@@ -27,7 +27,9 @@ const MANIFEST: &str = include_str!("../whisper-manifest.json");
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
-    #[allow(dead_code)]
+    /// Cache-busting key. Stored alongside the installed binary in
+    /// `.whisper-manifest-version`; on startup the supervisor invalidates
+    /// the cached binary whenever this string changes.
     version: String,
     binaries: std::collections::HashMap<String, BinaryEntry>,
 }
@@ -116,8 +118,23 @@ impl WhisperSupervisor {
         let archive = entry.archive.as_deref().ok_or(WhisperError::UnsupportedPlatform)?;
 
         let bin_path = self.binary_dir.join(&entry.binary_name);
+        let lock_path = self.binary_dir.join(".whisper-manifest-version");
+
         if bin_path.exists() {
-            return Ok(bin_path);
+            let cached = tokio::fs::read_to_string(&lock_path)
+                .await
+                .ok()
+                .map(|s| s.trim().to_string());
+            if cached.as_deref() == Some(manifest.version.trim()) {
+                return Ok(bin_path);
+            }
+            warn!(
+                "cached whisper-server was installed from manifest version {:?}; current is {:?}; replacing",
+                cached.as_deref().unwrap_or("(none)"),
+                manifest.version
+            );
+            let _ = tokio::fs::remove_file(&bin_path).await;
+            let _ = tokio::fs::remove_file(&lock_path).await;
         }
         tokio::fs::create_dir_all(&self.binary_dir).await?;
         let bytes = reqwest::get(url)
@@ -145,6 +162,7 @@ impl WhisperSupervisor {
             perms.set_mode(0o755);
             std::fs::set_permissions(&bin_path, perms)?;
         }
+        let _ = tokio::fs::write(&lock_path, manifest.version.trim()).await;
         Ok(bin_path)
     }
 
@@ -235,8 +253,22 @@ impl WhisperSupervisor {
             .arg("--api-key")
             .arg(&self.api_key)
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        Ok(cmd.spawn()?)
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        // Forward stderr to tracing so dyld errors, port conflicts, and
+        // model-load failures surface in the app log instead of vanishing
+        // into a silent crashloop. whisper-server's stderr carries init
+        // and request-routing diagnostics — not transcript content.
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    info!("whisper-server: {line}");
+                }
+            });
+        }
+        Ok(child)
     }
 
     pub async fn stop(&self) {
