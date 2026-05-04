@@ -1,10 +1,10 @@
 {
-  "_note": "Per-platform whisper-server binaries built from ggml-org/whisper.cpp v1.8.4 by .github/workflows/whisper-server.yml and hosted in this repo's releases under tag whisper-server-v1.8.4. SHA-256 verified at workflow runtime; bump the workflow tag and re-run + re-pin on whisper.cpp releases.",
-  "version": "v1.8.4",
+  "_note": "Per-platform whisper-server binaries built from ggml-org/whisper.cpp v1.8.4 by .github/workflows/whisper-server.yml and hosted in this repo's releases. SHA-256 verified at workflow runtime. Bump `version` whenever URL or SHA changes — the supervisor uses it as a cache-busting key (writes <bin-dir>/.whisper-manifest-version on install, invalidates the cached binary on mismatch).",
+  "version": "v1.8.4-static-2",
   "binaries": {
     "macos-aarch64": {
-      "url": "https://github.com/cortexuvula/rustMedicalAssistant/releases/download/whisper-server-v1.8.4/whisper-server-macos-aarch64.zip",
-      "sha256": "39f6ad146f947a6ca07d85a62cd196d4ba738794e923da58df0ee1886b9cc866",
+      "url": "https://github.com/cortexuvula/rustMedicalAssistant/releases/download/whisper-server-v1.8.4-static-2/whisper-server-macos-aarch64.zip",
+      "sha256": "2283e151323ca1cdaf937973bbd15895657596132faaa2f345515c0636905520",
       "archive": "zip",
       "binary_name": "whisper-server"
     },
@@ -16,14 +16,14 @@
       "binary_name": "whisper-server"
     },
     "linux-x86_64": {
-      "url": "https://github.com/cortexuvula/rustMedicalAssistant/releases/download/whisper-server-v1.8.4/whisper-server-linux-x86_64.tar.gz",
-      "sha256": "e24be9c5bd751851690d46c206dc3f07e105acfc2499098800821fdd630fdfd7",
+      "url": "https://github.com/cortexuvula/rustMedicalAssistant/releases/download/whisper-server-v1.8.4-static-2/whisper-server-linux-x86_64.tar.gz",
+      "sha256": "0c60f6df48fe155e23be6344741c1c939a9214e0bca477d968e3061cfbea218e",
       "archive": "tar.gz",
       "binary_name": "whisper-server"
     },
     "windows-x86_64": {
-      "url": "https://github.com/cortexuvula/rustMedicalAssistant/releases/download/whisper-server-v1.8.4/whisper-server-windows-x86_64.zip",
-      "sha256": "45f15c7df31270f104dfc53044cbd85532276031b7dbbf0c2d9628d88817c111",
+      "url": "https://github.com/cortexuvula/rustMedicalAssistant/releases/download/whisper-server-v1.8.4-static-2/whisper-server-windows-x86_64.zip",
+      "sha256": "c6cc24cba7db55ca3f3267bfe265e85a43d0770fa3346062d49dbdaa3c49e64b",
       "archive": "zip",
       "binary_name": "whisper-server.exe"
     }
