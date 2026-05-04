@@ -76,10 +76,11 @@ pub async fn start_sharing(
         install_persistent_ollama, ollama_service_state, ServiceState,
     };
     if matches!(ollama_service_state(), ServiceState::Missing) {
+        // install_persistent_ollama logs its own outcome (installed vs.
+        // skipped because port 11434 is already bound externally). Only log
+        // here on hard failure.
         if let Err(e) = install_persistent_ollama() {
             tracing::warn!("persistent ollama install failed: {e}");
-        } else {
-            tracing::info!("persistent ollama service installed");
         }
     }
 

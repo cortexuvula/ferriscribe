@@ -145,6 +145,7 @@ mod macos {
                 "launchctl load exited with {}", status
             )));
         }
+        tracing::info!("persistent ollama LaunchAgent installed and loaded");
         Ok(())
     }
 
@@ -194,6 +195,7 @@ mod linux {
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "enable", "--now", "ferriscribe-ollama.service"])
             .status();
+        tracing::info!("persistent ollama systemd unit installed and enabled");
         Ok(())
     }
 
@@ -258,6 +260,7 @@ mod windows {
                 "schtasks /Create exited with {}", status
             )));
         }
+        tracing::info!("persistent ollama scheduled task installed");
         Ok(())
     }
 
