@@ -69,6 +69,21 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Returns true if something is already listening on Ollama's default port.
+/// Used to avoid installing a competing persistent service when the user
+/// already has Ollama managed externally (homebrew, the Ollama.app installer,
+/// a manual `ollama serve`, etc.). A bound port means our `ollama serve`
+/// would fail to bind anyway, so skipping is the right default.
+fn ollama_port_in_use() -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    let addr: SocketAddr = match "127.0.0.1:11434".parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
     Installed,
@@ -87,6 +102,12 @@ mod macos {
     }
 
     pub fn install() -> Result<(), SharingError> {
+        if super::ollama_port_in_use() {
+            tracing::info!(
+                "skipping persistent ollama install: port 11434 already bound (managed externally)"
+            );
+            return Ok(());
+        }
         let path = plist_path();
         let bin = super::find_ollama_binary().ok_or_else(|| {
             SharingError::ServiceInstaller(
@@ -147,6 +168,12 @@ mod linux {
     }
 
     pub fn install() -> Result<(), SharingError> {
+        if super::ollama_port_in_use() {
+            tracing::info!(
+                "skipping persistent ollama install: port 11434 already bound (managed externally)"
+            );
+            return Ok(());
+        }
         let path = unit_path();
         let bin = super::find_ollama_binary().ok_or_else(|| {
             SharingError::ServiceInstaller(
@@ -184,6 +211,12 @@ mod windows {
     use super::*;
 
     pub fn install() -> Result<(), SharingError> {
+        if super::ollama_port_in_use() {
+            tracing::info!(
+                "skipping persistent ollama install: port 11434 already bound (managed externally)"
+            );
+            return Ok(());
+        }
         let bin = super::find_ollama_binary().ok_or_else(|| {
             SharingError::ServiceInstaller(
                 "Ollama binary not found. Install Ollama first (https://ollama.com/download)."
