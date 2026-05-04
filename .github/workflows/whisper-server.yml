@@ -51,11 +51,51 @@ jobs:
 
       - name: Configure (CMake)
         working-directory: whisper.cpp
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DWHISPER_BUILD_SERVER=ON
+          -DBUILD_SHARED_LIBS=OFF
 
       - name: Build server
         working-directory: whisper.cpp
         run: cmake --build build --config Release --target whisper-server
+
+      - name: Verify no whisper/ggml dynamic deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -e
+          BIN=whisper.cpp/build/bin/whisper-server
+          echo "otool -L $BIN:"
+          otool -L "$BIN"
+          if otool -L "$BIN" | grep -E '(libwhisper|libggml)'; then
+            echo "::error::whisper-server still links libwhisper/libggml dynamically — static build did not take effect"
+            exit 1
+          fi
+
+      - name: Verify no whisper/ggml dynamic deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -e
+          BIN=whisper.cpp/build/bin/whisper-server
+          echo "ldd $BIN:"
+          ldd "$BIN" || true
+          if ldd "$BIN" | grep -E '(libwhisper|libggml)'; then
+            echo "::error::whisper-server still links libwhisper/libggml dynamically — static build did not take effect"
+            exit 1
+          fi
+
+      - name: Verify no whisper/ggml dynamic deps (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "whisper.cpp/build/bin/Release/whisper-server.exe"
+          $out = & dumpbin /dependents $bin
+          $out | Write-Output
+          if ($out -match '(?i)(whisper|ggml).*\.dll') {
+            Write-Error "whisper-server still depends on whisper/ggml DLLs — static build did not take effect"
+            exit 1
+          }
 
       - name: Stage binary (Unix)
         if: runner.os != 'Windows'
