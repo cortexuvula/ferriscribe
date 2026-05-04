@@ -67,6 +67,22 @@ pub async fn start_sharing(
     service.start().await.map_err(|e| e.to_string())?;
     *sharing_slot = Some(service);
 
+    // Wire up the persistent Ollama service the wizard promises ("FerriScribe
+    // will configure persistent Ollama..."). Idempotent: skip when already
+    // installed; surface install failures via warn rather than aborting
+    // sharing so that a missing ollama binary or write-protected
+    // LaunchAgents directory doesn't block the in-process services.
+    use medical_sharing::service_installer::{
+        install_persistent_ollama, ollama_service_state, ServiceState,
+    };
+    if matches!(ollama_service_state(), ServiceState::Missing) {
+        if let Err(e) = install_persistent_ollama() {
+            tracing::warn!("persistent ollama install failed: {e}");
+        } else {
+            tracing::info!("persistent ollama service installed");
+        }
+    }
+
     // Heavy-box routing: this machine IS the office server, so route AI/STT
     // calls to the upstream services on localhost directly — no proxy hop, no
     // bearer needed. Ports are the upstream ports (Ollama 11434, LM Studio 1234,
