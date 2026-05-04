@@ -20,6 +20,28 @@
   let error: string | null = null;
   let success = false;
 
+  // Strip the mDNS suffix `._ferriscribe._tcp.local.` to recover the
+  // human-readable friendly name the office-server admin set in the wizard.
+  function friendlyName(d: Discovered): string {
+    const m = d.instance_name.match(/^(.+?)\._ferriscribe\._tcp\.local\.?$/);
+    if (m) return m[1];
+    if (d.host) return d.host;
+    return d.instance_name;
+  }
+
+  // mDNS browsers fire one ServiceResolved event per interface, so the
+  // same logical office server appears N times with overlapping address
+  // sets. Dedupe by instance_name (unique per service registration) and
+  // keep the first occurrence — the addresses don't surface in the UI
+  // anyway; the LAN address is read from the chosen entry at pair time.
+  $: deduped = (() => {
+    const seen = new Map<string, Discovered>();
+    for (const d of discovered) {
+      if (!seen.has(d.instance_name)) seen.set(d.instance_name, d);
+    }
+    return Array.from(seen.values());
+  })();
+
   async function rescan() {
     scanning = true;
     discovered = [];
@@ -130,31 +152,37 @@
   {:else}
     <div class="discovery">
       <h4>Found on your network</h4>
-      {#if scanning}<p>Scanning...</p>{/if}
-      {#if !scanning && discovered.length === 0}
+      {#if scanning}<p class="hint">Scanning…</p>{/if}
+      {#if !scanning && deduped.length === 0}
         <p class="hint">No servers found. Either no office server is running,
         or your Wi-Fi blocks discovery (UniFi / Meraki client isolation).
         Use the QR or code option below.</p>
       {/if}
       <ul class="servers">
-        {#each discovered as d}
+        {#each deduped as d (d.instance_name)}
           <li>
-            <div>
-              <strong>{d.host}</strong>
-              <small>{d.addresses.join(', ')}</small>
+            <div class="server-info">
+              <strong class="server-name">{friendlyName(d)}</strong>
+              {#if d.host && d.host !== friendlyName(d)}
+                <span class="server-host">{d.host}</span>
+              {/if}
             </div>
-            <button onclick={() => pairDiscovered(d)}>Connect</button>
+            <button class="btn btn-primary" onclick={() => pairDiscovered(d)}>Connect</button>
           </li>
         {/each}
       </ul>
-      <button onclick={rescan}>Rescan</button>
+      <button class="btn" onclick={rescan} disabled={scanning}>
+        {scanning ? 'Scanning…' : 'Rescan'}
+      </button>
     </div>
 
     <div class="paste">
       <h4>Or paste a pairing URL</h4>
       <input bind:value={pasteUrl} placeholder="ferriscribe://pair?..." />
       <input bind:value={label} placeholder="Label (e.g. Dr. Smith's MacBook)" />
-      <button disabled={busy} onclick={pairFromUrl}>Pair</button>
+      <button class="btn btn-primary" disabled={busy} onclick={pairFromUrl}>
+        {busy ? 'Pairing…' : 'Pair'}
+      </button>
     </div>
 
     {#if error}<div class="error">{error}</div>{/if}
@@ -162,8 +190,57 @@
 </section>
 
 <style>
-  .ok { color: #080; }
-  .error { color: #c00; }
-  .servers { list-style: none; padding: 0; }
-  .servers li { display: flex; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--border, #ddd); }
+  .ok { color: #16a34a; }
+  .error { color: #c00; margin-top: 0.5rem; }
+  .hint { color: var(--text-muted, #888); }
+
+  .servers { list-style: none; padding: 0; margin: 0 0 0.5rem 0; }
+  .servers li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border, #ddd);
+  }
+  .server-info { display: flex; flex-direction: column; gap: 0.15rem; }
+  .server-name { font-size: 1rem; }
+  .server-host {
+    font-size: 0.85rem;
+    color: var(--text-muted, #888);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .paste { margin-top: 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .paste input {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--border, #c8c8c8);
+    border-radius: 0.375rem;
+    background: var(--surface-1, transparent);
+    color: inherit;
+  }
+
+  .btn {
+    border: 1px solid var(--border, #c8c8c8);
+    background: var(--surface-1, #fff);
+    color: inherit;
+    padding: 0.4rem 0.9rem;
+    border-radius: 0.375rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--surface-2, #f0f0f0);
+    border-color: var(--border-strong, #a0a0a0);
+  }
+  .btn-primary {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: white;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+  }
 </style>
