@@ -35,7 +35,7 @@
     <li>Your operating system may ask permission for FerriScribe to accept
         incoming connections. Click <b>Allow</b>.</li>
   </ol>
-  <button disabled={busy} on:click={start}>
+  <button class="btn btn-primary" disabled={busy} on:click={start}>
     {busy ? 'Setting up…' : 'Start sharing'}
   </button>
   {#if error}<div class="error">{error}</div>{/if}
@@ -44,4 +44,27 @@
 <style>
   .error { color: #c00; margin-top: 0.5rem; }
   .steps { padding-left: 1.2rem; }
+  .btn {
+    border: 1px solid var(--border, #c8c8c8);
+    background: var(--surface-1, #fff);
+    color: inherit;
+    padding: 0.5rem 1rem;
+    border-radius: 0.375rem;
+    font-weight: 500;
+    margin-top: 0.5rem;
+    transition: background 0.12s ease, border-color 0.12s ease;
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--surface-2, #f0f0f0);
+    border-color: var(--border-strong, #a0a0a0);
+  }
+  .btn-primary {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: white;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+  }
 </style>
