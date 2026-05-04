@@ -76,7 +76,6 @@ pub type Result<T> = std::result::Result<T, WhisperError>;
 pub struct WhisperSupervisor {
     binary_dir: PathBuf,
     model_path: PathBuf,
-    api_key: String,
     port: u16,
     child: Mutex<Option<Child>>,
     stop: Arc<tokio::sync::Notify>,
@@ -89,12 +88,11 @@ pub struct WhisperSupervisor {
 }
 
 impl WhisperSupervisor {
-    pub fn new(binary_dir: PathBuf, model_path: PathBuf, port: u16, api_key: String) -> Self {
+    pub fn new(binary_dir: PathBuf, model_path: PathBuf, port: u16) -> Self {
         Self {
             binary_dir,
             model_path,
             port,
-            api_key,
             child: Mutex::new(None),
             stop: Arc::new(tokio::sync::Notify::new()),
             stopped: AtomicBool::new(false),
@@ -243,6 +241,10 @@ impl WhisperSupervisor {
     }
 
     async fn spawn_once_at(&self, bin: &Path) -> Result<Child> {
+        // whisper.cpp's whisper-server has no `--api-key` flag and no built-in
+        // auth. Auth is enforced one layer up by auth_proxy on
+        // `whisper_proxy_port`; this child only listens on 127.0.0.1 so it is
+        // unreachable from the LAN.
         let mut cmd = Command::new(bin);
         cmd.arg("--host")
             .arg("127.0.0.1")
@@ -250,8 +252,6 @@ impl WhisperSupervisor {
             .arg(self.port.to_string())
             .arg("-m")
             .arg(&self.model_path)
-            .arg("--api-key")
-            .arg(&self.api_key)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn()?;

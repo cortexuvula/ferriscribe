@@ -105,7 +105,6 @@ impl SharingService {
             config.binary_dir.clone(),
             config.whisper_model_path.clone(),
             config.whisper_internal_port,
-            config.whisper_internal_api_key.clone(),
         ));
         Ok(Self {
             config,
