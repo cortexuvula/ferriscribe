@@ -176,6 +176,16 @@
     <div class="ok">Paired. The model pickers in Models settings now show
     the office server's installed models.</div>
   {:else}
+    <div class="label-row">
+      <label for="ferri-pair-label">This computer's label</label>
+      <input
+        id="ferri-pair-label"
+        bind:value={label}
+        placeholder="e.g. Dr. Smith's MacBook, Room 6"
+      />
+      <small class="hint">Shown in the Connected clients panel on the office server.</small>
+    </div>
+
     <div class="discovery">
       <h4>Found on your network</h4>
       {#if scanning}<p class="hint">Scanning…</p>{/if}
@@ -205,7 +215,6 @@
     <div class="paste">
       <h4>Or paste a pairing URL</h4>
       <input bind:value={pasteUrl} placeholder="ferriscribe://pair?..." />
-      <input bind:value={label} placeholder="Label (e.g. Dr. Smith's MacBook)" />
       <button class="btn btn-primary" disabled={busy} onclick={pairFromUrl}>
         {busy ? 'Pairing…' : 'Pair'}
       </button>
@@ -235,6 +244,21 @@
     font-size: 0.85rem;
     color: var(--text-muted, #888);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .label-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-bottom: 1rem;
+  }
+  .label-row label { font-weight: 600; font-size: 0.95rem; }
+  .label-row input {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--border, #c8c8c8);
+    border-radius: 0.375rem;
+    background: var(--surface-1, transparent);
+    color: inherit;
   }
 
   .paste { margin-top: 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
