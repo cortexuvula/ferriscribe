@@ -1,5 +1,18 @@
 //! `RemoteEndpoint` — LAN/Tailscale connection resolver with optional bearer auth.
 
+/// Build the host:port portion of an HTTP URL, bracketing IPv6 literals as
+/// required by RFC 3986. Without this, `http://fe80::1:8080` parses as host
+/// `fe80` with three nested ports — reqwest then emits a "Builder error"
+/// rather than a useful message. Hostnames and IPv4 literals pass through
+/// unchanged.
+pub fn http_url(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("http://[{host}]:{port}")
+    } else {
+        format!("http://{host}:{port}")
+    }
+}
+
 /// A remote endpoint that may be reachable on either a LAN address or a
 /// Tailscale address. The resolver probes LAN first with a short connect
 /// timeout, then falls back to Tailscale.
@@ -36,12 +49,12 @@ impl RemoteEndpoint {
     pub async fn resolve_base_url(&self) -> Option<String> {
         if let Some(lan) = &self.lan {
             if Self::can_connect(lan, self.port, std::time::Duration::from_millis(500)).await {
-                return Some(format!("http://{}:{}", lan, self.port));
+                return Some(http_url(lan, self.port));
             }
         }
         if let Some(ts) = &self.tailscale {
             if Self::can_connect(ts, self.port, std::time::Duration::from_secs(2)).await {
-                return Some(format!("http://{}:{}", ts, self.port));
+                return Some(http_url(ts, self.port));
             }
         }
         None
@@ -61,6 +74,26 @@ impl RemoteEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_url_brackets_ipv6_literal() {
+        assert_eq!(
+            http_url("fd9f:e471:9b3d:99e2:841:fadf:c810:ea21", 11436),
+            "http://[fd9f:e471:9b3d:99e2:841:fadf:c810:ea21]:11436"
+        );
+        assert_eq!(http_url("fe80::1", 8080), "http://[fe80::1]:8080");
+    }
+
+    #[test]
+    fn http_url_passes_ipv4_and_hostname_through() {
+        assert_eq!(http_url("192.168.1.42", 11434), "http://192.168.1.42:11434");
+        assert_eq!(http_url("clinic.local", 11434), "http://clinic.local:11434");
+    }
+
+    #[test]
+    fn http_url_does_not_double_bracket() {
+        assert_eq!(http_url("[fe80::1]", 8080), "http://[fe80::1]:8080");
+    }
 
     #[test]
     fn default_endpoint_has_no_fields() {

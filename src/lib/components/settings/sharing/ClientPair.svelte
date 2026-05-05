@@ -32,15 +32,41 @@
   // mDNS browsers fire one ServiceResolved event per interface, so the
   // same logical office server appears N times with overlapping address
   // sets. Dedupe by instance_name (unique per service registration) and
-  // keep the first occurrence — the addresses don't surface in the UI
-  // anyway; the LAN address is read from the chosen entry at pair time.
+  // merge addresses across events so the picker has every candidate.
   $: deduped = (() => {
     const seen = new Map<string, Discovered>();
     for (const d of discovered) {
-      if (!seen.has(d.instance_name)) seen.set(d.instance_name, d);
+      const existing = seen.get(d.instance_name);
+      if (!existing) {
+        seen.set(d.instance_name, { ...d, addresses: [...d.addresses] });
+      } else {
+        for (const a of d.addresses) {
+          if (!existing.addresses.includes(a)) existing.addresses.push(a);
+        }
+      }
     }
     return Array.from(seen.values());
   })();
+
+  // Pick the most useful address from a server's resolved set:
+  //   1. RFC1918 IPv4 (192.168/10/172.16-31) — almost always the right answer
+  //      on a clinic LAN
+  //   2. Other IPv4 (e.g. 100.x Tailscale CGNAT, public-routable)
+  //   3. IPv6 ULA (fc/fd) or globally-routable
+  //   4. IPv6 link-local (fe80::, last resort — usually unreachable across hosts)
+  function bestAddress(d: Discovered): string | null {
+    if (d.addresses.length === 0) return null;
+    const score = (a: string): number => {
+      const isV6 = a.includes(':');
+      if (!isV6) {
+        if (/^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(a)) return 0;
+        return 1;
+      }
+      if (/^fe80:/i.test(a)) return 3;
+      return 2;
+    };
+    return [...d.addresses].sort((a, b) => score(a) - score(b))[0];
+  }
 
   async function rescan() {
     scanning = true;
@@ -114,7 +140,7 @@
   }
 
   function pairDiscovered(d: Discovered) {
-    const lan = d.addresses[0] ?? null;
+    const lan = bestAddress(d);
     const ports: PairPorts = {
       ollama: d.ports.ollama ?? 11435,
       whisper: d.ports.whisper ?? 8081,

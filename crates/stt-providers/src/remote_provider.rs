@@ -22,7 +22,7 @@ use tracing::{info, warn};
 use medical_core::error::{AppError, AppResult};
 use medical_core::traits::SttProvider;
 use medical_core::types::{
-    AudioData, AudioStream, RemoteEndpoint, SttConfig, Transcript, TranscriptChunk,
+    http_url, AudioData, AudioStream, RemoteEndpoint, SttConfig, Transcript, TranscriptChunk,
     TranscriptSegment,
 };
 
@@ -96,7 +96,7 @@ impl RemoteSttProvider {
         embedding_model_path: PathBuf,
     ) -> AppResult<Self> {
         let host = if host.is_empty() { "localhost" } else { host };
-        let base_url = format!("http://{host}:{port}");
+        let base_url = http_url(host, port);
 
         let client = Client::builder()
             .pool_max_idle_per_host(4)
@@ -131,7 +131,7 @@ impl RemoteSttProvider {
         ep: Option<RemoteEndpoint>,
     ) -> AppResult<Self> {
         let host = if host.is_empty() { "localhost" } else { host };
-        let base_url = format!("http://{host}:{port}");
+        let base_url = http_url(host, port);
         let client = Client::builder()
             .pool_max_idle_per_host(4)
             .connect_timeout(Duration::from_secs(10))

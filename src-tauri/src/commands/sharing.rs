@@ -270,11 +270,13 @@ pub async fn pair_with_server(
     code: String,
     label: String,
 ) -> Result<(), String> {
-    // Prefer LAN address; fall back to Tailscale.
+    // Prefer LAN address; fall back to Tailscale. http_url brackets IPv6
+    // literals — without it, an mDNS-discovered IPv6 address makes reqwest
+    // emit a generic "Builder error" with no URL context.
     let base = if let Some(ref l) = lan {
-        format!("http://{}:{}", l, ports.pairing)
+        medical_core::types::http_url(l, ports.pairing)
     } else if let Some(ref ts) = tailscale {
-        format!("http://{}:{}", ts, ports.pairing)
+        medical_core::types::http_url(ts, ports.pairing)
     } else {
         return Err("no reachable address provided".into());
     };
