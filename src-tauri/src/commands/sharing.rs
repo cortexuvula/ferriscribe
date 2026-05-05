@@ -206,7 +206,7 @@ pub async fn pairing_qr(state: State<'_, AppState>) -> Result<String, String> {
             ollama: cfg.ollama_proxy_port,
             whisper: cfg.whisper_proxy_port,
             pairing: cfg.pairing_port,
-            lmstudio: cfg.lmstudio_port,
+            lmstudio: cfg.lmstudio_proxy_port,
         },
         code,
     };
@@ -411,6 +411,10 @@ async fn build_sharing_config(
     rand::thread_rng()
         .try_fill_bytes(&mut whisper_api)
         .map_err(|e| e.to_string())?;
+    // Only wire up an LM Studio proxy when LM Studio's local server is
+    // actually running. If the user starts LM Studio after Start sharing,
+    // they'll need to Stop + Start sharing to wire up the proxy.
+    let lmstudio_internal = lmstudio_running_port().await;
     Ok(SharingConfig {
         enabled: true,
         friendly_name,
@@ -418,7 +422,8 @@ async fn build_sharing_config(
         whisper_proxy_port: 8081,
         pairing_port: 11436,
         whisper_internal_port: 8080,
-        lmstudio_port: lmstudio_running_port().await,
+        lmstudio_internal_port: lmstudio_internal,
+        lmstudio_proxy_port: lmstudio_internal.map(|_| 1235),
         token_store_path: app_data.join("sharing.db"),
         token_store_key: key,
         binary_dir: app_data.join("bin"),
