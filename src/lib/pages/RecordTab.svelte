@@ -44,14 +44,32 @@
   let silenceDialogRecordingId = $state<string | null>(null);
   let silenceDialogMessage = $state('');
 
-  function handleStartRecording() {
-    // Clear context for a fresh recording
+  function clearAllContextFields() {
+    // Both the freeform "Context" box and the structured Patient Context
+    // fields (medications / allergies / conditions) are tied to the
+    // current encounter — fresh encounter, fresh form.
     contextText = '';
+    medicationsText = '';
+    allergiesText = '';
+    conditionsText = '';
+  }
+
+  function handleStartRecording() {
+    clearAllContextFields();
     importedRecordingId = null;
     importedFilename = null;
     importError = null;
     pipeline.clearCurrent();
     audio.startRecording();
+  }
+
+  function handleNewRecording() {
+    clearAllContextFields();
+    importedRecordingId = null;
+    importedFilename = null;
+    importError = null;
+    pipeline.clearCurrent();
+    audio.reset();
   }
 
   function describeSilence(rms: number): string {
@@ -214,6 +232,7 @@
   <RecordingHeader
     onStart={handleStartRecording}
     onStop={handleStopRecording}
+    onNewRecording={handleNewRecording}
   />
 
   <!-- Main content area -->

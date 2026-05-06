@@ -6,8 +6,9 @@
   interface Props {
     onStart?: () => void;
     onStop?: () => void;
+    onNewRecording?: () => void;
   }
-  let { onStart, onStop }: Props = $props();
+  let { onStart, onStop, onNewRecording }: Props = $props();
 
   function handleStart() {
     if (onStart) {
@@ -22,6 +23,14 @@
       onStop();
     } else {
       audio.stop();
+    }
+  }
+
+  function handleNew() {
+    if (onNewRecording) {
+      onNewRecording();
+    } else {
+      audio.reset();
     }
   }
 </script>
@@ -65,7 +74,7 @@
           <span class="btn-icon">✕</span> Cancel
         </button>
       {:else if $audio.state === 'stopped'}
-        <button class="btn btn-new" onclick={() => audio.reset()}>
+        <button class="btn btn-new" onclick={handleNew}>
           <span class="btn-icon">+</span> New Recording
         </button>
       {/if}
