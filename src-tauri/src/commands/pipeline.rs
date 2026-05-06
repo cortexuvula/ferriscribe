@@ -125,15 +125,29 @@ pub async fn process_recording(
     // --- Stage 2: Generate SOAP ---
     emit_progress(&app, &rid, "generating_soap", None);
 
-    let soap_result = super::generation::generate_soap(
-        app.clone(),
-        state.clone(),
-        recording_id.clone(),
-        template,
-        context,
-        patient_context,
-    )
-    .await;
+    // generate_soap doesn't take a CancellationToken — race it against the
+    // cancel signal so a click during SOAP generation drops the in-flight
+    // reqwest future (which closes the upstream TCP connection at the
+    // socket layer) instead of waiting for the AI to finish. With `biased;`
+    // the cancel branch is checked first on every poll so a fast cancel
+    // doesn't lose to the completion path.
+    let soap_result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            let msg = "Pipeline cancelled by user during SOAP generation".to_string();
+            warn!("{msg}");
+            emit_progress(&app, &rid, "failed", Some(msg));
+            return Err(AppError::Cancelled);
+        }
+        res = super::generation::generate_soap(
+            app.clone(),
+            state.clone(),
+            recording_id.clone(),
+            template,
+            context,
+            patient_context,
+        ) => res,
+    };
 
     match soap_result {
         Ok(soap_text) => {
