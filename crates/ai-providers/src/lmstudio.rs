@@ -88,10 +88,17 @@ impl LmStudioProvider {
     }
 
     /// Override the remote endpoint used for LAN/Tailscale resolution.
-    /// Invalidates the URL cache so the next call re-resolves.
+    /// Invalidates the URL cache, replaces the endpoint, and propagates the
+    /// endpoint's bearer into the inner HTTP client so subsequent requests
+    /// authenticate with the current token. Without this last step, an
+    /// in-session Unpair → Pair leaves the inner client carrying the bearer
+    /// it had at construction time — a 401 source if the office admin
+    /// revoked the previous client entry before re-pairing.
     pub async fn set_endpoint(&self, ep: Option<RemoteEndpoint>) {
+        let new_bearer = ep.as_ref().and_then(|e| e.bearer.clone());
         *self.url_cache.lock().await = None;
         *self.endpoint.write().await = ep;
+        self.client.lock().await.bearer = new_bearer;
     }
 
     /// Resolve the current base URL (with the `/v1` suffix).

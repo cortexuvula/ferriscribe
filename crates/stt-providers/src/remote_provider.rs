@@ -56,7 +56,7 @@ pub struct RemoteSttProvider {
     /// this is a bearer credential (for the auth proxy in paired mode), not
     /// a whisper.cpp `--api-key`. The field name `api_key` is preserved to
     /// avoid churn at existing call sites.
-    api_key: Option<String>,
+    api_key: RwLock<Option<String>>,
     segmentation_model_path: PathBuf,
     embedding_model_path: PathBuf,
     /// Optional LAN/Tailscale endpoint. When set, `current_base_url()` resolves
@@ -109,7 +109,7 @@ impl RemoteSttProvider {
             client,
             base_url,
             model: model.to_string(),
-            api_key,
+            api_key: RwLock::new(api_key),
             segmentation_model_path,
             embedding_model_path,
             endpoint: RwLock::new(None),
@@ -142,7 +142,7 @@ impl RemoteSttProvider {
             client,
             base_url,
             model: model.to_string(),
-            api_key,
+            api_key: RwLock::new(api_key),
             segmentation_model_path,
             embedding_model_path,
             endpoint: RwLock::new(ep),
@@ -151,10 +151,17 @@ impl RemoteSttProvider {
     }
 
     /// Override the remote endpoint used for LAN/Tailscale resolution.
-    /// Invalidates the URL cache so the next call re-resolves.
+    /// Invalidates the URL cache, replaces the endpoint, and propagates the
+    /// endpoint's bearer into `api_key` so subsequent transcribe requests
+    /// authenticate with the current token. Without the last step, an
+    /// in-session Unpair → Pair leaves a stale bearer baked in at
+    /// construction time — a 401 source if the office admin revoked the
+    /// previous client entry.
     pub async fn set_endpoint(&self, ep: Option<RemoteEndpoint>) {
+        let new_bearer = ep.as_ref().and_then(|e| e.bearer.clone());
         *self.url_cache.lock().await = None;
         *self.endpoint.write().await = ep;
+        *self.api_key.write().await = new_bearer;
     }
 
     /// Resolve the current base URL (no trailing path).
@@ -214,7 +221,8 @@ impl RemoteSttProvider {
         }
 
         let mut req = self.client.post(&url).multipart(form);
-        if let Some(key) = self.api_key.as_deref().filter(|k| !k.is_empty()) {
+        let api_key_snapshot = self.api_key.read().await.clone();
+        if let Some(key) = api_key_snapshot.as_deref().filter(|k| !k.is_empty()) {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
 
