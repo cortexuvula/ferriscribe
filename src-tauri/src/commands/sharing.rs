@@ -352,11 +352,35 @@ pub async fn pair_with_server(
             p.set_endpoint(lmstudio_ep).await;
         }
     }
+
+    // STT requires more than set_endpoint: if the user was in Local mode at
+    // app startup, state.remote_stt_provider is None and set_endpoint would
+    // be a no-op. Persist `stt_mode = Remote` and rebuild the STT provider
+    // so transcription routes through the office server's whisper proxy —
+    // otherwise the user hits "Whisper model not found" because the local
+    // provider is still the active one.
     {
-        let guard = state.remote_stt_provider.read().await;
-        if let Some(ref p) = *guard {
-            p.set_endpoint(whisper_ep).await;
+        use medical_core::types::settings::SttMode;
+        let conn = state.db.conn().map_err(|e| e.to_string())?;
+        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+            .map_err(|e| e.to_string())?;
+        cfg.migrate();
+        if cfg.stt_mode != SttMode::Remote {
+            cfg.stt_mode = SttMode::Remote;
+            medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
+                .map_err(|e| e.to_string())?;
+            tracing::info!("pair: switched stt_mode to Remote");
         }
+        let stt_handles = crate::state::init_stt_providers_with_config(
+            &state.data_dir,
+            &cfg,
+            whisper_ep.clone(),
+        );
+        {
+            let mut guard = state.stt_providers.lock().await;
+            *guard = stt_handles.provider;
+        }
+        *state.remote_stt_provider.write().await = stt_handles.remote;
     }
 
     Ok(())
