@@ -86,6 +86,11 @@ pub struct SharingStatus {
     pub enabled: bool,
     pub ollama_ok: bool,
     pub whisper_ok: bool,
+    /// True only when LM Studio's local server was detected at Start sharing
+    /// time and the auth proxy was wired up. False when LM Studio wasn't
+    /// running at config time — clients won't see LM Studio models in that
+    /// case until the user Stops + Starts sharing with LM Studio running.
+    pub lmstudio_ok: bool,
     pub mdns_ok: bool,
     pub pairing_ok: bool,
     pub paired_clients: u32,
@@ -176,6 +181,9 @@ impl SharingService {
             self.config.lmstudio_internal_port,
             self.config.lmstudio_proxy_port,
         ) {
+            tracing::info!(
+                "LM Studio detected on 127.0.0.1:{internal}; spawning auth proxy on {proxy}"
+            );
             let h_lm = match spawn_auth_proxy(
                 ProxyConfig {
                     listen_port: proxy,
@@ -192,6 +200,10 @@ impl SharingService {
                 }
             };
             self.handles.lock().await.push(h_lm);
+        } else {
+            tracing::warn!(
+                "LM Studio not detected on 127.0.0.1:1234 at Start sharing; LM Studio models will not be available to paired clients. Stop and Start sharing again with LM Studio running to enable."
+            );
         }
 
         // Whisper child — if this fails, roll back the proxy tasks above.
@@ -265,6 +277,10 @@ impl SharingService {
             enabled: running,
             ollama_ok: running,
             whisper_ok: running,
+            // Reflect the wiring decision made at start_sharing time.
+            // `lmstudio_proxy_port` is Some iff lmstudio_running_port()
+            // detected a local LM Studio listener.
+            lmstudio_ok: running && self.config.lmstudio_proxy_port.is_some(),
             mdns_ok: running,
             pairing_ok: running,
             paired_clients: n,

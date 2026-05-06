@@ -8,6 +8,7 @@
     enabled: boolean;
     ollama_ok: boolean;
     whisper_ok: boolean;
+    lmstudio_ok: boolean;
     mdns_ok: boolean;
     pairing_ok: boolean;
     paired_clients: number;
@@ -43,9 +44,14 @@
     return () => clearInterval(pollHandle);
   });
 
-  const checks: { key: keyof SharingStatus; label: string }[] = [
+  const checks: { key: keyof SharingStatus; label: string; offHint?: string }[] = [
     { key: 'ollama_ok', label: 'Ollama' },
     { key: 'whisper_ok', label: 'Whisper' },
+    {
+      key: 'lmstudio_ok',
+      label: 'LM Studio',
+      offHint: 'LM Studio not running on this machine. Start its local server, then Stop and Start sharing.',
+    },
     { key: 'mdns_ok', label: 'mDNS' },
     { key: 'pairing_ok', label: 'Pairing' },
   ];
@@ -57,7 +63,7 @@
   <div class="status-panel" aria-label="Sharing service health">
     {#each checks as c}
       {@const ok = !!status?.[c.key]}
-      <div class="status-row" class:ok class:fail={!ok}>
+      <div class="status-row" class:ok class:fail={!ok} title={!ok && c.offHint ? c.offHint : ''}>
         <span class="status-icon" aria-hidden="true">{ok ? '✓' : '✗'}</span>
         <span class="status-label">{c.label}</span>
         <span class="status-state">{ok ? 'OK' : 'Not running'}</span>
