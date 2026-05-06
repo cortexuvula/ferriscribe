@@ -92,22 +92,45 @@ impl Drop for CaptureHandle {
 ///
 /// Tries the requested sample rate first, then falls back to common rates
 /// (48 kHz, 44.1 kHz, 16 kHz) and finally the device's default config.
+///
+/// Two device-side constraints cpal is strict about (especially on Windows
+/// WASAPI, where this otherwise surfaces as the unhelpful "stream
+/// configuration is not supported by the device" error):
+/// - The capture callback consumes `&[f32]`, so we filter
+///   `supported_input_configs` to ranges advertising `SampleFormat::F32`
+///   when any are available; an I16-only device falls through to
+///   `default_input_config` as a last resort.
+/// - The channel count in the returned `StreamConfig` MUST equal the
+///   matched range's `channels()`. Asking for mono on a stereo-only
+///   device fails. Downstream `audio_prep::to_mono` mixes multi-channel
+///   captures down for transcription, so returning the device's native
+///   channel count is safe.
 fn negotiate_stream_config(
     device: &cpal::Device,
     desired: &CaptureConfig,
 ) -> AudioResult<cpal::StreamConfig> {
-    let supported: Vec<cpal::SupportedStreamConfigRange> = device
+    let all_supported: Vec<cpal::SupportedStreamConfigRange> = device
         .supported_input_configs()
         .map_err(|e| AudioError::Capture(format!("Cannot query device configs: {e}")))?
         .collect();
 
-    if supported.is_empty() {
+    // Prefer F32-capable ranges since the capture callback consumes &[f32].
+    let f32_pool: Vec<&cpal::SupportedStreamConfigRange> = all_supported
+        .iter()
+        .filter(|r| r.sample_format() == cpal::SampleFormat::F32)
+        .collect();
+
+    let pool: Vec<&cpal::SupportedStreamConfigRange> = if !f32_pool.is_empty() {
+        f32_pool
+    } else if !all_supported.is_empty() {
+        all_supported.iter().collect()
+    } else {
         // Last resort: ask cpal for its own default.
         return device
             .default_input_config()
             .map(|c| c.into())
             .map_err(|e| AudioError::Capture(format!("No supported configs: {e}")));
-    }
+    };
 
     // Rates to try, in priority order: requested rate first, then common rates.
     let candidate_rates: &[u32] = &[
@@ -120,15 +143,10 @@ fn negotiate_stream_config(
     ];
 
     for &rate in candidate_rates {
-        for range in &supported {
+        for range in &pool {
             if range.min_sample_rate().0 <= rate && rate <= range.max_sample_rate().0 {
-                let channels = if desired.channels <= range.channels() {
-                    desired.channels
-                } else {
-                    range.channels()
-                };
                 return Ok(cpal::StreamConfig {
-                    channels,
+                    channels: range.channels(),
                     sample_rate: cpal::SampleRate(rate),
                     buffer_size: cpal::BufferSize::Default,
                 });
@@ -137,12 +155,10 @@ fn negotiate_stream_config(
     }
 
     // If none of the candidate rates match, pick the max rate from the first range.
-    let first = &supported[0];
-    let rate = first.max_sample_rate().0;
-    let channels = first.channels().min(desired.channels).max(1);
+    let first = pool[0];
     Ok(cpal::StreamConfig {
-        channels,
-        sample_rate: cpal::SampleRate(rate),
+        channels: first.channels(),
+        sample_rate: first.max_sample_rate(),
         buffer_size: cpal::BufferSize::Default,
     })
 }
