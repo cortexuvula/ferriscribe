@@ -252,6 +252,15 @@ impl WhisperSupervisor {
             .arg(self.port.to_string())
             .arg("-m")
             .arg(&self.model_path)
+            // whisper.cpp's whisper-server defaults to `/inference` for its
+            // POST endpoint; our RemoteSttProvider sends to the OpenAI-
+            // compatible `/v1/audio/transcriptions` path. Pin the server to
+            // that path so the proxy → whisper-server → response chain
+            // works without per-deployment config. The request and response
+            // shapes (multipart file upload, verbose_json) are already
+            // compatible.
+            .arg("--inference-path")
+            .arg("/v1/audio/transcriptions")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn()?;
