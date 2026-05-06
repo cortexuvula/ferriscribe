@@ -10,13 +10,30 @@ use medical_core::types::vocabulary::{CorrectionResult, VocabularyCategory, Voca
 use medical_db::vocabulary::VocabularyRepo;
 use medical_processing::vocabulary_corrector;
 
-use crate::state::AppState;
+use crate::state::{self, AppState};
+use crate::vocab_remote::{UpsertBody as RemoteUpsert, VocabRemote};
+
+/// Returns `Some((conn, bearer))` when this client is paired with an office
+/// server that advertised a vocab CRUD API. Vocabulary commands route
+/// through HTTP in that case; otherwise they operate on the local SQLite
+/// repo.
+fn paired_vocab_target() -> Option<(crate::commands::sharing::PairedConnection, String)> {
+    let conn = state::load_paired_connection()?;
+    conn.ports.vocab?;
+    let bearer = state::load_sharing_bearer()?;
+    Some((conn, bearer))
+}
 
 #[tauri::command]
 pub async fn list_vocabulary_entries(
     state: tauri::State<'_, AppState>,
     category: Option<String>,
 ) -> AppResult<Vec<VocabularyEntry>> {
+    if let Some((conn, bearer)) = paired_vocab_target() {
+        let remote = VocabRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
+        return remote.list(category.as_deref()).await;
+    }
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
         let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
@@ -45,6 +62,21 @@ pub async fn add_vocabulary_entry(
     priority: Option<i32>,
     enabled: Option<bool>,
 ) -> AppResult<VocabularyEntry> {
+    if let Some((conn, bearer)) = paired_vocab_target() {
+        let remote = VocabRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
+        let body = RemoteUpsert {
+            find_text,
+            replacement,
+            category,
+            case_sensitive,
+            priority,
+            enabled,
+        };
+        let entry = remote.insert(&body).await?;
+        info!("Vocabulary entry added (remote)");
+        return Ok(entry);
+    }
     let now = Utc::now();
     let entry = VocabularyEntry {
         id: Uuid::new_v4(),
@@ -82,6 +114,19 @@ pub async fn update_vocabulary_entry(
 ) -> AppResult<VocabularyEntry> {
     let uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::Other(format!("Invalid ID: {e}")))?;
+    if let Some((conn, bearer)) = paired_vocab_target() {
+        let remote = VocabRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
+        let body = RemoteUpsert {
+            find_text,
+            replacement,
+            category,
+            case_sensitive,
+            priority,
+            enabled,
+        };
+        return remote.update(uuid, &body).await;
+    }
     let db = Arc::clone(&state.db);
     let db2 = Arc::clone(&state.db);
 
@@ -123,6 +168,11 @@ pub async fn delete_vocabulary_entry(
 ) -> AppResult<()> {
     let uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::Other(format!("Invalid ID: {e}")))?;
+    if let Some((conn, bearer)) = paired_vocab_target() {
+        let remote = VocabRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
+        return remote.delete(uuid).await;
+    }
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
         let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
@@ -136,6 +186,11 @@ pub async fn delete_vocabulary_entry(
 pub async fn delete_all_vocabulary_entries(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<u32> {
+    if let Some((conn, bearer)) = paired_vocab_target() {
+        let remote = VocabRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
+        return remote.delete_all().await;
+    }
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
         let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
@@ -149,6 +204,11 @@ pub async fn delete_all_vocabulary_entries(
 pub async fn get_vocabulary_count(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<(u32, u32)> {
+    if let Some((conn, bearer)) = paired_vocab_target() {
+        let remote = VocabRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
+        return remote.count().await;
+    }
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
         let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
@@ -210,6 +270,23 @@ pub async fn import_vocabulary_json(
         .collect();
 
     let count = entries.len() as u32;
+    if let Some((conn, bearer)) = paired_vocab_target() {
+        let remote = VocabRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
+        for entry in &entries {
+            let body = RemoteUpsert {
+                find_text: entry.find_text.clone(),
+                replacement: entry.replacement.clone(),
+                category: Some(entry.category.as_str().to_string()),
+                case_sensitive: Some(entry.case_sensitive),
+                priority: Some(entry.priority),
+                enabled: Some(entry.enabled),
+            };
+            remote.insert(&body).await?;
+        }
+        info!(count, path = %file_path, "Imported vocabulary entries (remote)");
+        return Ok(count);
+    }
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
         let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
@@ -231,13 +308,19 @@ pub async fn export_vocabulary_json(
     state: tauri::State<'_, AppState>,
     file_path: String,
 ) -> AppResult<u32> {
-    let db = Arc::clone(&state.db);
-    let entries = tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        VocabularyRepo::list_all(&conn).map_err(|e| AppError::Database(e.to_string()))
-    })
-    .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    let entries: Vec<VocabularyEntry> = if let Some((conn, bearer)) = paired_vocab_target() {
+        let remote = VocabRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
+        remote.list(None).await?
+    } else {
+        let db = Arc::clone(&state.db);
+        tokio::task::spawn_blocking(move || {
+            let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+            VocabularyRepo::list_all(&conn).map_err(|e| AppError::Database(e.to_string()))
+        })
+        .await
+        .map_err(|e| AppError::Other(format!("Task join error: {e}")))??
+    };
 
     let count = entries.len() as u32;
     let export = serde_json::json!({
@@ -264,13 +347,24 @@ pub async fn test_vocabulary_correction(
     state: tauri::State<'_, AppState>,
     text: String,
 ) -> AppResult<CorrectionResult> {
-    let db = Arc::clone(&state.db);
-    let entries = tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        VocabularyRepo::list_enabled(&conn).map_err(|e| AppError::Database(e.to_string()))
-    })
-    .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    let entries: Vec<VocabularyEntry> = if let Some((conn, bearer)) = paired_vocab_target() {
+        let remote = VocabRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
+        remote
+            .list(None)
+            .await?
+            .into_iter()
+            .filter(|e| e.enabled)
+            .collect()
+    } else {
+        let db = Arc::clone(&state.db);
+        tokio::task::spawn_blocking(move || {
+            let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+            VocabularyRepo::list_enabled(&conn).map_err(|e| AppError::Database(e.to_string()))
+        })
+        .await
+        .map_err(|e| AppError::Other(format!("Task join error: {e}")))??
+    };
 
     Ok(vocabulary_corrector::apply_corrections(&text, &entries))
 }

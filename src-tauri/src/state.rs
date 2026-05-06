@@ -177,6 +177,10 @@ pub struct AppState {
     pub ingestion: Arc<IngestionPipeline>,
     /// Lazy-initialized sharing service. `None` until `start_sharing` is called.
     pub sharing: Arc<RwLock<Option<Arc<medical_sharing::SharingService>>>>,
+    /// JoinHandle for the vocab CRUD HTTP API task spawned alongside the
+    /// sharing service. Held here (rather than in SharingService) because
+    /// the API handlers need DB access that lives in the Tauri layer.
+    pub vocab_api: RwLock<Option<tokio::task::JoinHandle<()>>>,
     // ── Typed provider handles for runtime endpoint updates ──────────────────
     /// Concrete Ollama provider reference; allows `set_endpoint` after startup.
     /// Wrapped in `RwLock` so `reinit_providers` / `download_model` can replace
@@ -569,6 +573,7 @@ impl AppState {
             graph_search,
             ingestion,
             sharing: Arc::new(RwLock::new(None)),
+            vocab_api: RwLock::new(None),
             ollama_provider,
             lmstudio_provider,
             remote_stt_provider,

@@ -5923,8 +5923,9 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.10.30"
+version = "0.10.31"
 dependencies = [
+ "axum",
  "chrono",
  "dirs 6.0.0",
  "futures-util",
@@ -5960,6 +5961,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "urlencoding",
  "uuid",
 ]
 

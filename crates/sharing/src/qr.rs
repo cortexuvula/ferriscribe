@@ -19,6 +19,11 @@ pub struct PairPorts {
     pub whisper: u16,
     pub pairing: u16,
     pub lmstudio: Option<u16>,
+    /// Vocabulary CRUD HTTP API. None when the office server predates
+    /// the vocab-sync feature; clients should treat absence as "vocab
+    /// sync unavailable" and fall back to local vocab.
+    #[serde(default)]
+    pub vocab: Option<u16>,
 }
 
 pub fn encode(p: &PairPayload) -> String {
@@ -30,6 +35,7 @@ pub fn encode(p: &PairPayload) -> String {
     q.insert("wp", p.ports.whisper.to_string());
     q.insert("pp", p.ports.pairing.to_string());
     if let Some(l) = p.ports.lmstudio { q.insert("lp", l.to_string()); }
+    if let Some(v) = p.ports.vocab { q.insert("vp", v.to_string()); }
     q.insert("code", p.code.clone());
     let qs: Vec<String> = q
         .into_iter()
@@ -66,6 +72,7 @@ pub fn decode(url: &str) -> Result<PairPayload, DecodeError> {
     let wp      = map.remove("wp").ok_or(DecodeError::Missing("wp"))?;
     let pp      = map.remove("pp").ok_or(DecodeError::Missing("pp"))?;
     let lp      = map.remove("lp").and_then(|s| s.parse().ok());
+    let vp      = map.remove("vp").and_then(|s| s.parse().ok());
     let code    = map.remove("code").ok_or(DecodeError::Missing("code"))?;
     Ok(PairPayload {
         host,
@@ -76,6 +83,7 @@ pub fn decode(url: &str) -> Result<PairPayload, DecodeError> {
             whisper:  parse_port(&wp)?,
             pairing:  parse_port(&pp)?,
             lmstudio: lp,
+            vocab:    vp,
         },
         code,
     })
@@ -91,7 +99,7 @@ mod tests {
             host: "Clinic Server".to_string(),
             lan: Some("192.168.1.42".to_string()),
             tailscale: Some("clinic.tail-abc.ts.net".to_string()),
-            ports: PairPorts { ollama: 11435, whisper: 8081, pairing: 11436, lmstudio: Some(1234) },
+            ports: PairPorts { ollama: 11435, whisper: 8081, pairing: 11436, lmstudio: Some(1234), vocab: Some(11437) },
             code: "123456".to_string(),
         };
         let url = encode(&p);

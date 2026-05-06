@@ -381,31 +381,84 @@ pub async fn transcribe_recording_inner(
         return Err(AppError::Cancelled);
     }
 
-    // Apply vocabulary corrections if enabled
+    // Apply vocabulary corrections if enabled.
+    //
+    // When paired with an office server that exposes the vocab API, fetch
+    // entries from there so corrections stay consistent across all paired
+    // clients. On failure (server unreachable, transient HTTP error), warn
+    // and fall through with no corrections rather than aborting the whole
+    // transcription — corrections are best-effort polish on top of the
+    // already-successful STT output.
+    let vocab_enabled = {
+        let db_settings = Arc::clone(&state.db);
+        tokio::task::spawn_blocking(move || -> bool {
+            let conn = match db_settings.conn() {
+                Ok(c) => c,
+                Err(_) => return true,
+            };
+            SettingsRepo::load_config(&conn)
+                .ok()
+                .map(|mut c| { c.migrate(); c.vocabulary_enabled })
+                .unwrap_or(true)
+        })
+        .await
+        .unwrap_or(true)
+    };
+
+    let remote_entries: Option<Vec<medical_core::types::vocabulary::VocabularyEntry>> =
+        if vocab_enabled {
+            if let Some(conn) = crate::state::load_paired_connection() {
+                if conn.ports.vocab.is_some() {
+                    let bearer = crate::state::load_sharing_bearer();
+                    if let Some(remote) = crate::vocab_remote::VocabRemote::from(&conn, bearer) {
+                        match remote.list(None).await {
+                            Ok(list) => {
+                                Some(list.into_iter().filter(|e| e.enabled).collect())
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "remote vocab fetch failed; skipping corrections: {e}"
+                                );
+                                None
+                            }
+                        }
+                    } else { None }
+                } else { None }
+            } else { None }
+        } else { None };
+
     let db_vocab = Arc::clone(&state.db);
     let display_text = match tokio::task::spawn_blocking(move || {
-        let conn = db_vocab
-            .conn()
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        let config = SettingsRepo::load_config(&conn)
-            .ok()
-            .map(|mut c| { c.migrate(); c });
-        let vocab_enabled = config.map(|c| c.vocabulary_enabled).unwrap_or(true);
-        if vocab_enabled {
-            let entries = VocabularyRepo::list_enabled(&conn)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            if !entries.is_empty() {
-                let result = vocabulary_corrector::apply_corrections(&display_text, &entries);
-                if result.total_replacements > 0 {
-                    tracing::info!(
-                        replacements = result.total_replacements,
-                        "Applied vocabulary corrections to transcript"
-                    );
-                }
-                return Ok::<String, AppError>(result.corrected_text);
-            }
+        if !vocab_enabled {
+            return Ok::<String, AppError>(display_text);
         }
-        Ok(display_text)
+        let entries = if let Some(remote) = remote_entries {
+            remote
+        } else {
+            // Local fallback: only when not paired or remote fetch failed
+            // and we want to use the local DB. When paired but remote
+            // failed, remote_entries is None and we skip rather than
+            // silently using stale local data.
+            if crate::state::load_paired_connection().is_some() {
+                return Ok(display_text);
+            }
+            let conn = db_vocab
+                .conn()
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            VocabularyRepo::list_enabled(&conn)
+                .map_err(|e| AppError::Database(e.to_string()))?
+        };
+        if entries.is_empty() {
+            return Ok(display_text);
+        }
+        let result = vocabulary_corrector::apply_corrections(&display_text, &entries);
+        if result.total_replacements > 0 {
+            tracing::info!(
+                replacements = result.total_replacements,
+                "Applied vocabulary corrections to transcript"
+            );
+        }
+        Ok(result.corrected_text)
     })
     .await
     {

@@ -10,7 +10,7 @@
     version: string;
   };
 
-  type PairPorts = { ollama: number; whisper: number; pairing: number; lmstudio: number | null };
+  type PairPorts = { ollama: number; whisper: number; pairing: number; lmstudio: number | null; vocab: number | null };
 
   type PairedConnection = {
     lan: string | null;
@@ -146,12 +146,16 @@
     const lpRaw = u.searchParams.get('lp');
     const lp = lpRaw ? parseInt(lpRaw, 10) : null;
 
+    const vpRaw = u.searchParams.get('vp');
+    const vp = vpRaw ? parseInt(vpRaw, 10) : null;
+
     if (!lan && !ts) { error = 'No reachable address in URL'; return; }
     pairManual(lan, ts, {
       ollama: op,
       whisper: wp,
       pairing: pp,
       lmstudio: lp !== null && Number.isFinite(lp) ? lp : null,
+      vocab: vp !== null && Number.isFinite(vp) ? vp : null,
     }, code);
   }
 
@@ -162,6 +166,7 @@
       whisper: d.ports.whisper ?? 8081,
       pairing: d.ports.pairing ?? 11436,
       lmstudio: d.ports.lmstudio ?? null,
+      vocab: (d.ports as { vocab?: number | null }).vocab ?? null,
     };
     const code = prompt('Enter the 6-digit code from the office server.') ?? '';
     if (!code) return;

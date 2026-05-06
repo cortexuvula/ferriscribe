@@ -24,6 +24,7 @@ pub struct ServerPorts {
     pub whisper: Option<u16>,
     pub lmstudio: Option<u16>,
     pub pairing: Option<u16>,
+    pub vocab: Option<u16>,
 }
 
 pub struct MdnsAdvertiser {
@@ -59,6 +60,9 @@ impl MdnsAdvertiser {
         }
         if let Some(p) = ports.pairing {
             props.insert("pairing".into(), p.to_string());
+        }
+        if let Some(p) = ports.vocab {
+            props.insert("vocab".into(), p.to_string());
         }
         props.insert("version".into(), version.to_string());
         let advertise_port = ports.pairing.unwrap_or(11436);
@@ -114,6 +118,7 @@ pub fn browse(timeout: Duration) -> crate::Result<mpsc::Receiver<DiscoveredServe
                             whisper: parse_port("whisper"),
                             lmstudio: parse_port("lmstudio"),
                             pairing: parse_port("pairing"),
+                            vocab: parse_port("vocab"),
                         },
                         version: prop("version").unwrap_or_default(),
                     };
@@ -145,6 +150,7 @@ mod tests {
             whisper: Some(8081),
             lmstudio: None,
             pairing: Some(11436),
+            vocab: Some(11437),
         };
         let adv = MdnsAdvertiser::start("test-instance", &ports, "0.0.0.0").unwrap();
         // Give the daemon a moment to publish.

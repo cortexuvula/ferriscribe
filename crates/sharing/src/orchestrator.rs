@@ -31,6 +31,11 @@ pub struct SharingConfig {
     /// Public auth-proxy listener for LM Studio (typically 1235). Advertised
     /// to clients via mDNS / QR. Always paired with `lmstudio_internal_port`.
     pub lmstudio_proxy_port: Option<u16>,
+    /// Vocabulary CRUD HTTP API port (typically 11437). The HTTP server
+    /// itself lives in the Tauri layer because it needs the SQLCipher pool;
+    /// the sharing crate just records the port so it gets advertised via
+    /// mDNS / QR alongside the rest.
+    pub vocab_port: u16,
     pub token_store_path: PathBuf,
     pub token_store_key: [u8; 32],
     pub binary_dir: PathBuf,
@@ -50,6 +55,7 @@ impl std::fmt::Debug for SharingConfig {
             .field("whisper_internal_port", &self.whisper_internal_port)
             .field("lmstudio_internal_port", &self.lmstudio_internal_port)
             .field("lmstudio_proxy_port", &self.lmstudio_proxy_port)
+            .field("vocab_port", &self.vocab_port)
             .field("token_store_path", &self.token_store_path)
             .field("token_store_key", &"<redacted: 32 bytes>")
             .field("binary_dir", &self.binary_dir)
@@ -71,6 +77,7 @@ impl Default for SharingConfig {
             whisper_internal_port: 8080,
             lmstudio_internal_port: None,
             lmstudio_proxy_port: None,
+            vocab_port: 11437,
             token_store_path: PathBuf::new(),
             token_store_key: [0u8; 32],
             binary_dir: PathBuf::new(),
@@ -220,6 +227,7 @@ impl SharingService {
                 whisper: Some(self.config.whisper_proxy_port),
                 lmstudio: self.config.lmstudio_proxy_port,
                 pairing: Some(self.config.pairing_port),
+                vocab: Some(self.config.vocab_port),
             },
             &self.config.version,
         ) {

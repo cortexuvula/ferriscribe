@@ -1,5 +1,7 @@
 mod state;
 mod commands;
+mod sharing_vocab_api;
+mod vocab_remote;
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -67,7 +67,26 @@ pub async fn start_sharing(
         .map_err(|e| e.to_string())?;
     let service = Arc::new(SharingService::new(cfg).map_err(|e| e.to_string())?);
     service.start().await.map_err(|e| e.to_string())?;
+
+    // Spawn the vocab CRUD API on the configured port. Failures here are
+    // logged but don't abort sharing — clients on older versions don't
+    // expect a vocab API anyway, so they degrade gracefully.
+    let vocab_handle = match crate::sharing_vocab_api::spawn(
+        std::sync::Arc::clone(&state.db),
+        service.token_store(),
+        service.config().vocab_port,
+    )
+    .await
+    {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!("vocab API failed to start: {e}");
+            None
+        }
+    };
+
     *sharing_slot = Some(service);
+    *state.vocab_api.write().await = vocab_handle;
 
     // Wire up the persistent Ollama service the wizard promises ("FerriScribe
     // will configure persistent Ollama..."). Idempotent: skip when already
@@ -136,6 +155,9 @@ pub async fn start_sharing(
 pub async fn stop_sharing(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(s) = state.sharing.write().await.take() {
         s.stop().await.map_err(|e| e.to_string())?;
+    }
+    if let Some(h) = state.vocab_api.write().await.take() {
+        h.abort();
     }
 
     // Restore provider endpoints to pre-sharing configuration.
@@ -210,6 +232,7 @@ pub async fn pairing_qr(state: State<'_, AppState>) -> Result<String, String> {
             whisper: cfg.whisper_proxy_port,
             pairing: cfg.pairing_port,
             lmstudio: cfg.lmstudio_proxy_port,
+            vocab: Some(cfg.vocab_port),
         },
         code,
     };
@@ -451,6 +474,7 @@ async fn build_sharing_config(
         whisper_internal_port: 8080,
         lmstudio_internal_port: lmstudio_internal,
         lmstudio_proxy_port: lmstudio_internal.map(|_| 1235),
+        vocab_port: 11437,
         token_store_path: app_data.join("sharing.db"),
         token_store_key: key,
         binary_dir: app_data.join("bin"),
