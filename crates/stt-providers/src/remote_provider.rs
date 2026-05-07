@@ -72,9 +72,6 @@ struct VerboseJson {
     #[serde(default)]
     language: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
-    duration: Option<f32>,
-    #[serde(default)]
     text: Option<String>,
 }
 

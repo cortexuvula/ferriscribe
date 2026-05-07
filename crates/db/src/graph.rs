@@ -26,18 +26,6 @@ fn entity_type_to_str(et: &EntityType) -> &'static str {
     }
 }
 
-#[allow(dead_code)]
-fn entity_type_from_str(s: &str) -> Option<EntityType> {
-    match s {
-        "drug" => Some(EntityType::Drug),
-        "condition" => Some(EntityType::Condition),
-        "procedure" => Some(EntityType::Procedure),
-        "symptom" => Some(EntityType::Symptom),
-        "lab_test" => Some(EntityType::LabTest),
-        _ => None,
-    }
-}
-
 fn relation_type_to_str(rt: &RelationType) -> &'static str {
     match rt {
         RelationType::Treats => "treats",
@@ -45,18 +33,6 @@ fn relation_type_to_str(rt: &RelationType) -> &'static str {
         RelationType::Causes => "causes",
         RelationType::Diagnoses => "diagnoses",
         RelationType::Indicates => "indicates",
-    }
-}
-
-#[allow(dead_code)]
-fn relation_type_from_str(s: &str) -> Option<RelationType> {
-    match s {
-        "treats" => Some(RelationType::Treats),
-        "contraindicates" => Some(RelationType::Contraindicates),
-        "causes" => Some(RelationType::Causes),
-        "diagnoses" => Some(RelationType::Diagnoses),
-        "indicates" => Some(RelationType::Indicates),
-        _ => None,
     }
 }
 

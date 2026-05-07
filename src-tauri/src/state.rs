@@ -100,13 +100,6 @@ impl RecoveryState {
     pub fn get(&self) -> Option<String> {
         self.0.lock().ok().and_then(|g| g.clone())
     }
-
-    #[allow(dead_code)]
-    pub fn clear(&self) {
-        if let Ok(mut guard) = self.0.lock() {
-            *guard = None;
-        }
-    }
 }
 
 /// Wrapper to make `CaptureHandle` usable across threads.
@@ -153,7 +146,6 @@ pub struct CurrentRecording {
 }
 
 
-#[allow(dead_code)]
 pub struct AppState {
     pub db: Arc<Database>,
     pub keys: Arc<KeyStorage>,
@@ -173,6 +165,8 @@ pub struct AppState {
     pub embedding_generator: Arc<EmbeddingGenerator>,
     pub vector_store: Arc<VectorStore>,
     pub bm25_search: Arc<Bm25Search>,
+    /// Currently consumed only by IngestionPipeline; held here so future Tauri commands can issue direct graph queries.
+    #[allow(dead_code)]
     pub graph_search: Arc<GraphSearch>,
     pub ingestion: Arc<IngestionPipeline>,
     /// Lazy-initialized sharing service. `None` until `start_sharing` is called.
