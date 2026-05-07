@@ -220,6 +220,7 @@ pub fn run() {
             commands::sharing::list_paired_clients,
             commands::sharing::revoke_client,
             commands::sharing::discover_servers,
+            commands::sharing::discover_via_tailscale,
             commands::sharing::pair_with_server,
             commands::sharing::paired_endpoint,
             commands::sharing::unpair,

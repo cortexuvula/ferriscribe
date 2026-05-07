@@ -88,7 +88,16 @@
     scanning = true;
     discovered = [];
     try {
-      discovered = await invoke('discover_servers', { timeoutMs: 3000 });
+      // Run mDNS (LAN broadcast) and Tailscale-peer probes in parallel.
+      // mDNS sees servers on the same physical network; Tailscale probing
+      // sees servers reachable via the tailnet overlay. Either is valid;
+      // the dedupe step (by instance_name) merges them into one entry per
+      // logical office server when both paths succeed.
+      const [lan, ts] = await Promise.all([
+        invoke<Discovered[]>('discover_servers', { timeoutMs: 3000 }).catch(() => []),
+        invoke<Discovered[]>('discover_via_tailscale', { timeoutMs: 3000 }).catch(() => []),
+      ]);
+      discovered = [...lan, ...ts];
     } finally {
       scanning = false;
     }

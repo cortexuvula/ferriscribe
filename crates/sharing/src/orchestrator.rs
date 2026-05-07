@@ -241,10 +241,22 @@ impl SharingService {
         *self.mdns.lock().await = Some(mdns);
 
         // Pairing HTTP service — bind first so port conflicts surface as errors.
+        let info_snapshot = InfoSnapshot {
+            host: self.config.friendly_name.clone(),
+            version: self.config.version.clone(),
+            ports: ServerPorts {
+                ollama: Some(self.config.ollama_proxy_port),
+                whisper: Some(self.config.whisper_proxy_port),
+                lmstudio: self.config.lmstudio_proxy_port,
+                pairing: Some(self.config.pairing_port),
+                vocab: Some(self.config.vocab_port),
+            },
+        };
         let h3 = match spawn_pairing_service(
             self.config.pairing_port,
             self.pairing.clone(),
             self.store.clone(),
+            info_snapshot,
         ).await {
             Ok(h) => h,
             Err(e) => {
@@ -296,17 +308,29 @@ impl SharingService {
     }
 }
 
+/// Public, unauthenticated snapshot of an office server's identity and
+/// service ports. Returned by GET /info on the pairing port so clients
+/// that can't see the server's mDNS broadcasts (e.g. across Tailscale)
+/// can probe for FerriScribe servers without exchanging secrets.
+#[derive(Clone, Serialize)]
+pub struct InfoSnapshot {
+    pub host: String,
+    pub version: String,
+    pub ports: crate::mdns::ServerPorts,
+}
+
 async fn spawn_pairing_service(
     port: u16,
     pairing: Arc<PairingState>,
     store: Arc<TokenStore>,
+    info: InfoSnapshot,
 ) -> crate::Result<tokio::task::JoinHandle<()>> {
     use std::net::SocketAddr;
     use axum::{Json, Router, extract::{ConnectInfo, State}, routing::{get, post}};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone)]
-    struct St { pairing: Arc<PairingState>, store: Arc<TokenStore> }
+    struct St { pairing: Arc<PairingState>, store: Arc<TokenStore>, info: InfoSnapshot }
 
     #[derive(Deserialize)]
     struct EnrollReq { code: String, label: String }
@@ -361,11 +385,19 @@ async fn spawn_pairing_service(
         }
     }
 
-    let st = St { pairing, store };
+    /// Public discovery: same shape mDNS broadcasts (friendly name,
+    /// version, public ports). No secrets, no codes — reaching it tells
+    /// you no more than seeing the office server on the LAN would.
+    async fn info_handler(State(st): State<St>) -> Json<InfoSnapshot> {
+        Json(st.info.clone())
+    }
+
+    let st = St { pairing, store, info };
     let app = Router::new()
         .route("/pair/enroll", post(enroll))
         .route("/pair/clients", get(list_clients))
         .route("/pair/revoke/:id", post(revoke))
+        .route("/info", get(info_handler))
         .with_state(st);
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
