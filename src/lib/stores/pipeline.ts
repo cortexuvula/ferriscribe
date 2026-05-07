@@ -1,7 +1,7 @@
 import { writable } from 'svelte/store';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { processRecording, cancelPipeline } from '../api/pipeline';
-import { recordings } from './recordings';
+import { recordings, selectRecording } from './recordings';
 import { log } from '../api/logging';
 import { formatError } from '../types/errors';
 import type { PatientContext } from '../types';
@@ -26,7 +26,7 @@ interface PipelineState {
 }
 
 function createPipelineStore() {
-  const { subscribe, update } = writable<PipelineState>({
+  const { subscribe, set, update } = writable<PipelineState>({
     current: null,
     active: {},
   });
@@ -75,8 +75,11 @@ function createPipelineStore() {
         (event) => {
           const { recording_id, stage, error } = event.payload;
           const isTerminal = stage === 'completed' || stage === 'failed';
+          let isCurrentPipeline = false;
           update((s) => {
             const prior = s.active[recording_id];
+            const isCurrent = s.current?.recordingId === recording_id;
+            isCurrentPipeline = isCurrent;
             const entry: PipelineEntry = {
               recordingId: recording_id,
               stage: stage as PipelineStage,
@@ -92,7 +95,7 @@ function createPipelineStore() {
             };
             return {
               ...s,
-              current: s.current?.recordingId === recording_id ? entry : s.current,
+              current: isCurrent ? entry : s.current,
               active: { ...s.active, [recording_id]: entry },
             };
           });
@@ -105,6 +108,19 @@ function createPipelineStore() {
               log.info('Pipeline completed', { recording_id });
             }
             recordings.load(); // Refresh recordings list
+            // When the most-recently launched pipeline finishes, switch the UI
+            // to that recording so the Generate / Editor tabs reflect the
+            // freshly-completed result without an extra click. Only fires for
+            // the current pipeline — a background pipeline finishing must not
+            // hijack the view from a recording the user is actively reading.
+            if (stage === 'completed' && isCurrentPipeline) {
+              selectRecording(recording_id).catch((err) =>
+                log.error('Auto-select after pipeline completion failed', {
+                  recording_id,
+                  error: formatError(err),
+                }),
+              );
+            }
             scheduleCleanup(recording_id, 30000);
           }
         },
@@ -168,6 +184,16 @@ function createPipelineStore() {
     /** Clear the current pipeline display (e.g., when starting a new recording). */
     clearCurrent() {
       update((s) => ({ ...s, current: null }));
+    },
+
+    /** Reset the store to its initial state. Primarily useful in tests; also
+     *  appropriate for a full user-data wipe. Cancels any pending cleanups. */
+    reset() {
+      for (const handle of pendingCleanups.values()) {
+        clearTimeout(handle);
+      }
+      pendingCleanups.clear();
+      set({ current: null, active: {} });
     },
 
     /** Retry a failed pipeline. */
