@@ -7,7 +7,18 @@ use medical_core::error::{AppError, AppResult};
 use medical_core::types::settings::ContextTemplate;
 use medical_db::settings::SettingsRepo;
 
-use crate::state::AppState;
+use crate::state::{self, AppState};
+use crate::templates_remote::TemplatesRemote;
+
+/// Returns `Some((conn, bearer))` when this client is paired with an office
+/// server that exposes the templates API. Context-templates commands route
+/// through HTTP in that case; otherwise they operate on local SettingsRepo.
+fn paired_templates_target() -> Option<(crate::commands::sharing::PairedConnection, String)> {
+    let conn = state::load_paired_connection()?;
+    conn.ports.vocab?;
+    let bearer = state::load_sharing_bearer()?;
+    Some((conn, bearer))
+}
 
 /// Sort templates alphabetically by name (case-insensitive).
 pub fn sort_templates(templates: &mut Vec<ContextTemplate>) {
@@ -151,9 +162,14 @@ fn save_config(
 }
 
 #[tauri::command]
-pub fn list_context_templates(
+pub async fn list_context_templates(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<Vec<ContextTemplate>> {
+    if let Some((conn, bearer)) = paired_templates_target() {
+        let remote = TemplatesRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
+        return remote.list().await;
+    }
     let config = load_config(&state)?;
     let mut templates = config.custom_context_templates;
     sort_templates(&mut templates);
@@ -161,7 +177,7 @@ pub fn list_context_templates(
 }
 
 #[tauri::command]
-pub fn upsert_context_template(
+pub async fn upsert_context_template(
     state: tauri::State<'_, AppState>,
     name: String,
     body: String,
@@ -174,6 +190,13 @@ pub fn upsert_context_template(
     if body.is_empty() {
         return Err(AppError::Config("Template body cannot be empty".to_string()));
     }
+    if let Some((conn, bearer)) = paired_templates_target() {
+        let remote = TemplatesRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
+        let entry = remote.upsert(&name, &body).await?;
+        info!(name = %entry.name, "Upserted context template (remote)");
+        return Ok(entry);
+    }
     let mut config = load_config(&state)?;
     let result = upsert_into(&mut config.custom_context_templates, name, body);
     save_config(&state, &config)?;
@@ -182,7 +205,7 @@ pub fn upsert_context_template(
 }
 
 #[tauri::command]
-pub fn rename_context_template(
+pub async fn rename_context_template(
     state: tauri::State<'_, AppState>,
     old_name: String,
     new_name: String,
@@ -190,6 +213,13 @@ pub fn rename_context_template(
     let new_name = new_name.trim().to_string();
     if new_name.is_empty() {
         return Err(AppError::Config("Template name cannot be empty".to_string()));
+    }
+    if let Some((conn, bearer)) = paired_templates_target() {
+        let remote = TemplatesRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
+        let entry = remote.rename(&old_name, &new_name).await?;
+        info!(old = %old_name, new = %entry.name, "Renamed context template (remote)");
+        return Ok(entry);
     }
     let old_name_log = old_name.clone();
     let mut config = load_config(&state)?;
@@ -200,10 +230,17 @@ pub fn rename_context_template(
 }
 
 #[tauri::command]
-pub fn delete_context_template(
+pub async fn delete_context_template(
     state: tauri::State<'_, AppState>,
     name: String,
 ) -> AppResult<()> {
+    if let Some((conn, bearer)) = paired_templates_target() {
+        let remote = TemplatesRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
+        remote.delete(&name).await?;
+        info!(%name, "Deleted context template (remote)");
+        return Ok(());
+    }
     let mut config = load_config(&state)?;
     delete_in(&mut config.custom_context_templates, &name)?;
     save_config(&state, &config)?;
@@ -219,6 +256,22 @@ pub async fn import_context_templates_json(
 ) -> AppResult<u32> {
     let content = tokio::fs::read_to_string(&file_path).await?;
     let imported = parse_import_json(&content)?;
+    if let Some((conn, bearer)) = paired_templates_target() {
+        let remote = TemplatesRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
+        let mut count = 0u32;
+        for entry in imported {
+            let name = entry.name.trim();
+            let body = entry.body.trim();
+            if name.is_empty() || body.is_empty() {
+                continue;
+            }
+            remote.upsert(name, body).await?;
+            count += 1;
+        }
+        info!(count, path = %file_path, "Imported context templates (remote)");
+        return Ok(count);
+    }
     let mut config = load_config(&state)?;
     let count = apply_import(&mut config.custom_context_templates, imported);
     save_config(&state, &config)?;
@@ -232,9 +285,16 @@ pub async fn export_context_templates_json(
     state: tauri::State<'_, AppState>,
     file_path: String,
 ) -> AppResult<u32> {
-    let config = load_config(&state)?;
-    let count = config.custom_context_templates.len() as u32;
-    let json = export_json(&config.custom_context_templates)?;
+    let templates: Vec<ContextTemplate> = if let Some((conn, bearer)) = paired_templates_target() {
+        let remote = TemplatesRemote::from(&conn, Some(bearer))
+            .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
+        remote.list().await?
+    } else {
+        let config = load_config(&state)?;
+        config.custom_context_templates
+    };
+    let count = templates.len() as u32;
+    let json = export_json(&templates)?;
     tokio::fs::write(&file_path, json).await?;
     info!(count, path = %file_path, "Exported context templates");
     Ok(count)
