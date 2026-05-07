@@ -175,10 +175,9 @@
       importedFilename = filePath.split('/').pop()?.split('\\').pop() ?? 'audio file';
       await recordings.load();
 
-      if ($settings.auto_generate_soap) {
-        pipelineRecordingId = recordingId;
-        maybeLaunchPipeline(recordingId);
-      }
+      // Always launch — upload doesn't respect $settings.auto_generate_soap (live recording still does).
+      pipelineRecordingId = recordingId;
+      maybeLaunchPipeline(recordingId);
     } catch (e: any) {
       importError = formatError(e) || 'Import failed';
     } finally {
