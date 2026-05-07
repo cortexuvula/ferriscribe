@@ -319,11 +319,10 @@ pub async fn cancel_recording(
         rec_lock.take()
     };
 
-    if let Some(current) = current {
-        if current.wav_path.exists() {
+    if let Some(current) = current
+        && current.wav_path.exists() {
             let _ = std::fs::remove_file(&current.wav_path);
         }
-    }
 
     Ok(())
 }

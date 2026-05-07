@@ -61,9 +61,9 @@
 </script>
 
 {#if $rsvp.picker.open}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="backdrop" onclick={cancel}>
-    <div class="dialog" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="backdrop" onclick={cancel} role="presentation">
+    <div class="dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()}>
       <div class="header">
         <h2>Choose sections to read</h2>
         <button class="btn-close" aria-label="Close" onclick={cancel}>&times;</button>

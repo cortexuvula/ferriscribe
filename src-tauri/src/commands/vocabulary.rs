@@ -102,6 +102,7 @@ pub async fn add_vocabulary_entry(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri IPC: each field is named on the JS side.
 pub async fn update_vocabulary_entry(
     state: tauri::State<'_, AppState>,
     id: String,

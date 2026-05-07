@@ -276,15 +276,14 @@ pub async fn generate_soap(
 ) -> AppResult<String> {
     // Reject oversized user-supplied context up front, before emitting "started"
     // or touching the DB / provider.
-    if let Some(ref ctx) = context {
-        if ctx.len() > MAX_CONTEXT_CHARS {
+    if let Some(ref ctx) = context
+        && ctx.len() > MAX_CONTEXT_CHARS {
             return Err(AppError::Other(format!(
                 "Context too large: {} chars, limit is {}",
                 ctx.len(),
                 MAX_CONTEXT_CHARS
             )));
         }
-    }
     if let Some(ref pc) = patient_context {
         validate_patient_context(pc)?;
     }
@@ -432,20 +431,18 @@ async fn generate_soap_inner(
         recording.metadata = serde_json::json!({});
     }
     if let Some(obj) = recording.metadata.as_object_mut() {
-        if let Some(ctx) = context {
-            if !ctx.is_empty() {
+        if let Some(ctx) = context
+            && !ctx.is_empty() {
                 obj.insert("context".to_string(), serde_json::Value::String(ctx.to_string()));
             }
-        }
-        if let Some(pc) = patient_context {
-            if !patient_context_is_empty(pc) {
+        if let Some(pc) = patient_context
+            && !patient_context_is_empty(pc) {
                 obj.insert(
                     "patient_context".to_string(),
                     serde_json::to_value(pc)
                         .unwrap_or(serde_json::Value::Null),
                 );
             }
-        }
     }
 
     // Persist to DB (on blocking thread)

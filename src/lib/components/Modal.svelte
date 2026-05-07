@@ -33,7 +33,7 @@
 
 {#if open}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="modal-backdrop" onclick={handleBackdropClick} role="dialog" aria-modal="true" aria-label={title}>
+  <div class="modal-backdrop" onclick={handleBackdropClick} role="dialog" aria-modal="true" aria-label={title} tabindex="-1">
     <div class="modal-container">
       <div class="modal-header">
         <span class="modal-title">{title}</span>

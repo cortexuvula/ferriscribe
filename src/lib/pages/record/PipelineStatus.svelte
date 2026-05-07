@@ -4,7 +4,6 @@
   type CopyStatus = 'idle' | 'copying' | 'copied';
 
   interface Props {
-    pipelineRecordingId: string | null;
     copyStatus?: CopyStatus;
     onCancel: () => void;
     onRetry: () => void;
@@ -12,17 +11,12 @@
     onSpeedRead: () => void;
   }
   let {
-    pipelineRecordingId,
     copyStatus = $bindable<CopyStatus>('idle'),
     onCancel,
     onRetry,
     onCopySoap,
     onSpeedRead,
   }: Props = $props();
-
-  // pipelineRecordingId is part of the public prop contract; the parent gates
-  // rendering on its presence and the component is reused per recording.
-  void pipelineRecordingId;
 
   function stageLabel(stage: PipelineStage): string {
     switch (stage) {

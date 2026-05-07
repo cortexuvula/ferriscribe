@@ -358,9 +358,4 @@
     display: flex; justify-content: flex-end; align-items: center; flex: 0 0 auto;
   }
   .footer-count { font-size: 0.82rem; color: var(--text-secondary, #888); }
-
-  /* Override global input { width: 100% } for any checkboxes */
-  .ct-dialog input[type="checkbox"] {
-    width: 14px !important; height: 14px; min-width: 14px; padding: 0; margin: 0;
-  }
 </style>

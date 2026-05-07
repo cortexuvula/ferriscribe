@@ -525,11 +525,10 @@ impl AppState {
         let stt_handles = init_stt_providers_with_config(&data_dir, &config_ref, whisper_ep);
 
         // Set the active AI provider from saved settings
-        if let Some(ref cfg) = config {
-            if ai_handles.registry.set_active(&cfg.ai_provider) {
+        if let Some(ref cfg) = config
+            && ai_handles.registry.set_active(&cfg.ai_provider) {
                 info!("Active AI provider set to '{}' from settings", cfg.ai_provider);
             }
-        }
 
         let ollama_provider = RwLock::new(ai_handles.ollama.take());
         let lmstudio_provider = RwLock::new(ai_handles.lmstudio.take());

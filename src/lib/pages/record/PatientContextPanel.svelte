@@ -172,6 +172,7 @@
       {/if}
       <label class="save-modal-field">
         <span>Name</span>
+        <!-- svelte-ignore a11y_autofocus -->
         <input type="text" bind:value={saveModalName} placeholder="e.g. Follow-up visit" autofocus />
       </label>
       <div class="save-modal-field">

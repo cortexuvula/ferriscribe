@@ -29,7 +29,7 @@ use crate::state::AppState;
 /// aren't rejected.
 fn is_repeated_phrase_hallucination(text: &str) -> bool {
     let segments: Vec<String> = text
-        .split(|c: char| matches!(c, '.' | '!' | '?' | '\n'))
+        .split(['.', '!', '?', '\n'])
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .collect();
@@ -294,7 +294,7 @@ pub async fn transcribe_recording_inner(
     };
 
     // Checkpoint: bail before the (potentially 30s+) STT call if cancelled.
-    if cancel.as_ref().map_or(false, |c| c.is_cancelled()) {
+    if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
         let err_msg = "Transcription cancelled before STT start".to_string();
         tracing::info!("{err_msg}");
         mark_recording_failed_db_only(&state.db, recording, err_msg).await;
@@ -318,7 +318,7 @@ pub async fn transcribe_recording_inner(
             }
         }
     };
-    let token = cancel.clone().unwrap_or_else(CancellationToken::new);
+    let token = cancel.clone().unwrap_or_default();
     let transcript = match stt.transcribe(audio, config, token).await {
         Ok(t) => t,
         Err(e) => {
@@ -373,7 +373,7 @@ pub async fn transcribe_recording_inner(
     }
 
     // Checkpoint: bail before vocabulary correction if cancelled mid-STT.
-    if cancel.as_ref().map_or(false, |c| c.is_cancelled()) {
+    if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
         let err_msg = "Transcription cancelled after STT completion".to_string();
         tracing::info!("{err_msg}");
         mark_recording_failed_db_only(&state.db, recording, err_msg).await;
@@ -608,8 +608,8 @@ fn format_transcript_with_speakers(transcript: &medical_core::types::stt::Transc
     }
 
     // Flush the last speaker's words.
-    if !current_words.is_empty() {
-        if let Some(prev) = current_speaker {
+    if !current_words.is_empty()
+        && let Some(prev) = current_speaker {
             if !result.is_empty() {
                 result.push_str("\n\n");
             }
@@ -617,7 +617,6 @@ fn format_transcript_with_speakers(transcript: &medical_core::types::stt::Transc
             result.push_str(": ");
             result.push_str(&current_words.join(" "));
         }
-    }
 
     result
 }

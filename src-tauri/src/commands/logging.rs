@@ -31,13 +31,11 @@ pub fn get_recent_logs(lines: Option<usize>) -> AppResult<String> {
         if path.extension().and_then(|e| e.to_str()) != Some("log") {
             continue;
         }
-        if let Ok(meta) = path.metadata() {
-            if let Ok(modified) = meta.modified() {
-                if newest.as_ref().map_or(true, |(t, _)| modified > *t) {
+        if let Ok(meta) = path.metadata()
+            && let Ok(modified) = meta.modified()
+                && newest.as_ref().is_none_or(|(t, _)| modified > *t) {
                     newest = Some((modified, path));
                 }
-            }
-        }
     }
 
     let log_path = newest

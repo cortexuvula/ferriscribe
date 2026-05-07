@@ -238,7 +238,6 @@
   <div class="record-content">
     {#if $pipeline.current && pipelineRecordingId}
       <PipelineStatus
-        {pipelineRecordingId}
         bind:copyStatus
         onCancel={handleCancelPipeline}
         onRetry={handleRetry}

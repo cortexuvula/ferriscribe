@@ -21,7 +21,7 @@ fn paired_templates_target() -> Option<(crate::commands::sharing::PairedConnecti
 }
 
 /// Sort templates alphabetically by name (case-insensitive).
-pub fn sort_templates(templates: &mut Vec<ContextTemplate>) {
+pub fn sort_templates(templates: &mut [ContextTemplate]) {
     templates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 }
 
@@ -45,7 +45,7 @@ pub fn upsert_into(
 /// Rename a template.  Errors if `old_name` does not exist, or if `new_name`
 /// is different and already exists.
 pub fn rename_in(
-    templates: &mut Vec<ContextTemplate>,
+    templates: &mut [ContextTemplate],
     old_name: &str,
     new_name: String,
 ) -> AppResult<ContextTemplate> {

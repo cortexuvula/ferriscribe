@@ -34,8 +34,8 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if open}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="confirm-backdrop" onclick={handleBackdrop}>
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="confirm-backdrop" onclick={handleBackdrop} role="presentation">
     <div class="confirm-dialog" role="alertdialog" aria-modal="true" aria-label={title}>
       <div class="confirm-header">
         <span class="confirm-icon" class:danger>{danger ? '⚠' : '?'}</span>

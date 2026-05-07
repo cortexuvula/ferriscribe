@@ -69,13 +69,11 @@ pub fn delete_recording(
     // Delete the WAV file from disk only after the DB commit succeeds —
     // removing the file first and failing the DB delete would leave a row
     // pointing at nothing.
-    if let Some(rec) = recording {
-        if rec.audio_path.exists() {
-            if let Err(e) = std::fs::remove_file(&rec.audio_path) {
+    if let Some(rec) = recording
+        && rec.audio_path.exists()
+            && let Err(e) = std::fs::remove_file(&rec.audio_path) {
                 tracing::warn!(path = %rec.audio_path.display(), error = %e, "WAV delete failed");
             }
-        }
-    }
 
     Ok(())
 }

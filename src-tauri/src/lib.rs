@@ -275,13 +275,11 @@ fn cleanup_old_logs(dir: &std::path::Path, keep_days: u64) {
         if path.extension().and_then(|e| e.to_str()) != Some("log") {
             continue;
         }
-        if let Ok(meta) = path.metadata() {
-            if let Ok(modified) = meta.modified() {
-                if modified < cutoff {
+        if let Ok(meta) = path.metadata()
+            && let Ok(modified) = meta.modified()
+                && modified < cutoff {
                     tracing::debug!(file = %path.display(), "Removing old log file");
                     let _ = std::fs::remove_file(&path);
                 }
-            }
-        }
     }
 }

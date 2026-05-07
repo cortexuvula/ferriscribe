@@ -15,7 +15,7 @@ pub mod sharing;
 pub mod transcription;
 pub mod vocabulary;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use medical_core::error::{AppError, AppResult};
 use medical_db::Database;
@@ -24,7 +24,7 @@ use medical_db::Database;
 ///
 /// If the user has configured a custom `storage_path`, use it.
 /// Otherwise fall back to `{data_dir}/recordings`.
-pub fn resolve_recordings_dir(db: &Database, data_dir: &PathBuf) -> AppResult<PathBuf> {
+pub fn resolve_recordings_dir(db: &Database, data_dir: &Path) -> AppResult<PathBuf> {
     let dir = if let Ok(conn) = db.conn() {
         medical_db::settings::SettingsRepo::load_config(&conn)
             .ok()

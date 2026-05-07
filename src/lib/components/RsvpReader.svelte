@@ -191,13 +191,14 @@ function formatEta(secs: number): string {
 </script>
 
 {#if $rsvp.reader.open}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
     class="backdrop"
     class:dark={$settings.rsvp_dark_theme}
     onclick={close}
+    role="presentation"
   >
-    <div class="dialog" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+    <div class="dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()}>
       <div class="header">
         <h2>Speed Read</h2>
         <button class="btn-close" aria-label="Close" onclick={close}>&times;</button>
