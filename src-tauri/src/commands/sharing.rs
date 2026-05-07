@@ -50,9 +50,61 @@ fn paired_connection_path() -> Result<std::path::PathBuf, String> {
     Ok(app_data.join("sharing-paired.json"))
 }
 
+/// Persisted "this machine is the office server" config. Written when the
+/// user clicks Start sharing, removed when they Stop sharing. The presence
+/// of this file at app startup is what triggers auto-resume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// Schema version. Bumped if/when fields are added so older installs
+    /// can choose to ignore unrecognised configs rather than panic.
+    #[serde(default = "default_server_config_version")]
+    pub version: u32,
+    pub friendly_name: String,
+}
+
+fn default_server_config_version() -> u32 { 1 }
+
+pub fn server_config_path() -> Result<std::path::PathBuf, String> {
+    let app_data = dirs::data_dir()
+        .ok_or_else(|| "no app data dir".to_string())?
+        .join("rust-medical-assistant");
+    std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
+    Ok(app_data.join("sharing-server.json"))
+}
+
+fn write_server_config(cfg: &ServerConfig) -> Result<(), String> {
+    let path = server_config_path()?;
+    let json = serde_json::to_string(cfg).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// Idempotently delete the persisted server config. Missing file is not an
+/// error — Stop sharing should always succeed in clearing the auto-resume.
+fn delete_server_config() {
+    if let Ok(path) = server_config_path() {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 #[tauri::command]
 pub async fn start_sharing(
     state: State<'_, AppState>,
+    friendly_name: String,
+) -> Result<(), String> {
+    start_sharing_inner(&state, friendly_name.clone()).await?;
+    // Persist after a successful start so a crash mid-start doesn't leave a
+    // stale config that would auto-resume into a half-built service.
+    write_server_config(&ServerConfig { version: 1, friendly_name })?;
+    Ok(())
+}
+
+/// Body of the `start_sharing` command, factored out so the app-startup
+/// auto-resume hook can call exactly the same logic without going through
+/// the Tauri command dispatcher. Does NOT persist `sharing-server.json` —
+/// that's the caller's concern (auto-resume reads it; the Tauri command
+/// writes it).
+pub async fn start_sharing_inner(
+    state: &AppState,
     friendly_name: String,
 ) -> Result<(), String> {
     // Acquire the write lock BEFORE binding ports / spawning proxies so that a
@@ -62,7 +114,7 @@ pub async fn start_sharing(
     if sharing_slot.is_some() {
         return Err("sharing already running".to_string());
     }
-    let cfg = build_sharing_config(&state, friendly_name)
+    let cfg = build_sharing_config(state, friendly_name)
         .await
         .map_err(|e| e.to_string())?;
     let service = Arc::new(SharingService::new(cfg).map_err(|e| e.to_string())?);
@@ -153,6 +205,10 @@ pub async fn start_sharing(
 
 #[tauri::command]
 pub async fn stop_sharing(state: State<'_, AppState>) -> Result<(), String> {
+    // Clear the auto-resume marker first so an explicit Stop wins over an
+    // unrelated startup race (e.g. user stops sharing immediately on launch
+    // before the resume hook fires).
+    delete_server_config();
     if let Some(s) = state.sharing.write().await.take() {
         s.stop().await.map_err(|e| e.to_string())?;
     }
@@ -639,5 +695,58 @@ async fn lmstudio_running_port() -> Option<u16> {
         Some(1234)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_config_round_trips_through_json() {
+        let cfg = ServerConfig { version: 1, friendly_name: "Clinic Server".into() };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: ServerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, 1);
+        assert_eq!(back.friendly_name, "Clinic Server");
+    }
+
+    #[test]
+    fn server_config_defaults_version_when_missing() {
+        // An older install (or hand-edited file) might lack `version`. We
+        // accept it and default to 1 so we don't reject our own writes.
+        let json = r#"{"friendly_name":"Old Format"}"#;
+        let back: ServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(back.version, 1);
+        assert_eq!(back.friendly_name, "Old Format");
+    }
+
+    #[test]
+    fn write_then_delete_server_config_is_idempotent() {
+        // Writes the real config file (whatever dirs::data_dir() points at).
+        // We snapshot whatever was there first and restore it afterwards so we
+        // don't clobber a developer's actual paired install state.
+        let path = match server_config_path() {
+            Ok(p) => p,
+            Err(_) => return, // headless / sandboxed env without data_dir — nothing to test
+        };
+        let saved = std::fs::read(&path).ok();
+
+        // Ensure clean slate.
+        let _ = std::fs::remove_file(&path);
+        delete_server_config(); // idempotent — file already missing
+
+        // Write, confirm, then delete twice.
+        write_server_config(&ServerConfig { version: 1, friendly_name: "Test".into() })
+            .expect("write should succeed");
+        assert!(path.exists(), "config should exist after write");
+        delete_server_config();
+        assert!(!path.exists(), "config should be gone after delete");
+        delete_server_config(); // second delete is a no-op
+
+        // Restore prior state if any.
+        if let Some(bytes) = saved {
+            std::fs::write(&path, bytes).ok();
+        }
     }
 }

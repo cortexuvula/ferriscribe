@@ -210,6 +210,20 @@ pub fn load_paired_connection() -> Option<crate::commands::sharing::PairedConnec
     serde_json::from_str(&json).ok()
 }
 
+/// Load the persisted office-server config from disk. Returns `None` if this
+/// machine has never run as an office server (or the file is unreadable /
+/// malformed). Used by the app-startup auto-resume hook in `lib.rs::run`.
+pub fn load_server_config() -> Option<crate::commands::sharing::ServerConfig> {
+    let path = dirs::data_dir()?
+        .join("rust-medical-assistant")
+        .join("sharing-server.json");
+    if !path.exists() {
+        return None;
+    }
+    let json = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
 /// Load the bearer token stored in the OS keychain after pairing.
 /// Returns `None` if not paired or the keychain entry is absent.
 pub fn load_sharing_bearer() -> Option<String> {

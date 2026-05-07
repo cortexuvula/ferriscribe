@@ -119,9 +119,11 @@ pub fn run() {
 
     let init_result = AppState::initialize();
     let mut builder = tauri::Builder::default();
+    let mut app_state_managed = false;
     match init_result {
         Ok(state) => {
             builder = builder.manage(state);
+            app_state_managed = true;
         }
         Err(InitError::DatabaseRecoveryNeeded { reason }) => {
             tracing::warn!(%reason, "Database recovery needed");
@@ -137,6 +139,34 @@ pub fn run() {
 
     // Always managed so `get_database_recovery_state` is always callable.
     builder = builder.manage(recovery_state);
+
+    // Auto-resume office-server mode if the user enabled it in a previous
+    // session. We only consider this when AppState was successfully managed
+    // — there's nothing to start sharing on top of in recovery mode. Failures
+    // are logged and never block app startup.
+    if app_state_managed {
+        builder = builder.setup(|app| {
+            if let Some(cfg) = crate::state::load_server_config() {
+                tracing::info!(
+                    "auto-resuming office-server mode from saved config"
+                );
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tauri::Manager;
+                    let state = app_handle.state::<crate::state::AppState>();
+                    if let Err(e) = crate::commands::sharing::start_sharing_inner(
+                        &state,
+                        cfg.friendly_name,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "auto-resume sharing failed");
+                    }
+                });
+            }
+            Ok(())
+        });
+    }
 
     builder
         .plugin(tauri_plugin_deep_link::init())
