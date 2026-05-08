@@ -53,6 +53,28 @@ pub async fn revoke_client(state: State<'_, AppState>, id: i64) -> Result<(), St
     Ok(())
 }
 
+#[tauri::command]
+pub async fn rename_client(
+    state: State<'_, AppState>,
+    id: i64,
+    label: String,
+) -> Result<(), String> {
+    if label.trim().is_empty() {
+        return Err("label cannot be empty".into());
+    }
+    let svc = state.sharing.read().await;
+    let svc = svc.as_ref().ok_or("sharing not running")?;
+    svc.token_store()
+        .update_label(id, &label)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn suggested_client_label() -> String {
+    medical_sharing::suggested_label::suggested_client_label()
+}
+
 /// Pair with an office server: POST the enroll code, receive a bearer token,
 /// persist the token in the OS keychain, and persist the non-secret endpoint
 /// metadata to disk. Returns nothing to the frontend — no raw token is ever

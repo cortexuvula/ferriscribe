@@ -250,6 +250,8 @@ pub fn run() {
             commands::sharing::pairing::pairing_qr,
             commands::sharing::pairing::list_paired_clients,
             commands::sharing::pairing::revoke_client,
+            commands::sharing::pairing::rename_client,
+            commands::sharing::pairing::suggested_client_label,
             commands::sharing::discovery::discover_servers,
             commands::sharing::discovery::discover_via_tailscale,
             commands::sharing::pairing::pair_with_server,

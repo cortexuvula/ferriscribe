@@ -19,6 +19,10 @@ pub enum TokenStoreError {
     Entropy(String),
     #[error("lock poisoned")]
     LockPoisoned,
+    #[error("label cannot be empty")]
+    EmptyLabel,
+    #[error("client not found or revoked")]
+    NotFound,
 }
 
 pub type Result<T> = std::result::Result<T, TokenStoreError>;
@@ -139,6 +143,27 @@ impl TokenStore {
             "UPDATE clients SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
             params![now, id],
         )?;
+        Ok(())
+    }
+
+    /// Rename a non-revoked client. Trims whitespace, rejects empty values,
+    /// silently truncates to 80 chars (Unicode-aware: counts `char`s, not
+    /// bytes, so multi-byte scripts aren't sliced mid-codepoint).
+    pub fn update_label(&self, id: i64, new_label: &str) -> Result<()> {
+        let trimmed = new_label.trim();
+        if trimmed.is_empty() {
+            return Err(TokenStoreError::EmptyLabel);
+        }
+        let truncated: String = trimmed.chars().take(80).collect();
+
+        let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
+        let rows = conn.execute(
+            "UPDATE clients SET label = ? WHERE id = ? AND revoked_at IS NULL",
+            params![truncated, id],
+        )?;
+        if rows == 0 {
+            return Err(TokenStoreError::NotFound);
+        }
         Ok(())
     }
 

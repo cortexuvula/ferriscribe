@@ -1,7 +1,8 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { onMount, createEventDispatcher } from 'svelte';
+  import { onMount, createEventDispatcher, tick } from 'svelte';
   import PairingQr from './PairingQr.svelte';
+  import { renameClient } from '../../../api/sharing';
   const dispatch = createEventDispatcher();
 
   type SharingStatus = {
@@ -19,9 +20,17 @@
   let status: SharingStatus | null = null;
   let pollHandle: ReturnType<typeof setInterval>;
 
+  let editingId: number | null = null;
+  let draftLabel = '';
+  let editError: string | null = null;
+  let editInputEl: HTMLInputElement | null = null;
+
   async function refresh() {
     status = await invoke<SharingStatus>('sharing_status');
-    clients = await invoke('list_paired_clients');
+    // Don't clobber the input the user is typing in.
+    if (editingId === null) {
+      clients = await invoke('list_paired_clients');
+    }
   }
 
   async function regenQr() {
@@ -29,8 +38,52 @@
   }
 
   async function revoke(id: number) {
+    if (editingId === id) cancelEdit();
     await invoke('revoke_client', { id });
     await refresh();
+  }
+
+  async function startEdit(c: { id: number; label: string }) {
+    editingId = c.id;
+    draftLabel = c.label;
+    editError = null;
+    await tick();
+    editInputEl?.focus();
+    editInputEl?.select();
+  }
+
+  function cancelEdit() {
+    editingId = null;
+    draftLabel = '';
+    editError = null;
+  }
+
+  async function commitEdit() {
+    if (editingId === null) return;
+    const trimmed = draftLabel.trim();
+    if (!trimmed) {
+      editError = 'Label cannot be empty.';
+      return;
+    }
+    editError = null;
+    try {
+      await renameClient(editingId, trimmed);
+      editingId = null;
+      draftLabel = '';
+      await refresh();
+    } catch (e) {
+      editError = String(e);
+    }
+  }
+
+  function onEditKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitEdit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelEdit();
+    }
   }
 
   async function stop() {
@@ -85,11 +138,39 @@
         and either pick this server from the list or scan the QR.</p>
       {:else}
         <ul class="clients">
-          {#each clients as c}
+          {#each clients as c (c.id)}
             <li>
-              <span>{c.label}</span>
+              {#if editingId === c.id}
+                <input
+                  class="edit-input"
+                  bind:this={editInputEl}
+                  bind:value={draftLabel}
+                  on:keydown={onEditKeydown}
+                  aria-label="Rename client"
+                />
+                <button
+                  class="btn btn-icon"
+                  title="Save"
+                  aria-label="Save"
+                  on:click={commitEdit}>✓</button>
+                <button
+                  class="btn btn-icon"
+                  title="Cancel"
+                  aria-label="Cancel"
+                  on:click={cancelEdit}>✕</button>
+              {:else}
+                <span class="client-label">{c.label}</span>
+                <button
+                  class="btn btn-icon"
+                  title="Rename"
+                  aria-label="Rename {c.label}"
+                  on:click={() => startEdit(c)}>✎</button>
+              {/if}
               <button class="btn btn-revoke" on:click={() => revoke(c.id)}>Revoke</button>
             </li>
+            {#if editingId === c.id && editError}
+              <li class="edit-error">{editError}</li>
+            {/if}
           {/each}
         </ul>
       {/if}
@@ -104,7 +185,7 @@
   .clients li {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 0.5rem;
     padding: 0.25rem 0;
   }
   .hint { color: var(--text-muted, #888); }
@@ -162,5 +243,25 @@
   .btn-danger:hover:not(:disabled) {
     background: #c0392b;
     color: white;
+  }
+  .client-label { flex: 1; }
+  .edit-input {
+    flex: 1;
+    padding: 0.2rem 0.45rem;
+    border: 1px solid var(--border, #c8c8c8);
+    border-radius: 0.3rem;
+    background: var(--surface-1, transparent);
+    color: inherit;
+    font: inherit;
+  }
+  .btn-icon {
+    padding: 0.15rem 0.45rem;
+    font-size: 0.95rem;
+    line-height: 1;
+  }
+  .edit-error {
+    color: #c0392b;
+    font-size: 0.85rem;
+    padding-left: 0.25rem;
   }
 </style>
