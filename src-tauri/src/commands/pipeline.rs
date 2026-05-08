@@ -139,7 +139,7 @@ pub async fn process_recording(
             emit_progress(&app, &rid, "failed", Some(msg));
             return Err(AppError::Cancelled);
         }
-        res = super::generation::generate_soap(
+        res = super::generation::soap::generate_soap(
             app.clone(),
             state.clone(),
             recording_id.clone(),
