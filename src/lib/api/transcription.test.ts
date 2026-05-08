@@ -13,14 +13,12 @@ beforeEach(() => {
 });
 
 describe('transcription api', () => {
-  it('transcribeRecording leaves language / diarize undefined when omitted', async () => {
-    // Note: transcription.ts does NOT `?? null` its optional fields. Pinning
-    // current behavior — see commit notes about cross-wrapper inconsistency.
+  it('transcribeRecording null-coalesces language / diarize when omitted', async () => {
     await transcribeRecording('rec-1');
     expect(invokeMock).toHaveBeenCalledWith('transcribe_recording', {
       recordingId: 'rec-1',
-      language: undefined,
-      diarize: undefined,
+      language: null,
+      diarize: null,
     });
   });
 

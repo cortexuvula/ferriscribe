@@ -23,14 +23,12 @@ beforeEach(() => {
 const msgs = [{ role: 'user', content: 'hello' }];
 
 describe('chat api', () => {
-  it('chatSend forwards messages and leaves optional fields undefined when omitted', async () => {
-    // Note: chat.ts does NOT `?? null` its optional fields, so undefined is
-    // serialized away by Tauri. Pinning current behavior — see commit notes.
+  it('chatSend null-coalesces optional fields when omitted', async () => {
     await chatSend(msgs);
     expect(invokeMock).toHaveBeenCalledWith('chat_send', {
       messages: msgs,
-      model: undefined,
-      systemPrompt: undefined,
+      model: null,
+      systemPrompt: null,
     });
   });
 
@@ -43,21 +41,35 @@ describe('chat api', () => {
     });
   });
 
-  it('chatStream invokes chat_stream with the same shape', async () => {
+  it('chatStream invokes chat_stream with the same shape and null-coalesces optionals', async () => {
     await chatStream(msgs, 'm', 's');
     expect(invokeMock).toHaveBeenCalledWith('chat_stream', {
       messages: msgs,
       model: 'm',
       systemPrompt: 's',
     });
+    invokeMock.mockReset();
+    await chatStream(msgs);
+    expect(invokeMock).toHaveBeenCalledWith('chat_stream', {
+      messages: msgs,
+      model: null,
+      systemPrompt: null,
+    });
   });
 
-  it('chatWithAgent passes message + agentName + history', async () => {
+  it('chatWithAgent passes message + agentName + history, null-coalesces history when omitted', async () => {
     await chatWithAgent('hi', 'soap-agent', msgs);
     expect(invokeMock).toHaveBeenCalledWith('chat_with_agent', {
       message: 'hi',
       agentName: 'soap-agent',
       conversationHistory: msgs,
+    });
+    invokeMock.mockReset();
+    await chatWithAgent('hi', 'soap-agent');
+    expect(invokeMock).toHaveBeenCalledWith('chat_with_agent', {
+      message: 'hi',
+      agentName: 'soap-agent',
+      conversationHistory: null,
     });
   });
 
@@ -73,9 +85,9 @@ describe('chat api', () => {
     expect(invokeMock).toHaveBeenCalledWith('set_active_provider', { name: 'ollama' });
   });
 
-  it('listModels passes providerName as undefined when omitted', async () => {
+  it('listModels null-coalesces providerName when omitted', async () => {
     await listModels();
-    expect(invokeMock).toHaveBeenCalledWith('list_models', { providerName: undefined });
+    expect(invokeMock).toHaveBeenCalledWith('list_models', { providerName: null });
     invokeMock.mockReset();
     await listModels('ollama');
     expect(invokeMock).toHaveBeenCalledWith('list_models', { providerName: 'ollama' });

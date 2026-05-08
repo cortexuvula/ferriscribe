@@ -5,7 +5,11 @@ export async function transcribeRecording(
   language?: string,
   diarize?: boolean
 ): Promise<string> {
-  return invoke('transcribe_recording', { recordingId, language, diarize });
+  return invoke('transcribe_recording', {
+    recordingId,
+    language: language ?? null,
+    diarize: diarize ?? null,
+  });
 }
 
 export async function listSttProviders(): Promise<[string, boolean][]> {
