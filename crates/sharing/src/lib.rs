@@ -14,6 +14,7 @@ pub mod orchestrator;
 pub mod pairing;
 pub mod qr;
 pub mod service_installer;
+pub mod suggested_label;
 pub mod tailscale;
 pub mod token_store;
 pub mod whisper_supervisor;
