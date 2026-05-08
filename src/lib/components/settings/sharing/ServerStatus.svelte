@@ -65,11 +65,11 @@
       editError = 'Label cannot be empty.';
       return;
     }
+    editError = null;
     try {
       await renameClient(editingId, trimmed);
       editingId = null;
       draftLabel = '';
-      editError = null;
       await refresh();
     } catch (e) {
       editError = String(e);
@@ -185,7 +185,7 @@
   .clients li {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 0.5rem;
     padding: 0.25rem 0;
   }
   .hint { color: var(--text-muted, #888); }
