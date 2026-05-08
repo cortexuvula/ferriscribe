@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
+  import { suggestedClientLabel } from '../../../api/sharing';
 
   type Discovered = {
     instance_name: string;
@@ -112,7 +113,19 @@
     busy = true;
     error = null;
     try {
-      const tokenLabel = label || 'this laptop';
+      let tokenLabel = label.trim();
+      if (!tokenLabel) {
+        try {
+          tokenLabel = (await suggestedClientLabel()).trim();
+        } catch {
+          tokenLabel = '';
+        }
+      }
+      if (!tokenLabel) {
+        error = 'Please enter a label for this computer.';
+        busy = false;
+        return;
+      }
       await invoke('pair_with_server', {
         lan,
         tailscale,
@@ -207,7 +220,19 @@
 
   onMount(async () => {
     await loadPaired();
-    if (!pairedConn) rescan();
+    if (!pairedConn) {
+      // Pre-fill the label from the OS hostname so the office server
+      // always sees a meaningful computer name. Failure is non-fatal —
+      // the user can still type a label manually.
+      if (!label) {
+        try {
+          label = await suggestedClientLabel();
+        } catch {
+          // ignore — leave the input empty for the user to fill
+        }
+      }
+      rescan();
+    }
     window.addEventListener('ferriscribe-pair-url', onPairUrlEvent);
   });
 
