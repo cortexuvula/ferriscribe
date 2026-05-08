@@ -1,6 +1,6 @@
 [package]
 name = "rust-medical-assistant"
-version = "0.10.43"
+version = "0.10.44"
 description = "FerriScribe"
 authors = []
 edition = "2024"
@@ -24,8 +24,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 chrono = { workspace = true }
-dirs = "6"
-hound = "3.5"
+dirs = { workspace = true }
+hound = { workspace = true }
 futures-util = { workspace = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { workspace = true }
@@ -47,12 +47,12 @@ medical-processing = { path = "../crates/processing" }
 medical-export = { path = "../crates/export" }
 medical-translation = { path = "../crates/translation" }
 medical-sharing = { path = "../crates/sharing" }
-rand = "0.8"
-hex = "0.4"
+rand = { workspace = true }
+hex = { workspace = true }
 reqwest = { workspace = true }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 axum = "0.7"
-urlencoding = "2"
+urlencoding = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

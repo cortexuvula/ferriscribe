@@ -16,4 +16,4 @@ tokio-util = { workspace = true }
 tracing.workspace = true
 
 [dev-dependencies]
-proptest = "1"
+proptest = { workspace = true }

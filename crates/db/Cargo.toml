@@ -21,8 +21,8 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 bytemuck = { workspace = true }
-hex = "0.4"
+hex = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-proptest = "1"
+tempfile = { workspace = true }
+proptest = { workspace = true }

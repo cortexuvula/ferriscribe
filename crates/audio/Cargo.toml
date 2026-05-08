@@ -7,7 +7,7 @@ edition.workspace = true
 medical-core = { path = "../core" }
 cpal = "0.15"
 rodio = { version = "0.19", default-features = false, features = ["wav", "mp3", "symphonia-all"] }
-hound = "3.5"
+hound = { workspace = true }
 ringbuf = "0.4"
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -16,4 +16,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
