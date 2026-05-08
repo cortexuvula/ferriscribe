@@ -70,3 +70,71 @@ fn wrong_key_fails() {
     let err = TokenStore::open(&path, &[2u8; 32]).unwrap_err();
     assert!(matches!(err, TokenStoreError::Sqlite(_)));
 }
+
+#[test]
+fn update_label_round_trips() {
+    let tmp = TempDir::new().unwrap();
+    let store = open(&tmp);
+    let issued = store.issue("old name").unwrap();
+
+    store.update_label(issued.id, "Dr. Patel — Room 4").unwrap();
+
+    let listed = store.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].label, "Dr. Patel — Room 4");
+}
+
+#[test]
+fn update_label_trims_whitespace() {
+    let tmp = TempDir::new().unwrap();
+    let store = open(&tmp);
+    let issued = store.issue("x").unwrap();
+
+    store.update_label(issued.id, "   spaced   ").unwrap();
+
+    let listed = store.list().unwrap();
+    assert_eq!(listed[0].label, "spaced");
+}
+
+#[test]
+fn update_label_rejects_empty() {
+    let tmp = TempDir::new().unwrap();
+    let store = open(&tmp);
+    let issued = store.issue("x").unwrap();
+
+    let err = store.update_label(issued.id, "    ").unwrap_err();
+    assert!(matches!(err, TokenStoreError::EmptyLabel));
+}
+
+#[test]
+fn update_label_truncates_at_eighty_chars() {
+    let tmp = TempDir::new().unwrap();
+    let store = open(&tmp);
+    let issued = store.issue("x").unwrap();
+
+    let long = "a".repeat(200);
+    store.update_label(issued.id, &long).unwrap();
+
+    let listed = store.list().unwrap();
+    assert_eq!(listed[0].label.chars().count(), 80);
+}
+
+#[test]
+fn update_label_rejects_revoked() {
+    let tmp = TempDir::new().unwrap();
+    let store = open(&tmp);
+    let issued = store.issue("x").unwrap();
+    store.revoke(issued.id).unwrap();
+
+    let err = store.update_label(issued.id, "new").unwrap_err();
+    assert!(matches!(err, TokenStoreError::NotFound));
+}
+
+#[test]
+fn update_label_rejects_unknown_id() {
+    let tmp = TempDir::new().unwrap();
+    let store = open(&tmp);
+
+    let err = store.update_label(9999, "new").unwrap_err();
+    assert!(matches!(err, TokenStoreError::NotFound));
+}
