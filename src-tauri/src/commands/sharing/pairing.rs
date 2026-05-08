@@ -59,6 +59,9 @@ pub async fn rename_client(
     id: i64,
     label: String,
 ) -> Result<(), String> {
+    if label.trim().is_empty() {
+        return Err("label cannot be empty".into());
+    }
     let svc = state.sharing.read().await;
     let svc = svc.as_ref().ok_or("sharing not running")?;
     svc.token_store()
