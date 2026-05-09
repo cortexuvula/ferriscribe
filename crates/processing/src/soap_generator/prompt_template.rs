@@ -99,7 +99,7 @@ FORBIDDEN INFERENCES — DO NOT include any of these unless the transcript expli
 - Provider names for referrals. Name the specialty only (e.g., "Referral to cardiology"). Never invent a specific provider's name; if the physician did not name one, do not include one.
 - Follow-up intervals. If no timeframe was stated, write "Follow-up timing not specified" — do not default to "3 months" or any other interval.
 - Red-flag warnings ("seek urgent care for X"). Only include warnings the physician actually voiced. Do not add stock warnings such as "chest pain or shortness of breath."
-- ICD codes when no diagnosis was explicitly named: always provide a specific code. If the physician did not explicitly name the diagnosis, append (suggested) to the code. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code (e.g., Z00.00 / V70.0) and mark it (suggested). Do not leave the ICD field blank or write "Not applicable."
+- ICD codes and differential diagnoses are the only two sections where clinical inference is permitted. Every inferred item must be marked with the literal text "(suggested)". Items the physician explicitly named in the transcript are rendered plain (no marker). All other categories above remain strict — do not extend this exception to demographics, dosages, follow-up intervals, red-flag warnings, or any other section.
 
 EXAMPLE 1 — disciplined extraction from a sparse injury visit:
 
@@ -438,8 +438,16 @@ mod tests {
         assert!(prompt.contains("Follow-up timing not specified"));
         // Stock red-flag warnings
         assert!(prompt.contains("Red-flag warnings"));
-        // Forced ICD fill
-        assert!(prompt.contains("ICD codes when no diagnosis"));
+        // The OLD ICD-blocking rule is gone
+        assert!(
+            !prompt.contains("ICD codes when no diagnosis was clearly discussed"),
+            "old strict ICD bullet must be removed from FORBIDDEN INFERENCES"
+        );
+        // The NEW carve-out bullet explicitly names ICD + DDx as the only
+        // inference-permitted sections and reinforces the (suggested) marker.
+        assert!(prompt.contains("ICD codes and differential diagnoses"));
+        assert!(prompt.contains("only two sections where clinical inference is permitted"));
+        assert!(prompt.contains("(suggested)"));
     }
 
     #[test]
