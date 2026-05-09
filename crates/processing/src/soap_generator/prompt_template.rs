@@ -112,6 +112,8 @@ Doctor: Sounds like a muscle strain from lifting. I'll order an X-ray to be safe
 
 Correct extraction (excerpt — full output still requires every standard section):
 
+ICD-9 Code: 847.2 — Sprain of lumbar (suggested)
+
 Subjective:
 - Chief complaint: right-sided back pain for three days
 - History of present illness: pain began after lifting boxes; denies leg numbness or weakness
@@ -130,6 +132,14 @@ Objective:
 - Laboratory results: No new labs discussed
 - Imaging: X-ray ordered
 
+Assessment:
+- The patient describes right-sided lumbar pain for three days following lifting; no neurological deficit. The physician characterized this as a muscle strain from lifting and ordered imaging to rule out structural injury.
+
+Differential Diagnosis:
+- Lumbar muscle strain (suggested)
+- Lumbar facet sprain (suggested)
+- Lumbar disc herniation (suggested)
+
 Plan:
 - X-ray of the back
 - Ibuprofen 400 mg three times daily
@@ -140,7 +150,6 @@ Follow up:
 What this example deliberately does NOT contain — each would be a fabrication:
 - Blood pressure, heart rate, temperature, or any other vital signs (none stated)
 - "Tenderness on palpation", "no spinal deformity", or any exam finding (no exam was performed)
-- "Rule out disc herniation" or any differential diagnosis (none discussed)
 - "Patient appears comfortable" or any general-appearance description (not stated)
 - Specific red-flag warnings such as "seek care for bowel/bladder dysfunction" (not given by physician)
 - Allergy or medication entries beyond what was stated
