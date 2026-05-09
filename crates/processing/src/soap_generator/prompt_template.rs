@@ -29,15 +29,15 @@ fn icd_code_parts(version: &str) -> (&'static str, &'static str) {
     match version {
         "ICD-9" => (
             "ICD-9 code",
-            "ICD-9 Code: [code if a primary diagnosis was clearly discussed; otherwise \"Not applicable - no diagnosis clearly discussed\"]",
+            "ICD-9 Code: [specific code reflecting the visit's primary issue; append (suggested) if the physician did not explicitly name the diagnosis. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0 and mark it (suggested).]",
         ),
         "both" => (
             "both ICD-9 and ICD-10 codes",
-            "ICD-9 Code: [code if a primary diagnosis was clearly discussed; otherwise \"Not applicable - no diagnosis clearly discussed\"]\nICD-10 Code: [code if a primary diagnosis was clearly discussed; otherwise \"Not applicable - no diagnosis clearly discussed\"]",
+            "ICD-9 Code: [specific code reflecting the visit's primary issue; append (suggested) if the physician did not explicitly name the diagnosis. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0 and mark it (suggested).]\nICD-10 Code: [specific code reflecting the visit's primary issue; append (suggested) if the physician did not explicitly name the diagnosis. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00 and mark it (suggested).]",
         ),
         _ => (
             "ICD-10 code",
-            "ICD-10 Code: [code if a primary diagnosis was clearly discussed; otherwise \"Not applicable - no diagnosis clearly discussed\"]",
+            "ICD-10 Code: [specific code reflecting the visit's primary issue; append (suggested) if the physician did not explicitly name the diagnosis. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00 and mark it (suggested).]",
         ),
     }
 }
@@ -99,7 +99,7 @@ FORBIDDEN INFERENCES — DO NOT include any of these unless the transcript expli
 - Provider names for referrals. Name the specialty only (e.g., "Referral to cardiology"). Never invent a specific provider's name; if the physician did not name one, do not include one.
 - Follow-up intervals. If no timeframe was stated, write "Follow-up timing not specified" — do not default to "3 months" or any other interval.
 - Red-flag warnings ("seek urgent care for X"). Only include warnings the physician actually voiced. Do not add stock warnings such as "chest pain or shortness of breath."
-- ICD codes when no diagnosis was clearly discussed. If no clear primary diagnosis is stateable from the transcript, write "Not applicable - no diagnosis clearly discussed" instead of guessing a code.
+- ICD codes when no diagnosis was explicitly named: always provide a specific code. If the physician did not explicitly name the diagnosis, append (suggested) to the code. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code (e.g., Z00.00 / V70.0) and mark it (suggested). Do not leave the ICD field blank or write "Not applicable."
 
 EXAMPLE 1 — disciplined extraction from a sparse injury visit:
 
@@ -155,7 +155,7 @@ Patient: Thanks, have a good day."
 
 Correct extraction:
 
-ICD-10 Code: Not applicable - no diagnosis clearly discussed
+ICD-10 Code: Z00.00 (suggested)
 
 Subjective:
 - Chief complaint: Follow-up to review recent lab results
@@ -208,7 +208,7 @@ What this lab-review example deliberately does NOT contain — each would be a f
 - Visit type "telehealth" or "in-person" (not stated)
 - A referral to cardiology, or a named cardiologist — no referral was discussed
 - A specific follow-up interval such as "3 months" (none stated)
-- An ICD code (no clear diagnosis was made — write "Not applicable")
+- An ICD code beyond Z00.00 (suggested) — for this lab-review visit with no diagnosable complaint, the routine-encounter code is appropriate and marked (suggested)
 - Red-flag warnings such as "seek urgent care for chest pain" — the physician did not voice such warnings
 
 OUTPUT FORMAT — plain text only, no markdown:
@@ -268,7 +268,7 @@ SELF-CHECK BEFORE OUTPUT — for every line you produced, locate the transcript 
 4. Referral check: any specific provider name must have a transcript quote. If only the specialty was discussed, name the specialty only. If no referral was discussed, do not include a referral line.
 5. Follow-up interval check: any duration ("in 3 months", "in 2 weeks") must have a transcript quote. If absent, write "Follow-up timing not specified."
 6. Red-flag check: any "seek urgent care for X" warning must have a transcript quote. If absent, remove the line.
-7. ICD code check: only include a code if a clear primary diagnosis was discussed. If not, write "Not applicable - no diagnosis clearly discussed."
+7. ICD code check: always provide a specific code. If the physician did not explicitly name the diagnosis, append (suggested). For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code (Z00.00 / V70.0) marked (suggested).
 8. Visit modality check: only call the visit "telehealth" or "in-person" if explicitly stated.
 9. Assessment check: does the Assessment paragraph mention PMH, medications, family history, or social history that the physician did not tie to today's reasoning? If so, remove those mentions.
 
@@ -374,10 +374,15 @@ mod tests {
             ..Default::default()
         };
         let prompt = build_soap_prompt(&config);
-        assert!(prompt.contains("ICD-9 Code: [code"));
-        assert!(prompt.contains("Not applicable - no diagnosis clearly discussed"));
+        assert!(prompt.contains("ICD-9 Code: [specific code"));
+        assert!(prompt.contains("(suggested)"));
+        assert!(prompt.contains("V70.0"));
         assert!(!prompt.contains("{icd_label}"));
         assert!(!prompt.contains("{icd_instruction}"));
+        assert!(
+            !prompt.contains("Not applicable - no diagnosis clearly discussed"),
+            "old strict-mode 'Not applicable' string must not appear anywhere"
+        );
     }
 
     #[test]
@@ -387,8 +392,13 @@ mod tests {
             ..Default::default()
         };
         let prompt = build_soap_prompt(&config);
-        assert!(prompt.contains("ICD-10 Code: [code"));
-        assert!(prompt.contains("Not applicable - no diagnosis clearly discussed"));
+        assert!(prompt.contains("ICD-10 Code: [specific code"));
+        assert!(prompt.contains("(suggested)"));
+        assert!(prompt.contains("Z00.00"));
+        assert!(
+            !prompt.contains("Not applicable - no diagnosis clearly discussed"),
+            "old strict-mode 'Not applicable' string must not appear anywhere"
+        );
     }
 
     #[test]
@@ -398,9 +408,15 @@ mod tests {
             ..Default::default()
         };
         let prompt = build_soap_prompt(&config);
-        assert!(prompt.contains("ICD-9 Code: [code"));
-        assert!(prompt.contains("ICD-10 Code: [code"));
-        assert!(prompt.contains("Not applicable - no diagnosis clearly discussed"));
+        assert!(prompt.contains("ICD-9 Code: [specific code"));
+        assert!(prompt.contains("ICD-10 Code: [specific code"));
+        assert!(prompt.contains("(suggested)"));
+        assert!(prompt.contains("V70.0"));
+        assert!(prompt.contains("Z00.00"));
+        assert!(
+            !prompt.contains("Not applicable - no diagnosis clearly discussed"),
+            "old strict-mode 'Not applicable' string must not appear anywhere"
+        );
     }
 
     #[test]
@@ -490,8 +506,9 @@ mod tests {
         };
         let prompt = build_soap_prompt(&config);
         // Custom template is used, and placeholders are still resolved
-        assert!(prompt.starts_with("My custom template with ICD-9 Code: [code"));
-        assert!(prompt.contains("Not applicable - no diagnosis clearly discussed"));
+        assert!(prompt.starts_with("My custom template with ICD-9 Code: [specific code"));
+        assert!(prompt.contains("(suggested)"));
+        assert!(prompt.contains("V70.0"));
     }
 
     #[test]
