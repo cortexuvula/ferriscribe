@@ -268,9 +268,10 @@ SELF-CHECK BEFORE OUTPUT — for every line you produced, locate the transcript 
 4. Referral check: any specific provider name must have a transcript quote. If only the specialty was discussed, name the specialty only. If no referral was discussed, do not include a referral line.
 5. Follow-up interval check: any duration ("in 3 months", "in 2 weeks") must have a transcript quote. If absent, write "Follow-up timing not specified."
 6. Red-flag check: any "seek urgent care for X" warning must have a transcript quote. If absent, remove the line.
-7. ICD code check: always provide a specific code. If the physician did not explicitly name the diagnosis, append (suggested). For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code (Z00.00 / V70.0) marked (suggested).
+7. ICD code check: every ICD code is either supported by a transcript-named diagnosis (no marker) or inferred from findings (marked "(suggested)"). Never output a bare code without one of these. On a paperwork-only / wellness / lab-only visit, use an encounter-type code (e.g. V70.0 / Z00.00) marked (suggested) instead of leaving the field blank.
 8. Visit modality check: only call the visit "telehealth" or "in-person" if explicitly stated.
 9. Assessment check: does the Assessment paragraph mention PMH, medications, family history, or social history that the physician did not tie to today's reasoning? If so, remove those mentions.
+10. Differential Diagnosis count + marker check: the Differential Diagnosis section contains at least three items. Each item is either physician-stated (plain) or marked (suggested). If fewer than three are stateable from the transcript, fill the remaining slots with (suggested) items consistent with the chief complaint or findings.
 
 Vital signs, exam findings, medication dosages, follow-up timing, and red-flag warnings are the most common fabrications. If a number, dose, or interval was not stated in the transcript, do not invent one. Clinical reasoning in the Assessment must reflect what was discussed during the visit. A short accurate note beats a long partially-fabricated one. Length is not a virtue."#
 }
@@ -493,6 +494,8 @@ mod tests {
         assert!(prompt.contains("Red-flag check"));
         assert!(prompt.contains("ICD code check"));
         assert!(prompt.contains("Visit modality check"));
+        // New: DDx count + marker check is item 10
+        assert!(prompt.contains("Differential Diagnosis count"));
     }
 
     #[test]
