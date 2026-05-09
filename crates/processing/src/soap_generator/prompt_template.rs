@@ -164,7 +164,7 @@ Patient: Thanks, have a good day."
 
 Correct extraction:
 
-ICD-10 Code: Z00.00 (suggested)
+ICD-9 Code: 266.2 — Other B-complex deficiencies (suggested)
 
 Subjective:
 - Chief complaint: Follow-up to review recent lab results
@@ -197,7 +197,9 @@ Assessment:
 - The patient's recent labs show an elevated Lipoprotein(a), interpreted by the physician as indicating higher cardiovascular risk, and a low Vitamin B12 below the stated cutoff. Other labs are within normal ranges, including A1C with no evidence of diabetes.
 
 Differential Diagnosis:
-- No differential diagnoses were discussed during the visit
+- Vitamin B12 deficiency (suggested)
+- Lipoprotein(a) elevation contributing to atherosclerotic cardiovascular risk (suggested)
+- Mixed hyperlipidemia (suggested)
 
 Plan:
 - Vitamin B12 supplement or vitamin B complex (dose not specified)
@@ -217,7 +219,6 @@ What this lab-review example deliberately does NOT contain — each would be a f
 - Visit type "telehealth" or "in-person" (not stated)
 - A referral to cardiology, or a named cardiologist — no referral was discussed
 - A specific follow-up interval such as "3 months" (none stated)
-- An ICD code beyond Z00.00 (suggested) — for this lab-review visit with no diagnosable complaint, the routine-encounter code is appropriate and marked (suggested)
 - Red-flag warnings such as "seek urgent care for chest pain" — the physician did not voice such warnings
 
 OUTPUT FORMAT — plain text only, no markdown:
@@ -469,16 +470,17 @@ mod tests {
         assert!(prompt.contains("EXAMPLE 1"));
         assert!(prompt.contains("EXAMPLE 2"));
         assert!(prompt.contains("lab-review visit"));
-        // Lab-review example must teach the "Not applicable" ICD output
-        assert!(prompt.contains("Not applicable - no diagnosis clearly discussed"));
-        // Lab-review example must teach the "dose not specified" pattern
-        assert!(prompt.contains("dose not specified"));
-        // Lab-review example must show that a thin visit produces
-        // mostly "Not discussed" subjective entries
+        // Lab-review example must teach the new always-on ICD with (suggested)
         let lab_idx = prompt
             .find("EXAMPLE 2")
             .expect("EXAMPLE 2 must be present");
         let after_example = &prompt[lab_idx..];
+        assert!(after_example.contains("ICD-9 Code: 266.2"));
+        assert!(after_example.contains("(suggested)"));
+        // Lab-review example must teach the "dose not specified" pattern
+        assert!(after_example.contains("dose not specified"));
+        // Lab-review example must show that a thin visit produces
+        // mostly "Not discussed" subjective entries
         assert!(after_example.contains("Past medical history: Not discussed"));
         assert!(after_example.contains("Family history: Not discussed"));
         // Both examples must come before OUTPUT FORMAT
@@ -487,6 +489,43 @@ mod tests {
         assert!(
             pos_example_2 < pos_output_format,
             "EXAMPLE 2 must come before OUTPUT FORMAT"
+        );
+    }
+
+    #[test]
+    fn default_soap_prompt_lab_review_example_has_three_differentials() {
+        let prompt = build_soap_prompt(&SoapPromptConfig::default());
+        let lab_idx = prompt
+            .find("EXAMPLE 2")
+            .expect("EXAMPLE 2 must be present");
+        let after_example = &prompt[lab_idx..];
+
+        let ddx_idx = after_example
+            .find("Differential Diagnosis:")
+            .expect("EXAMPLE 2 must contain a Differential Diagnosis block");
+
+        // Capture the lines from the DDx header up to the next blank line.
+        let ddx_block_start = ddx_idx + "Differential Diagnosis:".len();
+        let ddx_tail = &after_example[ddx_block_start..];
+        let ddx_end = ddx_tail.find("\n\n").unwrap_or(ddx_tail.len());
+        let ddx_block = &ddx_tail[..ddx_end];
+
+        let item_count = ddx_block
+            .lines()
+            .filter(|line| line.trim_start().starts_with("- "))
+            .count();
+        assert!(
+            item_count >= 3,
+            "EXAMPLE 2 Differential Diagnosis must list at least three items; found {item_count}.\nBlock:\n{ddx_block}"
+        );
+
+        let suggested_count = ddx_block
+            .lines()
+            .filter(|line| line.trim_start().starts_with("- ") && line.contains("(suggested)"))
+            .count();
+        assert_eq!(
+            suggested_count, item_count,
+            "EXAMPLE 2 lab-review visit has nothing transcript-named, so every DDx item must carry the (suggested) marker.\nBlock:\n{ddx_block}"
         );
     }
 
