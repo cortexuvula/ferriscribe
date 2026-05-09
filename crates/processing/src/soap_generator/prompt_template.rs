@@ -99,7 +99,7 @@ FORBIDDEN INFERENCES — DO NOT include any of these unless the transcript expli
 - Provider names for referrals. Name the specialty only (e.g., "Referral to cardiology"). Never invent a specific provider's name; if the physician did not name one, do not include one.
 - Follow-up intervals. If no timeframe was stated, write "Follow-up timing not specified" — do not default to "3 months" or any other interval.
 - Red-flag warnings ("seek urgent care for X"). Only include warnings the physician actually voiced. Do not add stock warnings such as "chest pain or shortness of breath."
-- ICD codes and differential diagnoses are the only two sections where clinical inference is permitted. Every inferred item must be marked with the literal text "(suggested)". Items the physician explicitly named in the transcript are rendered plain (no marker). All other categories above remain strict — do not extend this exception to demographics, dosages, follow-up intervals, red-flag warnings, or any other section.
+- ICD codes and differential diagnoses are the only two sections where clinical inference is permitted. Every inferred item must be marked with the literal text "(suggested)". Items the physician explicitly named in the transcript are rendered plain (no marker). All other categories above remain strict — do not extend this exception to ANY of them: demographics, past medical conditions, medications, dosages, family history, social history, visit modality, general appearance, referral provider names, follow-up intervals, or red-flag warnings.
 
 EXAMPLE 1 — disciplined extraction from a sparse injury visit:
 
