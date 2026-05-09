@@ -725,4 +725,79 @@ mod tests {
             "system prompt must mark Patient record entries as authoritative"
         );
     }
+
+    #[test]
+    fn default_soap_prompt_explains_suggested_marker_convention() {
+        // The FORBIDDEN INFERENCES carve-out bullet must explicitly state
+        // the (suggested) marker convention so the model cannot rationalise
+        // dropping the marker.
+        let prompt = build_soap_prompt(&SoapPromptConfig::default());
+        let block_idx = prompt
+            .find("FORBIDDEN INFERENCES")
+            .expect("FORBIDDEN INFERENCES section missing");
+        let block = &prompt[block_idx..];
+        // Anchor at the start of the carve-out sentence so the window covers
+        // both "ICD codes and differential diagnoses" and "only two sections…"
+        // which appear in that order within the same bullet.
+        let carve_idx = block
+            .find("ICD codes and differential diagnoses are the only two sections")
+            .expect("FORBIDDEN INFERENCES must contain the ICD/DDx carve-out bullet");
+        let carve_window = &block[carve_idx..carve_idx + 600];
+        assert!(
+            carve_window.contains("(suggested)"),
+            "carve-out bullet must explicitly cite the (suggested) marker.\nWindow:\n{carve_window}"
+        );
+        assert!(
+            carve_window.contains("ICD codes and differential diagnoses"),
+            "carve-out bullet must name both protected sections.\nWindow:\n{carve_window}"
+        );
+    }
+
+    #[test]
+    fn default_soap_prompt_drops_old_icd_blocking_rule() {
+        // The pre-relaxation FORBIDDEN INFERENCES bullet "ICD codes when no
+        // diagnosis was clearly discussed..." must NOT appear anywhere in
+        // the prompt — regression guard against an accidental revert.
+        let prompt = build_soap_prompt(&SoapPromptConfig::default());
+        assert!(
+            !prompt.contains("ICD codes when no diagnosis was clearly discussed"),
+            "old strict ICD bullet must remain removed"
+        );
+        assert!(
+            !prompt.contains("No differential diagnoses were discussed during the visit"),
+            "old strict 'no DDx discussed' fallback must remain removed"
+        );
+        assert!(
+            !prompt.contains("Not applicable - no diagnosis clearly discussed"),
+            "old strict 'Not applicable' ICD output must remain removed"
+        );
+    }
+
+    #[test]
+    fn default_soap_prompt_self_check_keeps_other_strict_categories() {
+        // Sanity guard: ICD/DDx relaxation must not weaken the other
+        // categorical anti-fabrication checks. Each of these labels must
+        // still appear in the SELF-CHECK block.
+        let prompt = build_soap_prompt(&SoapPromptConfig::default());
+        let sc_idx = prompt
+            .find("SELF-CHECK")
+            .expect("SELF-CHECK block missing");
+        let sc_block = &prompt[sc_idx..];
+        for label in [
+            "Demographics check",
+            "Past medical history check",
+            "Medication check",
+            "Referral check",
+            "Follow-up interval check",
+            "Red-flag check",
+            "Visit modality check",
+            "Assessment check",
+        ] {
+            assert!(
+                sc_block.contains(label),
+                "SELF-CHECK must still contain '{label}' — ICD/DDx relaxation should not weaken other categories.\nBlock excerpt:\n{}",
+                &sc_block[..sc_block.len().min(2000)]
+            );
+        }
+    }
 }
