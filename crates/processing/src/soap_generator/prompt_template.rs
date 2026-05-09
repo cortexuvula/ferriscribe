@@ -236,10 +236,10 @@ Objective:
 - Imaging: [from transcript; otherwise "No imaging discussed"]
 
 Assessment:
-- [ONE cohesive paragraph using ONLY findings and reasoning that appear in the transcript. Include {icd_instruction} inline if a primary diagnosis was clearly discussed; otherwise omit the code. Do NOT restate past medical history, medications, family history, or social history in the Assessment unless the physician explicitly tied them to today's reasoning. If the visit is purely a lab review with no clinical examination, the Assessment should describe the lab findings and the physician's stated interpretation — nothing more. Not broken into sub-items.]
+- [ONE cohesive paragraph using ONLY findings and reasoning that appear in the transcript. Inline mention of {icd_instruction} is permitted but not required (the canonical location is the ICD line above the Subjective block); if you inline a code, mark it (suggested) when inferred. Do NOT restate past medical history, medications, family history, or social history in the Assessment unless the physician explicitly tied them to today's reasoning. If the visit is purely a lab review with no clinical examination, the Assessment should describe the lab findings and the physician's stated interpretation — nothing more. Not broken into sub-items.]
 
 Differential Diagnosis:
-- [Only diagnoses explicitly discussed during the visit. If none discussed: "- No differential diagnoses were discussed during the visit"]
+- [List at least three diagnoses, ranked by clinical likelihood given the chief complaint and findings. Each item: plain if the physician explicitly named it; suffixed with " (suggested)" if you inferred it from findings. On a paperwork-only / wellness / lab-only visit with no chief complaint, list three plausible items consistent with the encounter type or the labs reviewed, all marked (suggested).]
 
 Plan:
 - [Each intervention as a separate dash line — ONLY interventions discussed by the physician]
@@ -614,6 +614,34 @@ mod tests {
                 "{field} output format must allow supplementary background as a source.\nBlock:\n{block}"
             );
         }
+    }
+
+    #[test]
+    fn default_soap_prompt_requires_at_least_three_differentials() {
+        // The OUTPUT FORMAT Differential Diagnosis block must instruct the
+        // model to produce at least three items, with the (suggested) marker
+        // on inferences.
+        let prompt = build_soap_prompt(&SoapPromptConfig::default());
+        let format_idx = prompt
+            .find("OUTPUT FORMAT")
+            .expect("OUTPUT FORMAT section missing");
+        let format_block = &prompt[format_idx..];
+        let ddx_idx = format_block
+            .find("Differential Diagnosis:")
+            .expect("Differential Diagnosis section missing in OUTPUT FORMAT");
+        let ddx_block = &format_block[ddx_idx..ddx_idx + 600];
+        assert!(
+            ddx_block.contains("at least three"),
+            "OUTPUT FORMAT Differential Diagnosis must require at least three items.\nBlock:\n{ddx_block}"
+        );
+        assert!(
+            ddx_block.contains("(suggested)"),
+            "OUTPUT FORMAT Differential Diagnosis must reference the (suggested) marker convention.\nBlock:\n{ddx_block}"
+        );
+        assert!(
+            !ddx_block.contains("No differential diagnoses were discussed during the visit"),
+            "old strict 'no DDx' fallback must not appear in OUTPUT FORMAT"
+        );
     }
 
     #[test]
