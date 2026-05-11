@@ -254,10 +254,12 @@ pub fn start_capture(
         };
 
         let mut acc: Vec<f32> = Vec::with_capacity(waveform_chunk * 2);
+        let mut batch: Vec<f32> = Vec::with_capacity(waveform_chunk * 4);
 
         loop {
             // Drain available samples from the ring buffer.
-            let batch: Vec<f32> = cons.pop_iter().collect();
+            batch.clear();
+            batch.extend(cons.pop_iter());
 
             if !batch.is_empty() {
                 for &s in &batch {
@@ -283,11 +285,12 @@ pub fn start_capture(
                 // Final drain: capture any samples that arrived between the
                 // empty-check above and the stop_flag-check (race window).
                 loop {
-                    let final_batch: Vec<f32> = cons.pop_iter().collect();
-                    if final_batch.is_empty() {
+                    batch.clear();
+                    batch.extend(cons.pop_iter());
+                    if batch.is_empty() {
                         break;
                     }
-                    for &s in &final_batch {
+                    for &s in &batch {
                         if let Err(e) = writer.write_sample(s) {
                             tracing::error!("WAV write error (final drain): {e}");
                         }
