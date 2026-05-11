@@ -205,6 +205,31 @@ impl RecordingsRepo {
         Ok(updated as u32)
     }
 
+    /// Fetch multiple recordings by id in a single query. Order is not
+    /// guaranteed; sort the result on the caller side if needed. Empty
+    /// `ids` returns an empty Vec without hitting the database.
+    pub fn get_many(conn: &Connection, ids: &[uuid::Uuid]) -> DbResult<Vec<Recording>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT id, filename, transcript, soap_note, referral, letter, chat, \
+                     patient_name, audio_path, duration_seconds, file_size_bytes, \
+                     stt_provider, ai_provider, tags, processing_status, created_at, metadata \
+             FROM recordings WHERE id IN ({placeholders})"
+        );
+        let id_strings: Vec<String> = ids.iter().map(|u| u.to_string()).collect();
+        let params: Vec<&dyn rusqlite::ToSql> =
+            id_strings.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params.as_slice(), Self::row_to_recording)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
@@ -361,6 +386,44 @@ mod tests {
         RecordingsRepo::insert(&conn, &rec).unwrap();
         let fetched = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
         assert_eq!(fetched.tags, vec!["urgent", "follow-up"]);
+    }
+
+    #[test]
+    fn get_many_returns_matching_recordings() {
+        let conn = migrated_conn();
+        let r1 = {
+            let r = Recording::new("first.wav", PathBuf::from("/audio/first.wav"));
+            RecordingsRepo::insert(&conn, &r).unwrap();
+            r
+        };
+        let r2 = {
+            let r = Recording::new("second.wav", PathBuf::from("/audio/second.wav"));
+            RecordingsRepo::insert(&conn, &r).unwrap();
+            r
+        };
+        let _r3 = {
+            let r = Recording::new("third.wav", PathBuf::from("/audio/third.wav"));
+            RecordingsRepo::insert(&conn, &r).unwrap();
+            r
+        };
+
+        let results = RecordingsRepo::get_many(&conn, &[r1.id, r2.id]).unwrap();
+        assert_eq!(results.len(), 2);
+        let ids: std::collections::HashSet<_> = results.iter().map(|r| r.id).collect();
+        assert!(ids.contains(&r1.id));
+        assert!(ids.contains(&r2.id));
+    }
+
+    #[test]
+    fn get_many_empty_ids_returns_empty() {
+        let conn = migrated_conn();
+        let _r1 = {
+            let r = Recording::new("first.wav", PathBuf::from("/audio/first.wav"));
+            RecordingsRepo::insert(&conn, &r).unwrap();
+            r
+        };
+        let results = RecordingsRepo::get_many(&conn, &[]).unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]
