@@ -262,7 +262,7 @@ pub async fn transcribe_recording_inner(
             if let Some(conn) = crate::state::load_paired_connection() {
                 if conn.ports.vocab.is_some() {
                     let bearer = crate::state::load_sharing_bearer();
-                    if let Some(remote) = crate::vocab_remote::VocabRemote::from(&conn, bearer) {
+                    if let Some(remote) = crate::vocab_remote::VocabRemote::from(&conn, bearer, state.http_client.clone()) {
                         match remote.list(None).await {
                             Ok(list) => {
                                 Some(list.into_iter().filter(|e| e.enabled).collect())

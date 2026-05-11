@@ -16,12 +16,14 @@ use crate::commands::sharing::PairedConnection;
 pub struct TemplatesRemote<'a> {
     pub conn: &'a PairedConnection,
     pub bearer: String,
+    pub client: std::sync::Arc<reqwest::Client>,
 }
 
 impl<'a> TemplatesRemote<'a> {
     pub fn from(
         conn: &'a PairedConnection,
         bearer: Option<String>,
+        client: std::sync::Arc<reqwest::Client>,
     ) -> Option<Self> {
         let bearer = bearer?;
         // Templates ride on the same port as the vocab API. Absence means
@@ -29,7 +31,7 @@ impl<'a> TemplatesRemote<'a> {
         // treat that as "templates sync unavailable" and fall back to
         // local.
         conn.ports.vocab?;
-        Some(Self { conn, bearer })
+        Some(Self { conn, bearer, client })
     }
 
     fn base_url(&self) -> Option<String> {
@@ -38,21 +40,14 @@ impl<'a> TemplatesRemote<'a> {
         Some(http_url(host, port))
     }
 
-    fn client() -> AppResult<reqwest::Client> {
-        reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| AppError::Other(format!("templates_remote http client: {e}")))
-    }
-
     pub async fn list(&self) -> AppResult<Vec<ContextTemplate>> {
         let base = self
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/context-templates");
-        let resp = Self::client()?
+        let resp = self.client
             .get(&url)
+            .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
             .send()
             .await
@@ -70,8 +65,9 @@ impl<'a> TemplatesRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/context-templates/upsert");
-        let resp = Self::client()?
+        let resp = self.client
             .post(&url)
+            .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
             .json(&B { name, body })
             .send()
@@ -94,8 +90,9 @@ impl<'a> TemplatesRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/context-templates/rename");
-        let resp = Self::client()?
+        let resp = self.client
             .post(&url)
+            .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
             .json(&B { old_name, new_name })
             .send()
@@ -114,8 +111,9 @@ impl<'a> TemplatesRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/context-templates/delete");
-        let resp = Self::client()?
+        let resp = self.client
             .post(&url)
+            .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
             .json(&B { name })
             .send()
