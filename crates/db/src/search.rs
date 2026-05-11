@@ -46,13 +46,7 @@ impl SearchRepo {
         limit: u32,
     ) -> DbResult<Vec<Recording>> {
         let ids = Self::search(conn, query, limit)?;
-        let mut results = Vec::with_capacity(ids.len());
-        for id in &ids {
-            if let Ok(rec) = RecordingsRepo::get_by_id(conn, id) {
-                results.push(rec);
-            }
-        }
-        Ok(results)
+        RecordingsRepo::get_many(conn, &ids)
     }
 }
 

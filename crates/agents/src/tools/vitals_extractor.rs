@@ -6,6 +6,42 @@ use medical_core::{
 };
 use regex::Regex;
 use serde_json::json;
+use std::sync::LazyLock;
+
+// Blood pressure: e.g. "BP 120/80", "blood pressure: 120/80 mmHg"
+static BP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:bp|blood\s*pressure)[:\s]*(\d{2,3})\s*/\s*(\d{2,3})\s*(?:mmhg)?"
+    ).unwrap()
+});
+// Plain blood pressure pattern: "120/80"
+static BP_PLAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(\d{2,3})/(\d{2,3})\b").unwrap()
+});
+// Heart rate: e.g. "HR 72 bpm", "heart rate: 72", "pulse 72"
+static HR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:hr|heart\s*rate|pulse)[:\s]*(\d{2,3})\s*(?:bpm)?"
+    ).unwrap()
+});
+// Temperature: e.g. "Temp 98.6°F", "T 37.2C", "temperature: 98.6"
+static TEMP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:temp(?:erature)?|t)[:\s]*(\d{2,3}(?:\.\d)?)\s*(?:°?\s*([fcFC]))?"
+    ).unwrap()
+});
+// Respiratory rate: e.g. "RR 16", "respiratory rate: 18 breaths/min"
+static RR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:rr|resp(?:iratory)?\s*rate?)[:\s]*(\d{1,2})\s*(?:breaths?/min)?"
+    ).unwrap()
+});
+// SpO2 / Oxygen saturation: e.g. "SpO2 98%", "O2 sat 97%", "sats 99"
+static SPO2_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:spo2|o2\s*sat(?:uration)?|sats?)[:\s]*(\d{2,3})\s*%?"
+    ).unwrap()
+});
 
 /// Tool for extracting vital signs from clinical text using regex patterns.
 pub struct VitalsExtractorTool;
@@ -38,14 +74,9 @@ impl Tool for VitalsExtractorTool {
         let mut vitals = serde_json::Map::new();
 
         // Blood pressure: e.g. "BP 120/80", "blood pressure: 120/80 mmHg", "120/80"
-        let bp_re = Regex::new(
-            r"(?i)(?:bp|blood\s*pressure)[:\s]*(\d{2,3})\s*/\s*(\d{2,3})\s*(?:mmhg)?"
-        )
-        .unwrap();
         // Also match plain "120/80" patterns that look like BP
-        let bp_plain_re = Regex::new(r"\b(\d{2,3})/(\d{2,3})\b").unwrap();
 
-        if let Some(caps) = bp_re.captures(text) {
+        if let Some(caps) = BP_RE.captures(text) {
             let systolic: u32 = caps[1].parse().unwrap_or(0);
             let diastolic: u32 = caps[2].parse().unwrap_or(0);
             if (60..=250).contains(&systolic) && (30..=150).contains(&diastolic) {
@@ -55,7 +86,7 @@ impl Tool for VitalsExtractorTool {
                     "unit": "mmHg"
                 }));
             }
-        } else if let Some(caps) = bp_plain_re.captures(text) {
+        } else if let Some(caps) = BP_PLAIN_RE.captures(text) {
             let systolic: u32 = caps[1].parse().unwrap_or(0);
             let diastolic: u32 = caps[2].parse().unwrap_or(0);
             if (60..=250).contains(&systolic) && (30..=150).contains(&diastolic) {
@@ -68,11 +99,7 @@ impl Tool for VitalsExtractorTool {
         }
 
         // Heart rate: e.g. "HR 72 bpm", "heart rate: 72", "pulse 72"
-        let hr_re = Regex::new(
-            r"(?i)(?:hr|heart\s*rate|pulse)[:\s]*(\d{2,3})\s*(?:bpm)?"
-        )
-        .unwrap();
-        if let Some(caps) = hr_re.captures(text) {
+        if let Some(caps) = HR_RE.captures(text) {
             let hr: u32 = caps[1].parse().unwrap_or(0);
             if (20..=300).contains(&hr) {
                 vitals.insert("heart_rate".into(), json!({
@@ -83,11 +110,7 @@ impl Tool for VitalsExtractorTool {
         }
 
         // Temperature: e.g. "Temp 98.6°F", "T 37.2C", "temperature: 98.6"
-        let temp_re = Regex::new(
-            r"(?i)(?:temp(?:erature)?|t)[:\s]*(\d{2,3}(?:\.\d)?)\s*(?:°?\s*([fcFC]))?"
-        )
-        .unwrap();
-        if let Some(caps) = temp_re.captures(text)
+        if let Some(caps) = TEMP_RE.captures(text)
             && let Ok(temp_val) = caps[1].parse::<f32>() {
                 let unit = caps.get(2).map_or("", |m| m.as_str()).to_uppercase();
                 // Validate reasonable temperature range
@@ -102,11 +125,7 @@ impl Tool for VitalsExtractorTool {
             }
 
         // Respiratory rate: e.g. "RR 16", "respiratory rate: 18 breaths/min"
-        let rr_re = Regex::new(
-            r"(?i)(?:rr|resp(?:iratory)?\s*rate?)[:\s]*(\d{1,2})\s*(?:breaths?/min)?"
-        )
-        .unwrap();
-        if let Some(caps) = rr_re.captures(text) {
+        if let Some(caps) = RR_RE.captures(text) {
             let rr: u32 = caps[1].parse().unwrap_or(0);
             if (4..=60).contains(&rr) {
                 vitals.insert("respiratory_rate".into(), json!({
@@ -117,11 +136,7 @@ impl Tool for VitalsExtractorTool {
         }
 
         // SpO2 / Oxygen saturation: e.g. "SpO2 98%", "O2 sat 97%", "sats 99"
-        let spo2_re = Regex::new(
-            r"(?i)(?:spo2|o2\s*sat(?:uration)?|sats?)[:\s]*(\d{2,3})\s*%?"
-        )
-        .unwrap();
-        if let Some(caps) = spo2_re.captures(text) {
+        if let Some(caps) = SPO2_RE.captures(text) {
             let spo2: u32 = caps[1].parse().unwrap_or(0);
             if (50..=100).contains(&spo2) {
                 vitals.insert("spo2".into(), json!({
