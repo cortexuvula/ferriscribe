@@ -277,15 +277,15 @@ impl RemoteSttProvider {
             return Err(AppError::SttProvider(msg));
         }
         if status.is_client_error() {
-            let body = resp.text().await.unwrap_or_default();
-            let prefix: String = body.chars().take(200).collect();
+            let body = medical_core::http_error_body::read_error_body(resp, 200).await;
             return Err(AppError::SttProvider(format!(
-                "Whisper server rejected request: {status} {prefix}"
+                "Whisper server rejected request: {status} {body}"
             )));
         }
         if status.is_server_error() {
+            let body = medical_core::http_error_body::read_error_body(resp, 200).await;
             return Err(AppError::SttProvider(format!(
-                "Whisper server internal error: {status}"
+                "Whisper server internal error: {status} {body}"
             )));
         }
 
@@ -752,6 +752,25 @@ mod tests {
 
         let url = p.current_base_url().await.expect("url");
         assert_eq!(url, "http://myhost:8080");
+    }
+
+    #[tokio::test]
+    async fn http_500_with_partial_body_includes_diagnostic_marker() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("model load failed"))
+            .mount(&server)
+            .await;
+
+        let provider = provider_at(&server.uri(), None);
+        let err = provider
+            .transcribe(dummy_audio(), SttConfig::default(), CancellationToken::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("500"), "expected status code in error: {err}");
+        assert!(err.contains("model load failed"), "expected body content in error: {err}");
     }
 
     #[tokio::test]

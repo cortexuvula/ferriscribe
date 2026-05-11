@@ -107,10 +107,9 @@ pub async fn test_lmstudio_connection(host: String, port: u16) -> AppResult<Stri
     })?;
 
     if !response.status().is_success() {
-        return Err(AppError::AiProvider(format!(
-            "Server returned HTTP {}",
-            response.status()
-        )));
+        let status = response.status();
+        let body = medical_core::http_error_body::read_error_body(response, 200).await;
+        return Err(AppError::AiProvider(format!("Server returned HTTP {status}: {body}")));
     }
 
     // Parse the OpenAI-compatible models response to count models
@@ -185,10 +184,9 @@ pub async fn test_stt_remote_connection(
         ));
     }
     if !response.status().is_success() {
-        return Err(AppError::SttProvider(format!(
-            "Server returned HTTP {}",
-            response.status()
-        )));
+        let status = response.status();
+        let body = medical_core::http_error_body::read_error_body(response, 200).await;
+        return Err(AppError::SttProvider(format!("Server returned HTTP {status}: {body}")));
     }
 
     let body: serde_json::Value = response
@@ -244,10 +242,9 @@ pub async fn test_ollama_connection(host: String, port: u16) -> AppResult<String
     })?;
 
     if !response.status().is_success() {
-        return Err(AppError::AiProvider(format!(
-            "Server returned HTTP {}",
-            response.status()
-        )));
+        let status = response.status();
+        let body = medical_core::http_error_body::read_error_body(response, 200).await;
+        return Err(AppError::AiProvider(format!("Server returned HTTP {status}: {body}")));
     }
 
     let body: serde_json::Value = response

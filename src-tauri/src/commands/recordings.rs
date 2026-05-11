@@ -103,7 +103,9 @@ pub fn delete_all_recordings(
     let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
 
     // Delete all RAG vectors
-    let _ = conn.execute("DELETE FROM vectors", []);
+    if let Err(e) = conn.execute("DELETE FROM vectors", []) {
+        tracing::error!(error = %e, "RAG vector cleanup failed during delete_all_recordings; orphan vectors may remain");
+    }
 
     // Delete all recordings and get audio paths for file cleanup
     let paths = RecordingsRepo::delete_all(&conn).map_err(|e| AppError::Database(e.to_string()))?;

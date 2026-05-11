@@ -56,7 +56,7 @@ impl EmbeddingGenerator {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
+            let body_text = medical_core::http_error_body::read_error_body(resp, 200).await;
             return Err(AppError::AiProvider(format!(
                 "Ollama API error {status}: {body_text}"
             )));

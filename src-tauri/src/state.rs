@@ -201,7 +201,13 @@ pub fn load_paired_connection() -> Option<crate::commands::sharing::PairedConnec
         return None;
     }
     let json = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&json).ok()
+    match serde_json::from_str(&json) {
+        Ok(conn) => Some(conn),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse paired-connection JSON; treating as not paired");
+            None
+        }
+    }
 }
 
 /// Load the persisted office-server config from disk. Returns `None` if this
@@ -215,7 +221,13 @@ pub fn load_server_config() -> Option<crate::commands::sharing::ServerConfig> {
         return None;
     }
     let json = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&json).ok()
+    match serde_json::from_str(&json) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse server-config JSON; using defaults");
+            None
+        }
+    }
 }
 
 /// Load the bearer token stored in the OS keychain after pairing.
