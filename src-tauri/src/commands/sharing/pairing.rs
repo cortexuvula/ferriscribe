@@ -112,7 +112,9 @@ pub async fn pair_with_server(
         .map_err(|e| e.to_string())?;
 
     if !resp.status().is_success() {
-        return Err(format!("server rejected pair: {}", resp.status()));
+        let status = resp.status();
+        let body = medical_core::http_error_body::read_error_body(resp, 200).await;
+        return Err(format!("server rejected pair: {status} {body}"));
     }
 
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;

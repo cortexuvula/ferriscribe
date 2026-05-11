@@ -269,11 +269,19 @@ impl WhisperSupervisor {
         // into a silent crashloop. whisper-server's stderr carries init
         // and request-routing diagnostics — not transcript content.
         if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(async move {
+            let stderr_task = tokio::spawn(async move {
                 use tokio::io::{AsyncBufReadExt, BufReader};
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     info!("whisper-server: {line}");
+                }
+            });
+            tokio::spawn(async move {
+                match stderr_task.await {
+                    Ok(()) => tracing::debug!("whisper stderr-forwarding task exited normally"),
+                    Err(e) if e.is_cancelled() => tracing::debug!("whisper stderr task cancelled"),
+                    Err(e) if e.is_panic() => tracing::error!(error = %e, "whisper stderr task panicked; stderr output lost"),
+                    Err(e) => tracing::error!(error = %e, "whisper stderr task failed"),
                 }
             });
         }

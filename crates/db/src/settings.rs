@@ -49,7 +49,13 @@ impl SettingsRepo {
     pub fn load_config(conn: &Connection) -> DbResult<AppConfig> {
         match Self::get(conn, "app_config")? {
             Some(json) => {
-                let cfg = serde_json::from_str(&json).unwrap_or_default();
+                let cfg = match serde_json::from_str(&json) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to parse app_config JSON; using defaults");
+                        Default::default()
+                    }
+                };
                 Ok(cfg)
             }
             None => Ok(AppConfig::default()),
