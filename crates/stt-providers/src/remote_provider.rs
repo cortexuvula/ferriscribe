@@ -257,19 +257,25 @@ impl RemoteSttProvider {
             // orphaned-pairing case (e.g. office server rebuilt after pair).
             // Surface a specific instruction; fall back to a generic message
             // otherwise.
+            // The auth proxy at crates/sharing/src/auth_proxy.rs tags its 401s
+            // with `x-auth-reason: unknown-token` when the bearer doesn't match
+            // any non-revoked row (orphaned-pairing case — e.g. office server
+            // rebuilt). The header values are a contract with the proxy; do
+            // not change without coordinating the producer side.
             let reason = resp
                 .headers()
                 .get("x-auth-reason")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let msg = match reason.as_deref() {
+                .and_then(|v| v.to_str().ok());
+            let msg = match reason {
                 Some("unknown-token") => {
-                    "Office server no longer recognises this client \
+                    "Office server no longer recognizes this client \
                      \u{2014} please re-pair (Settings \u{2192} Sharing \u{2192} Unpair, \
                      then scan a fresh code from the office machine)."
                         .to_string()
                 }
-                _ => "Whisper server rejected authentication \u{2014} re-pair the client if the office server was reinstalled.".to_string(),
+                _ => "Whisper server rejected authentication \u{2014} \
+                      re-pair the client if the office server was reinstalled."
+                    .to_string(),
             };
             return Err(AppError::SttProvider(msg));
         }
@@ -556,8 +562,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("re-pair") || err.contains("no longer recognises"),
-            "expected re-pair guidance, got: {err}"
+            err.contains("no longer recognizes"),
+            "expected orphaned-pairing specific message, got: {err}"
         );
     }
 
