@@ -2,6 +2,31 @@
 //! ensure section headers are separated by blank lines.
 
 use regex::Regex;
+use std::sync::LazyLock;
+
+static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)```.+?```").unwrap());
+static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`(.+?)`").unwrap());
+static MARKDOWN_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*#+\s*").unwrap());
+static BOLD_STAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*(.*?)\*\*").unwrap());
+static BOLD_UNDER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"__(.*?)__").unwrap());
+static ITALIC_STAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*([^*]+?)\*").unwrap());
+static ITALIC_UNDER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b_([^_]+?)_\b").unwrap());
+static CITATION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\[\d+\])+").unwrap());
+
+/// Precomputed per-header regex triples: (mid-line-with-colon, header-at-end,
+/// header-then-bullet). One triple per SECTION_HEADERS entry, same order.
+static SECTION_HEADER_RES: LazyLock<Vec<(Regex, Regex, Regex)>> = LazyLock::new(|| {
+    SECTION_HEADERS.iter().map(|header| {
+        let escaped = regex::escape(header);
+        (
+            Regex::new(&format!(r"(?i)(\S)\s+({escaped}:)")).unwrap(),
+            Regex::new(&format!(r"(?im)(\S)\s+({escaped})\s*$")).unwrap(),
+            Regex::new(&format!(r"(?i)({escaped}:)\s*(- )")).unwrap(),
+        )
+    }).collect()
+});
+
+static BULLET_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" (- [A-Z])").unwrap());
 
 /// SOAP section headers (lowercase) that should be separated by blank lines.
 const SECTION_HEADERS: &[&str] = &[
@@ -20,39 +45,14 @@ const SECTION_HEADERS: &[&str] = &[
 
 /// Remove markdown formatting and citation markers from AI output.
 fn clean_text(text: &str) -> String {
-    let mut result = text.to_string();
-
-    // Remove code blocks
-    if let Ok(re) = Regex::new(r"(?s)```.+?```") {
-        result = re.replace_all(&result, "").into_owned();
-    }
-    // Remove inline code backticks
-    if let Ok(re) = Regex::new(r"`(.+?)`") {
-        result = re.replace_all(&result, "$1").into_owned();
-    }
-    // Remove markdown headings
-    if let Ok(re) = Regex::new(r"(?m)^\s*#+\s*") {
-        result = re.replace_all(&result, "").into_owned();
-    }
-    // Remove bold markers (**text** and __text__)
-    if let Ok(re) = Regex::new(r"\*\*(.*?)\*\*") {
-        result = re.replace_all(&result, "$1").into_owned();
-    }
-    if let Ok(re) = Regex::new(r"__(.*?)__") {
-        result = re.replace_all(&result, "$1").into_owned();
-    }
-    // Remove italic markers (*text* and _text_)
-    if let Ok(re) = Regex::new(r"\*([^*]+?)\*") {
-        result = re.replace_all(&result, "$1").into_owned();
-    }
-    if let Ok(re) = Regex::new(r"\b_([^_]+?)_\b") {
-        result = re.replace_all(&result, "$1").into_owned();
-    }
-    // Remove citation markers [1], [2], etc.
-    if let Ok(re) = Regex::new(r"(\[\d+\])+") {
-        result = re.replace_all(&result, "").into_owned();
-    }
-
+    let mut result = CODE_BLOCK_RE.replace_all(text, "").into_owned();
+    result = INLINE_CODE_RE.replace_all(&result, "$1").into_owned();
+    result = MARKDOWN_HEADING_RE.replace_all(&result, "").into_owned();
+    result = BOLD_STAR_RE.replace_all(&result, "$1").into_owned();
+    result = BOLD_UNDER_RE.replace_all(&result, "$1").into_owned();
+    result = ITALIC_STAR_RE.replace_all(&result, "$1").into_owned();
+    result = ITALIC_UNDER_RE.replace_all(&result, "$1").into_owned();
+    result = CITATION_RE.replace_all(&result, "").into_owned();
     result.trim().to_string()
 }
 
@@ -65,26 +65,14 @@ fn format_soap_paragraphs(text: &str) -> String {
     let mut result = text.replace("\r\n", "\n").replace('\r', "\n");
 
     // Handle section headers that appear mid-line — split them onto their own line
-    for header in SECTION_HEADERS {
-        let escaped = regex::escape(header);
-        // Pattern: non-whitespace followed by whitespace followed by header with colon
-        if let Ok(re) = Regex::new(&format!(r"(?i)(\S)\s+({escaped}:)")) {
-            result = re.replace_all(&result, "$1\n$2").into_owned();
-        }
-        // Handle header without colon at end of content
-        if let Ok(re) = Regex::new(&format!(r"(?im)(\S)\s+({escaped})\s*$")) {
-            result = re.replace_all(&result, "$1\n$2").into_owned();
-        }
-        // Handle content following header on same line: "Subjective: - Chief complaint"
-        if let Ok(re) = Regex::new(&format!(r"(?i)({escaped}:)\s*(- )")) {
-            result = re.replace_all(&result, "$1\n$2").into_owned();
-        }
+    for (mid_colon, end_anchor, header_bullet) in SECTION_HEADER_RES.iter() {
+        result = mid_colon.replace_all(&result, "$1\n$2").into_owned();
+        result = end_anchor.replace_all(&result, "$1\n$2").into_owned();
+        result = header_bullet.replace_all(&result, "$1\n$2").into_owned();
     }
 
     // Split concatenated bullet points: " - Text" where preceded by content
-    if let Ok(re) = Regex::new(r" (- [A-Z])") {
-        result = re.replace_all(&result, "\n$1").into_owned();
-    }
+    result = BULLET_SPLIT_RE.replace_all(&result, "\n$1").into_owned();
 
     // Now ensure blank lines before each section header
     let lines: Vec<&str> = result.split('\n').collect();
