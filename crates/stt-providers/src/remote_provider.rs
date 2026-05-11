@@ -252,16 +252,13 @@ impl RemoteSttProvider {
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            // The auth proxy tags its 401s with `x-auth-reason: unknown-token`
-            // when the bearer doesn't match any non-revoked row. That's the
-            // orphaned-pairing case (e.g. office server rebuilt after pair).
-            // Surface a specific instruction; fall back to a generic message
-            // otherwise.
             // The auth proxy at crates/sharing/src/auth_proxy.rs tags its 401s
             // with `x-auth-reason: unknown-token` when the bearer doesn't match
-            // any non-revoked row (orphaned-pairing case — e.g. office server
-            // rebuilt). The header values are a contract with the proxy; do
-            // not change without coordinating the producer side.
+            // any non-revoked row — the orphaned-pairing case (office server
+            // rebuilt after pair). Surface a specific re-pair instruction in
+            // that case; fall back to a generic auth-failure message otherwise.
+            // The header values are a contract with the proxy; do not change
+            // without coordinating the producer side.
             let reason = resp
                 .headers()
                 .get("x-auth-reason")
