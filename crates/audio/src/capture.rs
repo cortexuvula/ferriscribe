@@ -188,8 +188,11 @@ pub fn start_capture(
     );
 
     // ── Ring buffer (2 seconds of audio) ─────────────────────────────────────
-    let ring_capacity = (actual_rate as usize) * (actual_channels as usize) * 2;
-    let rb = HeapRb::<f32>::new(ring_capacity.max(config.buffer_size * 4));
+    let ring_capacity = (actual_rate as usize)
+        .saturating_mul(actual_channels as usize)
+        .saturating_mul(2)
+        .max(config.buffer_size.saturating_mul(4));
+    let rb = HeapRb::<f32>::new(ring_capacity);
     let (mut prod, mut cons) = rb.split();
 
     let is_paused = Arc::new(AtomicBool::new(false));
