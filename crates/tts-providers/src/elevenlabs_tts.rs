@@ -115,7 +115,7 @@ impl TtsProvider for ElevenLabsTtsProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let err_text = response.text().await.unwrap_or_default();
+            let err_text = medical_core::http_error_body::read_error_body(response, 200).await;
             return Err(AppError::TtsProvider(format!(
                 "ElevenLabs TTS HTTP {status}: {err_text}"
             )));

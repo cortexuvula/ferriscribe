@@ -34,7 +34,7 @@ impl OpenAiCompatibleClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let text = medical_core::http_error_body::read_error_body(response, 200).await;
             return Err(AppError::AiProvider(format!("HTTP {status}: {text}")));
         }
 
@@ -59,7 +59,7 @@ impl OpenAiCompatibleClient {
         .map_err(|e| AppError::AiProvider(e.to_string()))?;
 
         let status = response.status();
-        let raw_body = response.text().await.unwrap_or_default();
+        let raw_body = medical_core::http_error_body::read_error_body(response, 200).await;
 
         if !status.is_success() {
             return Err(AppError::AiProvider(format!("HTTP {status}: {raw_body}")));
@@ -116,7 +116,7 @@ impl OpenAiCompatibleClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let text = medical_core::http_error_body::read_error_body(response, 200).await;
             return Err(AppError::AiProvider(format!("HTTP {status}: {text}")));
         }
 
@@ -211,7 +211,7 @@ impl OpenAiCompatibleClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let text = medical_core::http_error_body::read_error_body(response, 200).await;
             return Err(AppError::AiProvider(format!("HTTP {status}: {text}")));
         }
 
