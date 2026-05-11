@@ -22,7 +22,7 @@ async fn next_free_port() -> u16 {
 }
 
 #[tokio::test]
-async fn missing_bearer_returns_401() {
+async fn missing_bearer_returns_401_with_reason_header() {
     let tmp = TempDir::new().unwrap();
     let store = Arc::new(TokenStore::open(tmp.path().join("t.db"), &[3u8; 32]).unwrap());
 
@@ -46,6 +46,11 @@ async fn missing_bearer_returns_401() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);
+    assert_eq!(
+        resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok()),
+        Some("missing-bearer"),
+        "401 from missing Authorization should be tagged"
+    );
 }
 
 #[tokio::test]
@@ -79,7 +84,7 @@ async fn valid_bearer_forwards_body() {
 }
 
 #[tokio::test]
-async fn revoked_bearer_returns_401() {
+async fn unknown_or_revoked_bearer_returns_401_with_reason_header() {
     let tmp = TempDir::new().unwrap();
     let store = Arc::new(TokenStore::open(tmp.path().join("t.db"), &[5u8; 32]).unwrap());
     let issued = store.issue("evil").unwrap();
@@ -106,4 +111,9 @@ async fn revoked_bearer_returns_401() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);
+    assert_eq!(
+        resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok()),
+        Some("unknown-token"),
+        "401 from revoked/unknown token should be tagged"
+    );
 }

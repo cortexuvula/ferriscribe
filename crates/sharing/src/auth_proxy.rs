@@ -65,18 +65,38 @@ pub async fn spawn_auth_proxy(
 async fn handler(State(state): State<AppState>, req: Request) -> Response {
     match handle_inner(state, req).await {
         Ok(resp) => resp,
-        Err(status) => status.into_response(),
+        Err(resp) => resp,
     }
 }
 
-async fn handle_inner(state: AppState, req: Request) -> Result<Response, StatusCode> {
-    let token = extract_bearer(req.headers()).ok_or(StatusCode::UNAUTHORIZED)?;
+fn unauthorized_with_reason(reason: &'static str) -> Response {
+    let mut resp = (StatusCode::UNAUTHORIZED, "").into_response();
+    // HeaderValue from a 'static &str is infallible for short ASCII tags.
+    resp.headers_mut()
+        .insert("x-auth-reason", HeaderValue::from_static(reason));
+    resp
+}
 
-    let row = state
-        .store
-        .validate(&token)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+async fn handle_inner(state: AppState, req: Request) -> Result<Response, Response> {
+    let token = match extract_bearer(req.headers()) {
+        Some(t) => t,
+        None => {
+            warn!("proxy: 401 missing-bearer (no Authorization header)");
+            return Err(unauthorized_with_reason("missing-bearer"));
+        }
+    };
+
+    let row = match state.store.validate(&token) {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            warn!("proxy: 401 unknown-token (no matching non-revoked row)");
+            return Err(unauthorized_with_reason("unknown-token"));
+        }
+        Err(e) => {
+            warn!(error = %e, "proxy: 500 token store validation error");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "").into_response());
+        }
+    };
     let client_id = row.id;
     debug!(client_id, "proxy: validated bearer");
     let _ = state.store.touch(client_id);
@@ -86,7 +106,7 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, StatusC
     const MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
     let body_bytes = axum::body::to_bytes(body, MAX_BODY_BYTES)
         .await
-        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+        .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "").into_response())?;
 
     let path_query = parts
         .uri
@@ -112,7 +132,7 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, StatusC
 
     let upstream = req_builder.send().await.map_err(|e| {
         warn!("proxy upstream error: {e}");
-        StatusCode::BAD_GATEWAY
+        (StatusCode::BAD_GATEWAY, "").into_response()
     })?;
 
     let status = upstream.status();
