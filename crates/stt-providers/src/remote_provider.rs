@@ -364,7 +364,7 @@ impl SttProvider for RemoteSttProvider {
         let speaker_turns = if config.diarize && self.diarization_available() {
             let seg_path = self.segmentation_model_path.clone();
             let emb_path = self.embedding_model_path.clone();
-            let audio_for_diarize = samples_i16.clone();
+            let audio_for_diarize = samples_i16;
             match tokio::task::spawn_blocking(move || {
                 let diarizer = SpeakerDiarizer::new(seg_path, emb_path);
                 diarizer.diarize(&audio_for_diarize, TARGET_SAMPLE_RATE)
