@@ -179,7 +179,9 @@ pub async fn test_stt_remote_connection(
         || response.status() == reqwest::StatusCode::FORBIDDEN
     {
         return Err(AppError::SttProvider(
-            "Authentication failed — check API key".to_string(),
+            "Authentication failed \u{2014} verify the API key, or if this is a paired client, \
+             re-pair the office server (Settings \u{2192} Sharing \u{2192} Unpair, then scan a fresh code)."
+                .to_string(),
         ));
     }
     if !response.status().is_success() {

@@ -337,11 +337,20 @@ pub fn init_stt_providers_with_config(
             // Bearer from the whisper endpoint (if set) overrides the keychain api_key.
             let bearer = whisper_ep.as_ref().and_then(|ep| ep.bearer.clone()).or(api_key);
 
+            let paired = whisper_ep.as_ref().map(|ep| {
+                format!(
+                    "lan={} tailscale={} port={}",
+                    ep.lan.as_deref().unwrap_or("-"),
+                    ep.tailscale.as_deref().unwrap_or("-"),
+                    ep.port
+                )
+            });
             info!(
-                host = %config.stt_remote_host,
-                port = config.stt_remote_port,
+                fallback_host = %config.stt_remote_host,
+                fallback_port = config.stt_remote_port,
                 model = %config.stt_remote_model,
                 has_bearer = bearer.is_some(),
+                paired_endpoint = paired.as_deref().unwrap_or("none"),
                 "Initializing remote STT provider"
             );
 
