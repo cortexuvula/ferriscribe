@@ -10,16 +10,18 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum SecurityError {
-    #[error("Encryption error: {0}")]
-    Encryption(String),
     #[error("Decryption error: {0}")]
     Decryption(String),
-    #[error("Key not found: {0}")]
-    KeyNotFound(String),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("Encryption error: {0}")]
+    Encryption(String),
     #[error("Invalid key format")]
     InvalidFormat,
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Key not found: {0}")]
+    KeyNotFound(String),
+    #[error("master key unavailable: {reason}")]
+    MasterKeyUnavailable { reason: String },
 }
 
 pub type SecurityResult<T> = Result<T, SecurityError>;

@@ -26,8 +26,16 @@ impl EmbeddingGenerator {
     ///
     /// Defaults to `http://localhost:11434` and the `nomic-embed-text` model (768 dims).
     pub fn new_ollama(host: Option<&str>, model: Option<&str>) -> Self {
+        // Embedding requests are short; bound connection at 10s and total
+        // request at 120s — long enough for Ollama to load a model on first
+        // call but short enough to avoid indefinite RAG ingestion stalls.
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .expect("reqwest client builder should not fail with valid config");
         Self {
-            client: Client::new(),
+            client,
             host: host.unwrap_or("http://localhost:11434").to_owned(),
             model: model.unwrap_or("nomic-embed-text").to_owned(),
             dim: 768,

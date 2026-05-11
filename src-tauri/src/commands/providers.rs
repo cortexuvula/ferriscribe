@@ -78,19 +78,22 @@ pub async fn reinit_providers(
 /// Makes a GET request to `http://{host}:{port}/v1/models` with a 5-second
 /// timeout. Returns a success message with the model count, or an error.
 #[tauri::command]
-pub async fn test_lmstudio_connection(host: String, port: u16) -> AppResult<String> {
+pub async fn test_lmstudio_connection(
+    state: tauri::State<'_, AppState>,
+    host: String,
+    port: u16,
+) -> AppResult<String> {
     let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
     let url = format!("http://{}:{}/v1/models", effective_host, port);
 
     info!(url = %url, "Testing LM Studio connection");
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
+    let response = state.http_client
+        .get(&url)
         .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| AppError::AiProvider(format!("Failed to build HTTP client: {e}")))?;
-
-    let response = client.get(&url).send().await.map_err(|e| {
+        .send()
+        .await
+        .map_err(|e| {
         if e.is_connect() {
             AppError::AiProvider(format!(
                 "Connection refused — is LM Studio running at {}:{}?",
@@ -138,6 +141,7 @@ pub async fn test_lmstudio_connection(host: String, port: u16) -> AppResult<Stri
 /// non-empty, an `Authorization: Bearer …` header is sent.
 #[tauri::command]
 pub async fn test_stt_remote_connection(
+    state: tauri::State<'_, AppState>,
     host: String,
     port: u16,
     api_key: Option<String>,
@@ -147,13 +151,9 @@ pub async fn test_stt_remote_connection(
 
     info!(url = %url, "Testing Whisper server connection");
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| AppError::SttProvider(format!("Failed to build HTTP client: {e}")))?;
-
-    let mut req = client.get(&url);
+    let mut req = state.http_client
+        .get(&url)
+        .timeout(Duration::from_secs(10));
     if let Some(key) = api_key.as_deref().filter(|s| !s.is_empty()) {
         req = req.header("Authorization", format!("Bearer {key}"));
     }
@@ -213,19 +213,22 @@ pub async fn test_stt_remote_connection(
 /// timeout. Returns a success message including the installed-model count,
 /// or a user-readable error.
 #[tauri::command]
-pub async fn test_ollama_connection(host: String, port: u16) -> AppResult<String> {
+pub async fn test_ollama_connection(
+    state: tauri::State<'_, AppState>,
+    host: String,
+    port: u16,
+) -> AppResult<String> {
     let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
     let url = format!("http://{}:{}/api/tags", effective_host, port);
 
     info!(url = %url, "Testing Ollama connection");
 
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
+    let response = state.http_client
+        .get(&url)
         .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| AppError::AiProvider(format!("Failed to build HTTP client: {e}")))?;
-
-    let response = client.get(&url).send().await.map_err(|e| {
+        .send()
+        .await
+        .map_err(|e| {
         if e.is_connect() {
             AppError::AiProvider(format!(
                 "Connection refused — is Ollama running at {}:{}?",
