@@ -78,7 +78,10 @@ impl OpenAiCompatibleClient {
 
         let resp: ChatResponse = serde_json::from_str(&raw_body)
             .map_err(|e| {
-                warn!(body_preview = &raw_body[..raw_body.len().min(500)], "Failed to parse AI response JSON");
+                warn!(
+                    body_len = raw_body.len(),
+                    "Failed to parse AI response JSON"
+                );
                 AppError::AiProvider(format!("JSON parse error: {e}"))
             })?;
 
