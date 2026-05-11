@@ -214,8 +214,20 @@ struct CancelGuard {
 
 impl Drop for CancelGuard {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.cancels.lock() {
-            guard.remove(&self.key);
+        match self.cancels.lock() {
+            Ok(mut guard) => {
+                guard.remove(&self.key);
+            }
+            Err(poisoned) => {
+                tracing::error!(
+                    key = %self.key,
+                    "Pipeline cancel-token map is poisoned; entry leaked. \
+                     Subsequent pipeline runs for this recording_id may behave incorrectly."
+                );
+                // Best-effort cleanup using the poisoned inner.
+                let mut inner = poisoned.into_inner();
+                inner.remove(&self.key);
+            }
         }
     }
 }
