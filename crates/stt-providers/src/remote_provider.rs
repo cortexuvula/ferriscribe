@@ -252,9 +252,26 @@ impl RemoteSttProvider {
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(AppError::SttProvider(
-                "Whisper server rejected authentication — check API key".into(),
-            ));
+            // The auth proxy tags its 401s with `x-auth-reason: unknown-token`
+            // when the bearer doesn't match any non-revoked row. That's the
+            // orphaned-pairing case (e.g. office server rebuilt after pair).
+            // Surface a specific instruction; fall back to a generic message
+            // otherwise.
+            let reason = resp
+                .headers()
+                .get("x-auth-reason")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let msg = match reason.as_deref() {
+                Some("unknown-token") => {
+                    "Office server no longer recognises this client \
+                     \u{2014} please re-pair (Settings \u{2192} Sharing \u{2192} Unpair, \
+                     then scan a fresh code from the office machine)."
+                        .to_string()
+                }
+                _ => "Whisper server rejected authentication \u{2014} re-pair the client if the office server was reinstalled.".to_string(),
+            };
+            return Err(AppError::SttProvider(msg));
         }
         if status.is_client_error() {
             let body = resp.text().await.unwrap_or_default();
@@ -522,7 +539,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_401_maps_to_auth_error() {
+    async fn http_401_with_unknown_token_reason_maps_to_repair_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(
+                ResponseTemplate::new(401).insert_header("x-auth-reason", "unknown-token"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = provider_at(&server.uri(), Some("stale".into()));
+        let err = provider
+            .transcribe(dummy_audio(), SttConfig::default(), CancellationToken::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("re-pair") || err.contains("no longer recognises"),
+            "expected re-pair guidance, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_401_without_reason_header_maps_to_generic_auth_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/audio/transcriptions"))
@@ -538,7 +578,7 @@ mod tests {
             .to_string();
         assert!(
             err.contains("authentication"),
-            "expected auth error, got: {err}"
+            "expected generic auth error, got: {err}"
         );
     }
 
