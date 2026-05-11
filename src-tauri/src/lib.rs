@@ -47,7 +47,9 @@ pub fn run() {
 
     let log_directory = log_dir();
 
-    // Rolling daily log file: ferri-scribe.YYYY-MM-DD.log
+    // Rolling daily log file: ferri-scribe.log.YYYY-MM-DD
+    // (tracing_appender appends the date AFTER the prefix; current
+    // file is `ferri-scribe.log` without suffix until rotation.)
     let file_appender = tracing_appender::rolling::daily(&log_directory, "ferri-scribe.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
@@ -274,7 +276,17 @@ fn cleanup_old_logs(dir: &std::path::Path, keep_days: u64) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("log") {
+        // Rolled log files are named `ferri-scribe.log.YYYY-MM-DD` (the
+        // date is appended after the prefix by tracing_appender::rolling::daily).
+        // The current file (no rotation suffix yet) is `ferri-scribe.log`.
+        // Match by filename prefix rather than extension — extension is the
+        // date string, not `.log`.
+        let is_log = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == "ferri-scribe.log" || n.starts_with("ferri-scribe.log."))
+            .unwrap_or(false);
+        if !is_log {
             continue;
         }
         if let Ok(meta) = path.metadata()
@@ -283,5 +295,37 @@ fn cleanup_old_logs(dir: &std::path::Path, keep_days: u64) {
                     tracing::debug!(file = %path.display(), "Removing old log file");
                     let _ = std::fs::remove_file(&path);
                 }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_old_logs_tests {
+    use super::cleanup_old_logs;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+
+    fn touch(path: &std::path::Path, age: Duration) {
+        fs::write(path, b"x").unwrap();
+        let mtime = SystemTime::now() - age;
+        let ft = filetime::FileTime::from_system_time(mtime);
+        filetime::set_file_mtime(path, ft).unwrap();
+    }
+
+    #[test]
+    fn deletes_rolled_files_older_than_cutoff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("ferri-scribe.log.2025-01-01");
+        let new = tmp.path().join("ferri-scribe.log.2026-05-11");
+        let unrelated = tmp.path().join("other.txt");
+
+        touch(&old, Duration::from_secs(30 * 24 * 3600));
+        touch(&new, Duration::from_secs(60));
+        touch(&unrelated, Duration::from_secs(30 * 24 * 3600));
+
+        cleanup_old_logs(tmp.path(), 7);
+
+        assert!(!old.exists(), "old rolled log should be deleted");
+        assert!(new.exists(), "recent rolled log should remain");
+        assert!(unrelated.exists(), "unrelated files must not be touched");
     }
 }
