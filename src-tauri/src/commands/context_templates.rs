@@ -166,7 +166,7 @@ pub async fn list_context_templates(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<Vec<ContextTemplate>> {
     if let Some((conn, bearer)) = paired_templates_target() {
-        let remote = TemplatesRemote::from(&conn, Some(bearer))
+        let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         return remote.list().await;
     }
@@ -191,7 +191,7 @@ pub async fn upsert_context_template(
         return Err(AppError::Config("Template body cannot be empty".to_string()));
     }
     if let Some((conn, bearer)) = paired_templates_target() {
-        let remote = TemplatesRemote::from(&conn, Some(bearer))
+        let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         let entry = remote.upsert(&name, &body).await?;
         info!(name = %entry.name, "Upserted context template (remote)");
@@ -215,7 +215,7 @@ pub async fn rename_context_template(
         return Err(AppError::Config("Template name cannot be empty".to_string()));
     }
     if let Some((conn, bearer)) = paired_templates_target() {
-        let remote = TemplatesRemote::from(&conn, Some(bearer))
+        let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         let entry = remote.rename(&old_name, &new_name).await?;
         info!(old = %old_name, new = %entry.name, "Renamed context template (remote)");
@@ -235,7 +235,7 @@ pub async fn delete_context_template(
     name: String,
 ) -> AppResult<()> {
     if let Some((conn, bearer)) = paired_templates_target() {
-        let remote = TemplatesRemote::from(&conn, Some(bearer))
+        let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         remote.delete(&name).await?;
         info!(%name, "Deleted context template (remote)");
@@ -257,7 +257,7 @@ pub async fn import_context_templates_json(
     let content = tokio::fs::read_to_string(&file_path).await?;
     let imported = parse_import_json(&content)?;
     if let Some((conn, bearer)) = paired_templates_target() {
-        let remote = TemplatesRemote::from(&conn, Some(bearer))
+        let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         let mut count = 0u32;
         for entry in imported {
@@ -286,7 +286,7 @@ pub async fn export_context_templates_json(
     file_path: String,
 ) -> AppResult<u32> {
     let templates: Vec<ContextTemplate> = if let Some((conn, bearer)) = paired_templates_target() {
-        let remote = TemplatesRemote::from(&conn, Some(bearer))
+        let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         remote.list().await?
     } else {

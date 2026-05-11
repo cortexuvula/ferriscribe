@@ -30,7 +30,7 @@ pub async fn list_vocabulary_entries(
     category: Option<String>,
 ) -> AppResult<Vec<VocabularyEntry>> {
     if let Some((conn, bearer)) = paired_vocab_target() {
-        let remote = VocabRemote::from(&conn, Some(bearer))
+        let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         return remote.list(category.as_deref()).await;
     }
@@ -63,7 +63,7 @@ pub async fn add_vocabulary_entry(
     enabled: Option<bool>,
 ) -> AppResult<VocabularyEntry> {
     if let Some((conn, bearer)) = paired_vocab_target() {
-        let remote = VocabRemote::from(&conn, Some(bearer))
+        let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         let body = RemoteUpsert {
             find_text,
@@ -116,7 +116,7 @@ pub async fn update_vocabulary_entry(
     let uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::Other(format!("Invalid ID: {e}")))?;
     if let Some((conn, bearer)) = paired_vocab_target() {
-        let remote = VocabRemote::from(&conn, Some(bearer))
+        let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         let body = RemoteUpsert {
             find_text,
@@ -170,7 +170,7 @@ pub async fn delete_vocabulary_entry(
     let uuid = Uuid::parse_str(&id)
         .map_err(|e| AppError::Other(format!("Invalid ID: {e}")))?;
     if let Some((conn, bearer)) = paired_vocab_target() {
-        let remote = VocabRemote::from(&conn, Some(bearer))
+        let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         return remote.delete(uuid).await;
     }
@@ -188,7 +188,7 @@ pub async fn delete_all_vocabulary_entries(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<u32> {
     if let Some((conn, bearer)) = paired_vocab_target() {
-        let remote = VocabRemote::from(&conn, Some(bearer))
+        let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         return remote.delete_all().await;
     }
@@ -206,7 +206,7 @@ pub async fn get_vocabulary_count(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<(u32, u32)> {
     if let Some((conn, bearer)) = paired_vocab_target() {
-        let remote = VocabRemote::from(&conn, Some(bearer))
+        let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         return remote.count().await;
     }
@@ -272,7 +272,7 @@ pub async fn import_vocabulary_json(
 
     let count = entries.len() as u32;
     if let Some((conn, bearer)) = paired_vocab_target() {
-        let remote = VocabRemote::from(&conn, Some(bearer))
+        let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         for entry in &entries {
             let body = RemoteUpsert {
@@ -310,7 +310,7 @@ pub async fn export_vocabulary_json(
     file_path: String,
 ) -> AppResult<u32> {
     let entries: Vec<VocabularyEntry> = if let Some((conn, bearer)) = paired_vocab_target() {
-        let remote = VocabRemote::from(&conn, Some(bearer))
+        let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         remote.list(None).await?
     } else {
@@ -349,7 +349,7 @@ pub async fn test_vocabulary_correction(
     text: String,
 ) -> AppResult<CorrectionResult> {
     let entries: Vec<VocabularyEntry> = if let Some((conn, bearer)) = paired_vocab_target() {
-        let remote = VocabRemote::from(&conn, Some(bearer))
+        let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         remote
             .list(None)
