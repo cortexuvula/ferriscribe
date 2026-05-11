@@ -314,18 +314,24 @@ mod cleanup_old_logs_tests {
     #[test]
     fn deletes_rolled_files_older_than_cutoff() {
         let tmp = tempfile::tempdir().unwrap();
-        let old = tmp.path().join("ferri-scribe.log.2025-01-01");
-        let new = tmp.path().join("ferri-scribe.log.2026-05-11");
+        let old_rolled = tmp.path().join("ferri-scribe.log.2025-01-01");
+        let old_base = tmp.path().join("ferri-scribe.log");
+        let new_rolled = tmp.path().join("ferri-scribe.log.2026-05-11");
         let unrelated = tmp.path().join("other.txt");
 
-        touch(&old, Duration::from_secs(30 * 24 * 3600));
-        touch(&new, Duration::from_secs(60));
+        touch(&old_rolled, Duration::from_secs(30 * 24 * 3600));
+        touch(&old_base, Duration::from_secs(30 * 24 * 3600));
+        touch(&new_rolled, Duration::from_secs(60));
         touch(&unrelated, Duration::from_secs(30 * 24 * 3600));
 
         cleanup_old_logs(tmp.path(), 7);
 
-        assert!(!old.exists(), "old rolled log should be deleted");
-        assert!(new.exists(), "recent rolled log should remain");
+        assert!(!old_rolled.exists(), "old rolled log should be deleted");
+        assert!(
+            !old_base.exists(),
+            "old base log file (no date suffix) should be deleted — covers the `n == \"ferri-scribe.log\"` branch of is_log"
+        );
+        assert!(new_rolled.exists(), "recent rolled log should remain");
         assert!(unrelated.exists(), "unrelated files must not be touched");
     }
 }
