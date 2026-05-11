@@ -18,16 +18,35 @@ pub async fn read_error_body(resp: Response, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
+    fn make_response(body: &'static str) -> Response {
+        // reqwest::Response is constructed from an http::Response<Body>;
+        // String implements Into<reqwest::Body>, satisfying the From bound.
+        let http_resp = http::Response::builder()
+            .status(500)
+            .body(body.to_string())
+            .unwrap();
+        Response::from(http_resp)
+    }
+
     #[tokio::test]
-    async fn truncates_to_max_chars() {
-        // The truncation logic is the only behavior we can unit test without
-        // a real reqwest::Response. Verify via a string-level smoke check;
-        // real round-trip behavior is exercised at the call sites in Tasks 2+.
-        assert_eq!(
-            "hello world".chars().take(5).collect::<String>(),
-            "hello"
-        );
-        // Ensure the function is importable and tokio::test compiles.
-        let _: fn(Response, usize) -> _ = read_error_body;
+    async fn returns_body_when_under_limit() {
+        let resp = make_response("hello");
+        let result = read_error_body(resp, 200).await;
+        assert_eq!(result, "hello");
+    }
+
+    #[tokio::test]
+    async fn truncates_body_when_over_limit() {
+        let resp = make_response("hello world");
+        let result = read_error_body(resp, 5).await;
+        assert_eq!(result, "hello");
+    }
+
+    #[tokio::test]
+    async fn truncates_at_unicode_codepoint_boundary() {
+        // 5 codepoints "héllo" — must not split a multi-byte boundary.
+        let resp = make_response("héllo world");
+        let result = read_error_body(resp, 5).await;
+        assert_eq!(result, "héllo");
     }
 }
