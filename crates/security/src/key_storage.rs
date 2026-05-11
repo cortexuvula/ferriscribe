@@ -173,10 +173,37 @@ impl KeyStorage {
 /// Derives the 32-byte master key from the salt using PBKDF2-HMAC-SHA256.
 ///
 /// The password is taken from the `MEDICAL_ASSISTANT_MASTER_KEY` env var when
-/// set, otherwise the machine ID is used.
+/// set, otherwise the machine ID is used.  Returns `Err(MasterKeyUnavailable)`
+/// when neither source yields a non-empty value — never falls back to a
+/// guessable constant.
 fn derive_master_key(salt: &[u8]) -> SecurityResult<[u8; 32]> {
-    let password = std::env::var("MEDICAL_ASSISTANT_MASTER_KEY")
-        .unwrap_or_else(|_| get_machine_id().unwrap_or_else(|_| "fallback".to_string()));
+    derive_master_key_from(
+        salt,
+        || std::env::var("MEDICAL_ASSISTANT_MASTER_KEY").ok(),
+        get_machine_id,
+    )
+}
+
+/// Testable core of `derive_master_key`: accepts injectable env-var and
+/// machine-id resolvers so the two error paths can be exercised without
+/// touching process state or OS calls.
+fn derive_master_key_from<E, M>(
+    salt: &[u8],
+    env_var: E,
+    machine_id: M,
+) -> SecurityResult<[u8; 32]>
+where
+    E: FnOnce() -> Option<String>,
+    M: FnOnce() -> SecurityResult<String>,
+{
+    let password = match env_var() {
+        Some(v) if !v.is_empty() => v,
+        _ => machine_id().map_err(|e| SecurityError::MasterKeyUnavailable {
+            reason: format!(
+                "MEDICAL_ASSISTANT_MASTER_KEY not set and machine id lookup failed: {e}"
+            ),
+        })?,
+    };
 
     let mut key = [0u8; 32];
     pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, PBKDF2_ITERATIONS, &mut key);
@@ -293,5 +320,28 @@ mod tests {
         let enc2 = &file.keys["p2"].encrypted;
         // Even for the same plaintext the nonces differ, so ciphertexts differ.
         assert_ne!(enc1, enc2);
+    }
+
+    #[test]
+    fn derive_master_key_from_errors_when_env_empty_and_machine_id_fails() {
+        let result = derive_master_key_from(
+            &[0u8; 16],
+            || None,
+            || Err(SecurityError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "simulated",
+            ))),
+        );
+        assert!(matches!(result, Err(SecurityError::MasterKeyUnavailable { .. })));
+    }
+
+    #[test]
+    fn derive_master_key_from_uses_env_when_present() {
+        let result = derive_master_key_from(
+            &[0u8; 16],
+            || Some("explicit".to_string()),
+            || panic!("machine id should not be called"),
+        );
+        assert!(result.is_ok());
     }
 }
