@@ -199,7 +199,7 @@ pub async fn sharing_status(state: State<'_, AppState>) -> Result<SharingStatusD
 }
 
 async fn build_sharing_config(
-    _state: &AppState,
+    state: &AppState,
     friendly_name: String,
 ) -> Result<SharingConfig, String> {
     use medical_security::keychain;
@@ -224,7 +224,7 @@ async fn build_sharing_config(
     // Only wire up an LM Studio proxy when LM Studio's local server is
     // actually running. If the user starts LM Studio after Start sharing,
     // they'll need to Stop + Start sharing to wire up the proxy.
-    let lmstudio_internal = lmstudio_running_port().await;
+    let lmstudio_internal = lmstudio_running_port(&state.http_client).await;
     Ok(SharingConfig {
         enabled: true,
         friendly_name,
@@ -244,8 +244,8 @@ async fn build_sharing_config(
     })
 }
 
-async fn lmstudio_running_port() -> Option<u16> {
-    let resp = reqwest::Client::new()
+async fn lmstudio_running_port(client: &reqwest::Client) -> Option<u16> {
+    let resp = client
         .get("http://127.0.0.1:1234/v1/models")
         .timeout(std::time::Duration::from_millis(300))
         .send()

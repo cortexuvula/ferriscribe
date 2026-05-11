@@ -184,6 +184,10 @@ pub struct AppState {
     pub lmstudio_provider: RwLock<Option<Arc<LmStudioProvider>>>,
     /// Concrete RemoteSttProvider reference; `None` when STT mode is Local.
     pub remote_stt_provider: RwLock<Option<Arc<medical_stt_providers::remote_provider::RemoteSttProvider>>>,
+    /// Shared HTTP client for connection-test and pairing commands.
+    /// Pooled per-host; reuse this instead of constructing a fresh
+    /// `reqwest::Client` per call.
+    pub http_client: Arc<reqwest::Client>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -398,6 +402,15 @@ impl AppState {
             .join("rust-medical-assistant");
         std::fs::create_dir_all(&data_dir)?;
 
+        let http_client = Arc::new(
+            reqwest::Client::builder()
+                .pool_max_idle_per_host(4)
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| InitError::Other(format!("Failed to build shared HTTP client: {e}").into()))?,
+        );
+
         let db_path = data_dir.join("medical.db");
 
         // ── Database encryption setup ────────────────────────────────────
@@ -605,6 +618,7 @@ impl AppState {
             ollama_provider,
             lmstudio_provider,
             remote_stt_provider,
+            http_client,
         })
     }
 }

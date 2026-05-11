@@ -104,7 +104,7 @@ pub async fn pair_with_server(
     };
 
     let body = serde_json::json!({ "code": code, "label": label });
-    let resp = reqwest::Client::new()
+    let resp = state.http_client
         .post(format!("{base}/pair/enroll"))
         .json(&body)
         .send()
