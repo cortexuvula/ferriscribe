@@ -59,10 +59,21 @@ impl OpenAiCompatibleClient {
         .map_err(|e| AppError::AiProvider(e.to_string()))?;
 
         let status = response.status();
-        let raw_body = medical_core::http_error_body::read_error_body(response, 200).await;
+        // Read full body — used for both the error message (truncated) and
+        // JSON parsing on success. The shared read_error_body helper isn't
+        // appropriate here because it always truncates, which would corrupt
+        // a successful response body before serde sees it.
+        let raw_body = match response.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, "failed to read response body");
+                String::new()
+            }
+        };
 
         if !status.is_success() {
-            return Err(AppError::AiProvider(format!("HTTP {status}: {raw_body}")));
+            let preview: String = raw_body.chars().take(200).collect();
+            return Err(AppError::AiProvider(format!("HTTP {status}: {preview}")));
         }
 
         let resp: ChatResponse = serde_json::from_str(&raw_body)
