@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import GenerationCard from './GenerationCard.svelte';
+  import ExportDialog from './ExportDialog.svelte';
 
   type Generation = {
     id: string;
@@ -24,6 +25,14 @@
   let cursorIndex = $state(0);
   const PAGE_SIZE = 50;
   let offset = $state(0);
+
+  let showExport = $state(false);
+  let successMessage: string | null = $state(null);
+
+  function distinctModels(): string[] {
+    const set = new Set(items.map((g) => g.ai_model));
+    return Array.from(set).sort();
+  }
 
   async function load() {
     loading = true;
@@ -80,6 +89,13 @@
 <svelte:window onkeydown={onKey} />
 
 <div class="promoted-list">
+  <div class="promoted-toolbar">
+    <button onclick={() => (showExport = true)} disabled={total === 0}>
+      Export training corpus…
+    </button>
+    {#if successMessage}<span class="success">{successMessage}</span>{/if}
+  </div>
+
   {#if loading}<div class="info">Loading…</div>{/if}
   {#if error}<div class="error">{error}</div>{/if}
   {#if !loading && items.length === 0}
@@ -105,8 +121,24 @@
   </p>
 </div>
 
+{#if showExport}
+  <ExportDialog
+    promotedCount={total}
+    availableModels={distinctModels()}
+    onclose={() => (showExport = false)}
+    onsuccess={(dir, pairs, warnings) => {
+      showExport = false;
+      successMessage =
+        `Exported ${pairs} pair${pairs === 1 ? '' : 's'} to ${dir}` +
+        (warnings > 0 ? ` (${warnings} redaction warning${warnings === 1 ? '' : 's'} — see manifest.json)` : '');
+    }}
+  />
+{/if}
+
 <style>
   .promoted-list { display: flex; flex-direction: column; gap: 0.25rem; }
+  .promoted-toolbar { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0; }
+  .success { font-size: 0.85rem; color: #166534; background: #dcfce7; padding: 0.3rem 0.6rem; border-radius: 4px; flex: 1; }
   .info, .empty { padding: 1rem; color: var(--muted-foreground, #888); }
   .error { padding: 0.5rem; background: #fee; color: #991b1b; border-radius: 4px; }
   .row-wrap { padding: 0.15rem; border-radius: 6px; }

@@ -66,6 +66,17 @@ lazy_static! {
     };
 }
 
+// ─── Extension API ───────────────────────────────────────────────────────────
+
+/// A compiled extension pattern that can be added to a redaction
+/// pass. Built per-export from the recording's patient_name and any
+/// other per-corpus identifiers.
+#[derive(Clone)]
+pub struct Extension {
+    pub regex: Regex,
+    pub placeholder: &'static str,
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Redacts PHI/PII from text.
@@ -97,11 +108,111 @@ impl PhiRedactor {
     pub fn contains_phi(text: &str) -> bool {
         PATTERNS.iter().any(|p| p.regex.is_match(text))
     }
+
+    /// Same as `redact`, but applies the given extensions first.
+    /// Extensions run before the static patterns so a patient name
+    /// like "John Smith" gets replaced with [PT_NAME] before the
+    /// static EMAIL pattern could try to match an email containing
+    /// "smith". (Defense-in-depth ordering.)
+    pub fn redact_with(text: &str, extensions: &[Extension]) -> String {
+        let mut result = text.to_string();
+        for ext in extensions {
+            result = ext.regex.replace_all(&result, ext.placeholder).into_owned();
+        }
+        for pattern in PATTERNS.iter() {
+            result = pattern.regex.replace_all(&result, pattern.placeholder).into_owned();
+        }
+        result
+    }
+
+    /// Same predicate as `contains_phi`, but checks both static
+    /// patterns and the supplied extensions.
+    pub fn contains_phi_with(text: &str, extensions: &[Extension]) -> bool {
+        extensions.iter().any(|e| e.regex.is_match(text))
+            || PATTERNS.iter().any(|p| p.regex.is_match(text))
+    }
 }
 
 impl Default for PhiRedactor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Datetime redaction extension. Matches ISO datetimes/dates, US short
+/// dates with 4-digit years (avoids clinical fraction collision), and
+/// long English dates.
+pub mod datetime {
+    use super::{Extension, Regex};
+
+    pub fn build_datetime_extension() -> Extension {
+        // Conservative: match ISO datetime first, then specific
+        // unambiguous date formats. Avoid bare MM/DD which collides
+        // with clinical fractions.
+        // - ISO datetime: 2026-05-11T14:30:00 or 2026-05-11 14:30:00
+        // - ISO date alone: 2026-05-11 (requires 4-digit year)
+        // - US short date: MM/DD/YYYY (requires 4-digit year)
+        // - Long English: "May 11, 2026"
+        let pat = r"(?ix)
+            \b
+            (?:
+                \d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}(?::\d{2})?)?     # ISO date(+time)
+                |
+                \d{1,2}/\d{1,2}/\d{4}                                 # US short date with 4-digit year
+                |
+                (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}  # Long form
+            )
+            \b
+        ";
+        let regex = Regex::new(pat).expect("hardcoded datetime regex");
+        Extension { regex, placeholder: "[DATE]" }
+    }
+}
+
+/// Per-recording patient-name pattern construction. Builds a single
+/// Extension that matches the full name, possessive form, first
+/// name alone, and last name preceded by a salutation. Returns
+/// None if the input is empty/whitespace-only.
+pub mod names {
+    use super::{Extension, Regex};
+
+    pub fn build_patient_name_extension(patient_name: &str) -> Option<Extension> {
+        let trimmed = patient_name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        // Escape each token, then assemble three alternatives:
+        //   1) Full name (with possessive): "First Last('s)?"
+        //   2) First alone (word-boundary)
+        //   3) Salutation Last: "(Mr|Mrs|Ms|Dr|Miss) Last"
+        let escape = |s: &str| regex::escape(s);
+        let mut alts: Vec<String> = Vec::new();
+
+        let full = parts
+            .iter()
+            .map(|p| escape(p))
+            .collect::<Vec<_>>()
+            .join(r"\s+");
+        alts.push(format!(r"\b{full}(?:'s)?\b"));
+
+        alts.push(format!(r"\b{}(?:'s)?\b", escape(parts[0])));
+
+        if parts.len() >= 2 {
+            let last = parts.last().unwrap();
+            alts.push(format!(
+                r"\b(?:Mr|Mrs|Ms|Miss|Dr)\.?\s+{}(?:'s)?\b",
+                escape(last)
+            ));
+        }
+
+        let combined = format!(r"(?i)(?:{})", alts.join("|"));
+        let regex = Regex::new(&combined).ok()?;
+        Some(Extension { regex, placeholder: "[PT_NAME]" })
     }
 }
 
@@ -207,5 +318,104 @@ mod tests {
         assert_eq!(PhiRedactor::redact("WBC count 15000"), "WBC count 15000");
         assert_eq!(PhiRedactor::redact("Dose 10000 units"), "Dose 10000 units");
         assert_eq!(PhiRedactor::redact("Platelet count 85000"), "Platelet count 85000");
+    }
+
+    #[test]
+    fn redact_with_extensions_runs_extensions_first() {
+        let ext = Extension {
+            regex: Regex::new(r"(?i)\bJohn Smith\b").unwrap(),
+            placeholder: "[PT_NAME]",
+        };
+        let input = "Mr. John Smith was seen for follow-up; reach him at john.smith@example.com.";
+        let out = PhiRedactor::redact_with(input, &[ext]);
+        assert!(out.contains("[PT_NAME]"), "name should be redacted: {out}");
+        assert!(out.contains("[EMAIL]"), "email should be redacted: {out}");
+        assert!(!out.contains("John Smith"), "raw name leaked: {out}");
+    }
+
+    #[test]
+    fn redact_with_empty_extensions_matches_redact() {
+        let input = "Call (555) 867-5309.";
+        let a = PhiRedactor::redact(input);
+        let b = PhiRedactor::redact_with(input, &[]);
+        assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod datetime_tests {
+    use super::*;
+
+    #[test]
+    fn datetime_extension_redacts_iso_format() {
+        let ext = datetime::build_datetime_extension();
+        let out = PhiRedactor::redact_with("Visit on 2026-05-11 14:30:00.", &[ext]);
+        assert!(out.contains("[DATE]"), "{out}");
+    }
+
+    #[test]
+    fn datetime_extension_redacts_us_short_date() {
+        let ext = datetime::build_datetime_extension();
+        let out = PhiRedactor::redact_with("Surgery scheduled 05/15/2026.", &[ext]);
+        assert!(out.contains("[DATE]"), "{out}");
+    }
+
+    #[test]
+    fn datetime_extension_does_not_redact_clinical_numbers() {
+        let ext = datetime::build_datetime_extension();
+        let cases = ["BP 120/80", "98.6 F", "Lab 5/15 reactive"];
+        for c in cases {
+            let out = PhiRedactor::redact_with(c, &[ext.clone()]);
+            assert_eq!(out, c, "clinical number wrongly redacted: {c} -> {out}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod names_tests {
+    use super::*;
+
+    #[test]
+    fn build_patient_name_extension_handles_full_name() {
+        let ext = names::build_patient_name_extension("Jane Smith")
+            .expect("should build extension");
+        let out = PhiRedactor::redact_with("Jane Smith presents with cough.", &[ext]);
+        assert!(out.contains("[PT_NAME]"));
+        assert!(!out.contains("Jane Smith"));
+    }
+
+    #[test]
+    fn build_patient_name_extension_handles_possessive() {
+        let ext = names::build_patient_name_extension("Jane Smith").unwrap();
+        let out = PhiRedactor::redact_with("Reviewed Jane Smith's results today.", &[ext]);
+        assert!(out.contains("[PT_NAME]"), "{out}");
+    }
+
+    #[test]
+    fn build_patient_name_extension_handles_first_only() {
+        let ext = names::build_patient_name_extension("Jane Smith").unwrap();
+        let out = PhiRedactor::redact_with("Jane is doing well.", &[ext]);
+        // First-name-only should still match.
+        assert!(out.contains("[PT_NAME]"), "{out}");
+    }
+
+    #[test]
+    fn build_patient_name_extension_handles_last_only_with_title() {
+        let ext = names::build_patient_name_extension("Jane Smith").unwrap();
+        let out = PhiRedactor::redact_with("Mrs. Smith returns for follow-up.", &[ext]);
+        assert!(out.contains("[PT_NAME]"), "{out}");
+    }
+
+    #[test]
+    fn build_patient_name_extension_returns_none_for_empty() {
+        assert!(names::build_patient_name_extension("").is_none());
+        assert!(names::build_patient_name_extension("   ").is_none());
+    }
+
+    #[test]
+    fn build_patient_name_extension_does_not_match_unrelated_text() {
+        let ext = names::build_patient_name_extension("Jane Smith").unwrap();
+        let out = PhiRedactor::redact_with("Patient denied chest pain.", &[ext]);
+        assert_eq!(out, "Patient denied chest pain.");
     }
 }

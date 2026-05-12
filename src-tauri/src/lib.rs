@@ -1,5 +1,6 @@
 mod state;
 mod commands;
+pub mod corpus_export;
 mod sharing_vocab_api;
 mod vocab_remote;
 mod templates_remote;
@@ -263,6 +264,7 @@ pub fn run() {
             commands::training_corpus::training_corpus_counts,
             commands::training_corpus::training_corpus_list,
             commands::training_corpus::training_corpus_set_status,
+            commands::training_corpus_export::training_corpus_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
