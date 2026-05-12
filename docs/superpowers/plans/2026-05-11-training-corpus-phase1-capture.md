@@ -1272,3 +1272,49 @@
 ## Implementation handoff
 
 After this plan is fully executed, the data layer is complete. The clinician can enable capture, generate SOAPs, save them, and the generations table fills with (draft, final, edit_distance) triples — but they have no way to view or curate them yet. That's Phase 2.
+
+---
+
+## Edit-save flow: manual smoke-test procedure
+
+The edit-save flow (Tasks 8a–8d, added post-plan) wires `EditorTab` to call the
+`save_recording_field` Tauri command on debounced edits. The round-trip
+(recording update + generations `final_text` + `edit_distance`) cannot be fully
+automated without a running Tauri runtime. Use the following steps to verify
+the feature end-to-end:
+
+1. **Enable capture** — Open Settings → Audio, turn on "Capture generations for
+   training corpus".
+
+2. **Generate a SOAP** — Create or select a recording, run transcription, then
+   click Generate on the Generate tab. Confirm a SOAP appears.
+
+3. **Open the editor** — Switch to the SOAP tab in the EditorTab. The text
+   should now be editable (no `readonly` attribute).
+
+4. **Edit a few words** — Change one or two phrases in the SOAP body.
+
+5. **Watch the indicator** — After ~1 second of inactivity, "Saving…" should
+   appear in the header, followed by "Saved" (green), which fades after ~1.5 s.
+
+6. **Inspect the DB** — The encrypted SQLite DB is at
+   `~/Library/Application Support/rust-medical-assistant/app.db` (macOS).
+   Open with a SQLCipher-aware tool, or add a temporary `tracing::info!` line
+   in `save_recording_field_inner` that emits `edit_distance` and
+   `final_text.len()`.
+
+   Expected after editing:
+   - `recordings.soap_note` = the edited text
+   - `generations.final_text` = the edited text (matching `recordings.soap_note`)
+   - `generations.edit_distance` > 0 (non-zero, reflecting the number of changed
+     words)
+   - `generations.edit_ratio` between 0.0 and 1.0
+
+7. **Verify cross-tab safety** — Edit the SOAP tab, immediately switch to the
+   Transcript tab. The debounce timer should not fire a save on the Transcript
+   field with the SOAP content.
+
+8. **Verify capture-off path** — Disable the toggle, generate a fresh SOAP,
+   edit it, wait for "Saved". Confirm no new row appears in `generations` for
+   this recording (or the existing row's `final_text` remains NULL if it was
+   captured during an earlier session).
