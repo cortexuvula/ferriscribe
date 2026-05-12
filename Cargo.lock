@@ -5581,7 +5581,7 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.10.55"
+version = "0.10.56"
 dependencies = [
  "axum",
  "chrono",
@@ -5606,6 +5606,7 @@ dependencies = [
  "medical-tts-providers",
  "rand 0.8.6",
  "reqwest 0.12.28",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",
