@@ -36,11 +36,18 @@
       });
       items = page.items;
       total = page.total;
-      cursorIndex = Math.min(cursorIndex, items.length - 1);
+      cursorIndex = Math.max(0, Math.min(cursorIndex, items.length - 1));
     } catch (e) {
       error = String(e);
     } finally {
       loading = false;
+    }
+    // Post-load rewind: if we landed on an empty page that has data on a
+    // prior page, rewind and try again. Outside the try/finally so the
+    // recursive load() manages its own loading state cleanly.
+    if (items.length === 0 && offset > 0 && total > 0) {
+      offset = Math.max(0, offset - PAGE_SIZE);
+      await load();
     }
   }
 
