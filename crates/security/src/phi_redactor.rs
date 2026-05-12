@@ -139,6 +139,36 @@ impl Default for PhiRedactor {
     }
 }
 
+/// Datetime redaction extension. Matches ISO datetimes/dates, US short
+/// dates with 4-digit years (avoids clinical fraction collision), and
+/// long English dates.
+pub mod datetime {
+    use super::{Extension, Regex};
+
+    pub fn build_datetime_extension() -> Extension {
+        // Conservative: match ISO datetime first, then specific
+        // unambiguous date formats. Avoid bare MM/DD which collides
+        // with clinical fractions.
+        // - ISO datetime: 2026-05-11T14:30:00 or 2026-05-11 14:30:00
+        // - ISO date alone: 2026-05-11 (requires 4-digit year)
+        // - US short date: MM/DD/YYYY (requires 4-digit year)
+        // - Long English: "May 11, 2026"
+        let pat = r"(?ix)
+            \b
+            (?:
+                \d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}(?::\d{2})?)?     # ISO date(+time)
+                |
+                \d{1,2}/\d{1,2}/\d{4}                                 # US short date with 4-digit year
+                |
+                (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}  # Long form
+            )
+            \b
+        ";
+        let regex = Regex::new(pat).expect("hardcoded datetime regex");
+        Extension { regex, placeholder: "[DATE]" }
+    }
+}
+
 /// Per-recording patient-name pattern construction. Builds a single
 /// Extension that matches the full name, possessive form, first
 /// name alone, and last name preceded by a salutation. Returns
@@ -309,6 +339,35 @@ mod tests {
         let a = PhiRedactor::redact(input);
         let b = PhiRedactor::redact_with(input, &[]);
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod datetime_tests {
+    use super::*;
+
+    #[test]
+    fn datetime_extension_redacts_iso_format() {
+        let ext = datetime::build_datetime_extension();
+        let out = PhiRedactor::redact_with("Visit on 2026-05-11 14:30:00.", &[ext]);
+        assert!(out.contains("[DATE]"), "{out}");
+    }
+
+    #[test]
+    fn datetime_extension_redacts_us_short_date() {
+        let ext = datetime::build_datetime_extension();
+        let out = PhiRedactor::redact_with("Surgery scheduled 05/15/2026.", &[ext]);
+        assert!(out.contains("[DATE]"), "{out}");
+    }
+
+    #[test]
+    fn datetime_extension_does_not_redact_clinical_numbers() {
+        let ext = datetime::build_datetime_extension();
+        let cases = ["BP 120/80", "98.6 F", "Lab 5/15 reactive"];
+        for c in cases {
+            let out = PhiRedactor::redact_with(c, &[ext.clone()]);
+            assert_eq!(out, c, "clinical number wrongly redacted: {c} -> {out}");
+        }
     }
 }
 
