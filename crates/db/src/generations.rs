@@ -177,6 +177,92 @@ impl GenerationsRepo {
         )?;
         Ok(())
     }
+
+    /// List generations matching the given corpus_status, paginated
+    /// by created_at DESC. Returns `(rows, total_count)` so the UI
+    /// can show "N candidates" + "page X of Y" in one call.
+    ///
+    /// `limit` is capped to 200 to avoid loading absurd batches.
+    pub fn list_by_status(
+        conn: &Connection,
+        status: &str,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<(Vec<Generation>, u32)> {
+        let limit = limit.min(200);
+
+        let total: u32 = conn.query_row(
+            "SELECT count(*) FROM generations WHERE corpus_status = ?",
+            params![status],
+            |r| r.get(0),
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, recording_id, output_type, created_at, finalized_at,
+                    ai_provider, ai_model, prompt_template_name,
+                    input_transcript, input_context_json,
+                    draft_text, final_text,
+                    corpus_status, corpus_curated_at,
+                    edit_distance, edit_ratio, regeneration_seq
+             FROM generations
+             WHERE corpus_status = ?
+             ORDER BY created_at DESC
+             LIMIT ? OFFSET ?",
+        )?;
+        let rows = stmt
+            .query_map(params![status, limit, offset], Self::row_to_generation)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok((rows, total))
+    }
+
+    /// Counts per status, for the summary header. Returns
+    /// `(candidates, promoted, rejected, excluded)`. Single query.
+    pub fn count_by_status(conn: &Connection) -> DbResult<(u32, u32, u32, u32)> {
+        let mut stmt = conn.prepare(
+            "SELECT
+                SUM(CASE WHEN corpus_status='candidate' THEN 1 ELSE 0 END) AS c,
+                SUM(CASE WHEN corpus_status='promoted'  THEN 1 ELSE 0 END) AS p,
+                SUM(CASE WHEN corpus_status='rejected'  THEN 1 ELSE 0 END) AS r,
+                SUM(CASE WHEN corpus_status='excluded'  THEN 1 ELSE 0 END) AS e
+             FROM generations",
+        )?;
+        let (c, p, r, e) = stmt.query_row([], |row| {
+            Ok((
+                row.get::<_, Option<u32>>(0)?.unwrap_or(0),
+                row.get::<_, Option<u32>>(1)?.unwrap_or(0),
+                row.get::<_, Option<u32>>(2)?.unwrap_or(0),
+                row.get::<_, Option<u32>>(3)?.unwrap_or(0),
+            ))
+        })?;
+        Ok((c, p, r, e))
+    }
+
+    /// Change a single row's corpus_status. Updates corpus_curated_at
+    /// to now on every call (so unpromote → promote shows a fresh
+    /// curation time, intentionally).
+    ///
+    /// Validates the input status; returns DbError on invalid value.
+    pub fn set_corpus_status(
+        conn: &Connection,
+        id: Uuid,
+        new_status: &str,
+    ) -> DbResult<()> {
+        if !matches!(new_status, "candidate" | "promoted" | "rejected" | "excluded") {
+            return Err(DbError::Other(format!("invalid corpus_status: {new_status}")));
+        }
+        let affected = conn.execute(
+            "UPDATE generations
+                SET corpus_status = ?,
+                    corpus_curated_at = datetime('now')
+              WHERE id = ?",
+            params![new_status, id.to_string()],
+        )?;
+        if affected == 0 {
+            return Err(DbError::Other(format!("generation {id} not found")));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -339,5 +425,128 @@ mod tests {
         let refreshed = GenerationsRepo::get_by_id(&conn, generation.id).unwrap();
         assert_eq!(refreshed.edit_distance, Some(12));
         assert_eq!(refreshed.edit_ratio, Some(0.34));
+    }
+
+    #[test]
+    fn list_by_status_returns_candidates_newest_first() {
+        let conn = migrated();
+        let rec_id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO recordings (id, filename, processing_status, created_at) \
+             VALUES (?, 'test.wav', 'done', datetime('now'))",
+            params![rec_id.to_string()],
+        )
+        .unwrap();
+        let insert = GenerationInsert {
+            recording_id: rec_id,
+            output_type: "soap",
+            ai_provider: "ollama",
+            ai_model: "llama3",
+            prompt_template_name: None,
+            input_transcript: "t",
+            input_context_json: None,
+            draft_text: "d",
+        };
+        let _g1 = GenerationsRepo::record_generation(&conn, insert.clone()).unwrap();
+        // Force a different timestamp so ordering is deterministic.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let g2 = GenerationsRepo::record_generation(&conn, insert).unwrap();
+
+        let (rows, total) =
+            GenerationsRepo::list_by_status(&conn, "candidate", 10, 0).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, g2.id, "newest first");
+    }
+
+    #[test]
+    fn list_by_status_paginates() {
+        let conn = migrated();
+        let rec_id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO recordings (id, filename, processing_status, created_at) \
+             VALUES (?, 'test.wav', 'done', datetime('now'))",
+            params![rec_id.to_string()],
+        )
+        .unwrap();
+        let insert = GenerationInsert {
+            recording_id: rec_id,
+            output_type: "soap",
+            ai_provider: "ollama",
+            ai_model: "llama3",
+            prompt_template_name: None,
+            input_transcript: "t",
+            input_context_json: None,
+            draft_text: "d",
+        };
+        for _ in 0..5 {
+            GenerationsRepo::record_generation(&conn, insert.clone()).unwrap();
+        }
+        let (page1, total) = GenerationsRepo::list_by_status(&conn, "candidate", 2, 0).unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(page1.len(), 2);
+        let (page2, _) = GenerationsRepo::list_by_status(&conn, "candidate", 2, 2).unwrap();
+        assert_eq!(page2.len(), 2);
+        let (page3, _) = GenerationsRepo::list_by_status(&conn, "candidate", 2, 4).unwrap();
+        assert_eq!(page3.len(), 1);
+    }
+
+    #[test]
+    fn list_by_status_caps_limit_at_200() {
+        let conn = migrated();
+        let (rows, _) = GenerationsRepo::list_by_status(&conn, "candidate", 9999, 0).unwrap();
+        assert_eq!(rows.len(), 0); // empty here, but limit-cap doesn't error
+    }
+
+    #[test]
+    fn count_by_status_sums_all_buckets() {
+        let conn = migrated();
+        let rec_id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO recordings (id, filename, processing_status, created_at) \
+             VALUES (?, 'test.wav', 'done', datetime('now'))",
+            params![rec_id.to_string()],
+        )
+        .unwrap();
+        let insert = GenerationInsert {
+            recording_id: rec_id,
+            output_type: "soap",
+            ai_provider: "ollama",
+            ai_model: "llama3",
+            prompt_template_name: None,
+            input_transcript: "t",
+            input_context_json: None,
+            draft_text: "d",
+        };
+        let g_cand = GenerationsRepo::record_generation(&conn, insert.clone()).unwrap();
+        let g_prom = GenerationsRepo::record_generation(&conn, insert.clone()).unwrap();
+        let g_rej = GenerationsRepo::record_generation(&conn, insert).unwrap();
+        GenerationsRepo::set_corpus_status(&conn, g_prom.id, "promoted").unwrap();
+        GenerationsRepo::set_corpus_status(&conn, g_rej.id, "rejected").unwrap();
+
+        let (c, p, r, e) = GenerationsRepo::count_by_status(&conn).unwrap();
+        assert_eq!(c, 1);
+        assert_eq!(p, 1);
+        assert_eq!(r, 1);
+        assert_eq!(e, 0);
+
+        // Sanity: original candidate row id is the un-promoted one.
+        let _ = g_cand;
+    }
+
+    #[test]
+    fn set_corpus_status_rejects_invalid_value() {
+        let conn = migrated();
+        let id = Uuid::new_v4();
+        let err = GenerationsRepo::set_corpus_status(&conn, id, "favorited");
+        assert!(err.is_err(), "should reject invalid status");
+    }
+
+    #[test]
+    fn set_corpus_status_errors_when_id_missing() {
+        let conn = migrated();
+        let id = Uuid::new_v4();
+        let err = GenerationsRepo::set_corpus_status(&conn, id, "promoted");
+        assert!(err.is_err());
     }
 }

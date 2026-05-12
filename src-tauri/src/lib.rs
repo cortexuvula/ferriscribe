@@ -260,6 +260,9 @@ pub fn run() {
             commands::sharing::pairing::pair_with_server,
             commands::sharing::pairing::paired_endpoint,
             commands::sharing::pairing::unpair,
+            commands::training_corpus::training_corpus_counts,
+            commands::training_corpus::training_corpus_list,
+            commands::training_corpus::training_corpus_set_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
