@@ -1,5 +1,6 @@
 mod state;
 mod commands;
+pub mod corpus_export;
 mod sharing_vocab_api;
 mod vocab_remote;
 mod templates_remote;
