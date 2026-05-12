@@ -5,6 +5,7 @@
   import TextEditor from '../components/TextEditor.svelte';
   import { rsvp } from '../stores/rsvp';
   import type { DocKind } from '../stores/rsvp';
+  import { invoke } from '@tauri-apps/api/core';
 
   let { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' } = $props();
 
@@ -25,6 +26,74 @@
   );
 
   let copyStatus = $state<'idle' | 'copying' | 'copied'>('idle');
+  let saveStatus = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  let saveError: string | null = $state(null);
+
+  // Debounce timer
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingValue: string | null = null;
+
+  // Track which (recordingId, field) the current content belongs to.
+  // When the user switches recordings or tabs we MUST NOT save the
+  // previous tab's content under the new tab's key.
+  let lastSeenKey: string | null = null;
+  const currentKey = $derived(
+    $selectedRecording ? `${$selectedRecording.id}::${String(config.field)}` : null
+  );
+
+  $effect(() => {
+    // Whenever the key changes (different recording or different tab),
+    // reset debounce state to prevent cross-contamination.
+    if (currentKey !== lastSeenKey) {
+      if (saveTimer !== null) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+      }
+      pendingValue = null;
+      lastSeenKey = currentKey;
+      saveStatus = 'idle';
+      saveError = null;
+    }
+  });
+
+  function onEditorChange(newValue: string) {
+    if (!$selectedRecording) return;
+    // Avoid triggering saves on programmatic value binding (no actual edit).
+    if (newValue === content) return;
+
+    pendingValue = newValue;
+
+    // Optimistic local update so the UI doesn't flicker.
+    $selectedRecording = {
+      ...$selectedRecording,
+      [config.field]: newValue,
+    };
+
+    if (saveTimer !== null) clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      saveTimer = null;
+      const value = pendingValue;
+      pendingValue = null;
+      if (value === null || !$selectedRecording) return;
+      saveStatus = 'saving';
+      saveError = null;
+      try {
+        await invoke('save_recording_field', {
+          recordingId: $selectedRecording.id,
+          field: String(config.field),
+          value,
+        });
+        saveStatus = 'saved';
+        // Clear the "Saved" badge after 1.5 s.
+        setTimeout(() => {
+          if (saveStatus === 'saved') saveStatus = 'idle';
+        }, 1500);
+      } catch (e) {
+        saveStatus = 'error';
+        saveError = String(e);
+      }
+    }, 1000); // 1 s debounce
+  }
 
   async function handleCopy() {
     if (copyStatus !== 'idle') return;
@@ -65,25 +134,34 @@
         <span class="patient-name">— {$selectedRecording.patient_name}</span>
       {/if}
     </div>
-    {#if content}
-      <button class="btn-copy" onclick={handleSpeedRead} title="Speed Read (Cmd/Ctrl+Shift+R)">
-        Speed Read
-      </button>
-      <button
-        class="btn-copy"
-        class:copied={copyStatus === 'copied'}
-        onclick={handleCopy}
-        disabled={copyStatus !== 'idle'}
-      >
-        {#if copyStatus === 'copying'}
-          Copying…
-        {:else if copyStatus === 'copied'}
-          Copied!
-        {:else}
-          Copy
-        {/if}
-      </button>
-    {/if}
+    <div class="editor-header-right">
+      {#if saveStatus === 'saving'}
+        <span class="save-status saving">Saving…</span>
+      {:else if saveStatus === 'saved'}
+        <span class="save-status saved">Saved</span>
+      {:else if saveStatus === 'error'}
+        <span class="save-status error" title={saveError ?? undefined}>Save failed</span>
+      {/if}
+      {#if content}
+        <button class="btn-copy" onclick={handleSpeedRead} title="Speed Read (Cmd/Ctrl+Shift+R)">
+          Speed Read
+        </button>
+        <button
+          class="btn-copy"
+          class:copied={copyStatus === 'copied'}
+          onclick={handleCopy}
+          disabled={copyStatus !== 'idle'}
+        >
+          {#if copyStatus === 'copying'}
+            Copying…
+          {:else if copyStatus === 'copied'}
+            Copied!
+          {:else}
+            Copy
+          {/if}
+        </button>
+      {/if}
+    </div>
   </div>
 
   {#if content === null}
@@ -99,7 +177,7 @@
       <p>Go to the <strong>Generate</strong> tab to create this document.</p>
     </div>
   {:else}
-    <TextEditor value={content} placeholder="No content…" readonly />
+    <TextEditor value={content} placeholder="No content…" onChange={onEditorChange} />
   {/if}
 </div>
 
@@ -127,6 +205,12 @@
     gap: 8px;
   }
 
+  .editor-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .doc-type {
     font-size: 15px;
     font-weight: 600;
@@ -136,6 +220,27 @@
   .patient-name {
     font-size: 13px;
     color: var(--text-muted);
+  }
+
+  .save-status {
+    font-size: 12px;
+    font-weight: 500;
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+  }
+
+  .save-status.saving {
+    color: var(--text-muted, #888);
+  }
+
+  .save-status.saved {
+    color: #059669;
+    background-color: color-mix(in srgb, #059669 10%, transparent);
+  }
+
+  .save-status.error {
+    color: #dc2626;
+    cursor: help;
   }
 
   .btn-copy {
