@@ -14,6 +14,7 @@ pub mod recovery;
 pub mod settings;
 pub mod sharing;
 pub mod training_corpus;
+pub mod training_corpus_export;
 pub mod transcription;
 pub mod vocabulary;
 
