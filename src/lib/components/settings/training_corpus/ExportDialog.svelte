@@ -56,10 +56,8 @@
 
 <div
   class="modal-backdrop"
-  role="button"
-  tabindex="-1"
+  role="presentation"
   onclick={onclose}
-  onkeydown={(e) => { if (e.key === 'Escape') onclose(); }}
 >
   <div
     class="modal"
@@ -67,7 +65,13 @@
     aria-modal="true"
     tabindex="0"
     onclick={(e) => e.stopPropagation()}
-    onkeydown={(e) => e.stopPropagation()}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') {
+        onclose();
+      } else {
+        e.stopPropagation();
+      }
+    }}
   >
     <header><h3>Export training corpus</h3></header>
 
