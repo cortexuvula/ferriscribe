@@ -442,9 +442,9 @@
       <span>Capture generations for training corpus</span>
     </label>
     <span class="form-hint">
-      When enabled, the app records every SOAP generation and your edited final version into an
-      encrypted on-device pool. Useful for fine-tuning a model on your own dictation style later.
-      Data stays on this device — nothing is sent anywhere.
+      When enabled, the app records every SOAP generation and your edited final version into a
+      local-device pool (encrypted whenever your database is encrypted). Useful for fine-tuning a
+      model on your own dictation style later. Data stays on this device — nothing is sent anywhere.
     </span>
   </div>
 </section>

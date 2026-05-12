@@ -257,10 +257,14 @@ async fn generate_soap_inner(
     persist_recording(&state.db, recording).await?;
 
     // ── Training-corpus finalize (Task 6b) ───────────────────────────────
-    // Mirror the saved text into the generations row's final_text.
-    // If capture wasn't on at generation time, update_final_text returns
-    // Ok(None) and we skip gracefully.
-    if let Some(rec_uuid) = recording_uuid {
+    // Mirror the saved text into the generations row's final_text. Only
+    // runs when capture actually inserted a row above — gating on
+    // capture_generation_id avoids an unnecessary DB query (and the
+    // SettingsRepo / GenerationsRepo round trips) on every SOAP
+    // generation for users who haven't opted into capture.
+    if capture_generation_id.is_some() {
+        let rec_uuid = recording_uuid
+            .expect("capture_generation_id Some implies recording_uuid Some");
         match state.db.conn() {
             Ok(conn) => {
                 match medical_db::generations::GenerationsRepo::update_final_text(
@@ -288,8 +292,6 @@ async fn generate_soap_inner(
                 tracing::warn!(error = %e, "training-corpus finalize: could not open DB connection; continuing");
             }
         }
-        // Suppress unused-variable warning when capture produced no row.
-        let _ = capture_generation_id;
     }
 
     Ok(soap_text)
