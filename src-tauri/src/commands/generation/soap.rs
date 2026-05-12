@@ -298,7 +298,9 @@ async fn generate_soap_inner(
 /// Spawn a blocking task that computes word-level Levenshtein between the
 /// draft and the final (saved) text, then writes the result back to the
 /// `generations` row. Best-effort: failures log at warn and are discarded.
-fn spawn_edit_distance_task(
+///
+/// `pub(crate)` so the edit-save command in `recordings_edit` can reuse it.
+pub(crate) fn spawn_edit_distance_task(
     db: Arc<medical_db::Database>,
     generation_id: Uuid,
     draft: String,
