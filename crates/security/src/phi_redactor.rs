@@ -66,6 +66,17 @@ lazy_static! {
     };
 }
 
+// ─── Extension API ───────────────────────────────────────────────────────────
+
+/// A compiled extension pattern that can be added to a redaction
+/// pass. Built per-export from the recording's patient_name and any
+/// other per-corpus identifiers.
+#[derive(Clone)]
+pub struct Extension {
+    pub regex: Regex,
+    pub placeholder: &'static str,
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Redacts PHI/PII from text.
@@ -96,6 +107,29 @@ impl PhiRedactor {
     /// Returns `true` if `text` contains at least one PHI token.
     pub fn contains_phi(text: &str) -> bool {
         PATTERNS.iter().any(|p| p.regex.is_match(text))
+    }
+
+    /// Same as `redact`, but applies the given extensions first.
+    /// Extensions run before the static patterns so a patient name
+    /// like "John Smith" gets replaced with [PT_NAME] before the
+    /// static EMAIL pattern could try to match an email containing
+    /// "smith". (Defense-in-depth ordering.)
+    pub fn redact_with(text: &str, extensions: &[Extension]) -> String {
+        let mut result = text.to_string();
+        for ext in extensions {
+            result = ext.regex.replace_all(&result, ext.placeholder).into_owned();
+        }
+        for pattern in PATTERNS.iter() {
+            result = pattern.regex.replace_all(&result, pattern.placeholder).into_owned();
+        }
+        result
+    }
+
+    /// Same predicate as `contains_phi`, but checks both static
+    /// patterns and the supplied extensions.
+    pub fn contains_phi_with(text: &str, extensions: &[Extension]) -> bool {
+        extensions.iter().any(|e| e.regex.is_match(text))
+            || PATTERNS.iter().any(|p| p.regex.is_match(text))
     }
 }
 
@@ -207,5 +241,26 @@ mod tests {
         assert_eq!(PhiRedactor::redact("WBC count 15000"), "WBC count 15000");
         assert_eq!(PhiRedactor::redact("Dose 10000 units"), "Dose 10000 units");
         assert_eq!(PhiRedactor::redact("Platelet count 85000"), "Platelet count 85000");
+    }
+
+    #[test]
+    fn redact_with_extensions_runs_extensions_first() {
+        let ext = Extension {
+            regex: Regex::new(r"(?i)\bJohn Smith\b").unwrap(),
+            placeholder: "[PT_NAME]",
+        };
+        let input = "Mr. John Smith was seen for follow-up; reach him at john.smith@example.com.";
+        let out = PhiRedactor::redact_with(input, &[ext]);
+        assert!(out.contains("[PT_NAME]"), "name should be redacted: {out}");
+        assert!(out.contains("[EMAIL]"), "email should be redacted: {out}");
+        assert!(!out.contains("John Smith"), "raw name leaked: {out}");
+    }
+
+    #[test]
+    fn redact_with_empty_extensions_matches_redact() {
+        let input = "Call (555) 867-5309.";
+        let a = PhiRedactor::redact(input);
+        let b = PhiRedactor::redact_with(input, &[]);
+        assert_eq!(a, b);
     }
 }
