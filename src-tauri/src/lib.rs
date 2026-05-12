@@ -182,6 +182,7 @@ pub fn run() {
             commands::recordings::delete_recording,
             commands::recordings::delete_all_recordings,
             commands::recordings::import_audio_file,
+            commands::recordings_edit::save_recording_field,
             commands::settings::get_settings,
             commands::settings::save_settings,
             commands::settings::get_api_key,

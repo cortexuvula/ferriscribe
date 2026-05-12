@@ -404,6 +404,14 @@ pub struct AppConfig {
     pub soap_note_settings: SoapNoteSettings,
     #[serde(default)]
     pub agent_settings: HashMap<String, AgentSettings>,
+
+    // Training corpus
+    /// When true, every successful SOAP generation is captured into the
+    /// `generations` table for the training-corpus feature. Defaults to
+    /// false — captures are opt-in. See
+    /// docs/superpowers/specs/2026-05-11-training-corpus-design.md.
+    #[serde(default)]
+    pub capture_for_training: bool,
 }
 
 impl Default for AppConfig {
@@ -610,6 +618,23 @@ mod tests {
             out.contains(r#""stt_mode":"remote""#),
             "expected remote, got: {out}"
         );
+    }
+
+    #[test]
+    fn capture_for_training_defaults_to_false_in_older_configs() {
+        // Simulate an older config JSON missing the new field.
+        let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).expect("should parse with serde defaults");
+        assert!(!cfg.capture_for_training, "default must be false");
+    }
+
+    #[test]
+    fn capture_for_training_round_trips() {
+        let mut cfg = AppConfig::default();
+        cfg.capture_for_training = true;
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.capture_for_training);
     }
 
 }

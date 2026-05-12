@@ -9,6 +9,8 @@ pub mod audit;
 pub mod search;
 pub mod vocabulary;
 pub mod vectors;
+pub mod generations;
+pub use generations::{Generation, GenerationInsert, GenerationsRepo};
 // CozoDB-backed knowledge graph. Gated behind the `graph` feature because cozo
 // uses the Sled storage engine and brings in a non-trivial dependency tree.
 // Enable with: cargo build -p medical-db --features graph

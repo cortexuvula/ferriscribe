@@ -1,10 +1,13 @@
 //! `generate_soap` Tauri command — turns a recording's transcript into a SOAP note.
 
+use std::sync::Arc;
+
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::PatientContext;
 use medical_processing::soap_generator::{self, SoapPromptConfig};
 use tauri::Emitter;
 use tracing::{debug, error, info, instrument};
+use uuid::Uuid;
 
 use crate::state::AppState;
 
@@ -179,6 +182,57 @@ async fn generate_soap_inner(
     // Post-process: strip markdown, fix paragraph formatting
     let soap_text = soap_generator::postprocess_soap(&raw_soap);
 
+    // ── Training-corpus capture (Task 6a) ────────────────────────────────
+    // Gated on AppConfig.capture_for_training (default: false). Failure
+    // must never break the user's workflow — log at warn and continue.
+    let recording_uuid = Uuid::parse_str(recording_id)
+        .ok(); // already validated by load_recording_and_settings; unwrap safe
+
+    let capture_generation_id: Option<Uuid> = if let Some(rec_uuid) = recording_uuid {
+        match state.db.conn() {
+            Ok(conn) => {
+                let cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                    .unwrap_or_default();
+                if cfg.capture_for_training {
+                    let context_blob = serde_json::json!({
+                        "context": context,
+                        "patient_context": patient_context,
+                    });
+                    let context_json = context_blob.to_string();
+                    let provider_name = provider.name().to_string();
+                    let insert = medical_db::generations::GenerationInsert {
+                        recording_id: rec_uuid,
+                        output_type: "soap",
+                        ai_provider: &provider_name,
+                        ai_model: &model_name,
+                        prompt_template_name: template,
+                        input_transcript: transcript,
+                        input_context_json: Some(context_json.as_str()),
+                        draft_text: &soap_text,
+                    };
+                    match medical_db::generations::GenerationsRepo::record_generation(&conn, insert) {
+                        Ok(g) => {
+                            tracing::debug!(generation_id = %g.id, "captured SOAP generation for training corpus");
+                            Some(g.id)
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "training-corpus capture failed; continuing");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "training-corpus capture: could not open DB connection; continuing");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Save context to recording metadata for future reference.
     if recording.metadata.is_null() {
         recording.metadata = serde_json::json!({});
@@ -202,5 +256,83 @@ async fn generate_soap_inner(
     recording.soap_note = Some(soap_text.clone());
     persist_recording(&state.db, recording).await?;
 
+    // ── Training-corpus finalize (Task 6b) ───────────────────────────────
+    // Mirror the saved text into the generations row's final_text. Only
+    // runs when capture actually inserted a row above — gating on
+    // capture_generation_id avoids an unnecessary DB query (and the
+    // SettingsRepo / GenerationsRepo round trips) on every SOAP
+    // generation for users who haven't opted into capture.
+    if capture_generation_id.is_some() {
+        let rec_uuid = recording_uuid
+            .expect("capture_generation_id Some implies recording_uuid Some");
+        match state.db.conn() {
+            Ok(conn) => {
+                match medical_db::generations::GenerationsRepo::update_final_text(
+                    &conn,
+                    rec_uuid,
+                    "soap",
+                    &soap_text,
+                ) {
+                    Ok(Some(g)) => {
+                        tracing::debug!(generation_id = %g.id, "updated final_text on generations row");
+                        spawn_edit_distance_task(
+                            Arc::clone(&state.db),
+                            g.id,
+                            g.draft_text.clone(),
+                            soap_text.clone(),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "training-corpus finalize failed; continuing");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "training-corpus finalize: could not open DB connection; continuing");
+            }
+        }
+    }
+
     Ok(soap_text)
+}
+
+/// Spawn a blocking task that computes word-level Levenshtein between the
+/// draft and the final (saved) text, then writes the result back to the
+/// `generations` row. Best-effort: failures log at warn and are discarded.
+///
+/// `pub(crate)` so the edit-save command in `recordings_edit` can reuse it.
+pub(crate) fn spawn_edit_distance_task(
+    db: Arc<medical_db::Database>,
+    generation_id: Uuid,
+    draft: String,
+    final_text: String,
+) {
+    tokio::task::spawn_blocking(move || {
+        let (distance, ratio) =
+            medical_processing::edit_distance::word_edit_distance(&draft, &final_text);
+        match db.conn() {
+            Ok(conn) => {
+                if let Err(e) = medical_db::generations::GenerationsRepo::set_edit_distance(
+                    &conn,
+                    generation_id,
+                    distance as i64,
+                    ratio,
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        generation_id = %generation_id,
+                        "set_edit_distance failed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    generation_id = %generation_id,
+                    "edit-distance task could not open DB connection"
+                );
+            }
+        }
+    });
 }
