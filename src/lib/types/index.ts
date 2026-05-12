@@ -105,6 +105,8 @@ export interface AppConfig {
   rsvp_auto_start: boolean;
   rsvp_remember_sections: boolean;
   rsvp_remembered_sections: string[];
+  // Training corpus
+  capture_for_training: boolean;
   [key: string]: any;
 }
 

@@ -428,6 +428,25 @@
     </label>
     <span class="form-hint">When enabled, transcription and SOAP generation start automatically after you stop recording.</span>
   </div>
+
+  <div class="form-group">
+    <label class="form-label checkbox-label">
+      <input
+        type="checkbox"
+        checked={$settings.capture_for_training ?? false}
+        onchange={(e: Event) => {
+          const checked = (e.target as HTMLInputElement).checked;
+          settings.updateField('capture_for_training', checked);
+        }}
+      />
+      <span>Capture generations for training corpus</span>
+    </label>
+    <span class="form-hint">
+      When enabled, the app records every SOAP generation and your edited final version into an
+      encrypted on-device pool. Useful for fine-tuning a model on your own dictation style later.
+      Data stays on this device — nothing is sent anywhere.
+    </span>
+  </div>
 </section>
 
 <style>

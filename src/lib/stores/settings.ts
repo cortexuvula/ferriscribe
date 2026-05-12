@@ -41,6 +41,7 @@ const defaults: AppConfig = {
   rsvp_auto_start: true,
   rsvp_remember_sections: false,
   rsvp_remembered_sections: [],
+  capture_for_training: false,
 };
 
 function createSettingsStore() {
