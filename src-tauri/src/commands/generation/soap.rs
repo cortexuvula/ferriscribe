@@ -295,12 +295,40 @@ async fn generate_soap_inner(
     Ok(soap_text)
 }
 
-/// Stub for Task 6 — replaced by the real implementation in Task 7.
+/// Spawn a blocking task that computes word-level Levenshtein between the
+/// draft and the final (saved) text, then writes the result back to the
+/// `generations` row. Best-effort: failures log at warn and are discarded.
 fn spawn_edit_distance_task(
-    _db: Arc<medical_db::Database>,
-    _id: Uuid,
-    _draft: String,
-    _final_text: String,
+    db: Arc<medical_db::Database>,
+    generation_id: Uuid,
+    draft: String,
+    final_text: String,
 ) {
-    // Task 7 fills this in.
+    tokio::task::spawn_blocking(move || {
+        let (distance, ratio) =
+            medical_processing::edit_distance::word_edit_distance(&draft, &final_text);
+        match db.conn() {
+            Ok(conn) => {
+                if let Err(e) = medical_db::generations::GenerationsRepo::set_edit_distance(
+                    &conn,
+                    generation_id,
+                    distance as i64,
+                    ratio,
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        generation_id = %generation_id,
+                        "set_edit_distance failed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    generation_id = %generation_id,
+                    "edit-distance task could not open DB connection"
+                );
+            }
+        }
+    });
 }
