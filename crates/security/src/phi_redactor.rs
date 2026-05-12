@@ -139,6 +139,53 @@ impl Default for PhiRedactor {
     }
 }
 
+/// Per-recording patient-name pattern construction. Builds a single
+/// Extension that matches the full name, possessive form, first
+/// name alone, and last name preceded by a salutation. Returns
+/// None if the input is empty/whitespace-only.
+pub mod names {
+    use super::{Extension, Regex};
+
+    pub fn build_patient_name_extension(patient_name: &str) -> Option<Extension> {
+        let trimmed = patient_name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        // Escape each token, then assemble three alternatives:
+        //   1) Full name (with possessive): "First Last('s)?"
+        //   2) First alone (word-boundary)
+        //   3) Salutation Last: "(Mr|Mrs|Ms|Dr|Miss) Last"
+        let escape = |s: &str| regex::escape(s);
+        let mut alts: Vec<String> = Vec::new();
+
+        let full = parts
+            .iter()
+            .map(|p| escape(p))
+            .collect::<Vec<_>>()
+            .join(r"\s+");
+        alts.push(format!(r"\b{full}(?:'s)?\b"));
+
+        alts.push(format!(r"\b{}(?:'s)?\b", escape(parts[0])));
+
+        if parts.len() >= 2 {
+            let last = parts.last().unwrap();
+            alts.push(format!(
+                r"\b(?:Mr|Mrs|Ms|Miss|Dr)\.?\s+{}(?:'s)?\b",
+                escape(last)
+            ));
+        }
+
+        let combined = format!(r"(?i)(?:{})", alts.join("|"));
+        let regex = Regex::new(&combined).ok()?;
+        Some(Extension { regex, placeholder: "[PT_NAME]" })
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -262,5 +309,54 @@ mod tests {
         let a = PhiRedactor::redact(input);
         let b = PhiRedactor::redact_with(input, &[]);
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod names_tests {
+    use super::*;
+
+    #[test]
+    fn build_patient_name_extension_handles_full_name() {
+        let ext = names::build_patient_name_extension("Jane Smith")
+            .expect("should build extension");
+        let out = PhiRedactor::redact_with("Jane Smith presents with cough.", &[ext]);
+        assert!(out.contains("[PT_NAME]"));
+        assert!(!out.contains("Jane Smith"));
+    }
+
+    #[test]
+    fn build_patient_name_extension_handles_possessive() {
+        let ext = names::build_patient_name_extension("Jane Smith").unwrap();
+        let out = PhiRedactor::redact_with("Reviewed Jane Smith's results today.", &[ext]);
+        assert!(out.contains("[PT_NAME]"), "{out}");
+    }
+
+    #[test]
+    fn build_patient_name_extension_handles_first_only() {
+        let ext = names::build_patient_name_extension("Jane Smith").unwrap();
+        let out = PhiRedactor::redact_with("Jane is doing well.", &[ext]);
+        // First-name-only should still match.
+        assert!(out.contains("[PT_NAME]"), "{out}");
+    }
+
+    #[test]
+    fn build_patient_name_extension_handles_last_only_with_title() {
+        let ext = names::build_patient_name_extension("Jane Smith").unwrap();
+        let out = PhiRedactor::redact_with("Mrs. Smith returns for follow-up.", &[ext]);
+        assert!(out.contains("[PT_NAME]"), "{out}");
+    }
+
+    #[test]
+    fn build_patient_name_extension_returns_none_for_empty() {
+        assert!(names::build_patient_name_extension("").is_none());
+        assert!(names::build_patient_name_extension("   ").is_none());
+    }
+
+    #[test]
+    fn build_patient_name_extension_does_not_match_unrelated_text() {
+        let ext = names::build_patient_name_extension("Jane Smith").unwrap();
+        let out = PhiRedactor::redact_with("Patient denied chest pain.", &[ext]);
+        assert_eq!(out, "Patient denied chest pain.");
     }
 }
