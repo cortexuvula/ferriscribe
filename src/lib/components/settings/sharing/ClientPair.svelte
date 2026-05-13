@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
   import { suggestedClientLabel } from '../../../api/sharing';
+  import { settings } from '../../../stores/settings';
 
   type Discovered = {
     instance_name: string;
@@ -133,6 +134,7 @@
         code,
         label: tokenLabel,
       });
+      await settings.load();
       await loadPaired();
     } catch (e) {
       error = String(e);
@@ -200,6 +202,7 @@
     error = null;
     try {
       await invoke('unpair');
+      await settings.load();
       pairedConn = null;
       // Repopulate the discovery list so the connect form is immediately useful.
       rescan();
