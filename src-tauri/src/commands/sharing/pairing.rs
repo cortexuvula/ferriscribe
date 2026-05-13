@@ -266,9 +266,11 @@ pub async fn paired_endpoint() -> Result<Option<PairedConnection>, String> {
 }
 
 /// Remove the keychain entry and the on-disk metadata. Idempotent.
+/// Also clears the per-service keychain slots and resets AppConfig fields
+/// the pair flow populated (Phase 3).
 #[tauri::command]
-pub async fn unpair() -> Result<(), String> {
-    // Remove keychain entry (ignore NoEntry).
+pub async fn unpair(state: State<'_, AppState>) -> Result<(), String> {
+    // Remove the sharing-bearer keychain entry (ignore NoEntry).
     if let Ok(entry) = keyring::Entry::new("rustMedicalAssistant", "sharing-bearer") {
         let _ = entry.delete_credential();
     }
@@ -277,6 +279,26 @@ pub async fn unpair() -> Result<(), String> {
     let path = paired_connection_path()?;
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+
+    // ── Phase 3: clear per-service keychain slots and reset AppConfig ──
+    {
+        use super::settings_helpers::reset_paired_settings;
+
+        for slot in &["stt_remote_api_key", "ollama_api_key", "lmstudio_api_key"] {
+            // Idempotent — ignore "not found" errors per the existing pattern.
+            let _ = state.keys.remove_key(slot);
+        }
+
+        let conn = state.db.conn().map_err(|e| e.to_string())?;
+        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+            .map_err(|e| e.to_string())?;
+        cfg.migrate();
+        reset_paired_settings(&mut cfg);
+        medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
+            .map_err(|e| e.to_string())?;
+
+        tracing::info!("unpair: cleared per-service api_keys and reset AppConfig");
     }
 
     Ok(())
