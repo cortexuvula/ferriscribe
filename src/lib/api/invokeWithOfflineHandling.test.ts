@@ -104,4 +104,11 @@ describe('invokeWithOfflineHandling', () => {
     // could spy on store calls, that would be cleaner. The behavioural proxy
     // is: the test for "passes through" already proves it.)
   });
+
+  it('resolves normally when args is omitted', async () => {
+    invokeMock.mockResolvedValueOnce('result');
+    await expect(invokeWithOfflineHandling<string>('zero_arg_cmd')).resolves.toBe('result');
+    // Tauri's invoke accepts the empty object as args.
+    expect(invokeMock).toHaveBeenCalledWith('zero_arg_cmd', {});
+  });
 });

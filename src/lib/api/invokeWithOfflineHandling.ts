@@ -1,3 +1,6 @@
+import { invoke } from '@tauri-apps/api/core';
+import { endpointOfflineStore } from '../stores/endpointOffline';
+
 /** Discriminant strings emitted by AppError::EndpointOffline. */
 export type ServiceKind = 'AiProvider' | 'RemoteStt';
 export type OfflineReason = 'ConnectionRefused' | 'Timeout' | 'DnsFailure' | 'TlsFailure';
@@ -36,9 +39,6 @@ export function isEndpointOffline(err: unknown): err is EndpointOfflinePayload {
   );
 }
 
-import { invoke } from '@tauri-apps/api/core';
-import { endpointOfflineStore } from '../stores/endpointOffline';
-
 /** Wraps Tauri `invoke`. On `EndpointOffline` rejection, opens the
  *  shared dialog and awaits the user's decision:
  *    - Retry      → loops back to re-invoke `cmd` with `args`.
@@ -51,7 +51,7 @@ import { endpointOfflineStore } from '../stores/endpointOffline';
  */
 export async function invokeWithOfflineHandling<T>(
   cmd: string,
-  args: Record<string, unknown>,
+  args: Record<string, unknown> = {},
 ): Promise<T> {
   for (;;) {
     try {
