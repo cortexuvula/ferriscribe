@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { invokeWithOfflineHandling } from './invokeWithOfflineHandling';
 
 export interface ChatMessageInput {
   role: string;
@@ -10,7 +11,7 @@ export async function chatSend(
   model?: string,
   systemPrompt?: string
 ): Promise<string> {
-  return invoke('chat_send', {
+  return invokeWithOfflineHandling('chat_send', {
     messages,
     model: model ?? null,
     systemPrompt: systemPrompt ?? null,
@@ -22,7 +23,7 @@ export async function chatStream(
   model?: string,
   systemPrompt?: string
 ): Promise<void> {
-  return invoke('chat_stream', {
+  return invokeWithOfflineHandling('chat_stream', {
     messages,
     model: model ?? null,
     systemPrompt: systemPrompt ?? null,
@@ -34,7 +35,7 @@ export async function chatWithAgent(
   agentName: string,
   conversationHistory?: ChatMessageInput[]
 ): Promise<any> {
-  return invoke('chat_with_agent', {
+  return invokeWithOfflineHandling('chat_with_agent', {
     message,
     agentName,
     conversationHistory: conversationHistory ?? null,

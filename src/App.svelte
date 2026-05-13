@@ -13,6 +13,9 @@
   import StatusBadge from './lib/components/StatusBadge.svelte';
   import SettingsDialog from './lib/dialogs/SettingsDialog.svelte';
   import DatabaseRecoveryDialog from './lib/dialogs/DatabaseRecoveryDialog.svelte';
+  import EndpointOfflineDialog from './lib/components/EndpointOfflineDialog.svelte';
+  import { settingsNav } from './lib/stores/settingsNav';
+  import type { ServiceKind } from './lib/api/invokeWithOfflineHandling';
   import { selectedRecording, selectRecording } from './lib/stores/recordings';
   import { pipeline } from './lib/stores/pipeline';
   import { audio } from './lib/stores/audio';
@@ -33,6 +36,12 @@
   let activeTab = $state('record');
   let settingsOpen = $state(false);
   let previousTab = $state('record');
+
+  /** Open Settings dialog and navigate to the pane relevant to the offline service. */
+  function onEndpointOfflineOpenSettings(service: ServiceKind) {
+    settingsOpen = true;
+    settingsNav.navigateTo(service === 'AiProvider' ? 'models' : 'audio');
+  }
 
   // Database recovery dialog state. The backend always registers
   // `RecoveryState` (Some(reason) on recovery, None on normal boot), so we
@@ -224,6 +233,8 @@
 
 <RsvpSectionPicker />
 <RsvpReader />
+
+<EndpointOfflineDialog onopenSettings={onEndpointOfflineOpenSettings} />
 {/if}
 
 <style>

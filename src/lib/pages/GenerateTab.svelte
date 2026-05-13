@@ -9,6 +9,7 @@
   import type { DocKind } from '../stores/rsvp';
   import type { PatientContext } from '../types';
   import { formatError } from '../types/errors';
+  import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
 
   let copyStatus = $state<Record<string, 'idle' | 'copying' | 'copied'>>({});
   let contextText = $state('');
@@ -114,6 +115,11 @@
       ]);
       generation.finish();
     } catch (e: any) {
+      if (e instanceof OfflineCancelled) {
+        // Dialog already informed the user; restore idle state without an error banner.
+        generation.finish();
+        return;
+      }
       generation.setError(formatError(e) || `Failed to generate ${type}`);
     }
   }

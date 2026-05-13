@@ -20,6 +20,8 @@ pub struct OpenAiCompatibleClient {
     pub policy: RetryConfig,
     /// Optional bearer token sent as `Authorization: Bearer <token>`.
     pub bearer: Option<String>,
+    /// Human-readable provider name used in `EndpointOffline` errors (e.g. "Ollama").
+    pub provider_name: String,
 }
 
 impl OpenAiCompatibleClient {
@@ -33,6 +35,7 @@ impl OpenAiCompatibleClient {
             base_url: base_url.into(),
             policy,
             bearer: None,
+            provider_name: String::new(),
         }
     }
 
@@ -48,6 +51,24 @@ impl OpenAiCompatibleClient {
             base_url: base_url.into(),
             policy,
             bearer,
+            provider_name: String::new(),
+        }
+    }
+
+    /// Create a client with an optional bearer token and a provider name.
+    pub fn new_with_bearer_and_name(
+        client: Client,
+        base_url: impl Into<String>,
+        policy: RetryConfig,
+        bearer: Option<String>,
+        provider_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            base_url: base_url.into(),
+            policy,
+            bearer,
+            provider_name: provider_name.into(),
         }
     }
 
@@ -200,6 +221,23 @@ impl OpenAiCompatibleClient {
             model,
             usage,
             tool_calls,
+        }
+    }
+
+    /// Classify a reqwest error from a `send_with_retry` call into either a
+    /// structured `EndpointOffline` (connectivity issue) or the existing
+    /// `AiProvider(String)` shape (genuine application-layer error).
+    pub(crate) fn classify_send_error(&self, e: reqwest::Error) -> medical_core::error::AppError {
+        use medical_core::error::ServiceKind;
+        use medical_core::preflight::classify_reqwest_error;
+        match classify_reqwest_error(&e) {
+            Some(reason) => medical_core::error::AppError::EndpointOffline {
+                service: ServiceKind::AiProvider,
+                endpoint: self.base_url.clone(),
+                reason,
+                provider_name: self.provider_name.clone(),
+            },
+            None => medical_core::error::AppError::AiProvider(format!("HTTP request failed: {e}")),
         }
     }
 

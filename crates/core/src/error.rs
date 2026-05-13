@@ -1,10 +1,39 @@
 use thiserror::Error;
 
+/// Which remote service produced an `EndpointOffline` error.
+/// Serialized as PascalCase strings (`"AiProvider"`, `"RemoteStt"`) so
+/// the frontend can pattern-match without depending on Rust's
+/// internal naming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ServiceKind {
+    AiProvider,
+    RemoteStt,
+}
+
+/// Why a remote endpoint appears offline. Each variant corresponds to a
+/// distinct user-visible dialog message in
+/// `src/lib/components/EndpointOfflineDialog.svelte`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum OfflineReason {
+    ConnectionRefused,
+    Timeout,
+    DnsFailure,
+    TlsFailure,
+}
+
 /// Top-level application error.
 #[derive(Error, Debug)]
 pub enum AppError {
     #[error("Database error: {0}")]
     Database(String),
+
+    #[error("{provider_name} at {endpoint} is offline ({reason:?})")]
+    EndpointOffline {
+        service: ServiceKind,
+        endpoint: String,
+        reason: OfflineReason,
+        provider_name: String,
+    },
 
     #[error("Security error: {0}")]
     Security(String),
@@ -57,6 +86,7 @@ impl AppError {
     pub fn kind_str(&self) -> &'static str {
         match self {
             AppError::Database(_) => "Database",
+            AppError::EndpointOffline { .. } => "EndpointOffline",
             AppError::Security(_) => "Security",
             AppError::Audio(_) => "Audio",
             AppError::AiProvider(_) => "AiProvider",
@@ -82,10 +112,29 @@ impl serde::Serialize for AppError {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("AppError", 2)?;
-        s.serialize_field("kind", self.kind_str())?;
-        s.serialize_field("message", &self.to_string())?;
-        s.end()
+        match self {
+            AppError::EndpointOffline {
+                service,
+                endpoint,
+                reason,
+                provider_name,
+            } => {
+                let mut s = serializer.serialize_struct("AppError", 6)?;
+                s.serialize_field("kind", self.kind_str())?;
+                s.serialize_field("message", &self.to_string())?;
+                s.serialize_field("service", service)?;
+                s.serialize_field("endpoint", endpoint)?;
+                s.serialize_field("reason", reason)?;
+                s.serialize_field("provider_name", provider_name)?;
+                s.end()
+            }
+            _ => {
+                let mut s = serializer.serialize_struct("AppError", 2)?;
+                s.serialize_field("kind", self.kind_str())?;
+                s.serialize_field("message", &self.to_string())?;
+                s.end()
+            }
+        }
     }
 }
 
@@ -208,5 +257,48 @@ mod tests {
         let json = serde_json::to_value(&err).expect("serialize");
         assert_eq!(json["kind"], "Cancelled");
         assert_eq!(json["message"], "Cancelled");
+    }
+
+    #[test]
+    fn endpoint_offline_serializes_with_structured_fields() {
+        let err = AppError::EndpointOffline {
+            service: ServiceKind::AiProvider,
+            endpoint: "http://192.168.1.10:11434".into(),
+            reason: OfflineReason::ConnectionRefused,
+            provider_name: "Ollama".into(),
+        };
+        let json = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(json["kind"], "EndpointOffline");
+        assert_eq!(json["service"], "AiProvider");
+        assert_eq!(json["endpoint"], "http://192.168.1.10:11434");
+        assert_eq!(json["reason"], "ConnectionRefused");
+        assert_eq!(json["provider_name"], "Ollama");
+        assert!(
+            json["message"].as_str().unwrap().contains("Ollama"),
+            "message should contain provider_name for log readability"
+        );
+    }
+
+    #[test]
+    fn endpoint_offline_kind_str_is_stable() {
+        let err = AppError::EndpointOffline {
+            service: ServiceKind::RemoteStt,
+            endpoint: "http://x:1".into(),
+            reason: OfflineReason::Timeout,
+            provider_name: "Whisper STT".into(),
+        };
+        assert_eq!(err.kind_str(), "EndpointOffline");
+    }
+
+    #[test]
+    fn service_kind_serializes_as_pascalcase() {
+        let json = serde_json::to_value(ServiceKind::RemoteStt).unwrap();
+        assert_eq!(json, serde_json::json!("RemoteStt"));
+    }
+
+    #[test]
+    fn offline_reason_serializes_as_pascalcase() {
+        let json = serde_json::to_value(OfflineReason::DnsFailure).unwrap();
+        assert_eq!(json, serde_json::json!("DnsFailure"));
     }
 }

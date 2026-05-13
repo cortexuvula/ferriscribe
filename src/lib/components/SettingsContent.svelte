@@ -5,9 +5,22 @@
   import Audio from './settings/Audio.svelte';
   import Sharing from './settings/Sharing.svelte';
   import TrainingCorpus from './settings/TrainingCorpus.svelte';
+  import { onMount } from 'svelte';
+  import { settingsNav, type SettingsSection } from '../stores/settingsNav';
 
-  type Section = 'general' | 'prompts' | 'models' | 'audio' | 'sharing' | 'training-corpus';
+  type Section = SettingsSection;
   let activeSection = $state<Section>('general');
+
+  // Consume navigation requests from settingsNav store (e.g. from the
+  // EndpointOfflineDialog "Open Settings" button).
+  onMount(() => {
+    return settingsNav.subscribe((s) => {
+      if (s.requestedSection) {
+        activeSection = s.requestedSection;
+        settingsNav.clear();
+      }
+    });
+  });
 
   const navItems: { id: Section; label: string }[] = [
     { id: 'general', label: 'General' },

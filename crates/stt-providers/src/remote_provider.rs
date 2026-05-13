@@ -177,9 +177,23 @@ impl RemoteSttProvider {
                 .resolve_base_url()
                 .await
                 .ok_or_else(|| {
-                    AppError::SttProvider(
-                        "Office server unreachable on LAN or Tailscale.".to_string(),
-                    )
+                    use medical_core::error::{OfflineReason, ServiceKind};
+                    // RemoteEndpoint probed LAN then Tailscale and both failed. Pick
+                    // the LAN URL as the representative endpoint; if LAN isn't set,
+                    // fall back to Tailscale; if neither is set, "(unresolved)"
+                    // surfaces clearly in the dialog.
+                    let endpoint = ep
+                        .lan
+                        .as_deref()
+                        .map(|h| http_url(h, ep.port))
+                        .or_else(|| ep.tailscale.as_deref().map(|h| http_url(h, ep.port)))
+                        .unwrap_or_else(|| "(unresolved)".into());
+                    AppError::EndpointOffline {
+                        service: ServiceKind::RemoteStt,
+                        endpoint,
+                        reason: OfflineReason::Timeout,
+                        provider_name: "Whisper STT".into(),
+                    }
                 })?;
             *cache = Some(ResolvedCache {
                 url: url.clone(),
@@ -234,17 +248,16 @@ impl RemoteSttProvider {
             }
             result = req.send() => {
                 result.map_err(|e| {
-                    if e.is_timeout() {
-                        AppError::SttProvider(format!(
-                            "Transcription timed out after {}s",
-                            TRANSCRIBE_TIMEOUT.as_secs()
-                        ))
-                    } else if e.is_connect() {
-                        AppError::SttProvider(format!(
-                            "Cannot reach Whisper server at {base}: {e}"
-                        ))
-                    } else {
-                        AppError::SttProvider(format!("Whisper request failed: {e}"))
+                    use medical_core::error::ServiceKind;
+                    use medical_core::preflight::classify_reqwest_error;
+                    match classify_reqwest_error(&e) {
+                        Some(reason) => AppError::EndpointOffline {
+                            service: ServiceKind::RemoteStt,
+                            endpoint: base.clone(),
+                            reason,
+                            provider_name: "Whisper STT".into(),
+                        },
+                        None => AppError::SttProvider(format!("Whisper request failed: {e}")),
                     }
                 })?
             }
@@ -808,5 +821,67 @@ mod tests {
         // Second call immediately: cache should return the same URL.
         let url2 = p.current_base_url().await.expect("cached resolve");
         assert_eq!(url1, url2, "should return cached URL without re-probing");
+    }
+}
+
+#[cfg(test)]
+mod offline_tests {
+    use super::*;
+    use medical_core::error::{AppError, OfflineReason, ServiceKind};
+
+    #[tokio::test]
+    async fn transcribe_returns_endpoint_offline_when_remote_unreachable() {
+        // Bind then immediately drop a TCP listener to get a port that will
+        // refuse connections. The OS reclaims the port but new connections to
+        // it yield ECONNREFUSED — the canonical "server is down" signal.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        // Build the provider pointing at the now-closed port.
+        let provider = RemoteSttProvider::new(
+            "127.0.0.1",
+            port,
+            "whisper-1",
+            None,
+            PathBuf::from("/nonexistent-seg.onnx"),
+            PathBuf::from("/nonexistent-emb.onnx"),
+        )
+        .expect("build provider");
+
+        // Use 1 second of silent 16 kHz mono f32 audio — same shape as the
+        // happy-path tests above.
+        let audio = AudioData {
+            samples: vec![0.0_f32; 16_000],
+            sample_rate: 16_000,
+            channels: 1,
+        };
+
+        let err = provider
+            .transcribe(audio, SttConfig::default(), CancellationToken::new())
+            .await
+            .unwrap_err();
+
+        match err {
+            AppError::EndpointOffline {
+                service,
+                endpoint,
+                reason,
+                provider_name,
+            } => {
+                assert_eq!(service, ServiceKind::RemoteStt);
+                assert_eq!(
+                    reason,
+                    OfflineReason::ConnectionRefused,
+                    "refused loopback port must yield ConnectionRefused, not {reason:?}"
+                );
+                assert_eq!(provider_name, "Whisper STT");
+                assert!(
+                    endpoint.contains("127.0.0.1"),
+                    "endpoint should carry the target host; got {endpoint:?}"
+                );
+            }
+            other => panic!("expected EndpointOffline, got {other:?}"),
+        }
     }
 }

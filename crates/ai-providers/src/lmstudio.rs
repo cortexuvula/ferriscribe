@@ -12,6 +12,7 @@ use medical_core::{
         CompletionRequest, CompletionResponse, ModelInfo, RemoteEndpoint, StreamChunk,
         ToolCompletionResponse, ToolDef,
     },
+    types::endpoint::http_url,
 };
 
 use crate::http_client::RetryConfig;
@@ -56,7 +57,7 @@ impl LmStudioProvider {
             .map_err(|e| AppError::AiProvider(format!("Failed to build LM Studio HTTP client: {e}")))?;
         Ok(Self {
             static_base_url: base_url.clone(),
-            client: Mutex::new(OpenAiCompatibleClient::new_with_bearer(http, base_url, policy, bearer)),
+            client: Mutex::new(OpenAiCompatibleClient::new_with_bearer_and_name(http, base_url, policy, bearer, "LM Studio")),
             endpoint: RwLock::new(None),
             url_cache: Mutex::new(None),
         })
@@ -81,7 +82,7 @@ impl LmStudioProvider {
             .map_err(|e| AppError::AiProvider(format!("Failed to build LM Studio HTTP client: {e}")))?;
         Ok(Self {
             static_base_url: base_url.clone(),
-            client: Mutex::new(OpenAiCompatibleClient::new_with_bearer(http, base_url, policy, bearer)),
+            client: Mutex::new(OpenAiCompatibleClient::new_with_bearer_and_name(http, base_url, policy, bearer, "LM Studio")),
             endpoint: RwLock::new(ep),
             url_cache: Mutex::new(None),
         })
@@ -117,9 +118,23 @@ impl LmStudioProvider {
                 .resolve_base_url()
                 .await
                 .ok_or_else(|| {
-                    AppError::AiProvider(
-                        "Office server unreachable on LAN or Tailscale (LM Studio).".to_string(),
-                    )
+                    use medical_core::error::{OfflineReason, ServiceKind};
+                    // RemoteEndpoint probed LAN then Tailscale and both failed. Pick
+                    // the LAN URL as the representative endpoint; if LAN isn't set,
+                    // fall back to Tailscale; if neither is set, this is a config
+                    // error and "(unresolved)" surfaces clearly in the dialog.
+                    let endpoint = ep
+                        .lan
+                        .as_deref()
+                        .map(|h| http_url(h, ep.port))
+                        .or_else(|| ep.tailscale.as_deref().map(|h| http_url(h, ep.port)))
+                        .unwrap_or_else(|| "(unresolved)".into());
+                    AppError::EndpointOffline {
+                        service: ServiceKind::AiProvider,
+                        endpoint,
+                        reason: OfflineReason::Timeout,
+                        provider_name: "LM Studio".into(),
+                    }
                 })?;
             let url = format!("{}/v1", resolved);
             *cache = Some(ResolvedCache {
@@ -282,5 +297,108 @@ mod tests {
         // Cache should still return the URL without re-probing.
         let url2 = p.current_base_url().await.expect("cached resolve");
         assert_eq!(url1, url2);
+    }
+}
+
+#[cfg(test)]
+mod offline_tests {
+    use super::*;
+    use medical_core::{
+        error::{AppError, OfflineReason, ServiceKind},
+        types::{Message, MessageContent, Role},
+    };
+
+    fn dead_port() -> u16 {
+        // Bind then immediately drop to get a free port that is guaranteed closed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    fn minimal_request(model: &str) -> CompletionRequest {
+        CompletionRequest {
+            model: model.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("hi".into()),
+                tool_calls: vec![],
+            }],
+            temperature: Some(0.0),
+            max_tokens: Some(10),
+            system_prompt: None,
+        }
+    }
+
+    /// Test the RemoteEndpoint resolution path: both LAN and Tailscale are
+    /// unreachable, so `resolve_base_url()` returns `None`, and
+    /// `current_base_url()` must emit `EndpointOffline`.
+    #[tokio::test]
+    async fn resolve_failure_returns_endpoint_offline() {
+        let port = dead_port();
+
+        let p = LmStudioProvider::new(None, None, RetryConfig::default()).expect("build");
+        p.set_endpoint(Some(RemoteEndpoint {
+            lan: Some("127.0.0.1".to_string()),
+            tailscale: None,
+            port,
+            bearer: None,
+        }))
+        .await;
+
+        let err = p.current_base_url().await.unwrap_err();
+        match err {
+            AppError::EndpointOffline {
+                service,
+                reason,
+                provider_name,
+                endpoint,
+            } => {
+                assert_eq!(service, ServiceKind::AiProvider);
+                assert_eq!(reason, OfflineReason::Timeout);
+                assert_eq!(provider_name, "LM Studio");
+                assert!(
+                    endpoint.contains("127.0.0.1"),
+                    "endpoint should carry host; got {endpoint:?}"
+                );
+            }
+            other => panic!("expected EndpointOffline, got {other:?}"),
+        }
+    }
+
+    /// Test the downstream HTTP-send path (race condition / static URL):
+    /// provider is pointed at a dead port via static URL, so `complete()`
+    /// hits a connection-refused during the actual HTTP send.
+    #[tokio::test]
+    async fn complete_returns_endpoint_offline_when_host_refused() {
+        let port = dead_port();
+        let host = format!("http://127.0.0.1:{port}");
+
+        // No endpoint set — uses static_base_url pointing at dead port.
+        let policy = RetryConfig {
+            max_retries: 0,
+            ..RetryConfig::default()
+        };
+        let p = LmStudioProvider::new(Some(&host), None, policy).expect("build");
+
+        let req = minimal_request("default");
+        let err = p.complete(req).await.unwrap_err();
+        match err {
+            AppError::EndpointOffline {
+                service,
+                reason,
+                provider_name,
+                endpoint,
+            } => {
+                assert_eq!(service, ServiceKind::AiProvider);
+                assert_eq!(reason, OfflineReason::ConnectionRefused);
+                assert_eq!(provider_name, "LM Studio");
+                assert!(
+                    endpoint.contains("127.0.0.1"),
+                    "endpoint should carry host; got {endpoint:?}"
+                );
+            }
+            other => panic!("expected EndpointOffline, got {other:?}"),
+        }
     }
 }

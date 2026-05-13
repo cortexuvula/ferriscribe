@@ -30,7 +30,7 @@ impl OpenAiCompatibleClient {
             self.get(&url)
         })
         .await
-        .map_err(|e| AppError::AiProvider(e.to_string()))?;
+        .map_err(|e| self.classify_send_error(e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -56,7 +56,7 @@ impl OpenAiCompatibleClient {
             self.post_json(&url, &body)
         })
         .await
-        .map_err(|e| AppError::AiProvider(e.to_string()))?;
+        .map_err(|e| self.classify_send_error(e))?;
 
         let status = response.status();
         // Read full body — used for both the error message (truncated) and
@@ -126,7 +126,7 @@ impl OpenAiCompatibleClient {
             self.post_json(&url, &body)
         })
         .await
-        .map_err(|e| AppError::AiProvider(e.to_string()))?;
+        .map_err(|e| self.classify_send_error(e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -221,7 +221,7 @@ impl OpenAiCompatibleClient {
             self.post_json(&url, &body)
         })
         .await
-        .map_err(|e| AppError::AiProvider(e.to_string()))?;
+        .map_err(|e| self.classify_send_error(e))?;
 
         if !response.status().is_success() {
             let status = response.status();

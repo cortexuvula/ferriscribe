@@ -5,7 +5,7 @@ use std::sync::Arc;
 use medical_core::error::{AppError, AppResult};
 use medical_core::traits::AiProvider;
 use medical_core::types::recording::Recording;
-use medical_core::types::settings::SoapTemplate;
+use medical_core::types::settings::{AppConfig, SoapTemplate};
 use medical_core::types::{CompletionRequest, Message, MessageContent, PatientContext, Role};
 use medical_db::recordings::RecordingsRepo;
 use uuid::Uuid;
@@ -28,14 +28,19 @@ pub(super) struct GenerationSettings {
     pub custom_synopsis_prompt: Option<String>,
 }
 
-/// Load a recording and settings from DB on a blocking thread.
+/// Load a recording, generation settings, and the full `AppConfig` from the DB
+/// on a blocking thread.
 ///
 /// All rusqlite work is offloaded via `spawn_blocking` so we never block the
 /// Tokio async runtime.
+///
+/// Returns `(Recording, GenerationSettings, AppConfig)`. The `AppConfig` is
+/// available to callers that need to pass it directly to
+/// `preflight_for_command`, avoiding a second `spawn_blocking` config load.
 pub(super) async fn load_recording_and_settings(
     db: &Arc<medical_db::Database>,
     recording_id: &str,
-) -> AppResult<(Recording, GenerationSettings)> {
+) -> AppResult<(Recording, GenerationSettings, AppConfig)> {
     let uuid = Uuid::parse_str(recording_id)
         .map_err(|e| AppError::Other(format!("Invalid recording ID: {e}")))?;
     let db = Arc::clone(db);
@@ -46,40 +51,27 @@ pub(super) async fn load_recording_and_settings(
         let recording = RecordingsRepo::get_by_id(&conn, &uuid)
             .map_err(|e| AppError::Database(e.to_string()))?;
 
-        let config = medical_db::settings::SettingsRepo::load_config(&conn)
-            .ok()
-            .map(|mut c| { c.migrate(); c });
-        let settings = match config {
-            Some(cfg) => {
-                let icd = match cfg.icd_version {
-                    medical_core::types::settings::IcdVersion::Icd9 => "ICD-9".to_string(),
-                    medical_core::types::settings::IcdVersion::Icd10 => "ICD-10".to_string(),
-                    medical_core::types::settings::IcdVersion::Both => "both".to_string(),
-                };
-                GenerationSettings {
-                    model: cfg.ai_model,
-                    temperature: cfg.temperature,
-                    icd_version: icd,
-                    ai_provider: cfg.ai_provider,
-                    custom_soap_prompt: cfg.custom_soap_prompt,
-                    custom_referral_prompt: cfg.custom_referral_prompt,
-                    custom_letter_prompt: cfg.custom_letter_prompt,
-                    custom_synopsis_prompt: cfg.custom_synopsis_prompt,
-                }
-            }
-            None => GenerationSettings {
-                model: String::new(),
-                temperature: 0.2,
-                icd_version: "ICD-10".to_string(),
-                ai_provider: "lmstudio".to_string(),
-                custom_soap_prompt: None,
-                custom_referral_prompt: None,
-                custom_letter_prompt: None,
-                custom_synopsis_prompt: None,
-            },
+        let mut config = medical_db::settings::SettingsRepo::load_config(&conn)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        config.migrate();
+
+        let icd = match config.icd_version {
+            medical_core::types::settings::IcdVersion::Icd9 => "ICD-9".to_string(),
+            medical_core::types::settings::IcdVersion::Icd10 => "ICD-10".to_string(),
+            medical_core::types::settings::IcdVersion::Both => "both".to_string(),
+        };
+        let settings = GenerationSettings {
+            model: config.ai_model.clone(),
+            temperature: config.temperature,
+            icd_version: icd,
+            ai_provider: config.ai_provider.clone(),
+            custom_soap_prompt: config.custom_soap_prompt.clone(),
+            custom_referral_prompt: config.custom_referral_prompt.clone(),
+            custom_letter_prompt: config.custom_letter_prompt.clone(),
+            custom_synopsis_prompt: config.custom_synopsis_prompt.clone(),
         };
 
-        Ok::<_, AppError>((recording, settings))
+        Ok::<_, AppError>((recording, settings, config))
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?

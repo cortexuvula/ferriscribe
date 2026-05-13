@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invokeWithOfflineHandling } from './invokeWithOfflineHandling';
 import type { PatientContext } from '../types';
 
 export async function generateSoap(
@@ -9,7 +9,7 @@ export async function generateSoap(
 ): Promise<string> {
   // Tauri omits undefined fields from the payload, so explicitly pass null
   // for optional parameters to ensure they map to Rust Option::None
-  return invoke('generate_soap', {
+  return invokeWithOfflineHandling('generate_soap', {
     recordingId,
     template: template ?? null,
     context: context ?? null,
@@ -22,7 +22,7 @@ export async function generateReferral(
   recipientType?: string,
   urgency?: string
 ): Promise<string> {
-  return invoke('generate_referral', {
+  return invokeWithOfflineHandling('generate_referral', {
     recordingId,
     recipientType: recipientType ?? null,
     urgency: urgency ?? null,
@@ -33,7 +33,7 @@ export async function generateLetter(
   recordingId: string,
   letterType?: string
 ): Promise<string> {
-  return invoke('generate_letter', {
+  return invokeWithOfflineHandling('generate_letter', {
     recordingId,
     letterType: letterType ?? null,
   });
@@ -42,5 +42,5 @@ export async function generateLetter(
 export async function generateSynopsis(
   recordingId: string
 ): Promise<string> {
-  return invoke('generate_synopsis', { recordingId });
+  return invokeWithOfflineHandling('generate_synopsis', { recordingId });
 }
