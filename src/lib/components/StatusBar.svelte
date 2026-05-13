@@ -4,6 +4,12 @@
   import { audio } from '../stores/audio';
   import { settings } from '../stores/settings';
   import { formatDuration } from '../utils/format';
+  import EndpointHealthPill from './EndpointHealthPill.svelte';
+
+  type Props = {
+    onopenSettings: (target: 'models' | 'audio') => void;
+  };
+  let { onopenSettings }: Props = $props();
 
   type SharingStatus = {
     enabled: boolean;
@@ -11,8 +17,8 @@
   };
   type PairedConn = { label: string } | null;
 
-  let sharing: SharingStatus | null = null;
-  let paired: PairedConn = null;
+  let sharing = $state<SharingStatus | null>(null);
+  let paired = $state<PairedConn>(null);
   let pollHandle: ReturnType<typeof setInterval>;
 
   async function refresh() {
@@ -52,6 +58,7 @@
   </div>
 
   <div class="status-right">
+    <EndpointHealthPill {onopenSettings} />
     {#if sharing?.enabled}
       <span class="sharing-badge server" title="This machine is acting as an office server. Other paired clients can reach Ollama / Whisper / LM Studio via this device.">
         <span class="dot" aria-hidden="true"></span>
