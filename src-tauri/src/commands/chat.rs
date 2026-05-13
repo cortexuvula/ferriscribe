@@ -347,32 +347,13 @@ pub async fn chat_stream(
     Ok(())
 }
 
-/// Execute a named agent against the active AI provider.
-///
-/// Available agent names: `chat`, `medication`, `diagnostic`, `compliance`,
-/// `data_extraction`, `workflow`, `referral`, `synopsis`.
-///
-/// Returns the full `AgentResponse` as a JSON value.
-#[tauri::command]
-pub async fn chat_with_agent(
-    state: tauri::State<'_, AppState>,
+/// Inner implementation of `chat_with_agent`, testable without the Tauri runtime.
+async fn chat_with_agent_inner(
+    state: &AppState,
     message: String,
     agent_name: String,
     conversation_history: Option<Vec<ChatMessageInput>>,
 ) -> AppResult<serde_json::Value> {
-    // Guard against unbounded payloads: sum message + full history before we
-    // allocate an AgentContext or build a provider request.
-    let history_chars: usize = conversation_history
-        .as_ref()
-        .map(|h| h.iter().map(|m| m.content.len()).sum())
-        .unwrap_or(0);
-    let total = history_chars.saturating_add(message.len());
-    if total > MAX_HISTORY_CHARS {
-        return Err(AppError::Other(format!(
-            "Conversation history too large: {total} chars, limit is {MAX_HISTORY_CHARS}"
-        )));
-    }
-
     let agent = get_agent_by_name(&agent_name)
         .ok_or_else(|| AppError::Agent(format!("Unknown agent: '{agent_name}'")))?;
 
@@ -398,7 +379,16 @@ pub async fn chat_with_agent(
 
     // Load full config so we can pass it to pre-flight (model/temperature are
     // also read from here, replacing the separate load_chat_settings call).
-    let cfg = load_app_config(&state)?;
+    let cfg = {
+        let conn = state
+            .db
+            .conn()
+            .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
+        let mut c = medical_db::settings::SettingsRepo::load_config(&conn)
+            .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
+        c.migrate();
+        c
+    };
     let model = cfg.ai_model.clone();
     let temperature = cfg.temperature;
 
@@ -445,6 +435,35 @@ pub async fn chat_with_agent(
         })?;
 
     Ok(serde_json::to_value(&response)?)
+}
+
+/// Execute a named agent against the active AI provider.
+///
+/// Available agent names: `chat`, `medication`, `diagnostic`, `compliance`,
+/// `data_extraction`, `workflow`, `referral`, `synopsis`.
+///
+/// Returns the full `AgentResponse` as a JSON value.
+#[tauri::command]
+pub async fn chat_with_agent(
+    state: tauri::State<'_, AppState>,
+    message: String,
+    agent_name: String,
+    conversation_history: Option<Vec<ChatMessageInput>>,
+) -> AppResult<serde_json::Value> {
+    // Guard against unbounded payloads: sum message + full history before we
+    // allocate an AgentContext or build a provider request.
+    let history_chars: usize = conversation_history
+        .as_ref()
+        .map(|h| h.iter().map(|m| m.content.len()).sum())
+        .unwrap_or(0);
+    let total = history_chars.saturating_add(message.len());
+    if total > MAX_HISTORY_CHARS {
+        return Err(AppError::Other(format!(
+            "Conversation history too large: {total} chars, limit is {MAX_HISTORY_CHARS}"
+        )));
+    }
+
+    chat_with_agent_inner(&state, message, agent_name, conversation_history).await
 }
 
 /// List all registered AI provider names.
@@ -500,7 +519,20 @@ mod preflight_tests {
 
     /// Build a minimal `AppState` backed by an in-memory SQLite database and
     /// a pre-saved `AppConfig`. Used exclusively for pre-flight tests.
-    async fn build_chat_test_state(config: AppConfig) -> AppState {
+    ///
+    /// `provider` is the provider name (e.g. `"ollama"`), `host` and `port`
+    /// control where connection attempts are directed.
+    async fn build_chat_test_state(
+        provider: &str,
+        host: &str,
+        port: u16,
+    ) -> (AppState, tempfile::TempDir) {
+        let mut config = AppConfig::default();
+        config.ai_provider = provider.to_string();
+        config.ollama_host = host.to_string();
+        config.ollama_port = port;
+        config.ai_model = "llama3".to_string();
+
         let db = Arc::new(medical_db::Database::open_in_memory().expect("open in-memory db"));
         {
             let conn = db.conn().expect("conn");
@@ -528,7 +560,6 @@ mod preflight_tests {
         let config_dir = tmp.path().join("config");
         let keys = medical_security::key_storage::KeyStorage::open(&config_dir)
             .expect("KeyStorage::open");
-        std::mem::forget(tmp);
 
         let embedding_generator = Arc::new(
             medical_rag::embeddings::EmbeddingGenerator::new_ollama(None, None),
@@ -545,7 +576,7 @@ mod preflight_tests {
         let orchestrator = Arc::new(medical_agents::orchestrator::AgentOrchestrator::new(tool_registry));
         let http_client = Arc::new(reqwest::Client::new());
 
-        AppState {
+        let state = AppState {
             db,
             keys: Arc::new(keys),
             data_dir: std::path::PathBuf::from("/tmp/test-data"),
@@ -567,20 +598,16 @@ mod preflight_tests {
             lmstudio_provider: RwLock::new(None),
             remote_stt_provider: RwLock::new(None),
             http_client,
-        }
+        };
+
+        (state, tmp)
     }
 
     #[tokio::test]
     async fn chat_send_returns_endpoint_offline_when_ai_unreachable() {
         // 192.0.2.1 is RFC 5737 TEST-NET-1 — guaranteed unrouteable, so
         // the probe times out within PROBE_TIMEOUT (3s).
-        let mut config = AppConfig::default();
-        config.ai_provider = "ollama".to_string();
-        config.ollama_host = "192.0.2.1".to_string();
-        config.ollama_port = 11434;
-        config.ai_model = "llama3".to_string();
-
-        let state = build_chat_test_state(config).await;
+        let (state, _tmp) = build_chat_test_state("ollama", "192.0.2.1", 11434).await;
 
         let start = std::time::Instant::now();
         let result = chat_send_inner(
@@ -622,34 +649,21 @@ mod preflight_tests {
         );
     }
 
-    /// Verify that `chat_with_agent` short-circuits with `EndpointOffline` when
-    /// the AI provider is unreachable — confirming the pre-flight gate added in
-    /// the Fix 2 compliance review.
+    /// Verify that `chat_with_agent_inner` short-circuits with `EndpointOffline`
+    /// when the AI provider is unreachable — exercises the actual pre-flight call
+    /// site inside `chat_with_agent`'s code path (unlike the previous test which
+    /// called `preflight_for_command` directly and was redundant with Task 3).
     #[tokio::test]
-    async fn chat_with_agent_returns_endpoint_offline_when_ai_unreachable() {
+    async fn chat_with_agent_inner_returns_endpoint_offline_when_ai_unreachable() {
         // 192.0.2.1 is RFC 5737 TEST-NET-1 — guaranteed unrouteable.
-        let mut config = AppConfig::default();
-        config.ai_provider = "ollama".to_string();
-        config.ollama_host = "192.0.2.1".to_string();
-        config.ollama_port = 11434;
-        config.ai_model = "llama3".to_string();
-
-        let state = build_chat_test_state(config).await;
-
-        // We call `preflight_for_command` with the same config that
-        // `chat_with_agent` now loads, because `chat_with_agent` itself requires
-        // a `tauri::State` wrapper that can't be constructed outside the runtime.
-        let loaded_cfg = {
-            let conn = state.db.conn().expect("conn");
-            let mut c = medical_db::settings::SettingsRepo::load_config(&conn).expect("load");
-            c.migrate();
-            c
-        };
+        let (state, _tmp) = build_chat_test_state("ollama", "192.0.2.1", 11434).await;
 
         let start = std::time::Instant::now();
-        let result = medical_core::preflight::preflight_for_command(
-            medical_core::preflight::CommandKind::Chat,
-            &loaded_cfg,
+        let result = chat_with_agent_inner(
+            &state,
+            "Hello".to_string(),
+            "chat".to_string(),
+            None,
         )
         .await;
         let elapsed = start.elapsed();
@@ -658,10 +672,12 @@ mod preflight_tests {
         match err {
             AppError::EndpointOffline {
                 service,
+                provider_name,
                 reason,
                 ..
             } => {
                 assert_eq!(service, ServiceKind::AiProvider);
+                assert_eq!(provider_name, "Ollama");
                 assert!(
                     matches!(
                         reason,
@@ -675,7 +691,7 @@ mod preflight_tests {
 
         assert!(
             elapsed < std::time::Duration::from_secs(8),
-            "should have short-circuited at ~3s; took {elapsed:?}"
+            "should short-circuit; took {elapsed:?}"
         );
     }
 }
