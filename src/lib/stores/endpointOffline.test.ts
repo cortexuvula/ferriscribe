@@ -47,15 +47,31 @@ describe('endpointOfflineStore', () => {
     await expect(pending).resolves.toBe('opened_settings');
   });
 
-  it('concurrent open resolves prior promise with the new decision', async () => {
+  it('concurrent open chains the prior resolver into the new one', async () => {
     const first = endpointOfflineStore.openAndWait(samplePayload);
+
+    // The second open replaces the active dialog. The prior resolver
+    // must be chained into the new one so the first promise still
+    // settles when the user picks an action.
     const second = endpointOfflineStore.openAndWait({
       ...samplePayload,
       provider_name: 'LM Studio',
     });
-    endpointOfflineStore._resolve('cancel');
-    await expect(first).resolves.toBe('cancel');
-    await expect(second).resolves.toBe('cancel');
+
+    // Verify the store state reflects the SECOND payload (it overrode the first).
+    expect(get(endpointOfflineStore)?.payload.provider_name).toBe('LM Studio');
+
+    // Now resolve once — both promises must settle with the same decision,
+    // proving the prior resolver was chained.
+    endpointOfflineStore._resolve('retry');
+    await expect(first).resolves.toBe('retry');
+    await expect(second).resolves.toBe('retry');
+  });
+
+  it('_resolve is a no-op when no dialog is open', () => {
+    // No openAndWait called; state is null.
+    expect(() => endpointOfflineStore._resolve('cancel')).not.toThrow();
+    expect(get(endpointOfflineStore)).toBeNull();
   });
 
   it('close() clears state without resolving', () => {

@@ -1,4 +1,4 @@
-import { writable, type Readable } from 'svelte/store';
+import { writable, get } from 'svelte/store';
 import type {
   EndpointOfflineDecision,
   EndpointOfflinePayload,
@@ -11,11 +11,9 @@ interface OpenState {
 
 function createStore() {
   const state = writable<OpenState | null>(null);
-  let current: OpenState | null = null;
-  state.subscribe((s) => (current = s));
 
   return {
-    subscribe: state.subscribe as Readable<OpenState | null>['subscribe'],
+    subscribe: state.subscribe,
 
     /** Opens the dialog with `payload`; resolves when the user picks an
      *  action (retry / cancel / opened_settings). If `openAndWait` is
@@ -23,7 +21,7 @@ function createStore() {
      *  with the new decision — matches the "modal at most one" rule. */
     openAndWait(payload: EndpointOfflinePayload): Promise<EndpointOfflineDecision> {
       return new Promise((resolve) => {
-        const priorResolve = current?.resolve;
+        const priorResolve = get(state)?.resolve;
         state.set({
           payload,
           resolve: (decision) => {
@@ -36,7 +34,7 @@ function createStore() {
 
     /** Internal: dialog component calls this when the user picks an action. */
     _resolve(decision: EndpointOfflineDecision): void {
-      const s = current;
+      const s = get(state);
       if (s) {
         state.set(null);
         s.resolve(decision);
