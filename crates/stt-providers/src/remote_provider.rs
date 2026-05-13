@@ -177,9 +177,23 @@ impl RemoteSttProvider {
                 .resolve_base_url()
                 .await
                 .ok_or_else(|| {
-                    AppError::SttProvider(
-                        "Office server unreachable on LAN or Tailscale.".to_string(),
-                    )
+                    use medical_core::error::{OfflineReason, ServiceKind};
+                    // RemoteEndpoint probed LAN then Tailscale and both failed. Pick
+                    // the LAN URL as the representative endpoint; if LAN isn't set,
+                    // fall back to Tailscale; if neither is set, "(unresolved)"
+                    // surfaces clearly in the dialog.
+                    let endpoint = ep
+                        .lan
+                        .as_deref()
+                        .map(|h| http_url(h, ep.port))
+                        .or_else(|| ep.tailscale.as_deref().map(|h| http_url(h, ep.port)))
+                        .unwrap_or_else(|| "(unresolved)".into());
+                    AppError::EndpointOffline {
+                        service: ServiceKind::RemoteStt,
+                        endpoint,
+                        reason: OfflineReason::Timeout,
+                        provider_name: "Whisper STT".into(),
+                    }
                 })?;
             *cache = Some(ResolvedCache {
                 url: url.clone(),
