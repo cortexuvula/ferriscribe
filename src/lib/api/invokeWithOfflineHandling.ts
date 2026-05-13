@@ -36,4 +36,35 @@ export function isEndpointOffline(err: unknown): err is EndpointOfflinePayload {
   );
 }
 
-// invokeWithOfflineHandling is implemented in Task 11.
+import { invoke } from '@tauri-apps/api/core';
+import { endpointOfflineStore } from '../stores/endpointOffline';
+
+/** Wraps Tauri `invoke`. On `EndpointOffline` rejection, opens the
+ *  shared dialog and awaits the user's decision:
+ *    - Retry      → loops back to re-invoke `cmd` with `args`.
+ *    - Cancel     → throws OfflineCancelled('cancel').
+ *    - OpenSettings → throws OfflineCancelled('opened_settings').
+ *  Any other rejection passes through verbatim.
+ *
+ *  Successful retry resumes the original `await` with the new result —
+ *  callers don't need to re-trigger their action.
+ */
+export async function invokeWithOfflineHandling<T>(
+  cmd: string,
+  args: Record<string, unknown>,
+): Promise<T> {
+  for (;;) {
+    try {
+      return await invoke<T>(cmd, args);
+    } catch (err) {
+      if (!isEndpointOffline(err)) {
+        throw err;
+      }
+      const decision = await endpointOfflineStore.openAndWait(err);
+      if (decision === 'retry') {
+        continue;
+      }
+      throw new OfflineCancelled(decision);
+    }
+  }
+}
