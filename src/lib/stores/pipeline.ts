@@ -4,6 +4,7 @@ import { processRecording, cancelPipeline } from '../api/pipeline';
 import { recordings, selectRecording } from './recordings';
 import { log } from '../api/logging';
 import { formatError } from '../types/errors';
+import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
 import type { PatientContext } from '../types';
 
 export type PipelineStage = 'idle' | 'transcribing' | 'generating_soap' | 'completed' | 'failed';
@@ -161,6 +162,19 @@ function createPipelineStore() {
 
       // Fire and forget — progress comes via events
       processRecording(recordingId, context, template, patientContext).catch((err) => {
+        if (err instanceof OfflineCancelled) {
+          // User dismissed the offline dialog (cancelled or opened Settings).
+          // The dialog has already informed the user; remove the in-flight
+          // pipeline entry so the UI returns to its idle state.
+          update((s) => ({
+            ...s,
+            current: s.current?.recordingId === recordingId ? null : s.current,
+            active: Object.fromEntries(
+              Object.entries(s.active).filter(([k]) => k !== recordingId),
+            ),
+          }));
+          return;
+        }
         const message = formatError(err);
         log.error('Pipeline command failed', { recordingId, error: message });
         update((s) => {
