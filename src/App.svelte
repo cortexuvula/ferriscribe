@@ -209,7 +209,7 @@
       </div>
     {/if}
     {#if activeTab === 'record'}
-      <RecordTab />
+      <RecordTab onopenSettings={onEndpointHealthOpenSettings} />
     {:else if activeTab === 'recordings'}
       <RecordingsTab />
     {:else if activeTab === 'generate'}

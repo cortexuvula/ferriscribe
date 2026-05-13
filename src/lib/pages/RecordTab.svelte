@@ -19,6 +19,11 @@
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
 
+  type Props = {
+    onopenSettings?: (target: 'models' | 'audio') => void;
+  };
+  let { onopenSettings = () => {} }: Props = $props();
+
   // Context panel state — owned by parent because buildPatientContext(...) needs them at pipeline-launch time.
   let contextText = $state('');
   let medicationsText = $state('');
@@ -229,6 +234,7 @@
 
   <!-- Recording Controls (middle, unchanged) -->
   <RecordingHeader
+    {onopenSettings}
     onStart={handleStartRecording}
     onStop={handleStopRecording}
     onNewRecording={handleNewRecording}

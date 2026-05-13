@@ -2,13 +2,15 @@
   import { audio } from '../stores/audio';
   import { formatDuration } from '../utils/format';
   import Waveform from './Waveform.svelte';
+  import OfflineRecordBanner from './OfflineRecordBanner.svelte';
 
   interface Props {
     onStart?: () => void;
     onStop?: () => void;
     onNewRecording?: () => void;
+    onopenSettings?: (target: 'models' | 'audio') => void;
   }
-  let { onStart, onStop, onNewRecording }: Props = $props();
+  let { onStart, onStop, onNewRecording, onopenSettings = () => {} }: Props = $props();
 
   function handleStart() {
     if (onStart) {
@@ -42,6 +44,8 @@
       <button class="error-dismiss" onclick={() => audio.reset()}>Dismiss</button>
     </div>
   {/if}
+
+  <OfflineRecordBanner {onopenSettings} />
 
   <div class="controls-row">
     <div class="timer">
