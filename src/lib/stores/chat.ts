@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import * as chatApi from '../api/chat';
 import type { ChatMessage, ToolCallRecord } from '../types';
 import { formatError } from '../types/errors';
+import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -124,6 +125,12 @@ function createChatStore() {
 
       await chatApi.chatStream(apiMessages);
     } catch (e: any) {
+      if (e instanceof OfflineCancelled) {
+        // Remove the empty streaming placeholder; the dialog already informed the user.
+        update((msgs) => msgs.slice(0, -1));
+        cleanup();
+        return;
+      }
       appendToLast(`\n\nError: ${formatError(e) || 'Chat failed'}`);
       cleanup();
     }
