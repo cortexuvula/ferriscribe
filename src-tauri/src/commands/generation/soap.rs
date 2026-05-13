@@ -106,14 +106,15 @@ async fn generate_soap_inner(
     {
         let config = {
             let db = Arc::clone(&state.db);
-            tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || -> medical_core::error::AppResult<medical_core::types::settings::AppConfig> {
                 let conn = db.conn().map_err(|e| medical_core::error::AppError::Database(e.to_string()))?;
-                Ok::<_, medical_core::error::AppError>(
-                    medical_db::settings::SettingsRepo::load_config(&conn).unwrap_or_default()
-                )
+                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                    .map_err(|e| medical_core::error::AppError::Database(e.to_string()))?;
+                cfg.migrate();
+                Ok(cfg)
             })
             .await
-            .map_err(|e| medical_core::error::AppError::Other(format!("Task join error: {e}")))??
+            .map_err(|e| medical_core::error::AppError::Other(format!("preflight config load join error: {e}")))??
         };
         medical_core::preflight::preflight_for_command(
             medical_core::preflight::CommandKind::GenerateSoap,
