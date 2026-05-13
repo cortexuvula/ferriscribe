@@ -1,6 +1,7 @@
 import { writable, get, type Readable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { settings } from './settings';
+import type { AppConfig } from '../types';
 
 const POLL_INTERVAL_MS = 10_000;
 
@@ -46,6 +47,7 @@ function createEndpointHealthStore(): EndpointHealthStore {
   let timer: ReturnType<typeof setInterval> | null = null;
   let settingsUnsub: (() => void) | null = null;
   let visibilityHandler: (() => void) | null = null;
+  let primed = false;
   let lastProbedKey = '';
 
   const state = writable<EndpointHealthState>(INITIAL, () => {
@@ -54,17 +56,17 @@ function createEndpointHealthStore(): EndpointHealthStore {
     return () => stopPolling();
   });
 
-  function probedKey(cfg: any): string {
+  function probedKey(cfg: AppConfig): string {
     return [
       cfg.ai_provider,
       cfg.lmstudio_host, cfg.lmstudio_port,
       cfg.ollama_host, cfg.ollama_port,
-      cfg.stt_remote_host, cfg.stt_remote_port, cfg.stt_remote_api_key ?? '',
+      cfg.stt_remote_host, cfg.stt_remote_port,
       cfg.stt_mode,
     ].join('|');
   }
 
-  async function probeAi(cfg: any): Promise<ServiceStatus> {
+  async function probeAi(cfg: AppConfig): Promise<ServiceStatus> {
     const provider = cfg.ai_provider;
     if (provider === 'ollama') {
       if (isLoopbackHost(cfg.ollama_host)) return 'skipped';
@@ -93,14 +95,27 @@ function createEndpointHealthStore(): EndpointHealthStore {
     return 'skipped';
   }
 
-  async function probeStt(cfg: any): Promise<ServiceStatus> {
+  async function probeStt(cfg: AppConfig): Promise<ServiceStatus> {
     if (cfg.stt_mode !== 'remote') return 'skipped';
     if (isLoopbackHost(cfg.stt_remote_host)) return 'skipped';
+
+    // STT api key is keychain-stored, not a settings field. Fetch it at probe
+    // time; treat fetch failure as "no key" so the probe still runs.
+    let apiKey: string | undefined = undefined;
+    try {
+      const key = await invoke<string | null>('get_api_key', {
+        provider: 'stt_remote_api_key',
+      });
+      if (key) apiKey = key;
+    } catch {
+      // Keychain unavailable or no key stored — continue without auth.
+    }
+
     try {
       await invoke('test_stt_remote_connection', {
         host: cfg.stt_remote_host,
         port: cfg.stt_remote_port,
-        apiKey: cfg.stt_remote_api_key,
+        apiKey,
       });
       return 'online';
     } catch {
@@ -111,6 +126,7 @@ function createEndpointHealthStore(): EndpointHealthStore {
   async function probeAll(): Promise<void> {
     const cfg = get(settings);
     lastProbedKey = probedKey(cfg);
+    primed = true;
     const [ai, stt] = await Promise.all([probeAi(cfg), probeStt(cfg)]);
     const overall = computeOverall(ai, stt);
     state.set({ ai, stt, lastCheckedAt: Date.now(), overall });
@@ -122,7 +138,7 @@ function createEndpointHealthStore(): EndpointHealthStore {
 
     settingsUnsub = settings.subscribe((cfg) => {
       const key = probedKey(cfg);
-      if (key !== lastProbedKey && lastProbedKey !== '') {
+      if (primed && key !== lastProbedKey) {
         void probeAll();
       }
     });
@@ -152,6 +168,7 @@ function createEndpointHealthStore(): EndpointHealthStore {
       document.removeEventListener('visibilitychange', visibilityHandler);
       visibilityHandler = null;
     }
+    primed = false;
     lastProbedKey = '';
   }
 

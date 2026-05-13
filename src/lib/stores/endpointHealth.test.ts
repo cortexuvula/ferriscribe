@@ -107,13 +107,15 @@ describe('endpointHealth store', () => {
       ollama_port: 11434,
       stt_remote_host: '192.168.1.10',
       stt_remote_port: 8080,
-      stt_remote_api_key: undefined,
       stt_mode: 'remote',
     } as any);
 
-    invokeMock
-      .mockResolvedValueOnce('Connected') // AI probe
-      .mockRejectedValueOnce({ kind: 'SttProvider', message: 'timeout' }); // STT probe
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'test_lmstudio_connection') return Promise.resolve('Connected');
+      if (cmd === 'get_api_key') return Promise.resolve(null);
+      if (cmd === 'test_stt_remote_connection') return Promise.reject({ kind: 'SttProvider', message: 'timeout' });
+      return Promise.resolve(undefined);
+    });
 
     await endpointHealth.probeNow();
 
@@ -294,6 +296,67 @@ describe('endpointHealth store', () => {
       port: 11434,
     });
     unsub();
+  });
+
+  it('fetches stt_remote_api_key from keychain and forwards it to the STT probe', async () => {
+    settings.set({
+      ai_provider: 'lmstudio',
+      lmstudio_host: '127.0.0.1',
+      lmstudio_port: 1234,
+      ollama_host: '',
+      ollama_port: 11434,
+      stt_remote_host: '192.168.1.20',
+      stt_remote_port: 8080,
+      stt_mode: 'remote',
+    } as any);
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_api_key') return Promise.resolve('secret-token-abc');
+      if (cmd === 'test_stt_remote_connection') return Promise.resolve('Connected');
+      return Promise.resolve(undefined);
+    });
+
+    await endpointHealth.probeNow();
+
+    expect(invokeMock).toHaveBeenCalledWith('get_api_key', {
+      provider: 'stt_remote_api_key',
+    });
+    expect(invokeMock).toHaveBeenCalledWith('test_stt_remote_connection', {
+      host: '192.168.1.20',
+      port: 8080,
+      apiKey: 'secret-token-abc',
+    });
+    const state = get(endpointHealth);
+    expect(state.stt).toBe('online');
+  });
+
+  it('STT probe continues without auth if keychain fetch fails', async () => {
+    settings.set({
+      ai_provider: 'lmstudio',
+      lmstudio_host: '127.0.0.1',
+      lmstudio_port: 1234,
+      ollama_host: '',
+      ollama_port: 11434,
+      stt_remote_host: '192.168.1.20',
+      stt_remote_port: 8080,
+      stt_mode: 'remote',
+    } as any);
+
+    invokeMock.mockImplementation((cmd: string, _args: any) => {
+      if (cmd === 'get_api_key') return Promise.reject(new Error('keychain locked'));
+      if (cmd === 'test_stt_remote_connection') return Promise.resolve('Connected');
+      return Promise.resolve(undefined);
+    });
+
+    await endpointHealth.probeNow();
+
+    expect(invokeMock).toHaveBeenCalledWith('test_stt_remote_connection', {
+      host: '192.168.1.20',
+      port: 8080,
+      apiKey: undefined,
+    });
+    const state = get(endpointHealth);
+    expect(state.stt).toBe('online'); // probe ran, succeeded without auth
   });
 
   it('clears interval on visibilitychange to hidden; resumes on visible', async () => {
