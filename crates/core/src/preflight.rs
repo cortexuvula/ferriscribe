@@ -61,7 +61,11 @@ pub async fn probe_endpoint(
         .build()
         .map_err(|e| AppError::Config(format!("preflight client build failed: {e}")))?;
 
-    let url = format!("{}{}", base_url.trim_end_matches('/'), probe_path);
+    let url = format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        probe_path.trim_start_matches('/'),
+    );
     let mut req = client.get(&url);
     if let Some(b) = bearer {
         req = req.header("Authorization", format!("Bearer {b}"));
@@ -69,10 +73,10 @@ pub async fn probe_endpoint(
 
     let start = std::time::Instant::now();
     let result = req.send().await;
-    let elapsed_ms = start.elapsed().as_millis();
 
     match result {
         Ok(_response) => {
+            let elapsed_ms = start.elapsed().as_millis();
             // Any HTTP status counts as "reachable" for our purposes.
             debug!(
                 provider = provider_name,
@@ -83,21 +87,36 @@ pub async fn probe_endpoint(
             Ok(())
         }
         Err(e) => {
-            let reason = classify_reqwest_error(&e)
-                .unwrap_or(OfflineReason::ConnectionRefused);
-            warn!(
-                provider = provider_name,
-                url = %url,
-                elapsed_ms,
-                reason = ?reason,
-                "preflight probe failed"
-            );
-            Err(AppError::EndpointOffline {
-                service,
-                endpoint: base_url.to_string(),
-                reason,
-                provider_name: provider_name.to_string(),
-            })
+            let elapsed_ms = start.elapsed().as_millis();
+            match classify_reqwest_error(&e) {
+                Some(reason) => {
+                    warn!(
+                        provider = provider_name,
+                        url = %url,
+                        elapsed_ms,
+                        reason = ?reason,
+                        "preflight probe failed"
+                    );
+                    Err(AppError::EndpointOffline {
+                        service,
+                        endpoint: base_url.to_string(),
+                        reason,
+                        provider_name: provider_name.to_string(),
+                    })
+                }
+                None => {
+                    tracing::error!(
+                        provider = provider_name,
+                        url = %url,
+                        elapsed_ms,
+                        error = %e,
+                        "preflight probe failed with non-connectivity error"
+                    );
+                    Err(AppError::Other(format!(
+                        "Unexpected probe error against {provider_name} at {base_url}: {e}"
+                    )))
+                }
+            }
         }
     }
 }
@@ -264,5 +283,36 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "bearer-protected 200 should be Ok; got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn probe_returns_other_for_non_connectivity_error() {
+        // Pass a malformed URL — reqwest fails at the builder stage with an
+        // error that is neither is_timeout() nor is_connect(), so
+        // classify_reqwest_error returns None and probe_endpoint should
+        // surface this as AppError::Other rather than misleadingly claim
+        // the server is refusing connections.
+        let result = probe_endpoint(
+            ServiceKind::AiProvider,
+            "Ollama",
+            "not://a valid url with spaces",
+            "/api/tags",
+            None,
+        )
+        .await;
+
+        let err = result.expect_err("malformed URL must error");
+        match err {
+            AppError::Other(msg) => {
+                assert!(
+                    msg.contains("Unexpected probe error"),
+                    "message should signal unexpected, not connectivity; got: {msg}"
+                );
+            }
+            AppError::EndpointOffline { .. } => {
+                panic!("non-connectivity error must NOT be reported as EndpointOffline");
+            }
+            other => panic!("expected AppError::Other, got {other:?}"),
+        }
     }
 }
