@@ -82,9 +82,12 @@ function createEndpointHealthStore(): EndpointHealthStore {
         // Keychain unavailable or no key stored — continue without auth.
       }
       try {
-        await invoke('test_ollama_connection', {
+        await invoke('probe_endpoint_reachable', {
+          service: 'AiProvider',
+          providerName: 'Ollama',
           host: cfg.ollama_host,
           port: cfg.ollama_port,
+          probePath: '/api/tags',
           apiKey,
         });
         return 'online';
@@ -104,9 +107,12 @@ function createEndpointHealthStore(): EndpointHealthStore {
         // Keychain unavailable or no key stored — continue without auth.
       }
       try {
-        await invoke('test_lmstudio_connection', {
+        await invoke('probe_endpoint_reachable', {
+          service: 'AiProvider',
+          providerName: 'LM Studio',
           host: cfg.lmstudio_host,
           port: cfg.lmstudio_port,
+          probePath: '/v1/models',
           apiKey,
         });
         return 'online';
@@ -134,9 +140,12 @@ function createEndpointHealthStore(): EndpointHealthStore {
     }
 
     try {
-      await invoke('test_stt_remote_connection', {
+      await invoke('probe_endpoint_reachable', {
+        service: 'RemoteStt',
+        providerName: 'Whisper STT',
         host: cfg.stt_remote_host,
         port: cfg.stt_remote_port,
+        probePath: '/v1/models',
         apiKey,
       });
       return 'online';

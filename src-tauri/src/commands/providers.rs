@@ -2,9 +2,88 @@ use std::time::Duration;
 
 use tracing::info;
 
-use medical_core::error::{AppError, AppResult};
+use medical_core::error::{AppError, AppResult, OfflineReason, ServiceKind};
+use medical_core::preflight::classify_reqwest_error;
 
 use crate::state::{self, AppState};
+
+/// Inner reachability check — exposed as a pure async fn so unit tests can
+/// call it without constructing `tauri::State`. The Tauri command is a thin
+/// wrapper around this.
+///
+/// Returns Ok(()) for any HTTP response *except* 401/403 — auth failures
+/// surface as EndpointOffline so the polling pill reflects them. Network
+/// errors (connect/timeout/DNS/TLS) flow through classify_reqwest_error.
+async fn probe_endpoint_reachable_inner(
+    service: ServiceKind,
+    provider_name: String,
+    host: String,
+    port: u16,
+    probe_path: String,
+    api_key: Option<String>,
+) -> AppResult<()> {
+    let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
+    let base_url = format!("http://{}:{}", effective_host, port);
+    let url = format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        probe_path.trim_start_matches('/'),
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| AppError::Config(format!("reachability client build: {e}")))?;
+
+    let mut req = client.get(&url);
+    if let Some(key) = api_key.as_deref().filter(|s| !s.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+
+    let response = req.send().await.map_err(|e| {
+        let reason = classify_reqwest_error(&e).unwrap_or(OfflineReason::ConnectionRefused);
+        AppError::EndpointOffline {
+            service,
+            endpoint: base_url.clone(),
+            reason,
+            provider_name: provider_name.clone(),
+        }
+    })?;
+
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED
+        || response.status() == reqwest::StatusCode::FORBIDDEN
+    {
+        return Err(AppError::EndpointOffline {
+            service,
+            endpoint: base_url,
+            reason: OfflineReason::ConnectionRefused,
+            provider_name,
+        });
+    }
+
+    // Any other HTTP status (200/3xx/404/5xx) = reachable.
+    Ok(())
+}
+
+/// Lenient reachability probe for the background endpointHealth poller.
+/// Returns Ok for any HTTP response except 401/403. Returns
+/// `AppError::EndpointOffline` for network errors and auth failures.
+///
+/// Used by `src/lib/stores/endpointHealth.ts`. NOT used by Settings →
+/// Test Connection buttons (those use the strict `test_*_connection` commands
+/// which probe `/v1/models` and treat 404 as failure — appropriate for
+/// explicit user-triggered "can list models?" checks).
+#[tauri::command]
+pub async fn probe_endpoint_reachable(
+    service: ServiceKind,
+    provider_name: String,
+    host: String,
+    port: u16,
+    probe_path: String,
+    api_key: Option<String>,
+) -> AppResult<()> {
+    probe_endpoint_reachable_inner(service, provider_name, host, port, probe_path, api_key).await
+}
 
 /// Rebuild AI + STT provider registries (e.g. after LM Studio host/port changes).
 ///
@@ -308,4 +387,141 @@ pub async fn test_ollama_connection(
         model_count,
         if model_count == 1 { "" } else { "s" }
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use medical_core::error::AppError;
+
+    use super::probe_endpoint_reachable_inner;
+
+    #[tokio::test]
+    async fn probe_endpoint_reachable_returns_ok_on_any_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+
+        let parsed: reqwest::Url = server.uri().parse().unwrap();
+        let host = parsed.host_str().unwrap().to_string();
+        let port = parsed.port().unwrap();
+
+        let result = probe_endpoint_reachable_inner(
+            medical_core::error::ServiceKind::RemoteStt,
+            "Whisper STT".to_string(),
+            host,
+            port,
+            "/v1/models".to_string(),
+            None,
+        ).await;
+
+        assert!(result.is_ok(), "200 should be Ok; got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn probe_endpoint_reachable_returns_ok_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("File Not Found"))
+            .mount(&server)
+            .await;
+
+        let parsed: reqwest::Url = server.uri().parse().unwrap();
+        let host = parsed.host_str().unwrap().to_string();
+        let port = parsed.port().unwrap();
+
+        let result = probe_endpoint_reachable_inner(
+            medical_core::error::ServiceKind::RemoteStt,
+            "Whisper STT".to_string(),
+            host,
+            port,
+            "/v1/models".to_string(),
+            None,
+        ).await;
+
+        assert!(
+            result.is_ok(),
+            "404 means 'server alive, route absent' — must be Ok for reachability; got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_endpoint_reachable_returns_endpoint_offline_on_401() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let parsed: reqwest::Url = server.uri().parse().unwrap();
+        let host = parsed.host_str().unwrap().to_string();
+        let port = parsed.port().unwrap();
+
+        let result = probe_endpoint_reachable_inner(
+            medical_core::error::ServiceKind::RemoteStt,
+            "Whisper STT".to_string(),
+            host,
+            port,
+            "/v1/models".to_string(),
+            None,
+        ).await;
+
+        let err = result.expect_err("401 must surface as Err so the pill reflects auth issues");
+        assert!(
+            matches!(err, AppError::EndpointOffline { .. }),
+            "auth failure must produce EndpointOffline; got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_endpoint_reachable_forwards_bearer_when_provided() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(wiremock::matchers::header("authorization", "Bearer secret-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+
+        let parsed: reqwest::Url = server.uri().parse().unwrap();
+        let host = parsed.host_str().unwrap().to_string();
+        let port = parsed.port().unwrap();
+
+        let result = probe_endpoint_reachable_inner(
+            medical_core::error::ServiceKind::RemoteStt,
+            "Whisper STT".to_string(),
+            host,
+            port,
+            "/v1/models".to_string(),
+            Some("secret-token".to_string()),
+        ).await;
+
+        assert!(result.is_ok(), "authenticated 200 should be Ok; got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn probe_endpoint_reachable_returns_endpoint_offline_on_connect_refused() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let result = probe_endpoint_reachable_inner(
+            medical_core::error::ServiceKind::RemoteStt,
+            "Whisper STT".to_string(),
+            "127.0.0.1".to_string(),
+            port,
+            "/v1/models".to_string(),
+            None,
+        ).await;
+
+        let err = result.expect_err("connect refused must error");
+        assert!(matches!(err, AppError::EndpointOffline { .. }));
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rust-medical-assistant"
-version = "0.10.60"
+version = "0.10.61"
 description = "FerriScribe"
 authors = []
 edition = "2024"
@@ -58,3 +58,4 @@ urlencoding = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 filetime = "0.2"
+wiremock = { workspace = true }
