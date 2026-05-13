@@ -851,16 +851,21 @@ mod offline_tests {
         match err {
             AppError::EndpointOffline {
                 service,
+                endpoint,
                 reason,
                 provider_name,
-                ..
             } => {
                 assert_eq!(service, ServiceKind::RemoteStt);
-                assert!(
-                    matches!(reason, OfflineReason::ConnectionRefused | OfflineReason::Timeout),
-                    "expected ConnectionRefused or Timeout, got {reason:?}"
+                assert_eq!(
+                    reason,
+                    OfflineReason::ConnectionRefused,
+                    "refused loopback port must yield ConnectionRefused, not {reason:?}"
                 );
                 assert_eq!(provider_name, "Whisper STT");
+                assert!(
+                    endpoint.contains("127.0.0.1"),
+                    "endpoint should carry the target host; got {endpoint:?}"
+                );
             }
             other => panic!("expected EndpointOffline, got {other:?}"),
         }
