@@ -11,6 +11,7 @@ use reqwest::Client;
 use tracing::{debug, warn};
 
 use crate::error::{AppError, OfflineReason, ServiceKind};
+use crate::types::settings::AppConfig;
 
 /// Cap on a single probe's wall time. Chosen to be long enough for a
 /// healthy LAN round-trip plus TLS handshake (~200ms typical) but short
@@ -121,8 +122,6 @@ pub async fn probe_endpoint(
     }
 }
 
-use crate::types::settings::AppConfig;
-
 /// Which Tauri command is about to run. Drives which endpoint(s) are
 /// probed by `preflight_for_command`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,7 +172,7 @@ pub async fn preflight_for_command(
         return Ok(());
     }
 
-    let results = futures::future::join_all(futs).await;
+    let results = futures_util::future::join_all(futs).await;
     for r in results {
         r?;
     }
@@ -245,10 +244,12 @@ fn is_loopback_host(host: &str) -> bool {
         return true;
     }
     let h = host.trim().to_ascii_lowercase();
-    if h == "localhost" || h == "::1" {
+    let h_stripped = h.trim_matches(|c| c == '[' || c == ']');
+    if h_stripped == "localhost" || h_stripped == "::1" {
         return true;
     }
-    h.parse::<std::net::IpAddr>()
+    h_stripped
+        .parse::<std::net::IpAddr>()
         .map(|ip| ip.is_loopback())
         .unwrap_or(false)
 }
@@ -305,16 +306,10 @@ mod tests {
 
     #[tokio::test]
     async fn preflight_returns_endpoint_offline_for_unreachable_remote_ollama() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        // 192.0.2.1 is TEST-NET-1 (RFC 5737) — guaranteed unrouteable, so the
-        // probe will either be refused or time out. Either way, EndpointOffline.
         let mut cfg = AppConfig::default();
         cfg.ai_provider = "ollama".into();
-        cfg.ollama_host = "192.0.2.1".into();
-        cfg.ollama_port = port;
+        cfg.ollama_host = "192.0.2.1".into(); // RFC 5737 TEST-NET-1 — guaranteed unroutable
+        cfg.ollama_port = 11434;
 
         let result = preflight_for_command(CommandKind::GenerateSoap, &cfg).await;
         let err = result.expect_err("unrouteable host must fail preflight");
@@ -344,6 +339,9 @@ mod tests {
         assert!(!is_loopback_host("192.168.1.10"));
         assert!(!is_loopback_host("ollama.local"));
         assert!(!is_loopback_host("10.0.0.1"));
+        assert!(is_loopback_host("[::1]"), "bracketed IPv6 loopback must be skipped");
+        assert!(is_loopback_host("[127.0.0.1]"), "bracketed IPv4 loopback also handled");
+        assert!(!is_loopback_host("[::ffff:192.168.1.10]"), "bracketed non-loopback IPv6 stays a probe");
     }
 
     #[tokio::test]

@@ -11,7 +11,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }
 futures-core = { workspace = true }
-futures = "0.3"
+futures-util = { workspace = true }
 tokio = { workspace = true, features = ["sync", "net", "time"] }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }
