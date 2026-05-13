@@ -26,7 +26,7 @@
     }
   });
 
-  export function reasonSentence(payload: EndpointOfflinePayload): string {
+  function reasonSentence(payload: EndpointOfflinePayload): string {
     const { reason, provider_name, endpoint } = payload;
     switch (reason as OfflineReason) {
       case 'ConnectionRefused':
@@ -88,7 +88,6 @@
     class="modal-backdrop"
     role="presentation"
     onclick={onBackdrop}
-    onkeydown={onKeydown}
   >
     <div
       bind:this={dialogEl}
@@ -98,6 +97,7 @@
       aria-describedby="endpoint-offline-body"
       class="modal"
       tabindex="-1"
+      onkeydown={onKeydown}
     >
       <h2 id="endpoint-offline-title">Office server isn't responding</h2>
       <div id="endpoint-offline-body">
