@@ -70,10 +70,22 @@ function createEndpointHealthStore(): EndpointHealthStore {
     const provider = cfg.ai_provider;
     if (provider === 'ollama') {
       if (isLoopbackHost(cfg.ollama_host)) return 'skipped';
+      // AI api_key is keychain-stored, not a settings field. Fetch it at probe
+      // time; treat fetch failure as "no key" so the probe still runs.
+      let apiKey: string | undefined = undefined;
+      try {
+        const key = await invoke<string | null>('get_api_key', {
+          provider: 'ollama_api_key',
+        });
+        if (key) apiKey = key;
+      } catch {
+        // Keychain unavailable or no key stored — continue without auth.
+      }
       try {
         await invoke('test_ollama_connection', {
           host: cfg.ollama_host,
           port: cfg.ollama_port,
+          apiKey,
         });
         return 'online';
       } catch {
@@ -82,10 +94,20 @@ function createEndpointHealthStore(): EndpointHealthStore {
     }
     if (provider === 'lmstudio') {
       if (isLoopbackHost(cfg.lmstudio_host)) return 'skipped';
+      let apiKey: string | undefined = undefined;
+      try {
+        const key = await invoke<string | null>('get_api_key', {
+          provider: 'lmstudio_api_key',
+        });
+        if (key) apiKey = key;
+      } catch {
+        // Keychain unavailable or no key stored — continue without auth.
+      }
       try {
         await invoke('test_lmstudio_connection', {
           host: cfg.lmstudio_host,
           port: cfg.lmstudio_port,
+          apiKey,
         });
         return 'online';
       } catch {

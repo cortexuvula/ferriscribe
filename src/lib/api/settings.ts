@@ -9,8 +9,12 @@ export async function saveSettings(config: AppConfig): Promise<void> {
   return invoke('save_settings', { config });
 }
 
-export async function testLmStudioConnection(host: string, port: number): Promise<string> {
-  return invoke('test_lmstudio_connection', { host, port });
+export async function testLmStudioConnection(
+  host: string,
+  port: number,
+  apiKey?: string | null,
+): Promise<string> {
+  return invoke('test_lmstudio_connection', { host, port, apiKey: apiKey ?? null });
 }
 
 export async function testSttRemoteConnection(
@@ -21,8 +25,12 @@ export async function testSttRemoteConnection(
   return invoke('test_stt_remote_connection', { host, port, apiKey });
 }
 
-export async function testOllamaConnection(host: string, port: number): Promise<string> {
-  return invoke('test_ollama_connection', { host, port });
+export async function testOllamaConnection(
+  host: string,
+  port: number,
+  apiKey?: string | null,
+): Promise<string> {
+  return invoke('test_ollama_connection', { host, port, apiKey: apiKey ?? null });
 }
 
 export async function setApiKey(provider: string, key: string): Promise<void> {

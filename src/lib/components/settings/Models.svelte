@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { settings } from '../../stores/settings';
   import { listModels, setActiveProvider, reinitProviders, type ModelInfo } from '../../api/chat';
-  import { testLmStudioConnection, testOllamaConnection } from '../../api/settings';
+  import { testLmStudioConnection, testOllamaConnection, getApiKey } from '../../api/settings';
   import { formatError } from '../../types/errors';
 
   let availableModels = $state<ModelInfo[]>([]);
@@ -89,7 +89,13 @@
     try {
       const host = $settings.lmstudio_host || 'localhost';
       const port = $settings.lmstudio_port || 1234;
-      const msg = await testLmStudioConnection(host, port);
+      let apiKey: string | null = null;
+      try {
+        apiKey = await getApiKey('lmstudio_api_key');
+      } catch {
+        // Keychain unavailable — try without auth.
+      }
+      const msg = await testLmStudioConnection(host, port, apiKey);
       lmstudioTestStatus = 'success';
       lmstudioTestMessage = msg;
     } catch (err: any) {
@@ -271,9 +277,16 @@
         ollamaTestStatus = 'testing';
         ollamaTestMessage = '';
         try {
+          let apiKey: string | null = null;
+          try {
+            apiKey = await getApiKey('ollama_api_key');
+          } catch {
+            // Keychain unavailable — try without auth.
+          }
           const msg = await testOllamaConnection(
             $settings.ollama_host || 'localhost',
             $settings.ollama_port || 11434,
+            apiKey,
           );
           ollamaTestStatus = 'success';
           ollamaTestMessage = msg;

@@ -58,13 +58,17 @@ describe('endpointHealth store', () => {
       stt_mode: 'local',
     } as any);
 
+    // get_api_key (lmstudio_api_key) fires first, then the probe.
+    invokeMock.mockResolvedValueOnce(null); // get_api_key → no key
     invokeMock.mockResolvedValueOnce('Connected — 3 models available');
 
     await endpointHealth.probeNow();
 
+    expect(invokeMock).toHaveBeenCalledWith('get_api_key', { provider: 'lmstudio_api_key' });
     expect(invokeMock).toHaveBeenCalledWith('test_lmstudio_connection', {
       host: '192.168.1.10',
       port: 1234,
+      apiKey: undefined,
     });
     const state = get(endpointHealth);
     expect(state.ai).toBe('online');
@@ -86,6 +90,8 @@ describe('endpointHealth store', () => {
       stt_mode: 'local',
     } as any);
 
+    // get_api_key (ollama_api_key) fires first, then the probe rejects.
+    invokeMock.mockResolvedValueOnce(null); // get_api_key → no key
     invokeMock.mockRejectedValueOnce({
       kind: 'AiProvider',
       message: 'Connection refused — is Ollama running at 192.168.1.10:11434?',
@@ -112,7 +118,7 @@ describe('endpointHealth store', () => {
 
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'test_lmstudio_connection') return Promise.resolve('Connected');
-      if (cmd === 'get_api_key') return Promise.resolve(null);
+      if (cmd === 'get_api_key') return Promise.resolve(null); // handles lmstudio_api_key and stt_remote_api_key
       if (cmd === 'test_stt_remote_connection') return Promise.reject({ kind: 'SttProvider', message: 'timeout' });
       return Promise.resolve(undefined);
     });
@@ -160,11 +166,13 @@ describe('endpointHealth store', () => {
       stt_mode: 'remote',
     } as any);
 
-    invokeMock.mockResolvedValueOnce('Connected');
+    // get_api_key (lmstudio_api_key) then test_lmstudio_connection. STT skipped (empty host).
+    invokeMock.mockResolvedValueOnce(null); // get_api_key
+    invokeMock.mockResolvedValueOnce('Connected'); // test_lmstudio_connection
 
     await endpointHealth.probeNow();
 
-    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
     expect(invokeMock).toHaveBeenCalledWith('test_lmstudio_connection', expect.anything());
     const state = get(endpointHealth);
     expect(state.stt).toBe('skipped');
@@ -226,15 +234,15 @@ describe('endpointHealth store', () => {
     invokeMock.mockResolvedValue('Connected');
 
     const unsub = endpointHealth.subscribe(() => {});
-    // First probe fires immediately on subscribe.
+    // First probe fires immediately on subscribe: get_api_key + test_lmstudio_connection = 2 calls.
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    expect(invokeMock).toHaveBeenCalledTimes(1);
-
-    // Second probe after 10 s tick.
-    await vi.advanceTimersByTimeAsync(10_000);
     expect(invokeMock).toHaveBeenCalledTimes(2);
+
+    // Second probe after 10 s tick: 2 more calls.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(invokeMock).toHaveBeenCalledTimes(4);
 
     unsub();
   });
@@ -276,7 +284,10 @@ describe('endpointHealth store', () => {
       stt_remote_api_key: undefined,
       stt_mode: 'local',
     } as any);
-    invokeMock.mockResolvedValue('Connected');
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_api_key') return Promise.resolve(null);
+      return Promise.resolve('Connected');
+    });
 
     const unsub = endpointHealth.subscribe(() => {});
     await Promise.resolve();
@@ -294,6 +305,7 @@ describe('endpointHealth store', () => {
     expect(invokeMock).toHaveBeenLastCalledWith('test_ollama_connection', {
       host: '192.168.1.99',
       port: 11434,
+      apiKey: undefined,
     });
     unsub();
   });
@@ -357,6 +369,95 @@ describe('endpointHealth store', () => {
     });
     const state = get(endpointHealth);
     expect(state.stt).toBe('online'); // probe ran, succeeded without auth
+  });
+
+  it('fetches ollama_api_key from keychain and forwards it to the Ollama probe', async () => {
+    settings.set({
+      ai_provider: 'ollama',
+      lmstudio_host: '',
+      lmstudio_port: 1234,
+      ollama_host: '192.168.1.10',
+      ollama_port: 11434,
+      stt_remote_host: '',
+      stt_remote_port: 8080,
+      stt_mode: 'local',
+    } as any);
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_api_key') return Promise.resolve('bearer-token-xyz');
+      if (cmd === 'test_ollama_connection') return Promise.resolve('Connected — 2 models installed');
+      return Promise.resolve(undefined);
+    });
+
+    await endpointHealth.probeNow();
+
+    expect(invokeMock).toHaveBeenCalledWith('get_api_key', { provider: 'ollama_api_key' });
+    expect(invokeMock).toHaveBeenCalledWith('test_ollama_connection', {
+      host: '192.168.1.10',
+      port: 11434,
+      apiKey: 'bearer-token-xyz',
+    });
+    const state = get(endpointHealth);
+    expect(state.ai).toBe('online');
+  });
+
+  it('fetches lmstudio_api_key from keychain and forwards it to the LM Studio probe', async () => {
+    settings.set({
+      ai_provider: 'lmstudio',
+      lmstudio_host: '192.168.1.10',
+      lmstudio_port: 1234,
+      ollama_host: '',
+      ollama_port: 11434,
+      stt_remote_host: '',
+      stt_remote_port: 8080,
+      stt_mode: 'local',
+    } as any);
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_api_key') return Promise.resolve('lm-bearer-token');
+      if (cmd === 'test_lmstudio_connection') return Promise.resolve('Connected — 1 model available');
+      return Promise.resolve(undefined);
+    });
+
+    await endpointHealth.probeNow();
+
+    expect(invokeMock).toHaveBeenCalledWith('get_api_key', { provider: 'lmstudio_api_key' });
+    expect(invokeMock).toHaveBeenCalledWith('test_lmstudio_connection', {
+      host: '192.168.1.10',
+      port: 1234,
+      apiKey: 'lm-bearer-token',
+    });
+    const state = get(endpointHealth);
+    expect(state.ai).toBe('online');
+  });
+
+  it('AI probe continues without auth if keychain fetch fails', async () => {
+    settings.set({
+      ai_provider: 'ollama',
+      lmstudio_host: '',
+      lmstudio_port: 1234,
+      ollama_host: '192.168.1.10',
+      ollama_port: 11434,
+      stt_remote_host: '',
+      stt_remote_port: 8080,
+      stt_mode: 'local',
+    } as any);
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_api_key') return Promise.reject(new Error('keychain locked'));
+      if (cmd === 'test_ollama_connection') return Promise.resolve('Connected');
+      return Promise.resolve(undefined);
+    });
+
+    await endpointHealth.probeNow();
+
+    expect(invokeMock).toHaveBeenCalledWith('test_ollama_connection', {
+      host: '192.168.1.10',
+      port: 11434,
+      apiKey: undefined,
+    });
+    const state = get(endpointHealth);
+    expect(state.ai).toBe('online'); // probe ran, succeeded without auth
   });
 
   it('clears interval on visibilitychange to hidden; resumes on visible', async () => {
