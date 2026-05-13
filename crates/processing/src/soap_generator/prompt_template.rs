@@ -29,15 +29,15 @@ fn icd_code_parts(version: &str) -> (&'static str, &'static str) {
     match version {
         "ICD-9" => (
             "ICD-9 code",
-            "ICD-9 Code: [specific code reflecting the visit's primary issue; append (suggested) if the physician did not explicitly name the diagnosis. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0 and mark it (suggested).]",
+            "ICD-9 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0.]",
         ),
         "both" => (
             "both ICD-9 and ICD-10 codes",
-            "ICD-9 Code: [specific code reflecting the visit's primary issue; append (suggested) if the physician did not explicitly name the diagnosis. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0 and mark it (suggested).]\nICD-10 Code: [specific code reflecting the visit's primary issue; append (suggested) if the physician did not explicitly name the diagnosis. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00 and mark it (suggested).]",
+            "ICD-9 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0.]\nICD-10 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00.]",
         ),
         _ => (
             "ICD-10 code",
-            "ICD-10 Code: [specific code reflecting the visit's primary issue; append (suggested) if the physician did not explicitly name the diagnosis. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00 and mark it (suggested).]",
+            "ICD-10 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00.]",
         ),
     }
 }
@@ -99,7 +99,7 @@ FORBIDDEN INFERENCES — DO NOT include any of these unless the transcript expli
 - Provider names for referrals. Name the specialty only (e.g., "Referral to cardiology"). Never invent a specific provider's name; if the physician did not name one, do not include one.
 - Follow-up intervals. If no timeframe was stated, write "Follow-up timing not specified" — do not default to "3 months" or any other interval.
 - Red-flag warnings ("seek urgent care for X"). Only include warnings the physician actually voiced. Do not add stock warnings such as "chest pain or shortness of breath."
-- ICD codes and differential diagnoses are the only two sections where clinical inference is permitted. Every inferred item must be marked with the literal text "(suggested)". Items the physician explicitly named in the transcript are rendered plain (no marker). All other categories above remain strict — do not extend this exception to ANY of them: demographics, past medical conditions, medications, dosages, family history, social history, visit modality, general appearance, referral provider names, follow-up intervals, or red-flag warnings.
+- ICD codes and differential diagnoses are the only two sections where clinical inference is permitted. Render every item as plain text — do NOT append any marker, suffix, qualifier, or annotation such as "(suggested)", "(possible)", "(provisional)", or similar. All other categories above remain strict — do not extend this exception to ANY of them: demographics, past medical conditions, medications, dosages, family history, social history, visit modality, general appearance, referral provider names, follow-up intervals, or red-flag warnings.
 
 EXAMPLE 1 — disciplined extraction from a sparse injury visit:
 
@@ -112,7 +112,7 @@ Doctor: Sounds like a muscle strain from lifting. I'll order an X-ray to be safe
 
 Correct extraction (excerpt — full output still requires every standard section):
 
-ICD-9 Code: 847.2 — Sprain of lumbar (suggested)
+ICD-9 Code: 847.2 — Sprain of lumbar
 
 Subjective:
 - Chief complaint: right-sided back pain for three days
@@ -136,9 +136,9 @@ Assessment:
 - The patient describes right-sided lumbar pain for three days following lifting; no neurological deficit. The physician characterized this as a muscle strain from lifting and ordered imaging to rule out structural injury.
 
 Differential Diagnosis:
-- Lumbar muscle strain (suggested)
-- Lumbar facet sprain (suggested)
-- Lumbar disc herniation (suggested)
+- Lumbar muscle strain
+- Lumbar facet sprain
+- Lumbar disc herniation
 
 Plan:
 - X-ray of the back
@@ -164,7 +164,7 @@ Patient: Thanks, have a good day."
 
 Correct extraction:
 
-ICD-9 Code: 266.2 — Other B-complex deficiencies (suggested)
+ICD-9 Code: 266.2 — Other B-complex deficiencies
 
 Subjective:
 - Chief complaint: Follow-up to review recent lab results
@@ -197,9 +197,9 @@ Assessment:
 - The patient's recent labs show an elevated Lipoprotein(a), interpreted by the physician as indicating higher cardiovascular risk, and a low Vitamin B12 below the stated cutoff. Other labs are within normal ranges, including A1C with no evidence of diabetes.
 
 Differential Diagnosis:
-- Vitamin B12 deficiency (suggested)
-- Lipoprotein(a) elevation contributing to atherosclerotic cardiovascular risk (suggested)
-- Mixed hyperlipidemia (suggested)
+- Vitamin B12 deficiency
+- Lipoprotein(a) elevation contributing to atherosclerotic cardiovascular risk
+- Mixed hyperlipidemia
 
 Plan:
 - Vitamin B12 supplement or vitamin B complex (dose not specified)
@@ -246,10 +246,10 @@ Objective:
 - Imaging: [from transcript; otherwise "No imaging discussed"]
 
 Assessment:
-- [ONE cohesive paragraph using ONLY findings and reasoning that appear in the transcript. Inline mention of {icd_instruction} is permitted but not required (the canonical location is the ICD line above the Subjective block); if you inline a code, mark it (suggested) when inferred. Do NOT restate past medical history, medications, family history, or social history in the Assessment unless the physician explicitly tied them to today's reasoning. If the visit is purely a lab review with no clinical examination, the Assessment should describe the lab findings and the physician's stated interpretation — nothing more. Not broken into sub-items.]
+- [ONE cohesive paragraph using ONLY findings and reasoning that appear in the transcript. Inline mention of {icd_instruction} is permitted but not required (the canonical location is the ICD line above the Subjective block); if you inline a code, render it as plain text with no marker or qualifier. Do NOT restate past medical history, medications, family history, or social history in the Assessment unless the physician explicitly tied them to today's reasoning. If the visit is purely a lab review with no clinical examination, the Assessment should describe the lab findings and the physician's stated interpretation — nothing more. Not broken into sub-items.]
 
 Differential Diagnosis:
-- [List at least three diagnoses, ranked by clinical likelihood given the chief complaint and findings. Each item: plain if the physician explicitly named it; suffixed with " (suggested)" if you inferred it from findings. On a paperwork-only / wellness / lab-only visit with no chief complaint, list three plausible items consistent with the encounter type or the labs reviewed, all marked (suggested).]
+- [List at least three diagnoses, ranked by clinical likelihood given the chief complaint and findings. Render every item as plain text — do NOT append "(suggested)", "(possible)", "(provisional)", or any other marker, qualifier, or annotation, regardless of whether the item was physician-stated or model-inferred. On a paperwork-only / wellness / lab-only visit with no chief complaint, list three plausible items consistent with the encounter type or the labs reviewed, still as plain text.]
 
 Plan:
 - [Each intervention as a separate dash line — ONLY interventions discussed by the physician]
@@ -278,10 +278,10 @@ SELF-CHECK BEFORE OUTPUT — for every line you produced, locate the transcript 
 4. Referral check: any specific provider name must have a transcript quote. If only the specialty was discussed, name the specialty only. If no referral was discussed, do not include a referral line.
 5. Follow-up interval check: any duration ("in 3 months", "in 2 weeks") must have a transcript quote. If absent, write "Follow-up timing not specified."
 6. Red-flag check: any "seek urgent care for X" warning must have a transcript quote. If absent, remove the line.
-7. ICD code check: every ICD code is either supported by a transcript-named diagnosis (no marker) or inferred from findings (marked "(suggested)"). Never output a bare code without one of these. On a paperwork-only / wellness / lab-only visit, use an encounter-type code (e.g. V70.0 / Z00.00) marked (suggested) instead of leaving the field blank.
+7. ICD code check: every ICD code is supported by a transcript-named diagnosis or inferred from findings, and is rendered as plain text with no marker or qualifier. On a paperwork-only / wellness / lab-only visit, use an encounter-type code (e.g. V70.0 / Z00.00) instead of leaving the field blank. Never append "(suggested)" or any similar annotation to the code.
 8. Visit modality check: only call the visit "telehealth" or "in-person" if explicitly stated.
 9. Assessment check: does the Assessment paragraph mention PMH, medications, family history, or social history that the physician did not tie to today's reasoning? If so, remove those mentions.
-10. Differential Diagnosis count + marker check: the Differential Diagnosis section contains at least three items. Each item is either physician-stated (plain) or marked (suggested). If fewer than three are stateable from the transcript, fill the remaining slots with (suggested) items consistent with the chief complaint or findings.
+10. Differential Diagnosis count check: the Differential Diagnosis section contains at least three items, all rendered as plain text with no marker or qualifier suffix. If fewer than three are stateable from the transcript, fill the remaining slots with plausible items consistent with the chief complaint or findings — still as plain text, never marked "(suggested)".
 
 Vital signs, exam findings, medication dosages, follow-up timing, and red-flag warnings are the most common fabrications. If a number, dose, or interval was not stated in the transcript, do not invent one. Clinical reasoning in the Assessment must reflect what was discussed during the visit. A short accurate note beats a long partially-fabricated one. Length is not a virtue."#
 }
@@ -386,13 +386,16 @@ mod tests {
         };
         let prompt = build_soap_prompt(&config);
         assert!(prompt.contains("ICD-9 Code: [specific code"));
-        assert!(prompt.contains("(suggested)"));
         assert!(prompt.contains("V70.0"));
         assert!(!prompt.contains("{icd_label}"));
         assert!(!prompt.contains("{icd_instruction}"));
         assert!(
             !prompt.contains("Not applicable - no diagnosis clearly discussed"),
             "old strict-mode 'Not applicable' string must not appear anywhere"
+        );
+        assert!(
+            !icd_resolved_instruction(&prompt).contains("(suggested)"),
+            "resolved ICD instruction must no longer mention (suggested)"
         );
     }
 
@@ -404,11 +407,14 @@ mod tests {
         };
         let prompt = build_soap_prompt(&config);
         assert!(prompt.contains("ICD-10 Code: [specific code"));
-        assert!(prompt.contains("(suggested)"));
         assert!(prompt.contains("Z00.00"));
         assert!(
             !prompt.contains("Not applicable - no diagnosis clearly discussed"),
             "old strict-mode 'Not applicable' string must not appear anywhere"
+        );
+        assert!(
+            !icd_resolved_instruction(&prompt).contains("(suggested)"),
+            "resolved ICD instruction must no longer mention (suggested)"
         );
     }
 
@@ -421,13 +427,30 @@ mod tests {
         let prompt = build_soap_prompt(&config);
         assert!(prompt.contains("ICD-9 Code: [specific code"));
         assert!(prompt.contains("ICD-10 Code: [specific code"));
-        assert!(prompt.contains("(suggested)"));
         assert!(prompt.contains("V70.0"));
         assert!(prompt.contains("Z00.00"));
         assert!(
             !prompt.contains("Not applicable - no diagnosis clearly discussed"),
             "old strict-mode 'Not applicable' string must not appear anywhere"
         );
+        assert!(
+            !icd_resolved_instruction(&prompt).contains("(suggested)"),
+            "resolved ICD instruction must no longer mention (suggested)"
+        );
+    }
+
+    /// Slice the resolved ICD instruction block from the OUTPUT FORMAT section.
+    /// Used by ICD-resolution tests to scope assertions to the line(s) that
+    /// replaced the `{icd_label}` placeholder.
+    fn icd_resolved_instruction(prompt: &str) -> &str {
+        let start = prompt
+            .find("OUTPUT FORMAT")
+            .expect("OUTPUT FORMAT section missing");
+        let block = &prompt[start..];
+        let icd_idx = block.find("ICD-").expect("resolved ICD line missing");
+        let tail = &block[icd_idx..];
+        let end = tail.find("\n\n").unwrap_or(tail.len());
+        &tail[..end]
     }
 
     #[test]
@@ -454,11 +477,12 @@ mod tests {
             !prompt.contains("ICD codes when no diagnosis was clearly discussed"),
             "old strict ICD bullet must be removed from FORBIDDEN INFERENCES"
         );
-        // The NEW carve-out bullet explicitly names ICD + DDx as the only
-        // inference-permitted sections and reinforces the (suggested) marker.
+        // The carve-out bullet explicitly names ICD + DDx as the only
+        // inference-permitted sections and forbids the "(suggested)" marker
+        // (and similar qualifiers) so the model emits plain text.
         assert!(prompt.contains("ICD codes and differential diagnoses"));
         assert!(prompt.contains("only two sections where clinical inference is permitted"));
-        assert!(prompt.contains("(suggested)"));
+        assert!(prompt.contains("do NOT append any marker"));
     }
 
     #[test]
@@ -470,13 +494,12 @@ mod tests {
         assert!(prompt.contains("EXAMPLE 1"));
         assert!(prompt.contains("EXAMPLE 2"));
         assert!(prompt.contains("lab-review visit"));
-        // Lab-review example must teach the new always-on ICD with (suggested)
+        // Lab-review example must teach the new always-on ICD as plain text
         let lab_idx = prompt
             .find("EXAMPLE 2")
             .expect("EXAMPLE 2 must be present");
         let after_example = &prompt[lab_idx..];
         assert!(after_example.contains("ICD-9 Code: 266.2"));
-        assert!(after_example.contains("(suggested)"));
         // Lab-review example must teach the "dose not specified" pattern
         assert!(after_example.contains("dose not specified"));
         // Lab-review example must show that a thin visit produces
@@ -524,8 +547,8 @@ mod tests {
             .filter(|line| line.trim_start().starts_with("- ") && line.contains("(suggested)"))
             .count();
         assert_eq!(
-            suggested_count, item_count,
-            "EXAMPLE 2 lab-review visit has nothing transcript-named, so every DDx item must carry the (suggested) marker.\nBlock:\n{ddx_block}"
+            suggested_count, 0,
+            "EXAMPLE 2 DDx items must be rendered as plain text — no (suggested) marker.\nBlock:\n{ddx_block}"
         );
     }
 
@@ -566,8 +589,9 @@ mod tests {
         let prompt = build_soap_prompt(&config);
         // Custom template is used, and placeholders are still resolved
         assert!(prompt.starts_with("My custom template with ICD-9 Code: [specific code"));
-        assert!(prompt.contains("(suggested)"));
         assert!(prompt.contains("V70.0"));
+        // ICD instruction no longer carries the (suggested) marker
+        assert!(!prompt.contains("(suggested)"));
     }
 
     #[test]
@@ -670,8 +694,8 @@ mod tests {
     #[test]
     fn default_soap_prompt_requires_at_least_three_differentials() {
         // The OUTPUT FORMAT Differential Diagnosis block must instruct the
-        // model to produce at least three items, with the (suggested) marker
-        // on inferences.
+        // model to produce at least three items, all rendered as plain text
+        // with no "(suggested)" or similar marker.
         let prompt = build_soap_prompt(&SoapPromptConfig::default());
         let format_idx = prompt
             .find("OUTPUT FORMAT")
@@ -686,8 +710,8 @@ mod tests {
             "OUTPUT FORMAT Differential Diagnosis must require at least three items.\nBlock:\n{ddx_block}"
         );
         assert!(
-            ddx_block.contains("(suggested)"),
-            "OUTPUT FORMAT Differential Diagnosis must reference the (suggested) marker convention.\nBlock:\n{ddx_block}"
+            ddx_block.contains("plain text") && ddx_block.contains("do NOT append"),
+            "OUTPUT FORMAT Differential Diagnosis must require plain-text items and forbid markers.\nBlock:\n{ddx_block}"
         );
         assert!(
             !ddx_block.contains("No differential diagnoses were discussed during the visit"),
@@ -727,25 +751,22 @@ mod tests {
     }
 
     #[test]
-    fn default_soap_prompt_explains_suggested_marker_convention() {
-        // The FORBIDDEN INFERENCES carve-out bullet must explicitly state
-        // the (suggested) marker convention so the model cannot rationalise
-        // dropping the marker.
+    fn default_soap_prompt_forbids_suggested_marker_in_carve_out() {
+        // The FORBIDDEN INFERENCES carve-out bullet must explicitly forbid
+        // appending "(suggested)" (or any similar marker) to ICD codes and
+        // DDx items, so the model cannot rationalise emitting one.
         let prompt = build_soap_prompt(&SoapPromptConfig::default());
         let block_idx = prompt
             .find("FORBIDDEN INFERENCES")
             .expect("FORBIDDEN INFERENCES section missing");
         let block = &prompt[block_idx..];
-        // Anchor at the start of the carve-out sentence so the window covers
-        // both "ICD codes and differential diagnoses" and "only two sections…"
-        // which appear in that order within the same bullet.
         let carve_idx = block
             .find("ICD codes and differential diagnoses are the only two sections")
             .expect("FORBIDDEN INFERENCES must contain the ICD/DDx carve-out bullet");
         let carve_window = &block[carve_idx..carve_idx + 600];
         assert!(
-            carve_window.contains("(suggested)"),
-            "carve-out bullet must explicitly cite the (suggested) marker.\nWindow:\n{carve_window}"
+            carve_window.contains("(suggested)") && carve_window.contains("do NOT append"),
+            "carve-out bullet must explicitly forbid the (suggested) marker.\nWindow:\n{carve_window}"
         );
         assert!(
             carve_window.contains("ICD codes and differential diagnoses"),
