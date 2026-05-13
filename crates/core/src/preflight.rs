@@ -121,11 +121,230 @@ pub async fn probe_endpoint(
     }
 }
 
+use crate::types::settings::AppConfig;
+
+/// Which Tauri command is about to run. Drives which endpoint(s) are
+/// probed by `preflight_for_command`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandKind {
+    Transcribe,
+    GenerateSoap,
+    GenerateReferral,
+    GenerateLetter,
+    GenerateSynopsis,
+    Chat,
+}
+
+/// Inspect settings, decide which remote endpoints this command needs,
+/// probe each in parallel with a 3s timeout, return Ok(()) if all are
+/// reachable (or skipped) and the first `EndpointOffline` error otherwise.
+///
+/// Endpoints whose host is loopback (127.0.0.1, ::1, localhost, "")
+/// are skipped entirely — failures from local servers surface via the
+/// real call's error mapper using the same `EndpointOffline` variant.
+pub async fn preflight_for_command(
+    kind: CommandKind,
+    settings: &AppConfig,
+) -> Result<(), AppError> {
+    let mut futs: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>>> = Vec::new();
+
+    let ai_needed = matches!(
+        kind,
+        CommandKind::GenerateSoap
+            | CommandKind::GenerateReferral
+            | CommandKind::GenerateLetter
+            | CommandKind::GenerateSynopsis
+            | CommandKind::Chat,
+    );
+    let stt_needed = matches!(kind, CommandKind::Transcribe);
+
+    if ai_needed {
+        if let Some(probe) = build_ai_probe(settings) {
+            futs.push(Box::pin(probe));
+        }
+    }
+    if stt_needed {
+        if let Some(probe) = build_stt_probe(settings) {
+            futs.push(Box::pin(probe));
+        }
+    }
+
+    if futs.is_empty() {
+        return Ok(());
+    }
+
+    let results = futures::future::join_all(futs).await;
+    for r in results {
+        r?;
+    }
+    Ok(())
+}
+
+/// Returns `Some(future)` if the active AI provider has a non-loopback
+/// host worth probing; `None` if it's local or empty.
+fn build_ai_probe(
+    settings: &AppConfig,
+) -> Option<impl std::future::Future<Output = Result<(), AppError>> + Send + 'static> {
+    let (provider_name, host, port, probe_path) = match settings.ai_provider.as_str() {
+        "ollama" => (
+            "Ollama",
+            settings.ollama_host.clone(),
+            settings.ollama_port,
+            "/api/tags",
+        ),
+        "lmstudio" => (
+            "LM Studio",
+            settings.lmstudio_host.clone(),
+            settings.lmstudio_port,
+            "/v1/models",
+        ),
+        _ => return None, // unknown provider: skip; caller will surface a config error
+    };
+    if is_loopback_host(&host) {
+        return None;
+    }
+    let base_url = format!("http://{host}:{port}");
+    Some(async move {
+        probe_endpoint(
+            ServiceKind::AiProvider,
+            provider_name,
+            &base_url,
+            probe_path,
+            None,
+        )
+        .await
+    })
+}
+
+/// Returns `Some(future)` only if the user has configured a remote STT
+/// endpoint (non-empty host); `None` if STT is fully local (default).
+fn build_stt_probe(
+    settings: &AppConfig,
+) -> Option<impl std::future::Future<Output = Result<(), AppError>> + Send + 'static> {
+    let host = settings.stt_remote_host.clone();
+    if host.is_empty() || is_loopback_host(&host) {
+        return None;
+    }
+    let port = settings.stt_remote_port;
+    let base_url = format!("http://{host}:{port}");
+    Some(async move {
+        probe_endpoint(
+            ServiceKind::RemoteStt,
+            "Whisper STT",
+            &base_url,
+            "/v1/models",
+            None,
+        )
+        .await
+    })
+}
+
+/// True for loopback / empty hosts that should bypass preflight.
+fn is_loopback_host(host: &str) -> bool {
+    if host.is_empty() {
+        return true;
+    }
+    let h = host.trim().to_ascii_lowercase();
+    if h == "localhost" || h == "::1" {
+        return true;
+    }
+    h.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::settings::AppConfig;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn settings_pointing_at(ai_provider: &str, host: &str, port: u16) -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.ai_provider = ai_provider.into();
+        match ai_provider {
+            "ollama" => {
+                cfg.ollama_host = host.into();
+                cfg.ollama_port = port;
+            }
+            "lmstudio" => {
+                cfg.lmstudio_host = host.into();
+                cfg.lmstudio_port = port;
+            }
+            _ => panic!("unknown ai_provider: {ai_provider}"),
+        }
+        cfg
+    }
+
+    #[tokio::test]
+    async fn preflight_skips_loopback_ollama() {
+        // 127.0.0.1:1 is definitely unreachable; if preflight tried to probe it
+        // we'd see EndpointOffline. The skip rule means it never tries, so we
+        // get Ok.
+        let cfg = settings_pointing_at("ollama", "127.0.0.1", 1);
+        let result = preflight_for_command(CommandKind::GenerateSoap, &cfg).await;
+        assert!(result.is_ok(), "loopback should be skipped; got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn preflight_skips_localhost_lmstudio() {
+        let cfg = settings_pointing_at("lmstudio", "localhost", 1);
+        let result = preflight_for_command(CommandKind::GenerateSoap, &cfg).await;
+        assert!(result.is_ok(), "localhost should be skipped; got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn preflight_skips_empty_host_lmstudio() {
+        // The Settings UI uses empty-host to mean "use the default (localhost)".
+        // We treat empty host as loopback for skip purposes.
+        let cfg = settings_pointing_at("lmstudio", "", 1);
+        let result = preflight_for_command(CommandKind::GenerateSoap, &cfg).await;
+        assert!(result.is_ok(), "empty host should be skipped; got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn preflight_returns_endpoint_offline_for_unreachable_remote_ollama() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        // 192.0.2.1 is TEST-NET-1 (RFC 5737) — guaranteed unrouteable, so the
+        // probe will either be refused or time out. Either way, EndpointOffline.
+        let mut cfg = AppConfig::default();
+        cfg.ai_provider = "ollama".into();
+        cfg.ollama_host = "192.0.2.1".into();
+        cfg.ollama_port = port;
+
+        let result = preflight_for_command(CommandKind::GenerateSoap, &cfg).await;
+        let err = result.expect_err("unrouteable host must fail preflight");
+        assert!(matches!(err, AppError::EndpointOffline { .. }));
+    }
+
+    #[tokio::test]
+    async fn preflight_transcribe_skips_when_no_stt_remote_configured() {
+        let mut cfg = AppConfig::default();
+        cfg.stt_remote_host = "".into(); // not configured → use local whisper
+        cfg.stt_remote_port = 8080;
+        let result = preflight_for_command(CommandKind::Transcribe, &cfg).await;
+        assert!(
+            result.is_ok(),
+            "transcribe with no remote STT configured should skip preflight; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn is_loopback_host_recognizes_common_forms() {
+        assert!(is_loopback_host(""));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LOCALHOST"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("127.42.0.1")); // 127/8
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("192.168.1.10"));
+        assert!(!is_loopback_host("ollama.local"));
+        assert!(!is_loopback_host("10.0.0.1"));
+    }
 
     #[tokio::test]
     async fn probe_returns_ok_on_2xx() {
