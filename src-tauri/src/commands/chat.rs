@@ -75,15 +75,6 @@ fn load_app_config(state: &tauri::State<'_, AppState>) -> AppResult<medical_core
     Ok(cfg)
 }
 
-/// Load the AI model and temperature from saved settings.
-///
-/// Returns a hard error if the settings can't be read — a silent fallback to a
-/// hardcoded model (previously `"gpt-4o"`) would route requests to the wrong
-/// provider for any user configured for Anthropic/Ollama/etc.
-fn load_chat_settings(state: &tauri::State<'_, AppState>) -> AppResult<(String, f32)> {
-    let cfg = load_app_config(state)?;
-    Ok((cfg.ai_model, cfg.temperature))
-}
 
 /// Convert a frontend role string to the core `Role` enum.
 fn parse_role(s: &str) -> Role {
@@ -405,7 +396,28 @@ pub async fn chat_with_agent(
 
     let cancel = CancellationToken::new();
 
-    let (model, temperature) = load_chat_settings(&state)?;
+    // Load full config so we can pass it to pre-flight (model/temperature are
+    // also read from here, replacing the separate load_chat_settings call).
+    let cfg = load_app_config(&state)?;
+    let model = cfg.ai_model.clone();
+    let temperature = cfg.temperature;
+
+    // Pre-flight: probe the remote AI endpoint before dispatching to the agent
+    // orchestrator. Skipped for loopback hosts; returns EndpointOffline on
+    // failure so the frontend dialog can fire.
+    medical_core::preflight::preflight_for_command(
+        medical_core::preflight::CommandKind::Chat,
+        &cfg,
+    )
+    .await
+    .map_err(|e| match e {
+        // Preserve EndpointOffline as-is so the frontend dialog can fire.
+        AppError::EndpointOffline { .. } => e,
+        other => AppError::Agent(format!(
+            "Pre-flight check failed: {}",
+            super::unwrap_app_error_message(other)
+        )),
+    })?;
 
     debug!(
         "chat_with_agent: running agent '{}' with model '{}' (temperature={})",
@@ -423,7 +435,14 @@ pub async fn chat_with_agent(
             cancel,
         )
         .await
-        .map_err(|e| AppError::Agent(format!("Agent execution failed: {}", super::unwrap_app_error_message(e))))?;
+        .map_err(|e| match e {
+            // Preserve EndpointOffline as-is so the frontend dialog can fire.
+            AppError::EndpointOffline { .. } => e,
+            other => AppError::Agent(format!(
+                "Agent execution failed: {}",
+                super::unwrap_app_error_message(other)
+            )),
+        })?;
 
     Ok(serde_json::to_value(&response)?)
 }
@@ -586,6 +605,63 @@ mod preflight_tests {
             } => {
                 assert_eq!(service, ServiceKind::AiProvider);
                 assert_eq!(provider_name, "Ollama");
+                assert!(
+                    matches!(
+                        reason,
+                        OfflineReason::ConnectionRefused | OfflineReason::Timeout
+                    ),
+                    "expected ConnectionRefused or Timeout, got {reason:?}"
+                );
+            }
+            other => panic!("expected EndpointOffline, got {other:?}"),
+        }
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "should have short-circuited at ~3s; took {elapsed:?}"
+        );
+    }
+
+    /// Verify that `chat_with_agent` short-circuits with `EndpointOffline` when
+    /// the AI provider is unreachable — confirming the pre-flight gate added in
+    /// the Fix 2 compliance review.
+    #[tokio::test]
+    async fn chat_with_agent_returns_endpoint_offline_when_ai_unreachable() {
+        // 192.0.2.1 is RFC 5737 TEST-NET-1 — guaranteed unrouteable.
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "192.0.2.1".to_string();
+        config.ollama_port = 11434;
+        config.ai_model = "llama3".to_string();
+
+        let state = build_chat_test_state(config).await;
+
+        // We call `preflight_for_command` with the same config that
+        // `chat_with_agent` now loads, because `chat_with_agent` itself requires
+        // a `tauri::State` wrapper that can't be constructed outside the runtime.
+        let loaded_cfg = {
+            let conn = state.db.conn().expect("conn");
+            let mut c = medical_db::settings::SettingsRepo::load_config(&conn).expect("load");
+            c.migrate();
+            c
+        };
+
+        let start = std::time::Instant::now();
+        let result = medical_core::preflight::preflight_for_command(
+            medical_core::preflight::CommandKind::Chat,
+            &loaded_cfg,
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        let err = result.expect_err("must fail with offline error");
+        match err {
+            AppError::EndpointOffline {
+                service,
+                reason,
+                ..
+            } => {
+                assert_eq!(service, ServiceKind::AiProvider);
                 assert!(
                     matches!(
                         reason,
