@@ -20,6 +20,8 @@ pub struct OpenAiCompatibleClient {
     pub policy: RetryConfig,
     /// Optional bearer token sent as `Authorization: Bearer <token>`.
     pub bearer: Option<String>,
+    /// Human-readable provider name used in `EndpointOffline` errors (e.g. "Ollama").
+    pub provider_name: String,
 }
 
 impl OpenAiCompatibleClient {
@@ -33,6 +35,7 @@ impl OpenAiCompatibleClient {
             base_url: base_url.into(),
             policy,
             bearer: None,
+            provider_name: String::new(),
         }
     }
 
@@ -48,6 +51,24 @@ impl OpenAiCompatibleClient {
             base_url: base_url.into(),
             policy,
             bearer,
+            provider_name: String::new(),
+        }
+    }
+
+    /// Create a client with an optional bearer token and a provider name.
+    pub fn new_with_bearer_and_name(
+        client: Client,
+        base_url: impl Into<String>,
+        policy: RetryConfig,
+        bearer: Option<String>,
+        provider_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            base_url: base_url.into(),
+            policy,
+            bearer,
+            provider_name: provider_name.into(),
         }
     }
 
