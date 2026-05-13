@@ -8,7 +8,7 @@ interface SettingsNavState {
 }
 
 function createSettingsNavStore() {
-  const { subscribe, set, update } = writable<SettingsNavState>({ requestedSection: null });
+  const { subscribe, set } = writable<SettingsNavState>({ requestedSection: null });
 
   return {
     subscribe,
@@ -20,7 +20,7 @@ function createSettingsNavStore() {
 
     /** Called by SettingsContent once it has consumed the navigation request. */
     clear(): void {
-      update((s) => ({ ...s, requestedSection: null }));
+      set({ requestedSection: null });
     },
   };
 }
