@@ -65,9 +65,12 @@ describe('endpointHealth store', () => {
     await endpointHealth.probeNow();
 
     expect(invokeMock).toHaveBeenCalledWith('get_api_key', { provider: 'lmstudio_api_key' });
-    expect(invokeMock).toHaveBeenCalledWith('test_lmstudio_connection', {
+    expect(invokeMock).toHaveBeenCalledWith('probe_endpoint_reachable', {
+      service: 'AiProvider',
+      providerName: 'LM Studio',
       host: '192.168.1.10',
       port: 1234,
+      probePath: '/v1/models',
       apiKey: undefined,
     });
     const state = get(endpointHealth);
@@ -117,9 +120,18 @@ describe('endpointHealth store', () => {
     } as any);
 
     invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === 'test_lmstudio_connection') return Promise.resolve('Connected');
+      if (cmd === 'probe_endpoint_reachable') return Promise.resolve('Connected');
       if (cmd === 'get_api_key') return Promise.resolve(null); // handles lmstudio_api_key and stt_remote_api_key
-      if (cmd === 'test_stt_remote_connection') return Promise.reject({ kind: 'SttProvider', message: 'timeout' });
+      return Promise.resolve(undefined);
+    });
+
+    // Override: STT probe should reject (to simulate offline)
+    invokeMock.mockImplementation((cmd: string, args: any) => {
+      if (cmd === 'get_api_key') return Promise.resolve(null);
+      if (cmd === 'probe_endpoint_reachable' && args?.service === 'RemoteStt') {
+        return Promise.reject({ kind: 'SttProvider', message: 'timeout' });
+      }
+      if (cmd === 'probe_endpoint_reachable') return Promise.resolve('Connected');
       return Promise.resolve(undefined);
     });
 
@@ -173,7 +185,7 @@ describe('endpointHealth store', () => {
     await endpointHealth.probeNow();
 
     expect(invokeMock).toHaveBeenCalledTimes(2);
-    expect(invokeMock).toHaveBeenCalledWith('test_lmstudio_connection', expect.anything());
+    expect(invokeMock).toHaveBeenCalledWith('probe_endpoint_reachable', expect.anything());
     const state = get(endpointHealth);
     expect(state.stt).toBe('skipped');
   });
@@ -302,9 +314,12 @@ describe('endpointHealth store', () => {
     await Promise.resolve();
 
     expect(invokeMock.mock.calls.length).toBeGreaterThan(callsBefore);
-    expect(invokeMock).toHaveBeenLastCalledWith('test_ollama_connection', {
+    expect(invokeMock).toHaveBeenLastCalledWith('probe_endpoint_reachable', {
+      service: 'AiProvider',
+      providerName: 'Ollama',
       host: '192.168.1.99',
       port: 11434,
+      probePath: '/api/tags',
       apiKey: undefined,
     });
     unsub();
@@ -324,7 +339,7 @@ describe('endpointHealth store', () => {
 
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'get_api_key') return Promise.resolve('secret-token-abc');
-      if (cmd === 'test_stt_remote_connection') return Promise.resolve('Connected');
+      if (cmd === 'probe_endpoint_reachable') return Promise.resolve('Connected');
       return Promise.resolve(undefined);
     });
 
@@ -333,9 +348,12 @@ describe('endpointHealth store', () => {
     expect(invokeMock).toHaveBeenCalledWith('get_api_key', {
       provider: 'stt_remote_api_key',
     });
-    expect(invokeMock).toHaveBeenCalledWith('test_stt_remote_connection', {
+    expect(invokeMock).toHaveBeenCalledWith('probe_endpoint_reachable', {
+      service: 'RemoteStt',
+      providerName: 'Whisper STT',
       host: '192.168.1.20',
       port: 8080,
+      probePath: '/v1/models',
       apiKey: 'secret-token-abc',
     });
     const state = get(endpointHealth);
@@ -356,15 +374,18 @@ describe('endpointHealth store', () => {
 
     invokeMock.mockImplementation((cmd: string, _args: any) => {
       if (cmd === 'get_api_key') return Promise.reject(new Error('keychain locked'));
-      if (cmd === 'test_stt_remote_connection') return Promise.resolve('Connected');
+      if (cmd === 'probe_endpoint_reachable') return Promise.resolve('Connected');
       return Promise.resolve(undefined);
     });
 
     await endpointHealth.probeNow();
 
-    expect(invokeMock).toHaveBeenCalledWith('test_stt_remote_connection', {
+    expect(invokeMock).toHaveBeenCalledWith('probe_endpoint_reachable', {
+      service: 'RemoteStt',
+      providerName: 'Whisper STT',
       host: '192.168.1.20',
       port: 8080,
+      probePath: '/v1/models',
       apiKey: undefined,
     });
     const state = get(endpointHealth);
@@ -385,16 +406,19 @@ describe('endpointHealth store', () => {
 
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'get_api_key') return Promise.resolve('bearer-token-xyz');
-      if (cmd === 'test_ollama_connection') return Promise.resolve('Connected — 2 models installed');
+      if (cmd === 'probe_endpoint_reachable') return Promise.resolve('Connected — 2 models installed');
       return Promise.resolve(undefined);
     });
 
     await endpointHealth.probeNow();
 
     expect(invokeMock).toHaveBeenCalledWith('get_api_key', { provider: 'ollama_api_key' });
-    expect(invokeMock).toHaveBeenCalledWith('test_ollama_connection', {
+    expect(invokeMock).toHaveBeenCalledWith('probe_endpoint_reachable', {
+      service: 'AiProvider',
+      providerName: 'Ollama',
       host: '192.168.1.10',
       port: 11434,
+      probePath: '/api/tags',
       apiKey: 'bearer-token-xyz',
     });
     const state = get(endpointHealth);
@@ -415,16 +439,19 @@ describe('endpointHealth store', () => {
 
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'get_api_key') return Promise.resolve('lm-bearer-token');
-      if (cmd === 'test_lmstudio_connection') return Promise.resolve('Connected — 1 model available');
+      if (cmd === 'probe_endpoint_reachable') return Promise.resolve('Connected — 1 model available');
       return Promise.resolve(undefined);
     });
 
     await endpointHealth.probeNow();
 
     expect(invokeMock).toHaveBeenCalledWith('get_api_key', { provider: 'lmstudio_api_key' });
-    expect(invokeMock).toHaveBeenCalledWith('test_lmstudio_connection', {
+    expect(invokeMock).toHaveBeenCalledWith('probe_endpoint_reachable', {
+      service: 'AiProvider',
+      providerName: 'LM Studio',
       host: '192.168.1.10',
       port: 1234,
+      probePath: '/v1/models',
       apiKey: 'lm-bearer-token',
     });
     const state = get(endpointHealth);
@@ -445,15 +472,18 @@ describe('endpointHealth store', () => {
 
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'get_api_key') return Promise.reject(new Error('keychain locked'));
-      if (cmd === 'test_ollama_connection') return Promise.resolve('Connected');
+      if (cmd === 'probe_endpoint_reachable') return Promise.resolve('Connected');
       return Promise.resolve(undefined);
     });
 
     await endpointHealth.probeNow();
 
-    expect(invokeMock).toHaveBeenCalledWith('test_ollama_connection', {
+    expect(invokeMock).toHaveBeenCalledWith('probe_endpoint_reachable', {
+      service: 'AiProvider',
+      providerName: 'Ollama',
       host: '192.168.1.10',
       port: 11434,
+      probePath: '/api/tags',
       apiKey: undefined,
     });
     const state = get(endpointHealth);
