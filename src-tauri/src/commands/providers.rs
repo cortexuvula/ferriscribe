@@ -94,20 +94,26 @@ pub async fn test_lmstudio_connection(
         .send()
         .await
         .map_err(|e| {
-        if e.is_connect() {
-            AppError::AiProvider(format!(
-                "Connection refused — is LM Studio running at {}:{}?",
-                effective_host, port
-            ))
-        } else if e.is_timeout() {
-            AppError::AiProvider(format!(
-                "Connection timed out — check that {}:{} is reachable",
-                effective_host, port
-            ))
-        } else {
-            AppError::AiProvider(format!("Connection failed: {e}"))
-        }
-    })?;
+            use medical_core::error::OfflineReason;
+            use medical_core::preflight::classify_reqwest_error;
+            match classify_reqwest_error(&e) {
+                Some(OfflineReason::ConnectionRefused) => AppError::AiProvider(format!(
+                    "Connection refused — is LM Studio running at {}:{}?",
+                    effective_host, port
+                )),
+                Some(OfflineReason::Timeout) => AppError::AiProvider(format!(
+                    "Connection timed out — check that {}:{} is reachable",
+                    effective_host, port
+                )),
+                Some(OfflineReason::DnsFailure) => AppError::AiProvider(format!(
+                    "Cannot resolve hostname '{}'", effective_host
+                )),
+                Some(OfflineReason::TlsFailure) => AppError::AiProvider(format!(
+                    "TLS handshake failed at {}:{}", effective_host, port
+                )),
+                None => AppError::AiProvider(format!("Connection failed: {e}")),
+            }
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -159,18 +165,24 @@ pub async fn test_stt_remote_connection(
     }
 
     let response = req.send().await.map_err(|e| {
-        if e.is_connect() {
-            AppError::SttProvider(format!(
+        use medical_core::error::OfflineReason;
+        use medical_core::preflight::classify_reqwest_error;
+        match classify_reqwest_error(&e) {
+            Some(OfflineReason::ConnectionRefused) => AppError::SttProvider(format!(
                 "Connection refused — is the Whisper server running at {}:{}?",
                 effective_host, port
-            ))
-        } else if e.is_timeout() {
-            AppError::SttProvider(format!(
+            )),
+            Some(OfflineReason::Timeout) => AppError::SttProvider(format!(
                 "Connection timed out — check that {}:{} is reachable",
                 effective_host, port
-            ))
-        } else {
-            AppError::SttProvider(format!("Connection failed: {e}"))
+            )),
+            Some(OfflineReason::DnsFailure) => AppError::SttProvider(format!(
+                "Cannot resolve hostname '{}'", effective_host
+            )),
+            Some(OfflineReason::TlsFailure) => AppError::SttProvider(format!(
+                "TLS handshake failed at {}:{}", effective_host, port
+            )),
+            None => AppError::SttProvider(format!("Connection failed: {e}")),
         }
     })?;
 
@@ -229,20 +241,26 @@ pub async fn test_ollama_connection(
         .send()
         .await
         .map_err(|e| {
-        if e.is_connect() {
-            AppError::AiProvider(format!(
-                "Connection refused — is Ollama running at {}:{}?",
-                effective_host, port
-            ))
-        } else if e.is_timeout() {
-            AppError::AiProvider(format!(
-                "Connection timed out — check that {}:{} is reachable",
-                effective_host, port
-            ))
-        } else {
-            AppError::AiProvider(format!("Connection failed: {e}"))
-        }
-    })?;
+            use medical_core::error::OfflineReason;
+            use medical_core::preflight::classify_reqwest_error;
+            match classify_reqwest_error(&e) {
+                Some(OfflineReason::ConnectionRefused) => AppError::AiProvider(format!(
+                    "Connection refused — is Ollama running at {}:{}?",
+                    effective_host, port
+                )),
+                Some(OfflineReason::Timeout) => AppError::AiProvider(format!(
+                    "Connection timed out — check that {}:{} is reachable",
+                    effective_host, port
+                )),
+                Some(OfflineReason::DnsFailure) => AppError::AiProvider(format!(
+                    "Cannot resolve hostname '{}'", effective_host
+                )),
+                Some(OfflineReason::TlsFailure) => AppError::AiProvider(format!(
+                    "TLS handshake failed at {}:{}", effective_host, port
+                )),
+                None => AppError::AiProvider(format!("Connection failed: {e}")),
+            }
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
