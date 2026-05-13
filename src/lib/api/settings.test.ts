@@ -32,9 +32,12 @@ describe('settings api', () => {
     expect(invokeMock).toHaveBeenCalledWith('save_settings', { config });
   });
 
-  it('testLmStudioConnection passes host + port', async () => {
+  it('testLmStudioConnection passes host + port + apiKey (null when omitted)', async () => {
     await testLmStudioConnection('127.0.0.1', 1234);
-    expect(invokeMock).toHaveBeenCalledWith('test_lmstudio_connection', { host: '127.0.0.1', port: 1234 });
+    expect(invokeMock).toHaveBeenCalledWith('test_lmstudio_connection', { host: '127.0.0.1', port: 1234, apiKey: null });
+    invokeMock.mockReset();
+    await testLmStudioConnection('127.0.0.1', 1234, 'secret');
+    expect(invokeMock).toHaveBeenCalledWith('test_lmstudio_connection', { host: '127.0.0.1', port: 1234, apiKey: 'secret' });
   });
 
   it('testSttRemoteConnection passes host + port + apiKey (preserves null)', async () => {
@@ -45,9 +48,12 @@ describe('settings api', () => {
     expect(invokeMock).toHaveBeenCalledWith('test_stt_remote_connection', { host: 'h', port: 8080, apiKey: 'secret' });
   });
 
-  it('testOllamaConnection passes host + port', async () => {
+  it('testOllamaConnection passes host + port + apiKey (null when omitted)', async () => {
     await testOllamaConnection('127.0.0.1', 11434);
-    expect(invokeMock).toHaveBeenCalledWith('test_ollama_connection', { host: '127.0.0.1', port: 11434 });
+    expect(invokeMock).toHaveBeenCalledWith('test_ollama_connection', { host: '127.0.0.1', port: 11434, apiKey: null });
+    invokeMock.mockReset();
+    await testOllamaConnection('127.0.0.1', 11434, 'secret');
+    expect(invokeMock).toHaveBeenCalledWith('test_ollama_connection', { host: '127.0.0.1', port: 11434, apiKey: 'secret' });
   });
 
   it('setApiKey / getApiKey pass provider (and key on set)', async () => {

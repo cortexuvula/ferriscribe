@@ -76,24 +76,27 @@ pub async fn reinit_providers(
 /// Test connectivity to an LM Studio server.
 ///
 /// Makes a GET request to `http://{host}:{port}/v1/models` with a 5-second
-/// timeout. Returns a success message with the model count, or an error.
+/// timeout. If `api_key` is present and non-empty, an `Authorization: Bearer …`
+/// header is sent. Returns a success message with the model count, or an error.
 #[tauri::command]
 pub async fn test_lmstudio_connection(
     state: tauri::State<'_, AppState>,
     host: String,
     port: u16,
+    api_key: Option<String>,
 ) -> AppResult<String> {
     let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
     let url = format!("http://{}:{}/v1/models", effective_host, port);
 
     info!(url = %url, "Testing LM Studio connection");
 
-    let response = state.http_client
+    let mut req = state.http_client
         .get(&url)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .map_err(|e| {
+        .timeout(Duration::from_secs(5));
+    if let Some(key) = api_key.as_deref().filter(|s| !s.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let response = req.send().await.map_err(|e| {
             use medical_core::error::OfflineReason;
             use medical_core::preflight::classify_reqwest_error;
             match classify_reqwest_error(&e) {
@@ -115,6 +118,15 @@ pub async fn test_lmstudio_connection(
             }
         })?;
 
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED
+        || response.status() == reqwest::StatusCode::FORBIDDEN
+    {
+        return Err(AppError::AiProvider(
+            "Authentication failed \u{2014} verify the API key, or if this is a paired client, \
+             re-pair the office server (Settings \u{2192} Sharing \u{2192} Unpair, then scan a fresh code)."
+                .to_string(),
+        ));
+    }
     if !response.status().is_success() {
         let status = response.status();
         let body = medical_core::http_error_body::read_error_body(response, 200).await;
@@ -222,25 +234,28 @@ pub async fn test_stt_remote_connection(
 /// Test connectivity to an Ollama server.
 ///
 /// Makes a GET request to `http://{host}:{port}/api/tags` with a 5-second
-/// timeout. Returns a success message including the installed-model count,
+/// timeout. If `api_key` is present and non-empty, an `Authorization: Bearer …`
+/// header is sent. Returns a success message including the installed-model count,
 /// or a user-readable error.
 #[tauri::command]
 pub async fn test_ollama_connection(
     state: tauri::State<'_, AppState>,
     host: String,
     port: u16,
+    api_key: Option<String>,
 ) -> AppResult<String> {
     let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
     let url = format!("http://{}:{}/api/tags", effective_host, port);
 
     info!(url = %url, "Testing Ollama connection");
 
-    let response = state.http_client
+    let mut req = state.http_client
         .get(&url)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .map_err(|e| {
+        .timeout(Duration::from_secs(5));
+    if let Some(key) = api_key.as_deref().filter(|s| !s.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let response = req.send().await.map_err(|e| {
             use medical_core::error::OfflineReason;
             use medical_core::preflight::classify_reqwest_error;
             match classify_reqwest_error(&e) {
@@ -262,6 +277,15 @@ pub async fn test_ollama_connection(
             }
         })?;
 
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED
+        || response.status() == reqwest::StatusCode::FORBIDDEN
+    {
+        return Err(AppError::AiProvider(
+            "Authentication failed \u{2014} verify the API key, or if this is a paired client, \
+             re-pair the office server (Settings \u{2192} Sharing \u{2192} Unpair, then scan a fresh code)."
+                .to_string(),
+        ));
+    }
     if !response.status().is_success() {
         let status = response.status();
         let body = medical_core::http_error_body::read_error_body(response, 200).await;

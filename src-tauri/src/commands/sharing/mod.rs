@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub mod discovery;
 pub mod lifecycle;
 pub mod pairing;
+pub mod settings_helpers;
 
 // `start_sharing_inner` is a regular async function (not a Tauri command), so
 // re-exporting via `pub use` is fine — only `#[tauri::command]` items have the
