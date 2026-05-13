@@ -15,6 +15,7 @@
   onDestroy(unsub);
 
   function aiProviderLabel(): string {
+    // Valid providers are 'ollama' and 'lmstudio'; binary fallback is intentional.
     return $settings.ai_provider === 'ollama' ? 'Ollama' : 'LM Studio';
   }
 
@@ -115,5 +116,9 @@
   }
   .endpoint-pill:hover {
     filter: brightness(1.05);
+  }
+  .endpoint-pill:focus-visible {
+    outline: 2px solid var(--border-focus, #2563eb);
+    outline-offset: 2px;
   }
 </style>
