@@ -97,31 +97,17 @@ async fn generate_soap_inner(
     context: Option<&str>,
     patient_context: Option<&PatientContext>,
 ) -> AppResult<String> {
-    let (mut recording, settings) =
+    let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
 
     // Pre-flight: probe the remote AI endpoint before doing any work.
     // Skipped for loopback hosts; returns EndpointOffline on failure
     // without ever invoking the provider.
-    {
-        let config = {
-            let db = Arc::clone(&state.db);
-            tokio::task::spawn_blocking(move || -> medical_core::error::AppResult<medical_core::types::settings::AppConfig> {
-                let conn = db.conn().map_err(|e| medical_core::error::AppError::Database(e.to_string()))?;
-                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-                    .map_err(|e| medical_core::error::AppError::Database(e.to_string()))?;
-                cfg.migrate();
-                Ok(cfg)
-            })
-            .await
-            .map_err(|e| medical_core::error::AppError::Other(format!("preflight config load join error: {e}")))??
-        };
-        medical_core::preflight::preflight_for_command(
-            medical_core::preflight::CommandKind::GenerateSoap,
-            &config,
-        )
-        .await?;
-    }
+    medical_core::preflight::preflight_for_command(
+        medical_core::preflight::CommandKind::GenerateSoap,
+        &config,
+    )
+    .await?;
 
     let provider = resolve_provider(state, &settings.ai_provider).await?;
 
@@ -332,123 +318,9 @@ async fn generate_soap_inner(
 #[cfg(test)]
 mod preflight_tests {
     use super::*;
+    use super::super::test_helpers::build_test_state_with_recording;
     use medical_core::error::{AppError, OfflineReason, ServiceKind};
-    use medical_core::types::recording::{ProcessingStatus, Recording};
     use medical_core::types::settings::AppConfig;
-    use medical_db::recordings::RecordingsRepo;
-    use medical_db::settings::SettingsRepo;
-    use tokio::sync::{Mutex, RwLock};
-
-    /// Build a minimal `AppState` backed by an in-memory DB.
-    /// The DB is pre-loaded with `config` and a recording whose
-    /// transcript is `transcript_text`.
-    /// Returns `(state, recording_id_string)`.
-    async fn build_test_state_with_recording(
-        config: AppConfig,
-        transcript_text: &str,
-    ) -> (AppState, String) {
-        // ── Database ────────────────────────────────────────────────────────
-        let db = Arc::new(medical_db::Database::open_in_memory().expect("open in-memory db"));
-
-        // Save the config (AI provider endpoint) so load_recording_and_settings
-        // picks it up, and preflight_for_command reads the right host/port.
-        {
-            let conn = db.conn().expect("conn");
-            SettingsRepo::save_config(&conn, &config).expect("save_config");
-        }
-
-        // Insert a recording with the given transcript.
-        let recording_id = {
-            use std::path::PathBuf;
-            let id = uuid::Uuid::new_v4();
-            let mut rec = Recording::new(
-                format!("{}.wav", id),
-                PathBuf::from(format!("/tmp/{}.wav", id)),
-            );
-            rec.id = id;
-            rec.status = ProcessingStatus::Pending;
-            rec.transcript = Some(transcript_text.to_string());
-            let conn = db.conn().expect("conn");
-            RecordingsRepo::insert(&conn, &rec).expect("insert recording");
-            id
-        };
-
-        // ── AI provider registry ─────────────────────────────────────────────
-        // Register Ollama pointing at the configured (unrouteable) host.
-        // The provider is registered so resolve_provider doesn't fail, but
-        // pre-flight fires before provider.complete() is ever invoked.
-        let mut registry = medical_ai_providers::ProviderRegistry::new();
-        let ollama_host = if config.ollama_host.is_empty() {
-            "localhost"
-        } else {
-            config.ollama_host.as_str()
-        };
-        let ollama_url = format!("http://{}:{}", ollama_host, config.ollama_port);
-        if let Ok(p) = medical_ai_providers::ollama::OllamaProvider::new_with_endpoint(
-            Some(&ollama_url),
-            None,
-            medical_ai_providers::http_client::RetryConfig::default(),
-            None,
-        ) {
-            registry.register(Arc::new(p) as Arc<dyn medical_core::traits::AiProvider>);
-            registry.set_active(&config.ai_provider);
-        }
-
-        // ── Key storage ──────────────────────────────────────────────────────
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config_dir = tmp.path().join("config");
-        let keys = medical_security::key_storage::KeyStorage::open(&config_dir)
-            .expect("KeyStorage::open");
-        // Keep `tmp` alive for the duration of the state — we do this by
-        // moving it into a Box and leaking it (acceptable in tests).
-        std::mem::forget(tmp);
-
-        // ── RAG subsystem ────────────────────────────────────────────────────
-        let embedding_generator = Arc::new(
-            medical_rag::embeddings::EmbeddingGenerator::new_ollama(None, None)
-        );
-        let vector_store = Arc::new(medical_rag::vector_store::VectorStore::new(Arc::clone(&db)));
-        let bm25_search = Arc::new(medical_rag::bm25::Bm25Search::new(Arc::clone(&db)));
-        let graph_search = Arc::new(medical_rag::graph_search::GraphSearch::new(Arc::clone(&db)));
-        let ingestion = Arc::new(medical_rag::ingestion::IngestionPipeline::new(
-            Arc::clone(&embedding_generator),
-            Arc::clone(&vector_store),
-            Arc::clone(&graph_search),
-        ));
-
-        // ── Agent orchestrator ───────────────────────────────────────────────
-        let tool_registry = medical_agents::tools::ToolRegistry::with_defaults();
-        let orchestrator = Arc::new(medical_agents::orchestrator::AgentOrchestrator::new(tool_registry));
-
-        // ── HTTP client ──────────────────────────────────────────────────────
-        let http_client = Arc::new(reqwest::Client::new());
-
-        let state = AppState {
-            db,
-            keys: Arc::new(keys),
-            data_dir: std::path::PathBuf::from("/tmp/test-data"),
-            recording_active: Arc::new(Mutex::new(false)),
-            ai_providers: Arc::new(Mutex::new(registry)),
-            stt_providers: Arc::new(Mutex::new(None)),
-            orchestrator,
-            capture_handle: Arc::new(std::sync::Mutex::new(crate::state::SendCaptureHandle(None))),
-            current_recording: Arc::new(std::sync::Mutex::new(None)),
-            pipeline_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            embedding_generator,
-            vector_store,
-            bm25_search,
-            graph_search,
-            ingestion,
-            sharing: Arc::new(RwLock::new(None)),
-            vocab_api: RwLock::new(None),
-            ollama_provider: RwLock::new(None),
-            lmstudio_provider: RwLock::new(None),
-            remote_stt_provider: RwLock::new(None),
-            http_client,
-        };
-
-        (state, recording_id.to_string())
-    }
 
     #[tokio::test]
     async fn generate_soap_returns_endpoint_offline_when_ai_unreachable() {

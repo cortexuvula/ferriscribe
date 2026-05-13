@@ -13,6 +13,8 @@ pub mod letter;
 pub mod referral;
 pub mod soap;
 pub mod synopsis;
+#[cfg(test)]
+pub(super) mod test_helpers;
 
 // Re-exposed for `commands::pipeline`, which validates the same payload before
 // kicking off its own generation flow.

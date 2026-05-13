@@ -69,6 +69,28 @@ pub async fn transcribe_recording_inner(
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
 
+    // Pre-flight: if a remote STT endpoint is configured, probe it now before
+    // doing expensive WAV decode work.  For local whisper users, stt_remote_host
+    // is empty so build_stt_probe returns None and this is a no-op.
+    {
+        let db_cfg = Arc::clone(&state.db);
+        let app_config = tokio::task::spawn_blocking(move || -> AppResult<medical_core::types::settings::AppConfig> {
+            let conn = db_cfg.conn().map_err(|e| AppError::Database(e.to_string()))?;
+            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            cfg.migrate();
+            Ok(cfg)
+        })
+        .await
+        .map_err(|e| AppError::Other(format!("preflight config load join error: {e}")))??;
+
+        medical_core::preflight::preflight_for_command(
+            medical_core::preflight::CommandKind::Transcribe,
+            &app_config,
+        )
+        .await?;
+    }
+
     let wav_path = recording.audio_path.clone();
 
     if !wav_path.exists() {
@@ -174,6 +196,11 @@ pub async fn transcribe_recording_inner(
     let transcript = match stt.transcribe(audio, config, token).await {
         Ok(t) => t,
         Err(e) => {
+            // Preserve EndpointOffline as-is so the frontend dialog can fire.
+            // All other STT errors go through mark_recording_failed.
+            if matches!(e, AppError::EndpointOffline { .. }) {
+                return Err(e);
+            }
             let err_msg = format!("Transcription failed: {e}");
             tracing::error!(error = %e, "STT transcription failed");
             return Err(AppError::Processing(
@@ -471,4 +498,70 @@ fn format_transcript_with_speakers(transcript: &medical_core::types::stt::Transc
         }
 
     result
+}
+
+/// Integration tests for the pre-flight gate added by Task 8.
+///
+/// `transcribe_recording_inner` takes a `tauri::AppHandle` which cannot be
+/// easily constructed outside the Tauri runtime.  The tests below validate the
+/// pre-flight path in isolation: they call `preflight_for_command` directly
+/// with an `AppConfig` that matches what the inner function loads from the DB,
+/// confirming that the gate fires correctly for the Transcribe kind.
+#[cfg(test)]
+mod preflight_tests {
+    use medical_core::error::{AppError, OfflineReason, ServiceKind};
+    use medical_core::preflight::{preflight_for_command, CommandKind};
+    use medical_core::types::settings::AppConfig;
+
+    /// Verify that a non-empty, non-loopback `stt_remote_host` triggers a probe
+    /// and produces `EndpointOffline` when the host is unreachable.
+    #[tokio::test]
+    async fn transcribe_preflight_returns_endpoint_offline_when_stt_unreachable() {
+        // 192.0.2.1 is RFC 5737 TEST-NET-1 — guaranteed unrouteable.
+        let mut config = AppConfig::default();
+        config.stt_remote_host = "192.0.2.1".to_string();
+        config.stt_remote_port = 8080;
+
+        let start = std::time::Instant::now();
+        let result = preflight_for_command(CommandKind::Transcribe, &config).await;
+        let elapsed = start.elapsed();
+
+        let err = result.expect_err("unrouteable STT host must fail preflight");
+        match err {
+            AppError::EndpointOffline {
+                service,
+                reason,
+                ..
+            } => {
+                assert_eq!(service, ServiceKind::RemoteStt);
+                assert!(
+                    matches!(
+                        reason,
+                        OfflineReason::ConnectionRefused | OfflineReason::Timeout
+                    ),
+                    "expected ConnectionRefused or Timeout, got {reason:?}"
+                );
+            }
+            other => panic!("expected EndpointOffline, got {other:?}"),
+        }
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "should have short-circuited at ~3s; took {elapsed:?}"
+        );
+    }
+
+    /// Verify that an empty `stt_remote_host` (local whisper) skips the probe.
+    #[tokio::test]
+    async fn transcribe_preflight_skips_when_stt_remote_host_is_empty() {
+        let mut config = AppConfig::default();
+        config.stt_remote_host = String::new(); // local whisper — no probe needed
+        config.stt_remote_port = 8080;
+
+        let result = preflight_for_command(CommandKind::Transcribe, &config).await;
+        assert!(
+            result.is_ok(),
+            "empty stt_remote_host must skip preflight; got {result:?}"
+        );
+    }
 }

@@ -20,9 +20,26 @@ pub async fn generate_synopsis(
     state: tauri::State<'_, AppState>,
     recording_id: String,
 ) -> AppResult<String> {
-    let (mut recording, settings) =
-        load_recording_and_settings(&state.db, &recording_id).await?;
-    let provider = resolve_provider(&state, &settings.ai_provider).await?;
+    generate_synopsis_inner(&state, &recording_id).await
+}
+
+async fn generate_synopsis_inner(
+    state: &AppState,
+    recording_id: &str,
+) -> AppResult<String> {
+    let (mut recording, settings, config) =
+        load_recording_and_settings(&state.db, recording_id).await?;
+
+    // Pre-flight: probe the remote AI endpoint before doing any work.
+    // Skipped for loopback hosts; returns EndpointOffline on failure
+    // without ever invoking the provider.
+    medical_core::preflight::preflight_for_command(
+        medical_core::preflight::CommandKind::GenerateSynopsis,
+        &config,
+    )
+    .await?;
+
+    let provider = resolve_provider(state, &settings.ai_provider).await?;
 
     let soap_note = recording
         .soap_note
@@ -64,7 +81,15 @@ pub async fn generate_synopsis(
     let response = provider
         .complete(request)
         .await
-        .map_err(|e| AppError::AiProvider(format!("AI completion failed: {}", crate::commands::unwrap_app_error_message(e))))?;
+        .map_err(|e| match e {
+            // Preserve EndpointOffline as-is so the frontend dialog can fire.
+            AppError::EndpointOffline { .. } => e,
+            // For other errors, keep the existing nicer wrapping.
+            _ => AppError::AiProvider(format!(
+                "AI completion failed: {}",
+                crate::commands::unwrap_app_error_message(e)
+            )),
+        })?;
 
     let synopsis_text = response.content;
     if synopsis_text.is_empty() {
@@ -86,4 +111,59 @@ pub async fn generate_synopsis(
     persist_recording(&state.db, recording).await?;
 
     Ok(synopsis_text)
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+    use super::super::test_helpers::build_test_state_with_recording;
+    use medical_core::error::{AppError, OfflineReason, ServiceKind};
+    use medical_core::types::settings::AppConfig;
+
+    #[tokio::test]
+    async fn generate_synopsis_returns_endpoint_offline_when_ai_unreachable() {
+        // 192.0.2.1 is RFC 5737 TEST-NET-1 — guaranteed unrouteable, so
+        // the probe times out within PROBE_TIMEOUT (3s).
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "192.0.2.1".to_string();
+        config.ollama_port = 11434;
+        config.ai_model = "llama3".to_string();
+
+        let (state, recording_id) = build_test_state_with_recording(
+            config,
+            "Patient reports headache and fatigue.",
+        )
+        .await;
+
+        let start = std::time::Instant::now();
+        let result = generate_synopsis_inner(&state, &recording_id).await;
+        let elapsed = start.elapsed();
+
+        let err = result.expect_err("must fail with offline error");
+        match err {
+            AppError::EndpointOffline {
+                service,
+                reason,
+                provider_name,
+                ..
+            } => {
+                assert_eq!(service, ServiceKind::AiProvider);
+                assert_eq!(provider_name, "Ollama");
+                assert!(
+                    matches!(
+                        reason,
+                        OfflineReason::ConnectionRefused | OfflineReason::Timeout
+                    ),
+                    "expected ConnectionRefused or Timeout, got {reason:?}"
+                );
+            }
+            other => panic!("expected EndpointOffline, got {other:?}"),
+        }
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "should have short-circuited at ~3s; took {elapsed:?}"
+        );
+    }
 }
