@@ -43,6 +43,12 @@
     settingsNav.navigateTo(service === 'AiProvider' ? 'models' : 'audio');
   }
 
+  /** Open Settings dialog and navigate to the pane indicated by the health pill. */
+  function onEndpointHealthOpenSettings(target: 'models' | 'audio') {
+    settingsOpen = true;
+    settingsNav.navigateTo(target);
+  }
+
   // Database recovery dialog state. The backend always registers
   // `RecoveryState` (Some(reason) on recovery, None on normal boot), so we
   // query it on mount instead of subscribing to a timing-race event.
@@ -222,7 +228,7 @@
   </main>
 
   <footer class="app-statusbar">
-    <StatusBar />
+    <StatusBar onopenSettings={onEndpointHealthOpenSettings} />
     <StatusBadge />
   </footer>
 
