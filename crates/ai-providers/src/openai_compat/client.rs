@@ -224,6 +224,23 @@ impl OpenAiCompatibleClient {
         }
     }
 
+    /// Classify a reqwest error from a `send_with_retry` call into either a
+    /// structured `EndpointOffline` (connectivity issue) or the existing
+    /// `AiProvider(String)` shape (genuine application-layer error).
+    pub(crate) fn classify_send_error(&self, e: reqwest::Error) -> medical_core::error::AppError {
+        use medical_core::error::ServiceKind;
+        use medical_core::preflight::classify_reqwest_error;
+        match classify_reqwest_error(&e) {
+            Some(reason) => medical_core::error::AppError::EndpointOffline {
+                service: ServiceKind::AiProvider,
+                endpoint: self.base_url.clone(),
+                reason,
+                provider_name: self.provider_name.clone(),
+            },
+            None => medical_core::error::AppError::AiProvider(format!("HTTP request failed: {e}")),
+        }
+    }
+
     /// Build an authorized `RequestBuilder` for a GET request.
     pub(super) fn get(&self, url: &str) -> reqwest::RequestBuilder {
         let mut req = self.client.get(url);

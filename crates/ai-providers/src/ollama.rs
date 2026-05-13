@@ -135,7 +135,7 @@ impl OllamaProvider {
                     AppError::EndpointOffline {
                         service: ServiceKind::AiProvider,
                         endpoint,
-                        reason: OfflineReason::ConnectionRefused,
+                        reason: OfflineReason::Timeout,
                         provider_name: "Ollama".into(),
                     }
                 })?;
@@ -372,7 +372,7 @@ mod offline_tests {
                 endpoint,
             } => {
                 assert_eq!(service, ServiceKind::AiProvider);
-                assert_eq!(reason, OfflineReason::ConnectionRefused);
+                assert_eq!(reason, OfflineReason::Timeout);
                 assert_eq!(provider_name, "Ollama");
                 assert!(
                     endpoint.contains("127.0.0.1"),
