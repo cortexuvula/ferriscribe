@@ -37,16 +37,20 @@
   let settingsOpen = $state(false);
   let previousTab = $state('record');
 
+  /** Shared helper: open Settings dialog and navigate to a specific pane. */
+  function openSettingsTo(target: 'models' | 'audio') {
+    settingsOpen = true;
+    settingsNav.navigateTo(target);
+  }
+
   /** Open Settings dialog and navigate to the pane relevant to the offline service. */
   function onEndpointOfflineOpenSettings(service: ServiceKind) {
-    settingsOpen = true;
-    settingsNav.navigateTo(service === 'AiProvider' ? 'models' : 'audio');
+    openSettingsTo(service === 'AiProvider' ? 'models' : 'audio');
   }
 
   /** Open Settings dialog and navigate to the pane indicated by the health pill. */
   function onEndpointHealthOpenSettings(target: 'models' | 'audio') {
-    settingsOpen = true;
-    settingsNav.navigateTo(target);
+    openSettingsTo(target);
   }
 
   // Database recovery dialog state. The backend always registers
