@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { invokeWithOfflineHandling } from './invokeWithOfflineHandling';
 import type { PatientContext } from '../types';
 
 export async function processRecording(
@@ -7,7 +8,7 @@ export async function processRecording(
   template?: string,
   patientContext?: PatientContext,
 ): Promise<string> {
-  return invoke('process_recording', {
+  return invokeWithOfflineHandling('process_recording', {
     recordingId,
     context: context ?? null,
     template: template ?? null,
