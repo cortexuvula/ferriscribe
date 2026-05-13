@@ -141,7 +141,7 @@ pub async fn pair_with_server(
     // Update in-memory provider endpoints immediately so the "models visible"
     // success message in ClientPair.svelte is truthful without an app restart.
     use medical_core::types::RemoteEndpoint;
-    let bearer = Some(token);
+    let bearer = Some(token.clone());
 
     let ollama_ep = Some(RemoteEndpoint {
         lan: lan.clone(),
@@ -203,6 +203,51 @@ pub async fn pair_with_server(
             *guard = stt_handles.provider;
         }
         *state.remote_stt_provider.write().await = stt_handles.remote;
+    }
+
+    // ── Phase 3: per-service keychain mirror + AppConfig population ──
+    //
+    // The bearer above is stored at keyring "rustMedicalAssistant"/"sharing-bearer"
+    // (used by the in-memory provider path). The rest of the app — Settings UI,
+    // pre-flight, endpointHealth polling — reads from per-service keychain slots
+    // and AppConfig host/port fields. Mirror the bearer here so paired clients
+    // don't need to manually fill in Settings → Audio / Models.
+    {
+        use super::settings_helpers::apply_paired_settings;
+
+        // 1. Pick the resolved host. Prefer LAN; fall back to Tailscale. The
+        //    in-memory RemoteEndpoint will still try LAN-then-Tailscale at call
+        //    time, but the static AppConfig field shows ONE address — LAN is
+        //    more meaningful for the user reading the Settings UI than a
+        //    Tailscale CGNAT address.
+        let host = lan.clone()
+            .or_else(|| tailscale.clone())
+            .ok_or_else(|| "no reachable address for paired-settings autofill".to_string())?;
+
+        // 2. Write the bearer to per-service keychain slots via state.keys.
+        //    Same KeyStorage abstraction the set_api_key Tauri command uses.
+        for slot in &["stt_remote_api_key", "ollama_api_key", "lmstudio_api_key"] {
+            state.keys.store_key(slot, &token).map_err(|e| {
+                format!("autofill: store {slot}: {e}")
+            })?;
+        }
+
+        // 3. Update AppConfig with the paired endpoint values.
+        let conn = state.db.conn().map_err(|e| e.to_string())?;
+        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+            .map_err(|e| e.to_string())?;
+        cfg.migrate();
+        apply_paired_settings(&mut cfg, &host, &ports);
+        medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
+            .map_err(|e| e.to_string())?;
+
+        tracing::info!(
+            host = %host,
+            whisper_port = ports.whisper,
+            ollama_port = ports.ollama,
+            lmstudio_port = ?ports.lmstudio,
+            "pair: populated per-service api_keys and AppConfig host/ports"
+        );
     }
 
     Ok(())
