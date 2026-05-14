@@ -42,7 +42,7 @@
       : null
   );
 
-  async function load(opts?: { keepSelection?: boolean }) {
+  async function load(opts?: { keepSelection?: boolean; selectLast?: boolean }) {
     const prevSelectedId = selectedId;
     const prevCursor = cursorIndex;
     loading = true;
@@ -69,7 +69,9 @@
       return;
     }
 
-    if (opts?.keepSelection && prevSelectedId && items.some((g) => g.id === prevSelectedId)) {
+    if (opts?.selectLast && items.length > 0) {
+      selectedId = items[items.length - 1].id;
+    } else if (opts?.keepSelection && prevSelectedId && items.some((g) => g.id === prevSelectedId)) {
       selectedId = prevSelectedId;
     } else if (items.length > 0) {
       const idx = Math.min(Math.max(prevCursor, 0), items.length - 1);
@@ -84,12 +86,14 @@
       action === 'promote' ? 'promoted' :
       action === 'reject' ? 'rejected' :
       'candidate';
+    loading = true;
     try {
       await invoke('training_corpus_set_status', { id, newStatus: new_status });
       await load();
       onchange?.();
     } catch (e) {
       error = String(e);
+      loading = false;
     }
   }
 
@@ -107,8 +111,7 @@
       selectedId = items[cursorIndex - 1].id;
     } else if (offset > 0) {
       offset = Math.max(0, offset - PAGE_SIZE);
-      await load();
-      if (items.length > 0) selectedId = items[items.length - 1].id;
+      await load({ selectLast: true });
     }
   }
 
@@ -138,7 +141,9 @@
     <div class="error">{error}</div>
   {/if}
 
-  {#if !loading && items.length === 0}
+  {#if loading && items.length === 0}
+    <div class="empty">Loading…</div>
+  {:else if !loading && items.length === 0}
     <div class="empty">
       {#if mode === 'candidate'}
         No candidates. Generate a SOAP note with capture enabled to populate this list.
@@ -160,9 +165,9 @@
         {/each}
         {#if total > PAGE_SIZE}
           <nav class="pagination">
-            <button disabled={offset === 0} onclick={() => { offset = Math.max(0, offset - PAGE_SIZE); load(); }}>← Prev</button>
+            <button disabled={offset === 0 || loading} onclick={() => { offset = Math.max(0, offset - PAGE_SIZE); load(); }}>← Prev</button>
             <span>{offset + 1}–{Math.min(offset + PAGE_SIZE, total)} of {total}</span>
-            <button disabled={offset + PAGE_SIZE >= total} onclick={() => { offset += PAGE_SIZE; load(); }}>Next →</button>
+            <button disabled={offset + PAGE_SIZE >= total || loading} onclick={() => { offset += PAGE_SIZE; load(); }}>Next →</button>
           </nav>
         {/if}
       </aside>
