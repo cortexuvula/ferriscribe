@@ -186,11 +186,10 @@
     padding: 0.3rem 0.8rem;
     border-radius: 4px;
     font-size: 0.8rem;
+    font-family: inherit;
     background: transparent;
     border: 1px solid;
     cursor: pointer;
-    font: inherit;
-    font-size: 0.8rem;
     line-height: 1.4;
   }
 
@@ -212,7 +211,7 @@
 
   .btn.neutral {
     color: var(--text-primary);
-    border-color: var(--bg-tertiary);
+    border-color: var(--border);
   }
 
   .body {
