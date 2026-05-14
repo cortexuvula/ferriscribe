@@ -55,18 +55,51 @@ pub fn get_recent_logs(lines: Option<usize>) -> AppResult<String> {
     Ok(format!("--- {filename} (last {max_lines} lines) ---\n{}", result.join("\n")))
 }
 
+/// Maximum length of the `message` field accepted by `frontend_log`.
+///
+/// PHI guardrail: the frontend is trusted not to log patient content, but a
+/// hard cap prevents accidental floods (e.g., a stringified transcript) from
+/// reaching the on-disk log file. 1 KB is plenty for structured error
+/// messages while still bounding worst-case damage.
+const FRONTEND_LOG_MESSAGE_MAX: usize = 1000;
+
+/// Maximum length of the `context` blob accepted by `frontend_log`.
+///
+/// Context is a JSON object stringified by the caller; 2 KB allows a few
+/// nested fields without unbounded growth.
+const FRONTEND_LOG_CONTEXT_MAX: usize = 2000;
+
+/// Truncate a string to at most `max` characters, appending an explicit
+/// marker so log readers can tell the entry was capped.
+fn truncate_for_log(s: &str, max: usize) -> String {
+    let len = s.chars().count();
+    if len <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}…[truncated, {len} chars total]")
+}
+
 /// Bridge for frontend JavaScript to log structured entries to the backend.
 ///
 /// Call from the frontend as:
 /// ```js
 /// invoke('frontend_log', { level: 'error', message: 'Something failed', context: { component: 'RecordTab' } })
 /// ```
+///
+/// `message` and the stringified `context` are length-capped (see
+/// `FRONTEND_LOG_MESSAGE_MAX` / `FRONTEND_LOG_CONTEXT_MAX`) so an accidental
+/// PHI flood cannot fill the log file.
 #[tauri::command]
 pub fn frontend_log(level: String, message: String, context: Option<serde_json::Value>) {
-    let ctx = context
-        .as_ref()
-        .map(|v| v.to_string())
-        .unwrap_or_default();
+    let message = truncate_for_log(&message, FRONTEND_LOG_MESSAGE_MAX);
+    let ctx = truncate_for_log(
+        &context
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        FRONTEND_LOG_CONTEXT_MAX,
+    );
 
     match level.to_lowercase().as_str() {
         "error" => tracing::error!(source = "frontend", context = %ctx, "{message}"),
@@ -82,4 +115,40 @@ fn log_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("rust-medical-assistant")
         .join("logs")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_for_log_passes_through_short_strings() {
+        assert_eq!(truncate_for_log("hello", 100), "hello");
+    }
+
+    #[test]
+    fn truncate_for_log_returns_input_at_exact_limit() {
+        let s = "x".repeat(50);
+        assert_eq!(truncate_for_log(&s, 50), s);
+    }
+
+    #[test]
+    fn truncate_for_log_caps_and_annotates() {
+        let s = "x".repeat(1500);
+        let out = truncate_for_log(&s, 1000);
+        assert!(out.starts_with(&"x".repeat(1000)));
+        assert!(out.contains("[truncated, 1500 chars total]"));
+        // The capped output is short: head (1000) + a small annotation tail.
+        assert!(out.chars().count() < 1100);
+    }
+
+    #[test]
+    fn truncate_for_log_counts_chars_not_bytes() {
+        // Multi-byte UTF-8: 5 chars but 15 bytes. Should pass through under
+        // a char-based cap of 10.
+        let s = "héllo".repeat(5); // 25 chars
+        let out = truncate_for_log(&s, 10);
+        assert_eq!(out.chars().take(10).collect::<String>(), "héllohéllo");
+        assert!(out.contains("[truncated, 25 chars total]"));
+    }
 }
