@@ -42,7 +42,7 @@
       : null
   );
 
-  async function load(opts?: { keepSelection?: boolean; selectLast?: boolean }) {
+  async function load(opts?: { keepSelection?: boolean; selectLast?: boolean; selectFirst?: boolean }) {
     const prevSelectedId = selectedId;
     const prevCursor = cursorIndex;
     loading = true;
@@ -69,7 +69,9 @@
       return;
     }
 
-    if (opts?.selectLast && items.length > 0) {
+    if (opts?.selectFirst && items.length > 0) {
+      selectedId = items[0].id;
+    } else if (opts?.selectLast && items.length > 0) {
       selectedId = items[items.length - 1].id;
     } else if (opts?.keepSelection && prevSelectedId && items.some((g) => g.id === prevSelectedId)) {
       selectedId = prevSelectedId;
@@ -102,7 +104,7 @@
       selectedId = items[cursorIndex + 1].id;
     } else if (offset + items.length < total) {
       offset += PAGE_SIZE;
-      await load();
+      await load({ selectFirst: true });
     }
   }
 
