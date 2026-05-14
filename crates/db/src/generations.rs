@@ -192,7 +192,9 @@ impl GenerationsRepo {
         let limit = limit.min(200);
 
         let total: u32 = conn.query_row(
-            "SELECT count(*) FROM generations WHERE corpus_status = ?",
+            "SELECT count(*) FROM generations
+             WHERE corpus_status = ?
+               AND (corpus_status != 'candidate' OR final_text IS NOT NULL)",
             params![status],
             |r| r.get(0),
         )?;
@@ -206,6 +208,7 @@ impl GenerationsRepo {
                     edit_distance, edit_ratio, regeneration_seq
              FROM generations
              WHERE corpus_status = ?
+               AND (corpus_status != 'candidate' OR final_text IS NOT NULL)
              ORDER BY created_at DESC
              LIMIT ? OFFSET ?",
         )?;
@@ -221,7 +224,7 @@ impl GenerationsRepo {
     pub fn count_by_status(conn: &Connection) -> DbResult<(u32, u32, u32, u32)> {
         let mut stmt = conn.prepare(
             "SELECT
-                SUM(CASE WHEN corpus_status='candidate' THEN 1 ELSE 0 END) AS c,
+                SUM(CASE WHEN corpus_status='candidate' AND final_text IS NOT NULL THEN 1 ELSE 0 END) AS c,
                 SUM(CASE WHEN corpus_status='promoted'  THEN 1 ELSE 0 END) AS p,
                 SUM(CASE WHEN corpus_status='rejected'  THEN 1 ELSE 0 END) AS r,
                 SUM(CASE WHEN corpus_status='excluded'  THEN 1 ELSE 0 END) AS e
@@ -451,6 +454,12 @@ mod tests {
         // Force a different timestamp so ordering is deterministic.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let g2 = GenerationsRepo::record_generation(&conn, insert).unwrap();
+        // Set final_text on both rows so they are visible to list_by_status
+        // (null-final candidates are excluded from the corpus queue).
+        conn.execute(
+            "UPDATE generations SET final_text = 'finalized' WHERE recording_id = ?",
+            params![rec_id.to_string()],
+        ).unwrap();
 
         let (rows, total) =
             GenerationsRepo::list_by_status(&conn, "candidate", 10, 0).unwrap();
@@ -482,6 +491,12 @@ mod tests {
         for _ in 0..5 {
             GenerationsRepo::record_generation(&conn, insert.clone()).unwrap();
         }
+        // Set final_text on all rows so they are visible to list_by_status
+        // (null-final candidates are excluded from the corpus queue).
+        conn.execute(
+            "UPDATE generations SET final_text = 'finalized' WHERE recording_id = ?",
+            params![rec_id.to_string()],
+        ).unwrap();
         let (page1, total) = GenerationsRepo::list_by_status(&conn, "candidate", 2, 0).unwrap();
         assert_eq!(total, 5);
         assert_eq!(page1.len(), 2);
@@ -523,6 +538,12 @@ mod tests {
         let g_rej = GenerationsRepo::record_generation(&conn, insert).unwrap();
         GenerationsRepo::set_corpus_status(&conn, g_prom.id, "promoted").unwrap();
         GenerationsRepo::set_corpus_status(&conn, g_rej.id, "rejected").unwrap();
+        // Give the candidate row a final_text so it is counted by count_by_status
+        // (null-final candidates are excluded from the corpus queue).
+        conn.execute(
+            "UPDATE generations SET final_text = 'finalized' WHERE id = ?",
+            params![g_cand.id.to_string()],
+        ).unwrap();
 
         let (c, p, r, e) = GenerationsRepo::count_by_status(&conn).unwrap();
         assert_eq!(c, 1);
@@ -548,5 +569,98 @@ mod tests {
         let id = Uuid::new_v4();
         let err = GenerationsRepo::set_corpus_status(&conn, id, "promoted");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn list_by_status_candidate_excludes_null_final_text() {
+        let conn = migrated();
+        let rec_id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO recordings (id, filename, processing_status, created_at) \
+             VALUES (?, 'test.wav', 'done', datetime('now'))",
+            params![rec_id.to_string()],
+        ).unwrap();
+        // One candidate with final_text present:
+        let with_final = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO generations
+               (id, recording_id, output_type, created_at, ai_provider, ai_model,
+                input_transcript, draft_text, final_text, corpus_status, regeneration_seq)
+             VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'qwen3.6',
+                     'transcript', 'draft body', 'final body', 'candidate', 1)",
+            params![with_final.to_string(), rec_id.to_string()],
+        ).unwrap();
+        // One candidate with final_text NULL (the case we filter out):
+        let without_final = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO generations
+               (id, recording_id, output_type, created_at, ai_provider, ai_model,
+                input_transcript, draft_text, final_text, corpus_status, regeneration_seq)
+             VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'qwen3.6',
+                     'transcript', 'draft body', NULL, 'candidate', 2)",
+            params![without_final.to_string(), rec_id.to_string()],
+        ).unwrap();
+
+        let (items, total) =
+            GenerationsRepo::list_by_status(&conn, "candidate", 10, 0).unwrap();
+        assert_eq!(total, 1, "total should reflect only candidates with final_text");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, with_final);
+    }
+
+    #[test]
+    fn list_by_status_promoted_still_includes_null_final_text() {
+        let conn = migrated();
+        let rec_id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO recordings (id, filename, processing_status, created_at) \
+             VALUES (?, 'test.wav', 'done', datetime('now'))",
+            params![rec_id.to_string()],
+        ).unwrap();
+        let id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO generations
+               (id, recording_id, output_type, created_at, ai_provider, ai_model,
+                input_transcript, draft_text, final_text, corpus_status, regeneration_seq)
+             VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'qwen3.6',
+                     'transcript', 'draft body', NULL, 'promoted', 1)",
+            params![id.to_string(), rec_id.to_string()],
+        ).unwrap();
+
+        let (items, total) =
+            GenerationsRepo::list_by_status(&conn, "promoted", 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn count_by_status_excludes_null_final_text_from_candidates() {
+        let conn = migrated();
+        let rec_id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO recordings (id, filename, processing_status, created_at) \
+             VALUES (?, 'test.wav', 'done', datetime('now'))",
+            params![rec_id.to_string()],
+        ).unwrap();
+        // Two candidates: one with final_text, one without.
+        conn.execute(
+            "INSERT INTO generations
+               (id, recording_id, output_type, created_at, ai_provider, ai_model,
+                input_transcript, draft_text, final_text, corpus_status, regeneration_seq)
+             VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'qwen3.6',
+                     'transcript', 'draft body', 'final body', 'candidate', 1)",
+            params![Uuid::new_v4().to_string(), rec_id.to_string()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO generations
+               (id, recording_id, output_type, created_at, ai_provider, ai_model,
+                input_transcript, draft_text, final_text, corpus_status, regeneration_seq)
+             VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'qwen3.6',
+                     'transcript', 'draft body', NULL, 'candidate', 2)",
+            params![Uuid::new_v4().to_string(), rec_id.to_string()],
+        ).unwrap();
+
+        let (c, _p, _r, _e) = GenerationsRepo::count_by_status(&conn).unwrap();
+        assert_eq!(c, 1, "candidate count must match list_by_status filtering");
     }
 }
