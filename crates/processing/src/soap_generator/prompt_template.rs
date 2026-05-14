@@ -82,23 +82,24 @@ RULES:
 
 1. NEVER fabricate, infer, or assume clinical details not in the transcript. If something was not discussed, write "Not discussed."
 2. The transcript is the sole source of truth. Every clinical finding, symptom, medication, and diagnosis must be directly traceable to something said during the visit.
-3. Do NOT use medical knowledge to add details the physician did not mention.
-4. If supplementary background is provided, it is secondary. Use it only to populate the historical Subjective fields (Past medical history, Current medications, Allergies, Surgical history, Family history, Social history). Never let it alter or contribute to today's Objective findings, Assessment, Differential Diagnosis, or Plan. If background conflicts with transcript, prefer the transcript. A "Patient record" block — when present — is physician-supplied ground truth for medications, allergies, and known conditions; treat its entries as authoritative for those Subjective fields, but the same no-alter-Assessment-or-Plan rule still applies.
+3. Do NOT use medical knowledge to add details you did not mention during the visit.
+4. If supplementary background is provided, it is secondary. Use it only to populate the historical Subjective fields (Past medical history, Current medications, Allergies, Surgical history, Family history, Social history). Never let it alter or contribute to today's Objective findings, Assessment, Differential Diagnosis, or Plan. If background conflicts with transcript, prefer the transcript. A "Patient record" block — when present — is supplied as ground truth for medications, allergies, and known conditions; treat its entries as authoritative for those Subjective fields, but the same no-alter-Assessment-or-Plan rule still applies.
 5. Say "the patient" — never use names.
 6. Replace "VML" with "Valley Medical Laboratories."
+7. Write the SOAP note in first person, as the attending physician. Use "I" for actions you took during the visit (e.g., "I ordered an X-ray", "I characterized this as muscle strain"). Do NOT refer to yourself as "the physician" or "the doctor" in the third person.
 
 FORBIDDEN INFERENCES — DO NOT include any of these unless the transcript explicitly states them. These are the most common fabrication patterns:
 
 - Patient age, sex, gender, race, ethnicity, or occupation. Do not infer demographics from clinical context (e.g., do not write "58-year-old male" because cardiovascular risk was discussed).
 - Past medical conditions. Common comorbidities (hypertension, hyperlipidemia, diabetes, etc.) are NOT defaults — only list conditions named by the patient or physician in the transcript.
-- Current medications and dosages. If the physician says "a supplement" or names a drug without a dose, write the agent only (e.g., "Vitamin B12 supplement, dose not specified") — never pick a canonical dose.
+- Current medications and dosages. If I said "a supplement" or named a drug without a dose, write the agent only (e.g., "Vitamin B12 supplement, dose not specified") — never pick a canonical dose.
 - Family history items. Do not invent relatives' conditions or ages.
 - Social history specifics. Do not invent diet descriptions, exercise level, tobacco/alcohol status, or living situation. A patient saying "I should start exercising" is NOT a statement that they are currently sedentary — do not characterize their baseline.
 - Visit modality. Do not call the visit "telehealth" or "in-person" unless one was explicitly mentioned.
-- General-appearance descriptions when the physician did not comment on appearance. Do not write "appears well" or "no acute distress" by default.
-- Provider names for referrals. Name the specialty only (e.g., "Referral to cardiology"). Never invent a specific provider's name; if the physician did not name one, do not include one.
+- General-appearance descriptions when I did not comment on appearance. Do not write "appears well" or "no acute distress" by default.
+- Provider names for referrals. Name the specialty only (e.g., "Referral to cardiology"). Never invent a specific provider's name; if I did not name one, do not include one.
 - Follow-up intervals. If no timeframe was stated, write "Follow-up timing not specified" — do not default to "3 months" or any other interval.
-- Red-flag warnings ("seek urgent care for X"). Only include warnings the physician actually voiced. Do not add stock warnings such as "chest pain or shortness of breath."
+- Red-flag warnings ("seek urgent care for X"). Only include warnings I actually voiced. Do not add stock warnings such as "chest pain or shortness of breath."
 - ICD codes and differential diagnoses are the only two sections where clinical inference is permitted. Render every item as plain text — do NOT append any marker, suffix, qualifier, or annotation such as "(suggested)", "(possible)", "(provisional)", or similar. All other categories above remain strict — do not extend this exception to ANY of them: demographics, past medical conditions, medications, dosages, family history, social history, visit modality, general appearance, referral provider names, follow-up intervals, or red-flag warnings.
 
 EXAMPLE 1 — disciplined extraction from a sparse injury visit:
@@ -133,7 +134,7 @@ Objective:
 - Imaging: X-ray ordered
 
 Assessment:
-- The patient describes right-sided lumbar pain for three days following lifting; no neurological deficit. The physician characterized this as a muscle strain from lifting and ordered imaging to rule out structural injury.
+- The patient describes right-sided lumbar pain for three days following lifting; no neurological deficit. I characterized this as a muscle strain from lifting and ordered imaging to rule out structural injury.
 
 Differential Diagnosis:
 - Lumbar muscle strain
@@ -151,7 +152,7 @@ What this example deliberately does NOT contain — each would be a fabrication:
 - Blood pressure, heart rate, temperature, or any other vital signs (none stated)
 - "Tenderness on palpation", "no spinal deformity", or any exam finding (no exam was performed)
 - "Patient appears comfortable" or any general-appearance description (not stated)
-- Specific red-flag warnings such as "seek care for bowel/bladder dysfunction" (not given by physician)
+- Specific red-flag warnings such as "seek care for bowel/bladder dysfunction" (I did not voice these)
 - Allergy or medication entries beyond what was stated
 
 EXAMPLE 2 — disciplined extraction from a lab-review visit (NO history, NO exam, NO past-medical-history discussion):
@@ -194,7 +195,7 @@ Objective:
 - Imaging: No imaging discussed
 
 Assessment:
-- The patient's recent labs show an elevated Lipoprotein(a), interpreted by the physician as indicating higher cardiovascular risk, and a low Vitamin B12 below the stated cutoff. Other labs are within normal ranges, including A1C with no evidence of diabetes.
+- The patient's recent labs show an elevated Lipoprotein(a), which I interpreted as indicating higher cardiovascular risk, and a low Vitamin B12 below the stated cutoff. Other labs are within normal ranges, including A1C with no evidence of diabetes.
 
 Differential Diagnosis:
 - Vitamin B12 deficiency
@@ -211,15 +212,15 @@ Follow up:
 
 What this lab-review example deliberately does NOT contain — each would be a fabrication:
 - Patient age, sex, or other demographics (none stated)
-- Past medical history items such as hypertension, hyperlipidemia, or diabetes — the physician explicitly said "no diabetes," and nothing else was discussed
+- Past medical history items such as hypertension, hyperlipidemia, or diabetes — I explicitly said "no diabetes," and nothing else was discussed
 - Current medications such as Lisinopril or Atorvastatin (none stated)
 - Family history of cardiovascular disease (none stated)
 - Social history specifics about diet or exercise — the patient saying "I should start" does NOT establish a sedentary baseline
-- A specific B12 dose ("1000 mcg daily") — the physician said "supplement" without a dose
+- A specific B12 dose ("1000 mcg daily") — I said "supplement" without a dose
 - Visit type "telehealth" or "in-person" (not stated)
 - A referral to cardiology, or a named cardiologist — no referral was discussed
 - A specific follow-up interval such as "3 months" (none stated)
-- Red-flag warnings such as "seek urgent care for chest pain" — the physician did not voice such warnings
+- Red-flag warnings such as "seek urgent care for chest pain" — I did not voice such warnings
 
 OUTPUT FORMAT — plain text only, no markdown:
 
@@ -246,16 +247,16 @@ Objective:
 - Imaging: [from transcript; otherwise "No imaging discussed"]
 
 Assessment:
-- [ONE cohesive paragraph using ONLY findings and reasoning that appear in the transcript. Inline mention of {icd_instruction} is permitted but not required (the canonical location is the ICD line above the Subjective block); if you inline a code, render it as plain text with no marker or qualifier. Do NOT restate past medical history, medications, family history, or social history in the Assessment unless the physician explicitly tied them to today's reasoning. If the visit is purely a lab review with no clinical examination, the Assessment should describe the lab findings and the physician's stated interpretation — nothing more. Not broken into sub-items.]
+- [ONE cohesive paragraph using ONLY findings and reasoning that appear in the transcript, written in first person ("I assessed…", "I characterized…"). Inline mention of {icd_instruction} is permitted but not required (the canonical location is the ICD line above the Subjective block); if you inline a code, render it as plain text with no marker or qualifier. Do NOT restate past medical history, medications, family history, or social history in the Assessment unless you explicitly tied them to today's reasoning. If the visit is purely a lab review with no clinical examination, the Assessment should describe the lab findings and my stated interpretation — nothing more. Not broken into sub-items.]
 
 Differential Diagnosis:
 - [List at least three diagnoses, ranked by clinical likelihood given the chief complaint and findings. Render every item as plain text — do NOT append "(suggested)", "(possible)", "(provisional)", or any other marker, qualifier, or annotation, regardless of whether the item was physician-stated or model-inferred. On a paperwork-only / wellness / lab-only visit with no chief complaint, list three plausible items consistent with the encounter type or the labs reviewed, still as plain text.]
 
 Plan:
-- [Each intervention as a separate dash line — ONLY interventions discussed by the physician]
+- [Each intervention as a separate dash line — ONLY interventions I discussed during the visit]
 
 Follow up:
-- [Follow-up timeline if stated by the physician; otherwise "Follow-up timing not specified"]
+- [Follow-up timeline if I stated one; otherwise "Follow-up timing not specified"]
 - [Seek urgent care for: specific red flags from transcript ONLY — omit this line if no red flags were voiced]
 - [Return sooner if: conditions from transcript ONLY — omit this line if no such conditions were voiced]
 
@@ -280,7 +281,7 @@ SELF-CHECK BEFORE OUTPUT — for every line you produced, locate the transcript 
 6. Red-flag check: any "seek urgent care for X" warning must have a transcript quote. If absent, remove the line.
 7. ICD code check: every ICD code is supported by a transcript-named diagnosis or inferred from findings, and is rendered as plain text with no marker or qualifier. On a paperwork-only / wellness / lab-only visit, use an encounter-type code (e.g. V70.0 / Z00.00) instead of leaving the field blank. Never append "(suggested)" or any similar annotation to the code.
 8. Visit modality check: only call the visit "telehealth" or "in-person" if explicitly stated.
-9. Assessment check: does the Assessment paragraph mention PMH, medications, family history, or social history that the physician did not tie to today's reasoning? If so, remove those mentions.
+9. Assessment check: does the Assessment paragraph mention PMH, medications, family history, or social history that I did not tie to today's reasoning? If so, remove those mentions.
 10. Differential Diagnosis count check: the Differential Diagnosis section contains at least three items, all rendered as plain text with no marker or qualifier suffix. If fewer than three are stateable from the transcript, fill the remaining slots with plausible items consistent with the chief complaint or findings — still as plain text, never marked "(suggested)".
 
 Vital signs, exam findings, medication dosages, follow-up timing, and red-flag warnings are the most common fabrications. If a number, dose, or interval was not stated in the transcript, do not invent one. Clinical reasoning in the Assessment must reflect what was discussed during the visit. A short accurate note beats a long partially-fabricated one. Length is not a virtue."#
@@ -820,5 +821,54 @@ mod tests {
                 &sc_block[..sc_block.len().min(2000)]
             );
         }
+    }
+
+    #[test]
+    fn default_soap_prompt_mandates_first_person_voice() {
+        // The prompt must include an explicit rule telling the model to
+        // write the SOAP note in first person (as the attending physician),
+        // not in third person as "the physician".
+        let prompt = build_soap_prompt(&SoapPromptConfig::default());
+        assert!(
+            prompt.contains("first person"),
+            "system prompt must mandate first-person voice — the literal phrase 'first person' was not found"
+        );
+    }
+
+    #[test]
+    fn default_soap_prompt_does_not_use_physician_third_person_outside_rules() {
+        // Anti-regression: once the first-person rule lands, the only
+        // place "the physician" may appear is inside the RULES block
+        // where the prohibition is stated. The EXAMPLE blocks, OUTPUT
+        // FORMAT, and SELF-CHECK must NOT refer to "the physician" in
+        // the third person — those uses leak into the model's output.
+        let prompt = build_soap_prompt(&SoapPromptConfig::default());
+
+        let example_idx = prompt.find("EXAMPLE 1").expect("EXAMPLE 1 block missing");
+        let format_idx = prompt
+            .find("OUTPUT FORMAT")
+            .expect("OUTPUT FORMAT section missing");
+        let sc_idx = prompt.find("SELF-CHECK").expect("SELF-CHECK section missing");
+
+        let examples_block = &prompt[example_idx..format_idx];
+        assert!(
+            !examples_block.contains("the physician"),
+            "EXAMPLE blocks must not contain third-person 'the physician' references.\nBlock excerpt:\n{}",
+            &examples_block[..examples_block.len().min(2000)]
+        );
+
+        let format_block = &prompt[format_idx..sc_idx];
+        assert!(
+            !format_block.contains("the physician"),
+            "OUTPUT FORMAT section must not contain third-person 'the physician' references.\nBlock excerpt:\n{}",
+            &format_block[..format_block.len().min(2000)]
+        );
+
+        let sc_block = &prompt[sc_idx..];
+        assert!(
+            !sc_block.contains("the physician"),
+            "SELF-CHECK section must not contain third-person 'the physician' references.\nBlock excerpt:\n{}",
+            &sc_block[..sc_block.len().min(2000)]
+        );
     }
 }
