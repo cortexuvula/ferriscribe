@@ -39,7 +39,7 @@
   let snippet = $derived(firstChangeSnippet(generation.draft_text, generation.final_text));
 </script>
 
-<button class="master-row" class:selected type="button" {onclick}>
+<button class="master-row" class:selected type="button" aria-pressed={selected} {onclick}>
   <div class="row-head">
     <span class="date">{shortDate(generation.created_at)}</span>
     <span class="chip {chip.cls}">{chip.label}</span>
@@ -66,17 +66,17 @@
     font: inherit;
     color: inherit;
   }
-  .master-row:hover { background: rgba(255,255,255,0.03); }
+  .master-row:hover { background: var(--bg-hover); }
   .master-row.selected {
     background: rgba(59,130,246,0.10);
     border-left-color: #3b82f6;
   }
   .row-head { display: flex; justify-content: space-between; align-items: center; }
-  .date { font-size: 0.78rem; font-weight: 600; color: var(--foreground, #cbd2da); }
-  .model { font-family: var(--font-mono, monospace); font-size: 0.7rem; color: var(--muted-foreground, #9aa4b2); margin-top: 0.15rem; }
+  .date { font-size: 0.78rem; font-weight: 600; color: var(--text-primary); }
+  .model { font-family: var(--font-mono, monospace); font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem; }
   .snippet {
     margin-top: 0.4rem;
-    background: var(--muted, rgba(0,0,0,0.25));
+    background: var(--bg-code);
     border-radius: 3px;
     padding: 0.3rem 0.4rem;
     font-family: var(--font-mono, monospace);
