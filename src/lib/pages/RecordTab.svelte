@@ -6,11 +6,14 @@
   import { importAudioFile, getRecording } from '../api/recordings';
   import { checkRecordingAudioLevels } from '../api/audio';
   import { copyWithStatus } from '../utils/clipboard';
+  import { clampSidebarWidth } from '../utils/resize';
+  import { recordSidebar } from '../stores/recordSidebar';
   import RecordingHeader from '../components/RecordingHeader.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import RecordingStateCards from './record/RecordingStateCards.svelte';
   import PipelineStatus from './record/PipelineStatus.svelte';
-  import PatientContextPanel from './record/PatientContextPanel.svelte';
+  import PatientContextSidebar from './record/PatientContextSidebar.svelte';
+  import ResizeHandle from './record/ResizeHandle.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
   import { contextTemplates } from '../stores/contextTemplates';
@@ -24,12 +27,70 @@
   };
   let { onopenSettings = () => {} }: Props = $props();
 
-  // Context panel state — owned by parent because buildPatientContext(...) needs them at pipeline-launch time.
+  // Patient-context text state — owned here because buildPatientContext(...) needs them at pipeline-launch time.
   let contextText = $state('');
   let medicationsText = $state('');
   let allergiesText = $state('');
   let conditionsText = $state('');
-  let contextCollapsed = $state(true);
+
+  // Sidebar UI state — synced with the persisted recordSidebar store.
+  let sidebarOpen = $state(true);
+  let sidebarWidth = $state(360);
+
+  // Snapshot initial store values once on mount, then write back on toggle/resize-end.
+  // (We avoid two-way reactive subscription to keep the data flow simple.)
+  $effect(() => {
+    const unsubOpen = recordSidebar.open.subscribe((v) => {
+      sidebarOpen = v;
+    });
+    const unsubWidth = recordSidebar.width.subscribe((v) => {
+      sidebarWidth = v;
+    });
+    return () => {
+      unsubOpen();
+      unsubWidth();
+    };
+  });
+
+  function toggleSidebar() {
+    recordSidebar.setOpen(!sidebarOpen);
+  }
+
+  function onSidebarResize(delta: number) {
+    // Negative delta (drag handle left) = sidebar widens. The handle sits
+    // to the LEFT of the sidebar, so dragging right narrows it.
+    const next = clampSidebarWidth(
+      sidebarWidth - delta,
+      window.innerWidth,
+      recordSidebar.MIN_WIDTH,
+      recordSidebar.MAX_WIDTH,
+      320,
+    );
+    sidebarWidth = next;
+  }
+
+  function onSidebarResizeEnd() {
+    recordSidebar.setWidth(sidebarWidth);
+  }
+
+  // Re-clamp the sidebar width when the window resizes so the main area
+  // always retains at least 320px. Persisted width stays untouched.
+  $effect(() => {
+    function handler() {
+      const next = clampSidebarWidth(
+        sidebarWidth,
+        window.innerWidth,
+        recordSidebar.MIN_WIDTH,
+        recordSidebar.MAX_WIDTH,
+        320,
+      );
+      if (next !== sidebarWidth) {
+        sidebarWidth = next;
+      }
+    }
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
+  });
 
   onMount(() => {
     contextTemplates.load();
@@ -50,7 +111,7 @@
   let silenceDialogMessage = $state('');
 
   function clearAllContextFields() {
-    // Both the freeform "Context" box and the structured Patient Context
+    // Both the freeform "Notes" box and the structured Patient Context
     // fields (medications / allergies / conditions) are tied to the
     // current encounter — fresh encounter, fresh form.
     contextText = '';
@@ -82,7 +143,7 @@
     const formatted = isFinite(rmsDb) ? `${rmsDb.toFixed(1)} dBFS` : 'digital silence';
     return (
       `The recording appears to contain no audio (${formatted}). ` +
-      'Your microphone or audio routing likely isn’t capturing sound — ' +
+      "Your microphone or audio routing likely isn't capturing sound — " +
       'processing this file will probably produce an unreliable transcript.'
     );
   }
@@ -224,15 +285,6 @@
 </script>
 
 <div class="record-tab">
-  <PatientContextPanel
-    bind:contextText
-    bind:medicationsText
-    bind:allergiesText
-    bind:conditionsText
-    bind:contextCollapsed
-  />
-
-  <!-- Recording Controls (middle, unchanged) -->
   <RecordingHeader
     {onopenSettings}
     onStart={handleStartRecording}
@@ -240,26 +292,41 @@
     onNewRecording={handleNewRecording}
   />
 
-  <!-- Main content area -->
-  <div class="record-content">
-    {#if $pipeline.current && pipelineRecordingId}
-      <PipelineStatus
-        bind:copyStatus
-        onCancel={handleCancelPipeline}
-        onRetry={handleRetry}
-        onCopySoap={handleCopySoap}
-        onSpeedRead={handleSpeedRead}
-      />
-    {:else}
-      <RecordingStateCards
-        {importedRecordingId}
-        {importedFilename}
-        {importing}
-        {importError}
-        onProcessRecording={handleProcessRecording}
-        onUploadAudio={handleUploadAudio}
-      />
+  <div class="record-body">
+    <div class="record-main">
+      {#if $pipeline.current && pipelineRecordingId}
+        <PipelineStatus
+          bind:copyStatus
+          onCancel={handleCancelPipeline}
+          onRetry={handleRetry}
+          onCopySoap={handleCopySoap}
+          onSpeedRead={handleSpeedRead}
+        />
+      {:else}
+        <RecordingStateCards
+          {importedRecordingId}
+          {importedFilename}
+          {importing}
+          {importError}
+          onProcessRecording={handleProcessRecording}
+          onUploadAudio={handleUploadAudio}
+        />
+      {/if}
+    </div>
+
+    {#if sidebarOpen}
+      <ResizeHandle onResize={onSidebarResize} onResizeEnd={onSidebarResizeEnd} />
     {/if}
+
+    <PatientContextSidebar
+      bind:contextText
+      bind:medicationsText
+      bind:allergiesText
+      bind:conditionsText
+      open={sidebarOpen}
+      width={sidebarWidth}
+      onToggle={toggleSidebar}
+    />
   </div>
 </div>
 
@@ -282,12 +349,20 @@
     overflow: hidden;
   }
 
-  /* Main Content */
-  .record-content {
+  .record-body {
     flex: 1;
+    display: flex;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .record-main {
+    flex: 1;
+    min-width: 320px;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 32px;
+    overflow: auto;
   }
 </style>
