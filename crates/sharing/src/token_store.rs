@@ -196,3 +196,211 @@ fn parse_ts(s: String) -> rusqlite::Result<DateTime<Utc>> {
         .map(|d| d.with_timezone(&Utc))
         .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_store() -> (TokenStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.db");
+        let key = [42u8; 32];
+        let store = TokenStore::open(&path, &key).expect("open fresh store");
+        (store, dir)
+    }
+
+    #[test]
+    fn open_creates_fresh_database_with_no_clients() {
+        let (store, _dir) = fresh_store();
+        let rows = store.list().expect("list");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn open_reopens_existing_database_with_same_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.db");
+        let key = [42u8; 32];
+
+        let token = {
+            let store = TokenStore::open(&path, &key).expect("open1");
+            let issued = store.issue("first-client").expect("issue");
+            issued.token
+        };
+
+        // Drop the first store, reopen with the same path + key.
+        let store = TokenStore::open(&path, &key).expect("open2");
+        let validated = store.validate(&token).expect("validate");
+        assert!(validated.is_some(), "issued token should still validate after reopen");
+        assert_eq!(validated.unwrap().label, "first-client");
+    }
+
+    #[test]
+    fn open_with_wrong_key_rejects_database_access() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.db");
+        let key_a = [42u8; 32];
+        let key_b = [99u8; 32];
+
+        {
+            let store = TokenStore::open(&path, &key_a).expect("open with key_a");
+            let _ = store.issue("client-a").expect("issue");
+        }
+
+        // Reopening with key_b should fail (SQLCipher key mismatch on any query).
+        let reopened = TokenStore::open(&path, &key_b);
+        match reopened {
+            Ok(store) => {
+                // open() may succeed lazily; the first real query must fail.
+                let r = store.list();
+                assert!(
+                    r.is_err(),
+                    "list() with the wrong key must fail; got {r:?}"
+                );
+            }
+            Err(_) => {} // open() rejected up front — also acceptable
+        }
+    }
+
+    #[test]
+    fn issue_returns_id_and_opaque_token() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("alpha").expect("issue");
+        assert!(issued.id > 0, "id should be positive: {}", issued.id);
+        // Token is base64-url-encoded 32 random bytes → 43 chars without padding.
+        assert!(
+            issued.token.len() >= 32,
+            "token suspiciously short: {} chars",
+            issued.token.len()
+        );
+        assert!(
+            issued.token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "token must be base64-url-safe: {}",
+            issued.token
+        );
+    }
+
+    #[test]
+    fn issue_returns_different_tokens_each_call() {
+        let (store, _dir) = fresh_store();
+        let t1 = store.issue("a").expect("issue a").token;
+        let t2 = store.issue("b").expect("issue b").token;
+        let t3 = store.issue("c").expect("issue c").token;
+        assert_ne!(t1, t2);
+        assert_ne!(t2, t3);
+        assert_ne!(t1, t3);
+    }
+
+    #[test]
+    fn validate_returns_some_for_issued_token() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("clinic-laptop").expect("issue");
+        let row = store.validate(&issued.token).expect("validate").expect("Some");
+        assert_eq!(row.id, issued.id);
+        assert_eq!(row.label, "clinic-laptop");
+        assert!(row.revoked_at.is_none());
+    }
+
+    #[test]
+    fn validate_returns_none_for_unknown_token() {
+        let (store, _dir) = fresh_store();
+        let _ = store.issue("a").expect("issue");
+        let row = store.validate("not-a-real-token").expect("validate");
+        assert!(row.is_none());
+    }
+
+    #[test]
+    fn validate_returns_none_for_revoked_token() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("doomed").expect("issue");
+        store.revoke(issued.id).expect("revoke");
+        let row = store.validate(&issued.token).expect("validate");
+        assert!(row.is_none(), "revoked token should not validate");
+    }
+
+    #[test]
+    fn touch_updates_last_seen_at() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("touched").expect("issue");
+
+        // Before touch: last_seen_at is None.
+        let before = store
+            .validate(&issued.token)
+            .expect("validate before")
+            .expect("Some before");
+        assert!(before.last_seen_at.is_none());
+
+        store.touch(issued.id).expect("touch");
+
+        let after = store
+            .validate(&issued.token)
+            .expect("validate after")
+            .expect("Some after");
+        assert!(after.last_seen_at.is_some(), "touch must populate last_seen_at");
+    }
+
+    #[test]
+    fn revoke_is_idempotent() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("x").expect("issue");
+        store.revoke(issued.id).expect("first revoke");
+        // Second revoke must not error (no-op or successful idempotent UPDATE).
+        store.revoke(issued.id).expect("second revoke is idempotent");
+    }
+
+    #[test]
+    fn update_label_changes_visible_label_and_rejects_empty() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("old-name").expect("issue");
+
+        store
+            .update_label(issued.id, "renamed")
+            .expect("update_label happy path");
+        let rows = store.list().expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "renamed");
+
+        // Empty (and whitespace-only) labels are rejected.
+        let err = store
+            .update_label(issued.id, "")
+            .expect_err("empty label must error");
+        assert!(matches!(err, TokenStoreError::EmptyLabel));
+        let err2 = store
+            .update_label(issued.id, "   ")
+            .expect_err("whitespace-only label must error");
+        assert!(matches!(err2, TokenStoreError::EmptyLabel));
+
+        // Updating a non-existent or revoked id returns NotFound.
+        let err3 = store
+            .update_label(9999, "ghost")
+            .expect_err("updating non-existent id must error");
+        assert!(matches!(err3, TokenStoreError::NotFound));
+    }
+
+    #[test]
+    fn update_label_truncates_to_80_chars() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("orig").expect("issue");
+        let long = "a".repeat(200);
+        store
+            .update_label(issued.id, &long)
+            .expect("update with long label");
+        let rows = store.list().expect("list");
+        assert_eq!(rows[0].label.chars().count(), 80, "label truncated to 80 chars");
+    }
+
+    #[test]
+    fn list_returns_only_non_revoked_rows_in_id_order() {
+        let (store, _dir) = fresh_store();
+        let a = store.issue("a").expect("a");
+        let b = store.issue("b").expect("b");
+        let c = store.issue("c").expect("c");
+        store.revoke(b.id).expect("revoke b");
+
+        let rows = store.list().expect("list");
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![a.id, c.id], "revoked row should be filtered out");
+        // Each listed row has revoked_at == None.
+        assert!(rows.iter().all(|r| r.revoked_at.is_none()));
+    }
+}
