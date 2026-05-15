@@ -20,6 +20,10 @@ jobs:
             target: x86_64-pc-windows-msvc
           - platform: macos-latest
             target: aarch64-apple-darwin
+          # Intel Macs (clinical sites with older hardware) — runs natively
+          # on the last Intel-hosted GitHub runner image.
+          - platform: macos-13
+            target: x86_64-apple-darwin
 
     runs-on: ${{ matrix.platform }}
 
