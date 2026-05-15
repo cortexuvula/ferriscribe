@@ -8,7 +8,7 @@ medical-core = { path = "../core" }
 aes-gcm = "0.10"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 sha2 = { workspace = true }
-hmac = "0.12"
+hmac = "0.13"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 hex = { workspace = true }
 rand = { workspace = true }
