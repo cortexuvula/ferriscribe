@@ -1,332 +1,82 @@
-//! Orchestrator — the public face of the sharing layer.
-//!
-//! Owns the auth proxy (Ollama route), auth proxy (whisper route), mDNS
-//! advertiser, pairing service, whisper-cpp supervisor. start() boots all
-//! enabled subsystems; stop() tears them down cleanly.
+# Sharing Crate Tier 3 Test Backfill — Implementation Plan
 
-use std::path::PathBuf;
-use std::sync::Arc;
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-use serde::Serialize;
-use tokio::sync::Mutex;
+**Goal:** Add 21 unit/integration tests to `crates/sharing` covering pairing HTTP routes, SharingService lifecycle, and additional xml_escape edges. Brings medical-sharing from 47 → 68 tests. One small `pub(crate)` extraction.
 
-use crate::SharingError;
-use crate::auth_proxy::{ProxyConfig, spawn_auth_proxy};
-use crate::mdns::{MdnsAdvertiser, ServerPorts};
-use crate::pairing::PairingState;
-use crate::token_store::TokenStore;
-use crate::whisper_supervisor::WhisperSupervisor;
+**Architecture:** Tower-based axum testing via `ServiceExt::oneshot` with synthetic `ConnectInfo` for deterministic loopback-vs-non-loopback paths. Real `TokenStore`/`PairingState` over `tempfile::tempdir()` for state. No subprocesses, no real mDNS, no real Ollama.
 
-#[derive(Clone)]
-pub struct SharingConfig {
-    pub enabled: bool,
-    pub friendly_name: String,
-    pub ollama_proxy_port: u16,
-    pub whisper_proxy_port: u16,
-    pub pairing_port: u16,
-    pub whisper_internal_port: u16,
-    /// Local LM Studio listener port (typically 1234). `Some` when LM Studio
-    /// is detected at config time; `None` skips wiring an LM Studio proxy.
-    pub lmstudio_internal_port: Option<u16>,
-    /// Public auth-proxy listener for LM Studio (typically 1235). Advertised
-    /// to clients via mDNS / QR. Always paired with `lmstudio_internal_port`.
-    pub lmstudio_proxy_port: Option<u16>,
-    /// Vocabulary CRUD HTTP API port (typically 11437). The HTTP server
-    /// itself lives in the Tauri layer because it needs the SQLCipher pool;
-    /// the sharing crate just records the port so it gets advertised via
-    /// mDNS / QR alongside the rest.
-    pub vocab_port: u16,
-    pub token_store_path: PathBuf,
-    pub token_store_key: [u8; 32],
-    pub binary_dir: PathBuf,
-    pub whisper_model_path: PathBuf,
-    pub whisper_internal_api_key: String,
-    pub version: String,
-}
+**Tech Stack:** Rust 1.x · axum 0.7 · tokio · tower 0.5 (new dev-dep) · tempfile · `tower::ServiceExt::oneshot`
 
-impl std::fmt::Debug for SharingConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharingConfig")
-            .field("enabled", &self.enabled)
-            .field("friendly_name", &self.friendly_name)
-            .field("ollama_proxy_port", &self.ollama_proxy_port)
-            .field("whisper_proxy_port", &self.whisper_proxy_port)
-            .field("pairing_port", &self.pairing_port)
-            .field("whisper_internal_port", &self.whisper_internal_port)
-            .field("lmstudio_internal_port", &self.lmstudio_internal_port)
-            .field("lmstudio_proxy_port", &self.lmstudio_proxy_port)
-            .field("vocab_port", &self.vocab_port)
-            .field("token_store_path", &self.token_store_path)
-            .field("token_store_key", &"<redacted: 32 bytes>")
-            .field("binary_dir", &self.binary_dir)
-            .field("whisper_model_path", &self.whisper_model_path)
-            .field("whisper_internal_api_key", &"<redacted>")
-            .field("version", &self.version)
-            .finish()
-    }
-}
+**Spec:** `docs/superpowers/specs/2026-05-15-sharing-tier3-test-design.md`
 
-impl Default for SharingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            friendly_name: "FerriScribe Server".to_string(),
-            ollama_proxy_port: 11435,
-            whisper_proxy_port: 8081,
-            pairing_port: 11436,
-            whisper_internal_port: 8080,
-            lmstudio_internal_port: None,
-            lmstudio_proxy_port: None,
-            vocab_port: 11437,
-            token_store_path: PathBuf::new(),
-            token_store_key: [0u8; 32],
-            binary_dir: PathBuf::new(),
-            whisper_model_path: PathBuf::new(),
-            whisper_internal_api_key: String::new(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        }
-    }
-}
+**Worktree:** `.worktrees/sharing-tier3-tests` on branch `sharing-tier3-tests` (created from `master` at `1443c5b`)
 
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct SharingStatus {
-    pub enabled: bool,
-    pub ollama_ok: bool,
-    pub whisper_ok: bool,
-    /// True only when LM Studio's local server was detected at Start sharing
-    /// time and the auth proxy was wired up. False when LM Studio wasn't
-    /// running at config time — clients won't see LM Studio models in that
-    /// case until the user Stops + Starts sharing with LM Studio running.
-    pub lmstudio_ok: bool,
-    pub mdns_ok: bool,
-    pub pairing_ok: bool,
-    pub paired_clients: u32,
-}
+**Baseline:** `cargo test -p medical-sharing --lib` → 47 passed
 
-pub struct SharingService {
-    config: SharingConfig,
-    store: Arc<TokenStore>,
-    pairing: Arc<PairingState>,
-    whisper: Arc<WhisperSupervisor>,
-    mdns: Mutex<Option<MdnsAdvertiser>>,
-    handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    running: Mutex<bool>,
-}
+---
 
-impl SharingService {
-    pub fn new(config: SharingConfig) -> Result<Self, SharingError> {
-        let store = Arc::new(
-            TokenStore::open(&config.token_store_path, &config.token_store_key)
-                .map_err(|e| SharingError::TokenStore(e.to_string()))?,
-        );
-        let pairing = Arc::new(PairingState::new(store.clone()));
-        let whisper = Arc::new(WhisperSupervisor::new(
-            config.binary_dir.clone(),
-            config.whisper_model_path.clone(),
-            config.whisper_internal_port,
-        ));
-        Ok(Self {
-            config,
-            store,
-            pairing,
-            whisper,
-            mdns: Mutex::new(None),
-            handles: Mutex::new(Vec::new()),
-            running: Mutex::new(false),
-        })
-    }
+## Task 1: Add tower dev-dep
 
-    pub fn pairing_state(&self) -> Arc<PairingState> { self.pairing.clone() }
-    pub fn token_store(&self) -> Arc<TokenStore> { self.store.clone() }
-    pub fn config(&self) -> &SharingConfig { &self.config }
+**Files:**
+- Modify: `crates/sharing/Cargo.toml` (`[dev-dependencies]` section, after the `wiremock = { workspace = true }` line)
 
-    pub async fn start(&self) -> Result<(), SharingError> {
-        let mut running = self.running.lock().await;
-        if *running { return Ok(()); }
+- [ ] **Step 1: Add tower to dev-dependencies**
 
-        // Ollama auth proxy — bind first so port conflicts surface as errors.
-        let h1 = spawn_auth_proxy(
-            ProxyConfig {
-                listen_port: self.config.ollama_proxy_port,
-                backend_url: "http://127.0.0.1:11434".to_string(),
-                path_prefix: "/".to_string(),
-                inject_api_key: None,
-            },
-            self.store.clone(),
-        ).await?;
+Edit `crates/sharing/Cargo.toml`:
 
-        // Push h1 immediately so that if anything below fails, stop() can abort it.
-        self.handles.lock().await.push(h1);
+```toml
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+wiremock = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+```
 
-        // Whisper auth proxy — bind first.
-        let h2 = match spawn_auth_proxy(
-            ProxyConfig {
-                listen_port: self.config.whisper_proxy_port,
-                backend_url: format!("http://127.0.0.1:{}", self.config.whisper_internal_port),
-                path_prefix: "/".to_string(),
-                inject_api_key: Some(self.config.whisper_internal_api_key.clone()),
-            },
-            self.store.clone(),
-        ).await {
-            Ok(h) => h,
-            Err(e) => {
-                // h1 is already in handles; drain and abort it.
-                for h in self.handles.lock().await.drain(..) { h.abort(); }
-                return Err(e);
-            }
-        };
+- [ ] **Step 2: Verify it builds**
 
-        // Push h2 immediately so that if anything below fails, stop() can abort it.
-        self.handles.lock().await.push(h2);
+Run: `cargo build -p medical-sharing --tests`
+Expected: success, no warnings; Cargo.lock updated with `tower = "0.5.x"` and its transitive `tower-layer`, `tower-service`, etc.
 
-        // LM Studio auth proxy — only when LM Studio is detected locally.
-        // Symmetric with the Ollama route: bearer-validated, strips the
-        // inbound Authorization, no upstream auth (LM Studio doesn't validate
-        // bearers). Skipped when either port is None — that includes the
-        // common case where the user hasn't started LM Studio's local server.
-        if let (Some(internal), Some(proxy)) = (
-            self.config.lmstudio_internal_port,
-            self.config.lmstudio_proxy_port,
-        ) {
-            tracing::info!(
-                "LM Studio detected on 127.0.0.1:{internal}; spawning auth proxy on {proxy}"
-            );
-            let h_lm = match spawn_auth_proxy(
-                ProxyConfig {
-                    listen_port: proxy,
-                    backend_url: format!("http://127.0.0.1:{internal}"),
-                    path_prefix: "/".to_string(),
-                    inject_api_key: None,
-                },
-                self.store.clone(),
-            ).await {
-                Ok(h) => h,
-                Err(e) => {
-                    for h in self.handles.lock().await.drain(..) { h.abort(); }
-                    return Err(e);
-                }
-            };
-            self.handles.lock().await.push(h_lm);
-        } else {
-            tracing::warn!(
-                "LM Studio not detected on 127.0.0.1:1234 at Start sharing; LM Studio models will not be available to paired clients. Stop and Start sharing again with LM Studio running to enable."
-            );
-        }
+- [ ] **Step 3: Run existing tests**
 
-        // Whisper child — if this fails, roll back the proxy tasks above.
-        if let Err(e) = self.whisper.start().await {
-            for h in self.handles.lock().await.drain(..) { h.abort(); }
-            return Err(SharingError::WhisperSupervisor(e.to_string()));
-        }
+Run: `cargo test -p medical-sharing --lib`
+Expected: `47 passed; 0 failed`
 
-        // mDNS — roll back on failure.
-        let mdns = match MdnsAdvertiser::start(
-            &self.config.friendly_name,
-            &ServerPorts {
-                ollama: Some(self.config.ollama_proxy_port),
-                whisper: Some(self.config.whisper_proxy_port),
-                lmstudio: self.config.lmstudio_proxy_port,
-                pairing: Some(self.config.pairing_port),
-                vocab: Some(self.config.vocab_port),
-            },
-            &self.config.version,
-        ) {
-            Ok(m) => m,
-            Err(e) => {
-                self.whisper.stop().await;
-                for h in self.handles.lock().await.drain(..) { h.abort(); }
-                return Err(e);
-            }
-        };
-        *self.mdns.lock().await = Some(mdns);
+- [ ] **Step 4: Commit**
 
-        // Pairing HTTP service — bind first so port conflicts surface as errors.
-        let info_snapshot = InfoSnapshot {
-            host: self.config.friendly_name.clone(),
-            version: self.config.version.clone(),
-            ports: ServerPorts {
-                ollama: Some(self.config.ollama_proxy_port),
-                whisper: Some(self.config.whisper_proxy_port),
-                lmstudio: self.config.lmstudio_proxy_port,
-                pairing: Some(self.config.pairing_port),
-                vocab: Some(self.config.vocab_port),
-            },
-        };
-        let h3 = match spawn_pairing_service(
-            self.config.pairing_port,
-            self.pairing.clone(),
-            self.store.clone(),
-            info_snapshot,
-        ).await {
-            Ok(h) => h,
-            Err(e) => {
-                if let Some(m) = self.mdns.lock().await.take() { m.stop(); }
-                self.whisper.stop().await;
-                for h in self.handles.lock().await.drain(..) { h.abort(); }
-                return Err(e);
-            }
-        };
+```bash
+git add crates/sharing/Cargo.toml Cargo.lock
+git commit -m "$(cat <<'EOF'
+chore(sharing): add tower (util) dev-dep for axum router tests
 
-        self.handles.lock().await.push(h3);
-        *running = true;
-        Ok(())
-    }
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+EOF
+)"
+```
 
-    pub async fn stop(&self) -> Result<(), SharingError> {
-        let mut running = self.running.lock().await;
-        if !*running { return Ok(()); }
-        if let Some(m) = self.mdns.lock().await.take() {
-            m.stop();
-        }
-        self.whisper.stop().await;
-        for h in self.handles.lock().await.drain(..) {
-            h.abort();
-        }
-        *running = false;
-        Ok(())
-    }
+---
 
-    pub async fn status(&self) -> SharingStatus {
-        let running = *self.running.lock().await;
-        let n = self
-            .store
-            .list()
-            .map(|v| v.len() as u32)
-            .unwrap_or(0);
-        SharingStatus {
-            enabled: running,
-            ollama_ok: running,
-            whisper_ok: running,
-            // Reflect the wiring decision made at start_sharing time.
-            // `lmstudio_proxy_port` is Some iff lmstudio_running_port()
-            // detected a local LM Studio listener.
-            lmstudio_ok: running && self.config.lmstudio_proxy_port.is_some(),
-            mdns_ok: running,
-            pairing_ok: running,
-            paired_clients: n,
-        }
-    }
-}
+## Task 2: Refactor — extract build_pairing_router
 
-/// Public, unauthenticated snapshot of an office server's identity and
-/// service ports. Returned by GET /info on the pairing port so clients
-/// that can't see the server's mDNS broadcasts (e.g. across Tailscale)
-/// can probe for FerriScribe servers without exchanging secrets.
-#[derive(Clone, Serialize)]
-pub struct InfoSnapshot {
-    pub host: String,
-    pub version: String,
-    pub ports: crate::mdns::ServerPorts,
-}
+**Files:**
+- Modify: `crates/sharing/src/orchestrator.rs` (function `spawn_pairing_service`, lines 322–413)
 
+- [ ] **Step 1: Extract Router construction into pub(crate) fn**
+
+Replace `spawn_pairing_service` with a new `build_pairing_router` plus a thinned-out `spawn_pairing_service`. Move the entire `St` struct, the four inner async fns (`enroll`, `list_clients`, `revoke`, `info_handler`), and the `Router::new()...with_state(st)` construction into `build_pairing_router`. The serializable structs (`EnrollReq`, `EnrollResp`, `ClientView`) stay nested inside `build_pairing_router` since they're only referenced by its handlers.
+
+Target shape (intent — keep the existing handler bodies unchanged):
+
+```rust
 pub(crate) fn build_pairing_router(
     pairing: Arc<PairingState>,
     store: Arc<TokenStore>,
     info: InfoSnapshot,
 ) -> axum::Router {
-    use std::net::SocketAddr;
     use axum::{Json, Router, extract::{ConnectInfo, State}, routing::{get, post}};
     use serde::{Deserialize, Serialize};
+    use std::net::SocketAddr;
 
     #[derive(Clone)]
     struct St { pairing: Arc<PairingState>, store: Arc<TokenStore>, info: InfoSnapshot }
@@ -351,7 +101,6 @@ pub(crate) fn build_pairing_router(
     #[derive(Serialize)]
     struct ClientView { id: i64, label: String }
 
-    /// Admin endpoint: list paired clients. Loopback-only.
     async fn list_clients(
         State(st): State<St>,
         ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -369,7 +118,6 @@ pub(crate) fn build_pairing_router(
         Ok(Json(v))
     }
 
-    /// Admin endpoint: revoke a client. Loopback-only.
     async fn revoke(
         State(st): State<St>,
         ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -384,9 +132,6 @@ pub(crate) fn build_pairing_router(
         }
     }
 
-    /// Public discovery: same shape mDNS broadcasts (friendly name,
-    /// version, public ports). No secrets, no codes — reaching it tells
-    /// you no more than seeing the office server on the LAN would.
     async fn info_handler(State(st): State<St>) -> Json<InfoSnapshot> {
         Json(st.info.clone())
     }
@@ -420,7 +165,48 @@ async fn spawn_pairing_service(
         ).await;
     }))
 }
+```
 
+- [ ] **Step 2: Verify it compiles**
+
+Run: `cargo build -p medical-sharing`
+Expected: success, no warnings about unused imports.
+
+- [ ] **Step 3: Run existing tests**
+
+Run: `cargo test -p medical-sharing --lib`
+Expected: `47 passed; 0 failed` (no behavior change)
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/sharing/src/orchestrator.rs
+git commit -m "$(cat <<'EOF'
+refactor(orchestrator): extract build_pairing_router helper
+
+Pulls the axum Router construction out of spawn_pairing_service so the
+pairing HTTP routes can be tested via tower::ServiceExt::oneshot with
+synthetic ConnectInfo. spawn_pairing_service still binds the listener
+and wraps bind failures in SharingError::Pairing; observable behavior
+preserved.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 3: Pairing handler tests (10)
+
+**Files:**
+- Modify: `crates/sharing/src/orchestrator.rs` (append `#[cfg(test)] mod pairing_router_tests` at end of file)
+
+- [ ] **Step 1: Write the failing test module**
+
+Append to `crates/sharing/src/orchestrator.rs`:
+
+```rust
 #[cfg(test)]
 mod pairing_router_tests {
     use super::*;
@@ -663,7 +449,47 @@ mod pairing_router_tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 }
+```
 
+- [ ] **Step 2: Run the new tests**
+
+Run: `cargo test -p medical-sharing --lib pairing_router_tests`
+Expected: `10 passed; 0 failed`
+
+- [ ] **Step 3: Run the full sharing suite**
+
+Run: `cargo test -p medical-sharing --lib`
+Expected: `57 passed; 0 failed` (47 baseline + 10 new)
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/sharing/src/orchestrator.rs
+git commit -m "$(cat <<'EOF'
+test(orchestrator): add pairing HTTP router tests via tower::oneshot
+
+10 axum router tests via tower::ServiceExt::oneshot covering all 4
+pairing routes plus loopback enforcement on admin routes. Synthetic
+ConnectInfo lets us exercise both 127.0.0.1 (accept) and 192.168.x.x
+(403) branches deterministically.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 4: SharingService lifecycle tests (9)
+
+**Files:**
+- Modify: `crates/sharing/src/orchestrator.rs` (append `#[cfg(test)] mod lifecycle_tests` after `pairing_router_tests`)
+
+- [ ] **Step 1: Write the failing test module**
+
+Append to `crates/sharing/src/orchestrator.rs`:
+
+```rust
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
@@ -745,23 +571,19 @@ mod lifecycle_tests {
         assert!(path.exists(), "token store db should be created on disk");
     }
 
-    #[cfg(unix)]
     #[test]
     fn sharing_service_new_returns_token_store_error_on_unwritable_path() {
         // A path under /dev/null/... can't be created because /dev/null isn't a directory.
-        // Unix-specific because /dev/null doesn't resolve the same way on Windows.
         let c = cfg_with_tokens_at(
             PathBuf::from("/dev/null/cannot-create/tokens.db"),
             [0u8; 32],
             "k",
         );
-        match SharingService::new(c) {
-            Ok(_) => panic!("expected TokenStore error, but new() succeeded"),
-            Err(e) => assert!(
-                matches!(e, SharingError::TokenStore(_)),
-                "expected TokenStore variant, got {e:?}"
-            ),
-        }
+        let err = SharingService::new(c).expect_err("expected TokenStore error");
+        assert!(
+            matches!(err, SharingError::TokenStore(_)),
+            "expected TokenStore variant, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -788,6 +610,7 @@ mod lifecycle_tests {
         let code = pairing.issue_code().await;
         let _token = pairing.enroll(&code, "client-a").await.unwrap();
         let s = svc.status().await;
+        // paired_clients reflects store state even though service was never started
         assert_eq!(s.paired_clients, 1);
         assert!(!s.enabled);
     }
@@ -801,3 +624,116 @@ mod lifecycle_tests {
         svc.stop().await.expect("second stop should also be Ok");
     }
 }
+```
+
+- [ ] **Step 2: Run the new tests**
+
+Run: `cargo test -p medical-sharing --lib lifecycle_tests`
+Expected: `9 passed; 0 failed`
+
+- [ ] **Step 3: Run the full sharing suite**
+
+Run: `cargo test -p medical-sharing --lib`
+Expected: `66 passed; 0 failed` (47 + 10 + 9)
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/sharing/src/orchestrator.rs
+git commit -m "$(cat <<'EOF'
+test(orchestrator): add SharingService lifecycle + Debug-redaction tests
+
+9 tests covering SharingConfig::default port invariants, the
+security-critical Debug redaction of token_store_key and
+whisper_internal_api_key, SharingService::new happy + unwritable-path
+paths, status() reporting when not running, paired_clients count
+reflecting store state, and stop() idempotence.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 5: xml_escape edge tests (2)
+
+**Files:**
+- Modify: `crates/sharing/src/service_installer.rs` (append two tests to the existing `#[cfg(test)] mod tests` at lines 293–310)
+
+- [ ] **Step 1: Append the two tests**
+
+Inside the existing `mod tests` block in `crates/sharing/src/service_installer.rs`, after `xml_escape_empty_input_is_empty`:
+
+```rust
+    #[test]
+    fn xml_escape_handles_ampersand_before_other_chars() {
+        // Input literally contains "&lt;" — we must NOT see "&amp;amp;lt;"
+        // (which would happen if we replaced < before & on this input).
+        // The chain replaces & first, so "&lt;" becomes "&amp;lt;".
+        assert_eq!(xml_escape("&lt;"), "&amp;lt;");
+        assert_eq!(xml_escape("&&"), "&amp;&amp;");
+    }
+
+    #[test]
+    fn xml_escape_handles_realistic_windows_path() {
+        // Defends the Windows ScheduledTask install() path against
+        // unescaped '&' injection in folder names.
+        let input = r"C:\Program Files & Co\ollama.exe";
+        let expected = r"C:\Program Files &amp; Co\ollama.exe";
+        assert_eq!(xml_escape(input), expected);
+    }
+```
+
+- [ ] **Step 2: Run the tests**
+
+Run: `cargo test -p medical-sharing --lib service_installer::tests`
+Expected: `4 passed; 0 failed` (2 existing + 2 new)
+
+- [ ] **Step 3: Run the full sharing suite**
+
+Run: `cargo test -p medical-sharing --lib`
+Expected: `68 passed; 0 failed`
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/sharing/src/service_installer.rs
+git commit -m "$(cat <<'EOF'
+test(service_installer): add xml_escape edge tests for ordering and Windows paths
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 6: Final verification
+
+- [ ] **Step 1: Run targeted suite**
+
+Run: `cargo test -p medical-sharing --lib`
+Expected: `68 passed; 0 failed`
+
+- [ ] **Step 2: Run full workspace lib tests**
+
+Run: `cargo test --workspace --lib 2>&1 | grep -E "^test result:"`
+Expected: 14 lines, all "ok", none "FAILED"
+
+- [ ] **Step 3: Verify no PHI in new code**
+
+Run: `grep -rE "(patient|transcript|soap|medication|allergy|condition)" crates/sharing/src/ | grep -v "/// " | grep -v "// "`
+Expected: no matches in test or production code beyond unrelated comments
+
+- [ ] **Step 4: Verify clean git state**
+
+Run: `git status`
+Expected: clean (no untracked files left over from test runs)
+
+- [ ] **Step 5: Confirm commit chain**
+
+Run: `git log --oneline master..HEAD`
+Expected: 5 commits — spec doc (already committed), tower dep, refactor, pairing tests, lifecycle tests, xml_escape tests. Plus this plan commit.
+
+After all tasks: Dispatch final code reviewer subagent for entire implementation. Then use superpowers:finishing-a-development-branch.

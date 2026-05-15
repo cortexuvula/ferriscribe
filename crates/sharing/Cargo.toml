@@ -37,3 +37,4 @@ futures-util = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 wiremock = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

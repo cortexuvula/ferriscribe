@@ -307,4 +307,22 @@ mod tests {
     fn xml_escape_empty_input_is_empty() {
         assert_eq!(xml_escape(""), "");
     }
+
+    #[test]
+    fn xml_escape_handles_ampersand_before_other_chars() {
+        // Input literally contains "&lt;" — we must NOT see "&amp;amp;lt;"
+        // (which would happen if we replaced < before & on this input).
+        // The chain replaces & first, so "&lt;" becomes "&amp;lt;".
+        assert_eq!(xml_escape("&lt;"), "&amp;lt;");
+        assert_eq!(xml_escape("&&"), "&amp;&amp;");
+    }
+
+    #[test]
+    fn xml_escape_handles_realistic_windows_path() {
+        // Defends the Windows ScheduledTask install() path against
+        // unescaped '&' injection in folder names.
+        let input = r"C:\Program Files & Co\ollama.exe";
+        let expected = r"C:\Program Files &amp; Co\ollama.exe";
+        assert_eq!(xml_escape(input), expected);
+    }
 }
