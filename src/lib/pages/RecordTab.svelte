@@ -244,7 +244,7 @@
       // Always launch — upload doesn't respect $settings.auto_generate_soap (live recording still does).
       pipelineRecordingId = recordingId;
       maybeLaunchPipeline(recordingId);
-    } catch (e: any) {
+    } catch (e) {
       importError = formatError(e) || 'Import failed';
     } finally {
       importing = false;

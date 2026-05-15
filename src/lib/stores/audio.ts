@@ -75,7 +75,7 @@ function createAudioStore() {
           error: null,
         }));
         startTimer();
-      } catch (e: any) {
+      } catch (e) {
         const message = formatError(e);
         log.error('Failed to start recording', { error: message, device: device ?? 'default' });
         if (waveformUnlisten) {
@@ -96,7 +96,7 @@ function createAudioStore() {
         await audioApi.pauseRecording();
         clearTimer();
         update((s) => ({ ...s, state: 'paused' }));
-      } catch (e: any) {
+      } catch (e) {
         update((s) => ({
           ...s,
           error: formatError(e) || 'Failed to pause',
@@ -109,7 +109,7 @@ function createAudioStore() {
         await audioApi.resumeRecording();
         update((s) => ({ ...s, state: 'recording' }));
         startTimer();
-      } catch (e: any) {
+      } catch (e) {
         update((s) => ({
           ...s,
           error: formatError(e) || 'Failed to resume',
@@ -136,7 +136,7 @@ function createAudioStore() {
           state: 'stopped',
           lastRecordingId: recordingId,
         }));
-      } catch (e: any) {
+      } catch (e) {
         const message = formatError(e);
         log.error('Failed to stop recording', { error: message });
         if (waveformUnlisten) {
@@ -160,7 +160,7 @@ function createAudioStore() {
       clearTimer();
       try {
         await audioApi.cancelRecording();
-      } catch (_e: any) {
+      } catch (_e) {
         // Best-effort — even if backend fails, reset the frontend state
       }
       if (waveformUnlisten) {
@@ -223,7 +223,7 @@ function createAudioStore() {
           recordingId: snap.recording_id,
           elapsedSecs: initialElapsed,
         });
-      } catch (e: any) {
+      } catch (e) {
         log.warn('Could not query recording state on startup', { error: formatError(e) });
       }
     },

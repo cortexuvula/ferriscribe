@@ -124,7 +124,7 @@ function createChatStore() {
         .map((m) => ({ role: m.role, content: m.content }));
 
       await chatApi.chatStream(apiMessages);
-    } catch (e: any) {
+    } catch (e) {
       if (e instanceof OfflineCancelled) {
         // Remove the empty streaming placeholder; the dialog already informed the user.
         update((msgs) => msgs.slice(0, -1));

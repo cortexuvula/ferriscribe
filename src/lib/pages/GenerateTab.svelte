@@ -114,7 +114,7 @@
         recordings.load(),
       ]);
       generation.finish();
-    } catch (e: any) {
+    } catch (e) {
       if (e instanceof OfflineCancelled) {
         // Dialog already informed the user; restore idle state without an error banner.
         generation.finish();

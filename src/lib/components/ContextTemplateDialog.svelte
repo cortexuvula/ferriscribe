@@ -100,7 +100,7 @@
       }
       closeForm();
       await loadTemplates();
-    } catch (err: any) {
+    } catch (err) {
       formError = formatError(err) || 'Failed to save template.';
     }
   }

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { invokeWithOfflineHandling } from './invokeWithOfflineHandling';
+import type { AgentResponse } from '../types';
 
 export interface ChatMessageInput {
   role: string;
@@ -34,7 +35,7 @@ export async function chatWithAgent(
   message: string,
   agentName: string,
   conversationHistory?: ChatMessageInput[]
-): Promise<any> {
+): Promise<AgentResponse> {
   return invokeWithOfflineHandling('chat_with_agent', {
     message,
     agentName,

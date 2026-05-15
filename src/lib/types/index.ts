@@ -119,11 +119,38 @@ export interface AppConfig {
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
 
+/** Output of a single tool call. Mirrors `crates/core/src/types/agent.rs::ToolOutput`. */
+export interface ToolOutput {
+  content: string;
+  is_error: boolean;
+}
+
+/** Token-usage stats for a completion. Mirrors `crates/core/src/types/ai.rs::UsageInfo`. */
+export interface UsageInfo {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+/**
+ * Record of a single tool invocation made during an agent run.
+ * Mirrors `crates/core/src/types/agent.rs::AgentToolCallRecord`.
+ * `arguments` is structured JSON from the model — typed as `unknown` so
+ * call sites must narrow before use.
+ */
 export interface ToolCallRecord {
   tool_name: string;
-  arguments: any;
-  result: any;
+  arguments: unknown;
+  result: ToolOutput;
   duration_ms: number;
+}
+
+/** Final response from a `chat_with_agent` invocation. Mirrors `AgentResponse`. */
+export interface AgentResponse {
+  content: string;
+  tool_calls_made: ToolCallRecord[];
+  usage: UsageInfo;
+  iterations: number;
 }
 
 export interface ChatMessage {

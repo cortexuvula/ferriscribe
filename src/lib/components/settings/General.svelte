@@ -68,7 +68,7 @@
         const count = await importVocabularyJson(selected as string);
         alert(`Imported ${count} vocabulary entries.`);
         await loadVocabCount();
-      } catch (err: any) {
+      } catch (err) {
         alert(`Import failed: ${err}`);
       }
     }
@@ -84,7 +84,7 @@
       try {
         const count = await exportVocabularyJson(selected);
         alert(`Exported ${count} vocabulary entries.`);
-      } catch (err: any) {
+      } catch (err) {
         alert(`Export failed: ${err}`);
       }
     }
@@ -106,7 +106,7 @@
         const count = await importContextTemplatesJson(selected as string);
         alert(`Imported ${count} context templates.`);
         await contextTemplates.load();
-      } catch (err: any) {
+      } catch (err) {
         alert(`Import failed: ${err}`);
       }
     }
@@ -122,7 +122,7 @@
       try {
         const count = await exportContextTemplatesJson(selected);
         alert(`Exported ${count} context templates.`);
-      } catch (err: any) {
+      } catch (err) {
         alert(`Export failed: ${err}`);
       }
     }
