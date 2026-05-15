@@ -367,3 +367,169 @@ fn extract_tar_gz(bytes: &[u8], out_dir: &Path, binary_name: &str) -> Result<()>
         "binary {binary_name} not found in tar.gz"
     )))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use wiremock::matchers::{method as http_method, path as http_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zip::write::SimpleFileOptions;
+
+    /// Build an in-memory zip archive containing exactly one file named
+    /// `binary_name` with the given body.
+    fn build_zip_with(binary_name: &str, body: &[u8]) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            w.start_file(binary_name, SimpleFileOptions::default())
+                .expect("start_file");
+            std::io::Write::write_all(&mut w, body).expect("write");
+            w.finish().expect("finish");
+        }
+        buf.into_inner()
+    }
+
+    /// Same but with only `other.txt` — used for the "binary missing" tests.
+    fn build_zip_without_target() -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            w.start_file("other.txt", SimpleFileOptions::default())
+                .expect("start_file");
+            std::io::Write::write_all(&mut w, b"decoy").expect("write");
+            w.finish().expect("finish");
+        }
+        buf.into_inner()
+    }
+
+    fn build_tar_gz_with(binary_name: &str, body: &[u8]) -> Vec<u8> {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        let gz = GzEncoder::new(Vec::new(), Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        let mut header = tar::Header::new_gnu();
+        header.set_path(binary_name).expect("set_path");
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, body).expect("append");
+        let gz = tar.into_inner().expect("into_inner");
+        gz.finish().expect("finish")
+    }
+
+    fn build_tar_gz_without_target() -> Vec<u8> {
+        build_tar_gz_with("other.txt", b"decoy")
+    }
+
+    fn fresh_supervisor() -> (Arc<WhisperSupervisor>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let supervisor = Arc::new(WhisperSupervisor::new(
+            dir.path().to_path_buf(),
+            dir.path().join("model.bin"),
+            0,
+        ));
+        (supervisor, dir)
+    }
+
+    #[test]
+    fn extract_zip_extracts_named_binary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes = build_zip_with("whisper-server", b"fake-binary-content");
+        extract_zip(&bytes, dir.path(), "whisper-server").expect("extract_zip");
+        let out = std::fs::read(dir.path().join("whisper-server")).expect("read");
+        assert_eq!(out, b"fake-binary-content");
+    }
+
+    #[test]
+    fn extract_zip_errors_when_binary_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes = build_zip_without_target();
+        let r = extract_zip(&bytes, dir.path(), "whisper-server");
+        assert!(matches!(r, Err(WhisperError::Manifest(_))));
+    }
+
+    #[test]
+    fn extract_tar_gz_extracts_named_binary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes = build_tar_gz_with("whisper-server", b"tar-content");
+        extract_tar_gz(&bytes, dir.path(), "whisper-server").expect("extract_tar_gz");
+        let out = std::fs::read(dir.path().join("whisper-server")).expect("read");
+        assert_eq!(out, b"tar-content");
+    }
+
+    #[test]
+    fn extract_tar_gz_errors_when_binary_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes = build_tar_gz_without_target();
+        let r = extract_tar_gz(&bytes, dir.path(), "whisper-server");
+        assert!(matches!(r, Err(WhisperError::Manifest(_))));
+    }
+
+    #[test]
+    fn extract_archive_unknown_kind_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let r = WhisperSupervisor::extract_archive(b"", "rar", dir.path(), "whisper-server");
+        match r {
+            Err(WhisperError::Manifest(msg)) => {
+                assert!(
+                    msg.contains("unsupported archive"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected Err(Manifest); got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn download_and_verify_succeeds_with_correct_sha256() {
+        let (supervisor, _dir) = fresh_supervisor();
+        let zip_bytes = build_zip_with("whisper-server", b"hello-binary");
+        let expected = hex::encode(Sha256::digest(&zip_bytes));
+
+        let server = MockServer::start().await;
+        Mock::given(http_method("GET"))
+            .and(http_path("/binary.zip"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(zip_bytes.clone()),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/binary.zip", server.uri());
+        let bin = supervisor
+            .download_and_verify(&url, "zip", Some(&expected), "whisper-server")
+            .await
+            .expect("download_and_verify");
+        let out = std::fs::read(&bin).expect("read");
+        assert_eq!(out, b"hello-binary");
+    }
+
+    #[tokio::test]
+    async fn download_and_verify_rejects_hash_mismatch() {
+        let (supervisor, _dir) = fresh_supervisor();
+        let zip_bytes = build_zip_with("whisper-server", b"actual-content");
+        let wrong_sha = "0".repeat(64); // 64-char zero hash — guaranteed mismatch
+
+        let server = MockServer::start().await;
+        Mock::given(http_method("GET"))
+            .and(http_path("/binary.zip"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(zip_bytes.clone()),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/binary.zip", server.uri());
+        let r = supervisor
+            .download_and_verify(&url, "zip", Some(&wrong_sha), "whisper-server")
+            .await;
+        match r {
+            Err(WhisperError::HashMismatch { expected, got }) => {
+                assert_eq!(expected, wrong_sha);
+                assert_eq!(got, hex::encode(Sha256::digest(&zip_bytes)));
+            }
+            other => panic!("expected Err(HashMismatch); got {other:?}"),
+        }
+    }
+}
