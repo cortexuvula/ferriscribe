@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { chat, isStreaming } from '../stores/chat';
+  import { chat, isStreaming } from '../stores/chat.svelte.ts';
   import ChatMessage from '../components/ChatMessage.svelte';
 
   let input = $state('');
@@ -15,13 +15,13 @@
 
   // Scroll to bottom whenever messages change
   $effect(() => {
-    $chat.length;
+    chat.messages.length;
     scrollToBottom();
   });
 
   async function sendMessage() {
     const text = input.trim();
-    if (!text || $isStreaming) return;
+    if (!text || isStreaming.value) return;
 
     input = '';
     await chat.sendMessage(text);
@@ -37,18 +37,18 @@
 
 <div class="chat-tab">
   <div class="messages-area" bind:this={messagesEl}>
-    {#if $chat.length === 0}
+    {#if chat.messages.length === 0}
       <div class="welcome">
         <div class="welcome-icon">💬</div>
         <h2>Medical AI Chat</h2>
         <p>Ask questions about your recordings, get medical information, or discuss clinical cases.</p>
       </div>
     {:else}
-      {#each $chat as msg (msg.id)}
+      {#each chat.messages as msg (msg.id)}
         <ChatMessage message={msg} />
       {/each}
 
-      {#if $isStreaming}
+      {#if isStreaming.value}
         <div class="streaming-indicator">
           <span class="dot"></span>
           <span class="dot"></span>
@@ -65,14 +65,14 @@
       rows={3}
       bind:value={input}
       onkeydown={handleKeyDown}
-      disabled={$isStreaming}
+      disabled={isStreaming.value}
     ></textarea>
     <button
       class="send-btn"
       onclick={sendMessage}
-      disabled={!input.trim() || $isStreaming}
+      disabled={!input.trim() || isStreaming.value}
     >
-      {$isStreaming ? '...' : 'Send'}
+      {isStreaming.value ? '...' : 'Send'}
     </button>
   </div>
 </div>

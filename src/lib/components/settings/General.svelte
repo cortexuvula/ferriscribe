@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { settings } from '../../stores/settings';
-  import { theme } from '../../stores/theme';
+  import { theme } from '../../stores/theme.svelte.ts';
   import { contextTemplates } from '../../stores/contextTemplates';
   import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import VocabularyDialog from '../VocabularyDialog.svelte';

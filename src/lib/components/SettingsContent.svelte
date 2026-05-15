@@ -5,21 +5,18 @@
   import Audio from './settings/Audio.svelte';
   import Sharing from './settings/Sharing.svelte';
   import TrainingCorpus from './settings/TrainingCorpus.svelte';
-  import { onMount } from 'svelte';
-  import { settingsNav, type SettingsSection } from '../stores/settingsNav';
+  import { settingsNav, type SettingsSection } from '../stores/settingsNav.svelte.ts';
 
   type Section = SettingsSection;
   let activeSection = $state<Section>('general');
 
   // Consume navigation requests from settingsNav store (e.g. from the
   // EndpointOfflineDialog "Open Settings" button).
-  onMount(() => {
-    return settingsNav.subscribe((s) => {
-      if (s.requestedSection) {
-        activeSection = s.requestedSection;
-        settingsNav.clear();
-      }
-    });
+  $effect(() => {
+    if (settingsNav.state.requestedSection) {
+      activeSection = settingsNav.state.requestedSection;
+      settingsNav.clear();
+    }
   });
 
   const navItems: { id: Section; label: string }[] = [

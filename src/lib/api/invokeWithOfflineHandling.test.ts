@@ -8,7 +8,7 @@ import {
   OfflineCancelled,
   type EndpointOfflinePayload,
 } from './invokeWithOfflineHandling';
-import { endpointOfflineStore } from '../stores/endpointOffline';
+import { endpointOfflineStore } from '../stores/endpointOffline.svelte.ts';
 
 const invokeMock = vi.mocked(invoke);
 

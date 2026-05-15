@@ -16,8 +16,7 @@
  * these tests should be replaced/augmented with full render tests.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { get } from 'svelte/store';
-import { endpointOfflineStore } from '../stores/endpointOffline';
+import { endpointOfflineStore } from '../stores/endpointOffline.svelte.ts';
 import type {
   EndpointOfflinePayload,
   OfflineReason,
@@ -109,12 +108,12 @@ describe('EndpointOfflineDialog store contract', () => {
   beforeEach(() => endpointOfflineStore.close());
 
   it('store starts null (dialog should not render)', () => {
-    expect(get(endpointOfflineStore)).toBeNull();
+    expect(endpointOfflineStore.state).toBeNull();
   });
 
   it('openAndWait populates store — dialog component would become visible', () => {
     void endpointOfflineStore.openAndWait(payload());
-    const s = get(endpointOfflineStore);
+    const s = endpointOfflineStore.state;
     expect(s).not.toBeNull();
     expect(s?.payload.kind).toBe('EndpointOffline');
   });
@@ -123,50 +122,50 @@ describe('EndpointOfflineDialog store contract', () => {
     const pending = endpointOfflineStore.openAndWait(payload());
     endpointOfflineStore._resolve('retry');
     await expect(pending).resolves.toBe('retry');
-    expect(get(endpointOfflineStore)).toBeNull();
+    expect(endpointOfflineStore.state).toBeNull();
   });
 
   it('Cancel action: _resolve("cancel") resolves the promise and clears state', async () => {
     const pending = endpointOfflineStore.openAndWait(payload());
     endpointOfflineStore._resolve('cancel');
     await expect(pending).resolves.toBe('cancel');
-    expect(get(endpointOfflineStore)).toBeNull();
+    expect(endpointOfflineStore.state).toBeNull();
   });
 
   it('Open Settings action: _resolve("opened_settings") resolves and clears state', async () => {
     const pending = endpointOfflineStore.openAndWait(payload());
     endpointOfflineStore._resolve('opened_settings');
     await expect(pending).resolves.toBe('opened_settings');
-    expect(get(endpointOfflineStore)).toBeNull();
+    expect(endpointOfflineStore.state).toBeNull();
   });
 
   it('service field is propagated — dialog would pass it to onopenSettings', () => {
     void endpointOfflineStore.openAndWait(payload({ service: 'RemoteStt' }));
-    const s = get(endpointOfflineStore);
+    const s = endpointOfflineStore.state;
     expect(s?.payload.service).toBe('RemoteStt');
   });
 
   it('AiProvider service propagates correctly', () => {
     void endpointOfflineStore.openAndWait(payload({ service: 'AiProvider' }));
-    const s = get(endpointOfflineStore);
+    const s = endpointOfflineStore.state;
     expect(s?.payload.service).toBe('AiProvider');
   });
 
   it('close() removes state without resolving (teardown path)', () => {
     void endpointOfflineStore.openAndWait(payload());
     endpointOfflineStore.close();
-    expect(get(endpointOfflineStore)).toBeNull();
+    expect(endpointOfflineStore.state).toBeNull();
   });
 
   it('_resolve is a no-op when dialog is not open (defensive path)', () => {
     expect(() => endpointOfflineStore._resolve('cancel')).not.toThrow();
-    expect(get(endpointOfflineStore)).toBeNull();
+    expect(endpointOfflineStore.state).toBeNull();
   });
 
   it('concurrent openAndWait: second open replaces first, single _resolve settles both', async () => {
     const first = endpointOfflineStore.openAndWait(payload({ provider_name: 'Ollama' }));
     const second = endpointOfflineStore.openAndWait(payload({ provider_name: 'LM Studio' }));
-    expect(get(endpointOfflineStore)?.payload.provider_name).toBe('LM Studio');
+    expect(endpointOfflineStore.state?.payload.provider_name).toBe('LM Studio');
     endpointOfflineStore._resolve('retry');
     await expect(first).resolves.toBe('retry');
     await expect(second).resolves.toBe('retry');

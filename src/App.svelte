@@ -2,7 +2,7 @@
   import './app.css';
   import { onMount, onDestroy } from 'svelte';
   import { settings } from './lib/stores/settings';
-  import { theme } from './lib/stores/theme';
+  import { theme } from './lib/stores/theme.svelte.ts';
   import { generation } from './lib/stores/generation';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -14,7 +14,7 @@
   import SettingsDialog from './lib/dialogs/SettingsDialog.svelte';
   import DatabaseRecoveryDialog from './lib/dialogs/DatabaseRecoveryDialog.svelte';
   import EndpointOfflineDialog from './lib/components/EndpointOfflineDialog.svelte';
-  import { settingsNav } from './lib/stores/settingsNav';
+  import { settingsNav } from './lib/stores/settingsNav.svelte.ts';
   import type { ServiceKind } from './lib/api/invokeWithOfflineHandling';
   import { selectedRecording, selectRecording } from './lib/stores/recordings';
   import { pipeline } from './lib/stores/pipeline';

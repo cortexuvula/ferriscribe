@@ -7,7 +7,7 @@
   import { checkRecordingAudioLevels } from '../api/audio';
   import { copyWithStatus } from '../utils/clipboard';
   import { clampSidebarWidth } from '../utils/resize';
-  import { recordSidebar } from '../stores/recordSidebar';
+  import { recordSidebar } from '../stores/recordSidebar.svelte.ts';
   import RecordingHeader from '../components/RecordingHeader.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import RecordingStateCards from './record/RecordingStateCards.svelte';
@@ -37,19 +37,10 @@
   let sidebarOpen = $state(true);
   let sidebarWidth = $state(360);
 
-  // Snapshot initial store values once on mount, then write back on toggle/resize-end.
-  // (We avoid two-way reactive subscription to keep the data flow simple.)
+  // Sync local state from the persisted recordSidebar rune store.
   $effect(() => {
-    const unsubOpen = recordSidebar.open.subscribe((v) => {
-      sidebarOpen = v;
-    });
-    const unsubWidth = recordSidebar.width.subscribe((v) => {
-      sidebarWidth = v;
-    });
-    return () => {
-      unsubOpen();
-      unsubWidth();
-    };
+    sidebarOpen = recordSidebar.open;
+    sidebarWidth = recordSidebar.width;
   });
 
   function toggleSidebar() {
