@@ -11,6 +11,7 @@ const defaults: AppConfig = {
   tts_provider: 'elevenlabs',
   tts_voice: 'default',
   temperature: 0.2,
+  input_device: null,
   sample_rate: 44100,
   autosave_enabled: true,
   autosave_interval_secs: 60,
@@ -99,7 +100,10 @@ function createSettingsStore() {
       return saveQueue;
     },
 
-    async updateField(key: string, value: any): Promise<void> {
+    async updateField<K extends keyof AppConfig>(
+      key: K,
+      value: AppConfig[K],
+    ): Promise<void> {
       if (!loaded) {
         console.warn('Settings not loaded yet, refusing to save');
         return;

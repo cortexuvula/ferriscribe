@@ -65,6 +65,13 @@ import type { ContextTemplate } from '../api/contextTemplates';
 
 // ── App Config ────────────────────────────────────────────────────────────────
 
+// The Rust AppConfig (crates/core/src/types/settings.rs) defines additional
+// fields the frontend doesn't touch (channels, window_width/height, soap_note_settings,
+// agent_settings, icd_version, soap_template, embedding_model, quick_continue_mode,
+// max_background_workers, show_processing_notifications, auto_retry_failed,
+// max_retry_attempts, auto_generate_referral/letter, auto_index_rag). They round-
+// trip through this type without being modeled here; if the frontend ever reads
+// or writes one, add it here so the typo guard kicks in.
 export interface AppConfig {
   theme: 'dark' | 'light';
   language: string;
@@ -83,6 +90,7 @@ export interface AppConfig {
   ollama_host: string;
   ollama_port: number;
   temperature: number;
+  input_device: string | null;
   sample_rate: number;
   autosave_enabled: boolean;
   autosave_interval_secs: number;
@@ -107,7 +115,6 @@ export interface AppConfig {
   rsvp_remembered_sections: string[];
   // Training corpus
   capture_for_training: boolean;
-  [key: string]: any;
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
