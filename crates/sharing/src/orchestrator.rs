@@ -745,9 +745,11 @@ mod lifecycle_tests {
         assert!(path.exists(), "token store db should be created on disk");
     }
 
+    #[cfg(unix)]
     #[test]
     fn sharing_service_new_returns_token_store_error_on_unwritable_path() {
         // A path under /dev/null/... can't be created because /dev/null isn't a directory.
+        // Unix-specific because /dev/null doesn't resolve the same way on Windows.
         let c = cfg_with_tokens_at(
             PathBuf::from("/dev/null/cannot-create/tokens.db"),
             [0u8; 32],
