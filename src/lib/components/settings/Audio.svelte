@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { settings } from '../../stores/settings';
+  import { settings } from '../../stores/settings.svelte';
   import { listAudioDevices } from '../../api/audio';
   import { listWhisperModels, listPyannoteModels, downloadModel, deleteModel, type ModelInfo as WhisperModelInfo } from '../../api/models';
   import { reinitProviders } from '../../api/chat';
@@ -20,7 +20,7 @@
   let modelsRefreshing = $state(false);
   let downloadingModel = $state<string | null>(null);
   let downloadProgress = $state<Record<string, { downloaded: number; total: number }>>({});
-  let sttMode = $state<'local' | 'remote'>(($settings.stt_mode as 'local' | 'remote') ?? 'local');
+  let sttMode = $state<'local' | 'remote'>((settings.state.stt_mode as 'local' | 'remote') ?? 'local');
   let progressUnlisten: UnlistenFn | null = null;
 
   async function fetchAudioDevices() {
@@ -186,7 +186,7 @@
     <label for="sample-rate" class="form-label">Sample Rate</label>
     <select
       id="sample-rate"
-      value={$settings.sample_rate}
+      value={settings.state.sample_rate}
       onchange={handleSampleRateChange}
     >
       <option value={16000}>16000 Hz</option>
@@ -199,7 +199,7 @@
     <label class="form-label checkbox-label">
       <input
         type="checkbox"
-        checked={$settings.auto_generate_soap}
+        checked={settings.state.auto_generate_soap}
         onchange={(e: Event) => {
           const checked = (e.target as HTMLInputElement).checked;
           settings.updateField('auto_generate_soap', checked);
@@ -214,7 +214,7 @@
     <label class="form-label checkbox-label">
       <input
         type="checkbox"
-        checked={$settings.capture_for_training ?? false}
+        checked={settings.state.capture_for_training ?? false}
         onchange={(e: Event) => {
           const checked = (e.target as HTMLInputElement).checked;
           settings.updateField('capture_for_training', checked);

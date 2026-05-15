@@ -1,6 +1,6 @@
 <script lang="ts">
   import { theme } from '../stores/theme.svelte.ts';
-  import { settings } from '../stores/settings';
+  import { settings } from '../stores/settings.svelte';
 
   interface Props {
     activeTab: string;

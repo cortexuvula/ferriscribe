@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { settings } from '../../stores/settings';
+  import { settings } from '../../stores/settings.svelte';
   import { testSttRemoteConnection, setApiKey, getApiKey } from '../../api/settings';
   import { reinitProviders } from '../../api/chat';
   import { formatError } from '../../types/errors';
   import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
 
-  const sttOk = $derived(isLocalOrAllowed($settings.stt_remote_host ?? '', $settings.allow_public_endpoint));
-  const sttKind = $derived(classifyEndpoint($settings.stt_remote_host ?? ''));
+  const sttOk = $derived(isLocalOrAllowed(settings.state.stt_remote_host ?? '', settings.state.allow_public_endpoint));
+  const sttKind = $derived(classifyEndpoint(settings.state.stt_remote_host ?? ''));
 
   let sttRemoteTestStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
   let sttRemoteTestMessage = $state('');
@@ -26,7 +26,7 @@
     id="stt-remote-host"
     type="text"
     placeholder="computer-a.tailnet.ts.net"
-    value={$settings.stt_remote_host ?? ''}
+    value={settings.state.stt_remote_host ?? ''}
     onchange={async (e) => {
       await settings.updateField('stt_remote_host', (e.target as HTMLInputElement).value);
       sttRemoteTestStatus = 'idle';
@@ -47,7 +47,7 @@
   <input
     id="stt-remote-port"
     type="number"
-    value={$settings.stt_remote_port ?? 8080}
+    value={settings.state.stt_remote_port ?? 8080}
     min="1"
     max="65535"
     onchange={async (e) => {
@@ -67,7 +67,7 @@
   <input
     id="stt-remote-model"
     type="text"
-    value={$settings.stt_remote_model ?? ''}
+    value={settings.state.stt_remote_model ?? ''}
     onchange={async (e) => {
       await settings.updateField('stt_remote_model', (e.target as HTMLInputElement).value);
       await reinitProviders();
@@ -111,8 +111,8 @@
       sttRemoteTestMessage = '';
       try {
         const msg = await testSttRemoteConnection(
-          $settings.stt_remote_host || 'localhost',
-          $settings.stt_remote_port || 8080,
+          settings.state.stt_remote_host || 'localhost',
+          settings.state.stt_remote_port || 8080,
           sttRemoteApiKey || null,
         );
         sttRemoteTestStatus = 'success';

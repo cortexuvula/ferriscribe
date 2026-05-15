@@ -2,7 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
   import { suggestedClientLabel } from '../../../api/sharing';
-  import { settings } from '../../../stores/settings';
+  import { settings } from '../../../stores/settings.svelte';
 
   type Discovered = {
     instance_name: string;

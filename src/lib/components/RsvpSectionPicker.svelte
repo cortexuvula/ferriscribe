@@ -1,6 +1,6 @@
 <script lang="ts">
   import { rsvp } from '../stores/rsvp.svelte';
-  import { settings } from '../stores/settings';
+  import { settings } from '../stores/settings.svelte';
   import { tokenize, type Section } from '../rsvp/engine';
 
   let selected = $state<Set<string>>(new Set());
@@ -15,10 +15,10 @@
     if (initialised) return;
     initialised = true;
 
-    rememberChoice = $settings.rsvp_remember_sections;
-    const remembered = new Set($settings.rsvp_remembered_sections);
+    rememberChoice = settings.state.rsvp_remember_sections;
+    const remembered = new Set(settings.state.rsvp_remembered_sections);
     const useRemembered =
-      $settings.rsvp_remember_sections && remembered.size > 0;
+      settings.state.rsvp_remember_sections && remembered.size > 0;
 
     selected = new Set(
       rsvp.state.picker.sections
@@ -42,7 +42,7 @@
     if (rememberChoice) {
       settings.updateField('rsvp_remember_sections', true);
       settings.updateField('rsvp_remembered_sections', [...selected]);
-    } else if ($settings.rsvp_remember_sections) {
+    } else if (settings.state.rsvp_remember_sections) {
       settings.updateField('rsvp_remember_sections', false);
     }
 

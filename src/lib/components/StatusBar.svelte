@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { audio } from '../stores/audio.svelte';
-  import { settings } from '../stores/settings';
+  import { settings } from '../stores/settings.svelte';
   import { formatDuration } from '../utils/format';
   import EndpointHealthPill from './EndpointHealthPill.svelte';
 
@@ -75,9 +75,9 @@
       </span>
       <span class="status-sep">·</span>
     {/if}
-    <span class="status-provider">AI: {$settings.ai_provider}/{$settings.ai_model}</span>
+    <span class="status-provider">AI: {settings.state.ai_provider}/{settings.state.ai_model}</span>
     <span class="status-sep">·</span>
-    <span class="status-provider">STT: {$settings.whisper_model}</span>
+    <span class="status-provider">STT: {settings.state.whisper_model}</span>
   </div>
 </div>
 

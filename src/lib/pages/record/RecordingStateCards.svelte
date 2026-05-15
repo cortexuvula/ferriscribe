@@ -1,6 +1,6 @@
 <script lang="ts">
   import { audio } from '../../stores/audio.svelte';
-  import { settings } from '../../stores/settings';
+  import { settings } from '../../stores/settings.svelte';
 
   interface Props {
     importedRecordingId: string | null;
@@ -27,7 +27,7 @@
     <h2>Audio File Imported</h2>
     <p><strong>{importedFilename}</strong> has been added to your recordings.</p>
 
-    {#if !$settings.auto_generate_soap}
+    {#if !settings.state.auto_generate_soap}
       <div class="post-actions">
         <button class="btn-primary" onclick={onProcessRecording}>
           Process Recording
@@ -85,7 +85,7 @@
     <h2>Recording Complete</h2>
     <p>Your recording has been saved.</p>
 
-    {#if !$settings.auto_generate_soap && audio.state.lastRecordingId}
+    {#if !settings.state.auto_generate_soap && audio.state.lastRecordingId}
       <div class="post-actions">
         <button class="btn-primary" onclick={onProcessRecording}>
           Process Recording

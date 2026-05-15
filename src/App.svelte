@@ -1,7 +1,7 @@
 <script lang="ts">
   import './app.css';
   import { onMount, onDestroy } from 'svelte';
-  import { settings } from './lib/stores/settings';
+  import { settings } from './lib/stores/settings.svelte';
   import { theme } from './lib/stores/theme.svelte.ts';
   import { generation } from './lib/stores/generation.svelte';
   import { invoke } from '@tauri-apps/api/core';
@@ -67,10 +67,15 @@
     }
   });
 
+  // Keep theme in sync with the loaded settings state.
+  $effect(() => {
+    theme.set(settings.state.theme);
+  });
+
   let progressUnlisten: UnlistenFn | null = null;
   let pipelineCompleteUnlisten: UnlistenFn | null = null;
   let pipelineFailedUnlisten: UnlistenFn | null = null;
-  let settingsUnsubscribe: (() => void) | null = null;
+  // Theme sync is handled reactively via $effect below.
   let onGlobalKeydown: ((e: KeyboardEvent) => void) | null = null;
 
   async function navigateToSoap(tab: string, recordingId: string) {
@@ -106,10 +111,6 @@
     );
 
     await settings.load();
-    // Set theme from loaded settings
-    settingsUnsubscribe = settings.subscribe((cfg) => {
-      theme.set(cfg.theme);
-    });
 
     onGlobalKeydown = (e: KeyboardEvent) => {
       const cmdOrCtrl = e.metaKey || e.ctrlKey;
@@ -187,7 +188,6 @@
   onDestroy(() => {
     if (onGlobalKeydown) window.removeEventListener('keydown', onGlobalKeydown);
     progressUnlisten?.();
-    settingsUnsubscribe?.();
     pipeline.destroy();
     pipelineCompleteUnlisten?.();
     pipelineFailedUnlisten?.();

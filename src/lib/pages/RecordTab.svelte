@@ -1,6 +1,6 @@
 <script lang="ts">
   import { audio } from '../stores/audio.svelte';
-  import { settings } from '../stores/settings';
+  import { settings } from '../stores/settings.svelte';
   import { pipeline } from '../stores/pipeline.svelte';
   import { recordings } from '../stores/recordings.svelte';
   import { importAudioFile, getRecording } from '../api/recordings';
@@ -189,7 +189,7 @@
 
       pipelineRecordingId = recordingId;
 
-      if ($settings.auto_generate_soap) {
+      if (settings.state.auto_generate_soap) {
         maybeLaunchPipeline(recordingId);
       } else {
         warnIfSilent(recordingId);
@@ -232,7 +232,7 @@
       importedFilename = filePath.split('/').pop()?.split('\\').pop() ?? 'audio file';
       await recordings.load();
 
-      // Always launch — upload doesn't respect $settings.auto_generate_soap (live recording still does).
+      // Always launch — upload doesn't respect settings.state.auto_generate_soap (live recording still does).
       pipelineRecordingId = recordingId;
       maybeLaunchPipeline(recordingId);
     } catch (e) {

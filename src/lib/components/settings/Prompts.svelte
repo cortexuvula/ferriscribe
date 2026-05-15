@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { settings } from '../../stores/settings';
+  import { settings } from '../../stores/settings.svelte';
   import { getDefaultPrompt, type DocType } from '../../api/prompts';
 
   type PromptInfo = {
@@ -58,7 +58,7 @@
     promptSaveStatus = 'idle';
     try {
       const info = PROMPT_TYPES.find((p) => p.key === docType)!;
-      const customValue = $settings?.[info.configField] as string | null | undefined;
+      const customValue = settings.state?.[info.configField] as string | null | undefined;
       if (customValue && customValue.length > 0) {
         promptEditorText = customValue;
         promptIsCustom = true;

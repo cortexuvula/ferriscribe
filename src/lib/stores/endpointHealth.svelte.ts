@@ -1,6 +1,5 @@
-import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
-import { settings } from './settings';
+import { settings } from './settings.svelte';
 import type { AppConfig } from '../types';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -149,7 +148,7 @@ class EndpointHealthStore {
   }
 
   private async probeAll(): Promise<void> {
-    const cfg = get(settings);
+    const cfg = settings.state;
     this.lastProbedKey = this.probedKey(cfg);
     this.primed = true;
     const [ai, stt] = await Promise.all([this.probeAi(cfg), this.probeStt(cfg)]);

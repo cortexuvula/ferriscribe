@@ -4,30 +4,44 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 const invokeMock = vi.mocked(invoke);
 
-vi.mock('../stores/settings', () => {
-  const { writable } = require('svelte/store');
-  return {
-    settings: writable({
-      ai_provider: 'lmstudio',
-      lmstudio_host: '',
-      lmstudio_port: 1234,
-      ollama_host: '',
-      ollama_port: 11434,
-      stt_remote_host: '',
-      stt_remote_port: 8080,
-      stt_remote_api_key: undefined,
-      stt_mode: 'local',
-    }),
+// Mock the new runes-based settings store. The endpointHealth store reads
+// settings.state and calls settings.subscribe(cb). Tests mutate state via
+// settings.set() / settings.update() which trigger all active subscribers,
+// mirroring the old writable behaviour.
+vi.mock('../stores/settings.svelte', () => {
+  let _state: any = {
+    ai_provider: 'lmstudio',
+    lmstudio_host: '',
+    lmstudio_port: 1234,
+    ollama_host: '',
+    ollama_port: 11434,
+    stt_remote_host: '',
+    stt_remote_port: 8080,
+    stt_remote_api_key: undefined,
+    stt_mode: 'local',
   };
+  const _subscribers = new Set<(v: any) => void>();
+  function notify() { for (const cb of _subscribers) cb(_state); }
+  const obj = {
+    get state() { return _state; },
+    set(next: any) { _state = next; notify(); },
+    update(fn: (s: any) => any) { _state = fn(_state); notify(); },
+    subscribe(cb: (v: any) => void) {
+      cb(_state); // emit current value immediately
+      _subscribers.add(cb);
+      return () => { _subscribers.delete(cb); };
+    },
+  };
+  return { settings: obj };
 });
 
 // Import after mocks are set up.
 import { endpointHealth } from './endpointHealth.svelte';
-// The vi.mock above replaces settings with a plain writable; cast to any so
+// The vi.mock above replaces settings with a plain object; cast to any so
 // svelte-check doesn't complain that .set() / .update() don't exist on the
 // real settings store type.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-import { settings as _settings } from '../stores/settings';
+import { settings as _settings } from '../stores/settings.svelte';
 const settings = _settings as any;
 
 describe('endpointHealth store', () => {
