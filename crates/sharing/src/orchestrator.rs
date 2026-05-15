@@ -319,12 +319,11 @@ pub struct InfoSnapshot {
     pub ports: crate::mdns::ServerPorts,
 }
 
-async fn spawn_pairing_service(
-    port: u16,
+pub(crate) fn build_pairing_router(
     pairing: Arc<PairingState>,
     store: Arc<TokenStore>,
     info: InfoSnapshot,
-) -> crate::Result<tokio::task::JoinHandle<()>> {
+) -> axum::Router {
     use std::net::SocketAddr;
     use axum::{Json, Router, extract::{ConnectInfo, State}, routing::{get, post}};
     use serde::{Deserialize, Serialize};
@@ -393,13 +392,23 @@ async fn spawn_pairing_service(
     }
 
     let st = St { pairing, store, info };
-    let app = Router::new()
+    Router::new()
         .route("/pair/enroll", post(enroll))
         .route("/pair/clients", get(list_clients))
         .route("/pair/revoke/:id", post(revoke))
         .route("/info", get(info_handler))
-        .with_state(st);
+        .with_state(st)
+}
 
+async fn spawn_pairing_service(
+    port: u16,
+    pairing: Arc<PairingState>,
+    store: Arc<TokenStore>,
+    info: InfoSnapshot,
+) -> crate::Result<tokio::task::JoinHandle<()>> {
+    use std::net::SocketAddr;
+
+    let app = build_pairing_router(pairing, store, info);
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .map_err(|e| crate::SharingError::Pairing(format!("bind 0.0.0.0:{port}: {e}")))?;
