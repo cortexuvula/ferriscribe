@@ -7,7 +7,7 @@
     deleteAllVocabularyEntries,
     type VocabularyEntry,
   } from '../api/vocabulary';
-  import { toasts } from '../stores/toasts';
+  import { toasts } from '../stores/toasts.svelte';
   import { onMount, onDestroy } from 'svelte';
   import VocabularyForm from './VocabularyForm.svelte';
   import VocabularyTable from './VocabularyTable.svelte';

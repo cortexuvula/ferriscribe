@@ -10,7 +10,7 @@
   import WhisperLocalSection from './WhisperLocalSection.svelte';
   import SttRemoteSection from './SttRemoteSection.svelte';
   import DiarizationModelsSection from './DiarizationModelsSection.svelte';
-  import { toasts } from '../../stores/toasts';
+  import { toasts } from '../../stores/toasts.svelte';
 
   let audioDevices = $state<AudioDevice[]>([]);
   let devicesLoading = $state(false);

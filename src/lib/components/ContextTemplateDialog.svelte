@@ -5,7 +5,7 @@
     deleteContextTemplate,
     type ContextTemplate,
   } from '../api/contextTemplates';
-  import { contextTemplates } from '../stores/contextTemplates';
+  import { contextTemplates } from '../stores/contextTemplates.svelte';
   import { formatError } from '../types/errors';
   import { onMount, onDestroy } from 'svelte';
 
@@ -51,9 +51,9 @@
   }
 
   function filtered(): ContextTemplate[] {
-    if (!searchText.trim()) return $contextTemplates;
+    if (!searchText.trim()) return contextTemplates.list;
     const q = searchText.toLowerCase();
-    return $contextTemplates.filter(
+    return contextTemplates.list.filter(
       (t) => t.name.toLowerCase().includes(q) || t.body.toLowerCase().includes(q),
     );
   }
@@ -92,7 +92,7 @@
         }
         await upsertContextTemplate(name, body);
       } else {
-        if ($contextTemplates.some((t) => t.name === name)) {
+        if (contextTemplates.list.some((t) => t.name === name)) {
           formError = `A template named "${name}" already exists.`;
           return;
         }
@@ -172,7 +172,7 @@
             <p class="loading-text">Loading...</p>
           {:else if filtered().length === 0}
             <p class="empty-text">
-              {$contextTemplates.length === 0 ? 'No templates yet. Click "+ Add Template" to create one.' : 'No templates match the search.'}
+              {contextTemplates.list.length === 0 ? 'No templates yet. Click "+ Add Template" to create one.' : 'No templates match the search.'}
             </p>
           {:else}
             <table class="ct-table">
@@ -202,7 +202,7 @@
 
       <div class="ct-footer">
         <span class="footer-count">
-          {filtered().length} shown{searchText ? ` of ${$contextTemplates.length}` : ''}
+          {filtered().length} shown{searchText ? ` of ${contextTemplates.list.length}` : ''}
         </span>
       </div>
     </div>

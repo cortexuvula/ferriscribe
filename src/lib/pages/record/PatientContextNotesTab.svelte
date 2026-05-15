@@ -1,6 +1,6 @@
 <script lang="ts">
   import { upsertContextTemplate } from '../../api/contextTemplates';
-  import { contextTemplates } from '../../stores/contextTemplates';
+  import { contextTemplates } from '../../stores/contextTemplates.svelte';
   import { formatError } from '../../types/errors';
 
   type Props = {
@@ -16,7 +16,7 @@
 
   function applyTemplate(name: string) {
     if (!name) return;
-    const t = $contextTemplates.find((x) => x.name === name);
+    const t = contextTemplates.list.find((x) => x.name === name);
     if (!t) return;
     if (contextText.trim() === '') {
       contextText = t.body;
@@ -46,7 +46,7 @@
       saveModalError = 'Name is required.';
       return;
     }
-    const exists = $contextTemplates.some((t) => t.name === name);
+    const exists = contextTemplates.list.some((t) => t.name === name);
     if (exists && !saveModalOverwriteConfirm) {
       saveModalOverwriteConfirm = true;
       saveModalError = `A template named "${name}" exists. Click Save again to overwrite.`;
@@ -68,12 +68,12 @@
       class="template-picker"
       bind:value={selectedTemplate}
       onchange={() => applyTemplate(selectedTemplate)}
-      disabled={$contextTemplates.length === 0}
+      disabled={contextTemplates.list.length === 0}
     >
       <option value="">
-        {$contextTemplates.length === 0 ? 'No templates saved' : 'Apply template…'}
+        {contextTemplates.list.length === 0 ? 'No templates saved' : 'Apply template…'}
       </option>
-      {#each $contextTemplates as t (t.name)}
+      {#each contextTemplates.list as t (t.name)}
         <option value={t.name}>{t.name}</option>
       {/each}
     </select>

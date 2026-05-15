@@ -16,8 +16,8 @@
   import ResizeHandle from './record/ResizeHandle.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
-  import { contextTemplates } from '../stores/contextTemplates';
-  import { toasts } from '../stores/toasts';
+  import { contextTemplates } from '../stores/contextTemplates.svelte';
+  import { toasts } from '../stores/toasts.svelte';
   import { rsvp } from '../stores/rsvp';
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';

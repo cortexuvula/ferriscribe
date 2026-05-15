@@ -1,7 +1,7 @@
 <script lang="ts">
   import { selectedRecording, recordings, selectRecording } from '../stores/recordings';
   import { generateSoap, generateReferral, generateLetter } from '../api/generation';
-  import { generation } from '../stores/generation';
+  import { generation } from '../stores/generation.svelte';
   import { copyWithStatus } from '../utils/clipboard';
   import { buildPatientContext } from '../utils/patient_context';
   import GenerateItem from '../components/GenerateItem.svelte';
@@ -209,23 +209,23 @@
         {/if}
       </div>
 
-      {#if $generation.error}
+      {#if generation.state.error}
         <div class="error-banner">
-          <span>{$generation.error}</span>
+          <span>{generation.state.error}</span>
           <button class="error-dismiss" onclick={() => generation.clearError()}>Dismiss</button>
         </div>
       {/if}
 
-      {#if $generation.progressStatus}
-        <div class="progress-banner">{$generation.progressStatus}</div>
+      {#if generation.state.progressStatus}
+        <div class="progress-banner">{generation.state.progressStatus}</div>
       {/if}
 
       <div class="generate-buttons">
         <GenerateItem
           title="SOAP Note"
           description="Structured clinical note (Subjective, Objective, Assessment, Plan)"
-          generating={$generation.generating === 'soap'}
-          anyGenerating={$generation.generating !== null}
+          generating={generation.state.generating === 'soap'}
+          anyGenerating={generation.state.generating !== null}
           done={!!$selectedRecording.soap_note}
           copyStatus={copyStatus['soap']}
           onGenerate={() => handleGenerate('soap')}
@@ -235,8 +235,8 @@
         <GenerateItem
           title="Referral Letter"
           description="Specialist referral letter based on the consultation"
-          generating={$generation.generating === 'referral'}
-          anyGenerating={$generation.generating !== null}
+          generating={generation.state.generating === 'referral'}
+          anyGenerating={generation.state.generating !== null}
           done={!!$selectedRecording.referral}
           copyStatus={copyStatus['referral']}
           onGenerate={() => handleGenerate('referral')}
@@ -246,8 +246,8 @@
         <GenerateItem
           title="Patient Letter"
           description="Patient-friendly summary of the consultation"
-          generating={$generation.generating === 'letter'}
-          anyGenerating={$generation.generating !== null}
+          generating={generation.state.generating === 'letter'}
+          anyGenerating={generation.state.generating !== null}
           done={!!$selectedRecording.letter}
           copyStatus={copyStatus['letter']}
           onGenerate={() => handleGenerate('letter')}

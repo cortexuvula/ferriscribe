@@ -3,7 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { settings } from '../../stores/settings';
   import { theme } from '../../stores/theme.svelte.ts';
-  import { contextTemplates } from '../../stores/contextTemplates';
+  import { contextTemplates } from '../../stores/contextTemplates.svelte';
   import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import VocabularyDialog from '../VocabularyDialog.svelte';
   import ContextTemplateDialog from '../ContextTemplateDialog.svelte';
@@ -13,7 +13,7 @@
   let vocabDialogOpen = $state(false);
   let vocabCount = $state<[number, number]>([0, 0]);
   let ctxTemplateDialogOpen = $state(false);
-  let ctxTemplateCount = $derived($contextTemplates.length);
+  let ctxTemplateCount = $derived(contextTemplates.list.length);
   let encryptionState = $state<'no-database' | 'plaintext' | 'encrypted' | 'unknown'>('unknown');
 
   async function handleThemeChange(e: Event) {

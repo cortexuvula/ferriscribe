@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 import { detectSections, preprocessSoap, type Section } from '../rsvp/engine';
-import { toasts } from './toasts';
+import { toasts } from './toasts.svelte';
 
 export type DocKind = 'soap' | 'referral' | 'letter' | 'synopsis';
 

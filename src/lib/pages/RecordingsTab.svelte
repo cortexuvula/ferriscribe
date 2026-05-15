@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { recordings, loading, selectedRecording, selectRecording } from '../stores/recordings';
-  import { toasts } from '../stores/toasts';
+  import { toasts } from '../stores/toasts.svelte';
   import SearchBar from '../components/SearchBar.svelte';
   import RecordingCard from '../components/RecordingCard.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';

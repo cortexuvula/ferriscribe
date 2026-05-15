@@ -3,7 +3,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { settings } from './lib/stores/settings';
   import { theme } from './lib/stores/theme.svelte.ts';
-  import { generation } from './lib/stores/generation';
+  import { generation } from './lib/stores/generation.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onOpenUrl } from '@tauri-apps/plugin-deep-link';
@@ -19,7 +19,7 @@
   import { selectedRecording, selectRecording } from './lib/stores/recordings';
   import { pipeline } from './lib/stores/pipeline';
   import { audio } from './lib/stores/audio';
-  import { toasts } from './lib/stores/toasts';
+  import { toasts } from './lib/stores/toasts.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import RsvpReader from './lib/components/RsvpReader.svelte';
   import RsvpSectionPicker from './lib/components/RsvpSectionPicker.svelte';
