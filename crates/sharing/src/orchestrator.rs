@@ -663,3 +663,139 @@ mod pairing_router_tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    fn cfg_with_tokens_at(path: PathBuf, key: [u8; 32], api_key: &str) -> SharingConfig {
+        SharingConfig {
+            enabled: true,
+            friendly_name: "test-server".into(),
+            ollama_proxy_port: 11435,
+            whisper_proxy_port: 8081,
+            pairing_port: 11436,
+            whisper_internal_port: 8080,
+            lmstudio_internal_port: None,
+            lmstudio_proxy_port: None,
+            vocab_port: 11437,
+            token_store_path: path,
+            token_store_key: key,
+            binary_dir: PathBuf::from("/tmp"),
+            whisper_model_path: PathBuf::from("/tmp/model.bin"),
+            whisper_internal_api_key: api_key.to_string(),
+            version: "9.9.9".into(),
+        }
+    }
+
+    #[test]
+    fn sharing_config_default_has_expected_ports() {
+        let c = SharingConfig::default();
+        assert_eq!(c.ollama_proxy_port, 11435);
+        assert_eq!(c.whisper_proxy_port, 8081);
+        assert_eq!(c.pairing_port, 11436);
+        assert_eq!(c.whisper_internal_port, 8080);
+        assert_eq!(c.vocab_port, 11437);
+    }
+
+    #[test]
+    fn sharing_config_default_is_disabled() {
+        let c = SharingConfig::default();
+        assert!(!c.enabled);
+        assert!(c.lmstudio_internal_port.is_none());
+        assert!(c.lmstudio_proxy_port.is_none());
+    }
+
+    #[test]
+    fn sharing_config_debug_redacts_token_store_key() {
+        let mut key = [0u8; 32];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_add(3);
+        }
+        let c = cfg_with_tokens_at(PathBuf::from("/tmp/x"), key, "irrelevant");
+        let dbg = format!("{:?}", c);
+        assert!(dbg.contains("<redacted: 32 bytes>"), "Debug must redact key marker; got: {dbg}");
+        let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(
+            !dbg.to_lowercase().contains(&hex),
+            "Debug must not contain key bytes as hex"
+        );
+    }
+
+    #[test]
+    fn sharing_config_debug_redacts_whisper_internal_api_key() {
+        let api_key = "secret-key-DO-NOT-LEAK-12345";
+        let c = cfg_with_tokens_at(PathBuf::from("/tmp/x"), [0u8; 32], api_key);
+        let dbg = format!("{:?}", c);
+        assert!(dbg.contains("<redacted>"), "Debug must contain redacted marker for api key; got: {dbg}");
+        assert!(
+            !dbg.contains(api_key),
+            "Debug must not contain literal api key"
+        );
+    }
+
+    #[test]
+    fn sharing_service_new_creates_token_store_on_disk() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tokens.db");
+        let c = cfg_with_tokens_at(path.clone(), [0u8; 32], "k");
+        let _svc = SharingService::new(c).expect("new() should succeed");
+        assert!(path.exists(), "token store db should be created on disk");
+    }
+
+    #[test]
+    fn sharing_service_new_returns_token_store_error_on_unwritable_path() {
+        // A path under /dev/null/... can't be created because /dev/null isn't a directory.
+        let c = cfg_with_tokens_at(
+            PathBuf::from("/dev/null/cannot-create/tokens.db"),
+            [0u8; 32],
+            "k",
+        );
+        match SharingService::new(c) {
+            Ok(_) => panic!("expected TokenStore error, but new() succeeded"),
+            Err(e) => assert!(
+                matches!(e, SharingError::TokenStore(_)),
+                "expected TokenStore variant, got {e:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn sharing_service_status_when_not_running_reports_disabled() {
+        let dir = tempdir().unwrap();
+        let c = cfg_with_tokens_at(dir.path().join("tokens.db"), [0u8; 32], "k");
+        let svc = SharingService::new(c).unwrap();
+        let s = svc.status().await;
+        assert!(!s.enabled);
+        assert!(!s.ollama_ok);
+        assert!(!s.whisper_ok);
+        assert!(!s.lmstudio_ok);
+        assert!(!s.mdns_ok);
+        assert!(!s.pairing_ok);
+        assert_eq!(s.paired_clients, 0);
+    }
+
+    #[tokio::test]
+    async fn sharing_service_status_counts_paired_clients_when_stopped() {
+        let dir = tempdir().unwrap();
+        let c = cfg_with_tokens_at(dir.path().join("tokens.db"), [0u8; 32], "k");
+        let svc = SharingService::new(c).unwrap();
+        let pairing = svc.pairing_state();
+        let code = pairing.issue_code().await;
+        let _token = pairing.enroll(&code, "client-a").await.unwrap();
+        let s = svc.status().await;
+        assert_eq!(s.paired_clients, 1);
+        assert!(!s.enabled);
+    }
+
+    #[tokio::test]
+    async fn sharing_service_stop_is_idempotent_when_never_started() {
+        let dir = tempdir().unwrap();
+        let c = cfg_with_tokens_at(dir.path().join("tokens.db"), [0u8; 32], "k");
+        let svc = SharingService::new(c).unwrap();
+        svc.stop().await.expect("first stop should be Ok");
+        svc.stop().await.expect("second stop should also be Ok");
+    }
+}
