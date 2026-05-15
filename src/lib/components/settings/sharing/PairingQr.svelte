@@ -1,9 +1,17 @@
 <script lang="ts">
   import QRCode from 'qrcode';
-  export let payload: string;
-  let canvas: HTMLCanvasElement;
-  $: if (canvas && payload) QRCode.toCanvas(canvas, payload, { width: 240 });
-  $: code = payload.match(/[?&]code=(\d{6})/)?.[1] ?? '';
+
+  type Props = {
+    payload: string;
+  };
+  let { payload }: Props = $props();
+
+  let canvas: HTMLCanvasElement | undefined = $state();
+  let code = $derived(payload.match(/[?&]code=(\d{6})/)?.[1] ?? '');
+
+  $effect(() => {
+    if (canvas && payload) QRCode.toCanvas(canvas, payload, { width: 240 });
+  });
 </script>
 <div class="qr-block">
   <canvas bind:this={canvas}></canvas>
