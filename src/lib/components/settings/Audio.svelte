@@ -7,6 +7,7 @@
   import { reinitProviders } from '../../api/chat';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { AudioDevice } from '../../types';
+  import AudioInputSection from './AudioInputSection.svelte';
   import { toasts } from '../../stores/toasts';
   import { formatError } from '../../types/errors';
   import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
@@ -130,11 +131,6 @@
     progressUnlisten?.();
   });
 
-  async function handleInputDeviceChange(e: Event) {
-    const value = (e.target as HTMLSelectElement).value;
-    await settings.updateField('input_device', value || null);
-  }
-
   async function handleSampleRateChange(e: Event) {
     const value = parseInt((e.target as HTMLSelectElement).value, 10);
     await settings.updateField('sample_rate', value);
@@ -144,26 +140,7 @@
 <section class="settings-section">
   <h3 class="section-title">Audio / STT</h3>
 
-  <div class="form-group">
-    <label for="input-device" class="form-label">Input Device</label>
-    <select
-      id="input-device"
-      value={$settings.input_device ?? ''}
-      onchange={handleInputDeviceChange}
-      disabled={devicesLoading}
-    >
-      {#if devicesLoading}
-        <option value="">Loading devices...</option>
-      {:else}
-        <option value="">System Default</option>
-        {#each audioDevices as device}
-          <option value={device.name}>
-            {device.name}{device.is_default ? ' (Default)' : ''}
-          </option>
-        {/each}
-      {/if}
-    </select>
-  </div>
+  <AudioInputSection {audioDevices} {devicesLoading} />
 
   <fieldset class="form-group radio-fieldset">
     <legend class="form-label">STT Mode</legend>
