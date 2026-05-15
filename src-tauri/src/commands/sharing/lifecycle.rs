@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use medical_core::error::{AppError, AppResult};
 use medical_sharing::{SharingConfig, SharingService};
 use tauri::State;
 
@@ -16,11 +17,11 @@ use super::{
 pub async fn start_sharing(
     state: State<'_, AppState>,
     friendly_name: String,
-) -> Result<(), String> {
+) -> AppResult<()> {
     start_sharing_inner(&state, friendly_name.clone()).await?;
     // Persist after a successful start so a crash mid-start doesn't leave a
     // stale config that would auto-resume into a half-built service.
-    write_server_config(&ServerConfig { version: 1, friendly_name }).map_err(|e| e.to_string())?;
+    write_server_config(&ServerConfig { version: 1, friendly_name })?;
     Ok(())
 }
 
@@ -32,19 +33,17 @@ pub async fn start_sharing(
 pub async fn start_sharing_inner(
     state: &AppState,
     friendly_name: String,
-) -> Result<(), String> {
+) -> AppResult<()> {
     // Acquire the write lock BEFORE binding ports / spawning proxies so that a
     // concurrent stop_sharing cannot return Ok while we are mid-start and leave
     // the service running with no future cleanup path.
     let mut sharing_slot = state.sharing.write().await;
     if sharing_slot.is_some() {
-        return Err("sharing already running".to_string());
+        return Err(AppError::Other("sharing already running".into()));
     }
-    let cfg = build_sharing_config(state, friendly_name)
-        .await
-        .map_err(|e| e.to_string())?;
-    let service = Arc::new(SharingService::new(cfg).map_err(|e| e.to_string())?);
-    service.start().await.map_err(|e| e.to_string())?;
+    let cfg = build_sharing_config(state, friendly_name).await?;
+    let service = Arc::new(SharingService::new(cfg).map_err(|e| AppError::Other(e.to_string()))?);
+    service.start().await.map_err(|e| AppError::Other(e.to_string()))?;
 
     // Spawn the vocab CRUD API on the configured port. Failures here are
     // logged but don't abort sharing — clients on older versions don't
@@ -88,9 +87,9 @@ pub async fn start_sharing_inner(
     // bearer needed. Ports are the upstream ports (Ollama 11434, LM Studio 1234,
     // whisper.cpp 8080), NOT the proxy ports (11435 / 8081).
     let allow_public = {
-        let conn = state.db.conn().map_err(|e| e.to_string())?;
+        let conn = state.db.conn().map_err(|e| AppError::Other(e.to_string()))?;
         let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| AppError::Other(e.to_string()))?;
         cfg.migrate();
         cfg.allow_public_endpoint
     };
@@ -118,21 +117,21 @@ pub async fn start_sharing_inner(
         let guard = state.ollama_provider.read().await;
         if let Some(ref p) = *guard {
             p.set_endpoint(local_ollama, allow_public).await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| AppError::Other(e.to_string()))?;
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
         if let Some(ref p) = *guard {
             p.set_endpoint(local_lmstudio, allow_public).await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| AppError::Other(e.to_string()))?;
         }
     }
     {
         let guard = state.remote_stt_provider.read().await;
         if let Some(ref p) = *guard {
             p.set_endpoint(local_whisper, allow_public).await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| AppError::Other(e.to_string()))?;
         }
     }
 
@@ -140,13 +139,13 @@ pub async fn start_sharing_inner(
 }
 
 #[tauri::command]
-pub async fn stop_sharing(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn stop_sharing(state: State<'_, AppState>) -> AppResult<()> {
     // Clear the auto-resume marker first so an explicit Stop wins over an
     // unrelated startup race (e.g. user stops sharing immediately on launch
     // before the resume hook fires).
     delete_server_config();
     if let Some(s) = state.sharing.write().await.take() {
-        s.stop().await.map_err(|e| e.to_string())?;
+        s.stop().await.map_err(|e| AppError::Other(e.to_string()))?;
     }
     if let Some(h) = state.vocab_api.write().await.take() {
         h.abort();
@@ -156,9 +155,9 @@ pub async fn stop_sharing(state: State<'_, AppState>) -> Result<(), String> {
     // If this machine is also paired as a client to another server, restore the
     // paired endpoint; otherwise revert to None (local-only mode).
     let allow_public = {
-        let conn = state.db.conn().map_err(|e| e.to_string())?;
+        let conn = state.db.conn().map_err(|e| AppError::Other(e.to_string()))?;
         let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| AppError::Other(e.to_string()))?;
         cfg.migrate();
         cfg.allow_public_endpoint
     };
@@ -180,21 +179,21 @@ pub async fn stop_sharing(state: State<'_, AppState>) -> Result<(), String> {
         let guard = state.ollama_provider.read().await;
         if let Some(ref p) = *guard {
             p.set_endpoint(ollama_ep, allow_public).await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| AppError::Other(e.to_string()))?;
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
         if let Some(ref p) = *guard {
             p.set_endpoint(lmstudio_ep, allow_public).await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| AppError::Other(e.to_string()))?;
         }
     }
     {
         let guard = state.remote_stt_provider.read().await;
         if let Some(ref p) = *guard {
             p.set_endpoint(whisper_ep, allow_public).await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| AppError::Other(e.to_string()))?;
         }
     }
 
@@ -202,7 +201,7 @@ pub async fn stop_sharing(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn sharing_status(state: State<'_, AppState>) -> Result<SharingStatusDto, String> {
+pub async fn sharing_status(state: State<'_, AppState>) -> AppResult<SharingStatusDto> {
     if let Some(s) = state.sharing.read().await.as_ref() {
         Ok(s.status().await.into())
     } else {
@@ -221,26 +220,26 @@ pub async fn sharing_status(state: State<'_, AppState>) -> Result<SharingStatusD
 async fn build_sharing_config(
     state: &AppState,
     friendly_name: String,
-) -> Result<SharingConfig, String> {
+) -> AppResult<SharingConfig> {
     use medical_security::keychain;
     use rand::RngCore;
 
     // Reuse the SQLCipher DB key as the sharing-store key — same keychain
     // entry, no new secret to manage.
     let key = keychain::get_db_key()
-        .map_err(|e| format!("Keychain access denied: {e}. Sharing requires keychain access — quit and reopen FerriScribe, then approve the keychain prompt."))?
+        .map_err(|e| AppError::Other(format!("Keychain access denied: {e}. Sharing requires keychain access — quit and reopen FerriScribe, then approve the keychain prompt.")))?
         .ok_or_else(|| {
-            "FerriScribe's database hasn't been initialized yet. Restart the app and try again.".to_string()
+            AppError::Other("FerriScribe's database hasn't been initialized yet. Restart the app and try again.".into())
         })?;
 
     let app_data = dirs::data_dir()
-        .ok_or_else(|| "no app data dir".to_string())?
+        .ok_or_else(|| AppError::Other("no app data dir".into()))?
         .join("rust-medical-assistant");
-    std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&app_data)?;
     let mut whisper_api = [0u8; 16];
     rand::thread_rng()
         .try_fill_bytes(&mut whisper_api)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AppError::Other(e.to_string()))?;
     // Only wire up an LM Studio proxy when LM Studio's local server is
     // actually running. If the user starts LM Studio after Start sharing,
     // they'll need to Stop + Start sharing to wire up the proxy.
