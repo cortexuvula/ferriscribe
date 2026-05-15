@@ -1,0 +1,40 @@
+version: 2
+
+# Dependabot monitors npm, cargo, and github-actions weekly. For a clinical /
+# HIPAA-adjacent app a one-week lag on advisories is far better than waiting
+# for a manual `npm audit` / `cargo audit` to surface them.
+#
+# Patch-and-minor bumps are grouped to reduce PR noise; major bumps still
+# arrive as individual PRs since they often require code changes.
+
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3

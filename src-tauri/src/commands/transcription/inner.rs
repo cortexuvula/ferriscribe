@@ -230,10 +230,12 @@ pub async fn transcribe_recording_inner(
         let err_msg = format!(
             "Transcription rejected: the audio was effectively silent (rms={rms:.6}) and the model returned a repeated-phrase hallucination. Check your microphone or audio routing."
         );
+        // PHI guardrail: log structural metadata only — never the transcript text.
         tracing::warn!(
             provider = %transcript.provider,
             rms = %format!("{:.6}", rms),
-            text_preview = %transcript.text.chars().take(80).collect::<String>(),
+            text_len = transcript.text.chars().count(),
+            segments = transcript.segments.len(),
             "Rejecting likely Whisper hallucination from silent source"
         );
         return Err(AppError::Processing(
