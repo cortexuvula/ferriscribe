@@ -134,6 +134,30 @@ impl WhisperSupervisor {
             let _ = tokio::fs::remove_file(&bin_path).await;
             let _ = tokio::fs::remove_file(&lock_path).await;
         }
+
+        let bin_path = self
+            .download_and_verify(url, archive, entry.sha256.as_deref(), &entry.binary_name)
+            .await?;
+
+        let _ = tokio::fs::write(&lock_path, manifest.version.trim()).await;
+        Ok(bin_path)
+    }
+
+    /// Download an archive from `url`, optionally verify its SHA-256 against
+    /// `expected_sha256`, extract `binary_name` into `self.binary_dir`, and
+    /// (on Unix) chmod 0755. Returns the path to the extracted binary.
+    ///
+    /// Extracted into a `pub(crate)` helper so unit tests can supply a
+    /// wiremock URL + a controlled archive body. The lock-file write that
+    /// records the manifest version stays in `ensure_binary` — this helper
+    /// is unaware of the manifest.
+    pub(crate) async fn download_and_verify(
+        &self,
+        url: &str,
+        archive: &str,
+        expected_sha256: Option<&str>,
+        binary_name: &str,
+    ) -> Result<PathBuf> {
         tokio::fs::create_dir_all(&self.binary_dir).await?;
         let bytes = reqwest::get(url)
             .await
@@ -141,18 +165,19 @@ impl WhisperSupervisor {
             .bytes()
             .await
             .map_err(|e| WhisperError::Download(e.to_string()))?;
-        if let Some(expected) = &entry.sha256 {
+        if let Some(expected) = expected_sha256 {
             let got = hex::encode(Sha256::digest(&bytes));
-            if &got != expected {
+            if got != expected {
                 return Err(WhisperError::HashMismatch {
-                    expected: expected.clone(),
+                    expected: expected.to_string(),
                     got,
                 });
             }
         } else {
-            warn!("sha256 not set for platform {}; skipping verification", key);
+            warn!("sha256 not set for binary {}; skipping verification", binary_name);
         }
-        Self::extract_archive(&bytes, archive, &self.binary_dir, &entry.binary_name)?;
+        Self::extract_archive(&bytes, archive, &self.binary_dir, binary_name)?;
+        let bin_path = self.binary_dir.join(binary_name);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -160,7 +185,6 @@ impl WhisperSupervisor {
             perms.set_mode(0o755);
             std::fs::set_permissions(&bin_path, perms)?;
         }
-        let _ = tokio::fs::write(&lock_path, manifest.version.trim()).await;
         Ok(bin_path)
     }
 
