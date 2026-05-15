@@ -5,13 +5,14 @@
     updateVocabularyEntry,
     deleteVocabularyEntry,
     deleteAllVocabularyEntries,
-    testVocabularyCorrection,
     type VocabularyEntry,
-    type CorrectionResult,
   } from '../api/vocabulary';
   import { toasts } from '../stores/toasts';
-  import { formatError } from '../types/errors';
   import { onMount, onDestroy } from 'svelte';
+  import VocabularyForm from './VocabularyForm.svelte';
+  import VocabularyTable from './VocabularyTable.svelte';
+  import VocabularyTestPanel from './VocabularyTestPanel.svelte';
+  import { filterVocabularyEntries } from '../utils/vocabularyFilter';
 
   interface Props {
     open: boolean;
@@ -43,19 +44,9 @@
   // Add/Edit form
   let editing = $state<VocabularyEntry | null>(null);
   let showForm = $state(false);
-  let formFind = $state('');
-  let formReplace = $state('');
-  let formCategory = $state('general');
-  let formCaseSensitive = $state(false);
-  let formPriority = $state(0);
-  let formEnabled = $state(true);
-  let formError = $state('');
 
-  // Test area
-  let testInput = $state('');
-  let testResult = $state<CorrectionResult | null>(null);
-  let testError = $state<string | null>(null);
-  let testing = $state(false);
+  // Test panel reset signal
+  let resetSignal = $state(0);
 
   const CATEGORIES = [
     { value: 'general', label: 'General' },
@@ -82,77 +73,14 @@
     }
   }
 
-  function filteredEntries(): VocabularyEntry[] {
-    if (!searchText.trim()) return entries;
-    const q = searchText.toLowerCase();
-    return entries.filter(
-      (e) =>
-        e.find_text.toLowerCase().includes(q) ||
-        e.replacement.toLowerCase().includes(q),
-    );
-  }
-
   function openAddForm() {
     editing = null;
-    formFind = '';
-    formReplace = '';
-    formCategory = 'general';
-    formCaseSensitive = false;
-    formPriority = 0;
-    formEnabled = true;
-    formError = '';
     showForm = true;
   }
 
   function openEditForm(entry: VocabularyEntry) {
     editing = entry;
-    formFind = entry.find_text;
-    formReplace = entry.replacement;
-    formCategory = entry.category;
-    formCaseSensitive = entry.case_sensitive;
-    formPriority = entry.priority;
-    formEnabled = entry.enabled;
-    formError = '';
     showForm = true;
-  }
-
-  function closeForm() {
-    showForm = false;
-    editing = null;
-    formError = '';
-  }
-
-  async function handleSave() {
-    if (!formFind.trim() || !formReplace.trim()) {
-      formError = 'Find and replacement text are required.';
-      return;
-    }
-    try {
-      if (editing) {
-        await updateVocabularyEntry(
-          editing.id,
-          formFind.trim(),
-          formReplace.trim(),
-          formCategory,
-          formCaseSensitive,
-          formPriority,
-          formEnabled,
-        );
-      } else {
-        await addVocabularyEntry(
-          formFind.trim(),
-          formReplace.trim(),
-          formCategory,
-          formCaseSensitive,
-          formPriority,
-          formEnabled,
-        );
-      }
-      closeForm();
-      await loadEntries();
-    } catch (err) {
-      formError = formatError(err) || 'Failed to save entry.';
-    }
   }
 
   async function handleDelete(entry: VocabularyEntry) {
@@ -195,25 +123,10 @@
     }
   }
 
-  async function handleTest() {
-    if (!testInput.trim()) return;
-    testError = null;
-    testing = true;
-    try {
-      testResult = await testVocabularyCorrection(testInput);
-    } catch (err) {
-      console.error('Test failed:', err);
-      testError = formatError(err) || 'Test failed.';
-    } finally {
-      testing = false;
-    }
-  }
-
   $effect(() => {
     if (open) {
       loadEntries();
-      testResult = null;
-      testError = null;
+      resetSignal += 1;
     }
   });
 
@@ -251,119 +164,55 @@
 
       <div class="vocab-body">
         {#if showForm}
-          <div class="vocab-form">
-            <div class="form-header">
-              <h3>{editing ? 'Edit' : 'Add'} Entry</h3>
-              <button class="btn-close-form" aria-label="Close form" onclick={closeForm}>&times;</button>
-            </div>
-            {#if formError}
-              <div class="form-error">{formError}</div>
-            {/if}
-            <div class="form-grid">
-              <label class="field">
-                <span>Find Text</span>
-                <input type="text" bind:value={formFind} placeholder="e.g. htn" />
-              </label>
-              <label class="field">
-                <span>Replacement</span>
-                <input type="text" bind:value={formReplace} placeholder="e.g. hypertension" />
-              </label>
-              <label class="field">
-                <span>Category</span>
-                <select bind:value={formCategory}>
-                  {#each CATEGORIES as cat}
-                    <option value={cat.value}>{cat.label}</option>
-                  {/each}
-                </select>
-              </label>
-              <label class="field">
-                <span>Priority</span>
-                <input type="number" bind:value={formPriority} min="0" max="100" />
-              </label>
-            </div>
-            <div class="form-toggles">
-              <label class="vocab-toggle">
-                <input type="checkbox" bind:checked={formCaseSensitive} />
-                <span class="toggle-text">Case sensitive</span>
-              </label>
-              <label class="vocab-toggle">
-                <input type="checkbox" bind:checked={formEnabled} />
-                <span class="toggle-text">Enabled</span>
-              </label>
-            </div>
-            <div class="form-actions">
-              <button class="btn-save" onclick={handleSave}>Save</button>
-              <button class="btn-cancel" onclick={closeForm}>Cancel</button>
-            </div>
-          </div>
+          <VocabularyForm
+            {editing}
+            categories={CATEGORIES}
+            onSave={async (values) => {
+              if (editing) {
+                await updateVocabularyEntry(
+                  editing.id,
+                  values.findText,
+                  values.replacement,
+                  values.category,
+                  values.caseSensitive,
+                  values.priority,
+                  values.enabled,
+                );
+              } else {
+                await addVocabularyEntry(
+                  values.findText,
+                  values.replacement,
+                  values.category,
+                  values.caseSensitive,
+                  values.priority,
+                  values.enabled,
+                );
+              }
+              showForm = false;
+              editing = null;
+              await loadEntries();
+            }}
+            onCancel={() => { showForm = false; editing = null; }}
+          />
         {/if}
 
-        <div class="vocab-table-wrap">
-          {#if loading}
-            <p class="loading-text">Loading...</p>
-          {:else if filteredEntries().length === 0}
-            <p class="empty-text">No vocabulary entries found.</p>
-          {:else}
-            <table class="vocab-table">
-              <thead>
-                <tr>
-                  <th>Find</th>
-                  <th>Replace With</th>
-                  <th class="col-category">Category</th>
-                  <th class="col-enabled">Enabled</th>
-                  <th class="col-actions">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each filteredEntries() as entry (entry.id)}
-                  <tr class:disabled={!entry.enabled}>
-                    <td class="mono">{entry.find_text}</td>
-                    <td class="truncate">{entry.replacement}</td>
-                    <td class="col-category">{categoryLabel(entry.category)}</td>
-                    <td class="col-enabled">
-                      <input
-                        type="checkbox"
-                        checked={entry.enabled}
-                        onchange={() => handleToggleEnabled(entry)}
-                      />
-                    </td>
-                    <td class="col-actions actions">
-                      <button class="btn-edit" onclick={() => openEditForm(entry)}>Edit</button>
-                      <button class="btn-delete" onclick={() => handleDelete(entry)}>Del</button>
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {/if}
-        </div>
+        <VocabularyTable
+          {entries}
+          {loading}
+          {searchText}
+          {categoryLabel}
+          onEdit={openEditForm}
+          onDelete={handleDelete}
+          onToggleEnabled={handleToggleEnabled}
+        />
 
       </div>
 
-      <div class="vocab-test">
-        <h3>Test Corrections</h3>
-        <textarea
-          bind:value={testInput}
-          placeholder="Paste sample text to test corrections..."
-          rows="3"
-        ></textarea>
-        <button class="btn-test" onclick={handleTest} disabled={!testInput.trim() || testing}>
-          {testing ? 'Testing...' : 'Test'}
-        </button>
-        {#if testError}
-          <div class="test-error">{testError}</div>
-        {/if}
-        {#if testResult}
-          <div class="test-result">
-            <strong>{testResult.total_replacements} replacement{testResult.total_replacements !== 1 ? 's' : ''}</strong>
-            <pre>{testResult.corrected_text}</pre>
-          </div>
-        {/if}
-      </div>
+      <VocabularyTestPanel {resetSignal} />
 
       <div class="vocab-footer">
         <span class="footer-count">
-          {filteredEntries().length} shown{searchText || filterCategory !== 'all' ? ` of ${entries.length}` : ''}
+          {filterVocabularyEntries(entries, searchText).length} shown{searchText || filterCategory !== 'all' ? ` of ${entries.length}` : ''}
         </span>
         <button class="btn-delete-all" onclick={handleDeleteAll} disabled={entries.length === 0}>
           Delete All ({entries.length})
@@ -464,241 +313,6 @@
     flex: 1 1 auto;
     overflow-y: auto;
     min-height: 0;
-  }
-
-  /* Form */
-  .vocab-form {
-    padding: 14px 20px;
-    border-bottom: 1px solid var(--border-color, #333);
-    background: var(--bg-primary, #111);
-  }
-  .form-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 10px;
-  }
-  .form-header h3 { margin: 0; font-size: 0.95rem; font-weight: 600; }
-  .btn-close-form {
-    background: none;
-    border: none;
-    color: var(--text-secondary, #888);
-    font-size: 1.2rem;
-    line-height: 1;
-    padding: 2px 6px;
-    cursor: pointer;
-    border-radius: 3px;
-  }
-  .btn-close-form:hover { background: rgba(255, 255, 255, 0.08); }
-  .form-error {
-    color: #ff6b6b;
-    margin-bottom: 10px;
-    font-size: 0.85rem;
-    padding: 6px 10px;
-    background: rgba(255, 107, 107, 0.1);
-    border-radius: 4px;
-  }
-  .form-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-    margin-bottom: 10px;
-  }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 0.8rem;
-    color: var(--text-secondary, #aaa);
-  }
-  .field span { font-weight: 500; }
-  .field input,
-  .field select {
-    padding: 7px 10px;
-    border-radius: 4px;
-    border: 1px solid var(--border-color, #444);
-    background: var(--bg-secondary, #1e1e1e);
-    color: var(--text-primary, #e0e0e0);
-    font-size: 0.9rem;
-  }
-  .form-toggles {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 24px;
-    margin-bottom: 14px;
-    padding: 4px 0;
-  }
-  .vocab-toggle {
-    display: inline-flex !important;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 8px;
-    font-size: 0.88rem;
-    line-height: 1;
-    cursor: pointer;
-    user-select: none;
-    white-space: nowrap;
-    color: var(--text-primary, #e0e0e0);
-  }
-  .vocab-toggle input[type="checkbox"] {
-    flex: 0 0 auto;
-    margin: 0;
-    padding: 0;
-    cursor: pointer;
-    width: 14px !important;
-    height: 14px;
-    min-width: 14px;
-  }
-  /* Override global input { width: 100% } for all checkboxes in this dialog */
-  .vocab-dialog input[type="checkbox"] {
-    width: 14px !important;
-    height: 14px;
-    min-width: 14px;
-    padding: 0;
-    margin: 0;
-    vertical-align: middle;
-  }
-  .toggle-text {
-    display: inline-block;
-    white-space: nowrap;
-  }
-  .form-actions { display: flex; gap: 8px; }
-  .btn-save {
-    padding: 7px 18px;
-    border-radius: 4px;
-    border: none;
-    background: var(--accent-color, #4a9eff);
-    color: white;
-    cursor: pointer;
-    font-size: 0.9rem;
-  }
-  .btn-save:hover { filter: brightness(1.1); }
-  .btn-cancel {
-    padding: 7px 18px;
-    border-radius: 4px;
-    border: 1px solid var(--border-color, #444);
-    background: transparent;
-    color: var(--text-primary, #e0e0e0);
-    cursor: pointer;
-    font-size: 0.9rem;
-  }
-  .btn-cancel:hover { background: rgba(255, 255, 255, 0.05); }
-
-  /* Table */
-  .vocab-table-wrap {
-    padding: 8px 20px 16px;
-  }
-  .loading-text, .empty-text {
-    text-align: center;
-    color: var(--text-secondary, #888);
-    padding: 32px;
-    font-size: 0.9rem;
-  }
-  .vocab-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.88rem;
-    table-layout: fixed;
-  }
-  .vocab-table th {
-    text-align: left;
-    padding: 8px 8px;
-    border-bottom: 1px solid var(--border-color, #333);
-    color: var(--text-secondary, #888);
-    font-weight: 500;
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    position: sticky;
-    top: 0;
-    background: var(--bg-secondary, #1e1e1e);
-    z-index: 1;
-  }
-  .vocab-table td {
-    padding: 8px;
-    border-bottom: 1px solid var(--border-color, #222);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .vocab-table tr.disabled td { opacity: 0.45; }
-  .vocab-table tr:hover td { background: rgba(255, 255, 255, 0.03); }
-  .mono { font-family: 'SF Mono', Menlo, Consolas, monospace; color: var(--text-primary, #e0e0e0); }
-  .truncate { max-width: 0; }
-  .col-category { width: 140px; color: var(--text-secondary, #aaa); }
-  .col-enabled { width: 70px; text-align: center; }
-  .col-enabled input { cursor: pointer; }
-  .col-actions { width: 110px; }
-  .actions { display: flex; gap: 4px; }
-  .btn-edit, .btn-delete {
-    padding: 3px 10px;
-    border-radius: 3px;
-    border: 1px solid var(--border-color, #444);
-    background: transparent;
-    color: var(--text-secondary, #bbb);
-    cursor: pointer;
-    font-size: 0.78rem;
-  }
-  .btn-edit:hover { background: rgba(255, 255, 255, 0.05); }
-  .btn-delete { color: #ff6b6b; border-color: #ff6b6b44; }
-  .btn-delete:hover { background: rgba(255, 107, 107, 0.08); }
-
-  /* Test area */
-  .vocab-test {
-    flex: 0 0 auto;
-    padding: 12px 20px 16px;
-    border-top: 1px solid var(--border-color, #333);
-    background: var(--bg-primary, #111);
-    max-height: 40vh;
-    overflow-y: auto;
-  }
-  .vocab-test h3 { margin: 0 0 8px; font-size: 0.9rem; font-weight: 600; }
-  .vocab-test textarea {
-    width: 100%;
-    padding: 8px;
-    border-radius: 4px;
-    border: 1px solid var(--border-color, #444);
-    background: var(--bg-secondary, #1e1e1e);
-    color: var(--text-primary, #e0e0e0);
-    resize: vertical;
-    font-family: inherit;
-    font-size: 0.88rem;
-    box-sizing: border-box;
-  }
-  .btn-test {
-    margin-top: 8px;
-    padding: 6px 14px;
-    border-radius: 4px;
-    border: none;
-    background: var(--accent-color, #4a9eff);
-    color: white;
-    cursor: pointer;
-    font-size: 0.88rem;
-  }
-  .btn-test:disabled { opacity: 0.5; cursor: not-allowed; }
-  .btn-test:not(:disabled):hover { filter: brightness(1.1); }
-  .test-error {
-    margin-top: 10px;
-    padding: 8px 10px;
-    border-radius: 4px;
-    background: rgba(255, 107, 107, 0.1);
-    color: #ff6b6b;
-    font-size: 0.85rem;
-    border: 1px solid rgba(255, 107, 107, 0.3);
-    word-wrap: break-word;
-  }
-  .test-result { margin-top: 10px; }
-  .test-result strong { font-size: 0.85rem; color: var(--accent-color, #4a9eff); }
-  .test-result pre {
-    background: var(--bg-secondary, #1e1e1e);
-    padding: 10px;
-    border-radius: 4px;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    font-size: 0.85rem;
-    margin-top: 6px;
-    border: 1px solid var(--border-color, #333);
   }
 
   /* Footer */
