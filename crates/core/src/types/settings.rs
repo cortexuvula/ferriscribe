@@ -405,6 +405,13 @@ pub struct AppConfig {
     #[serde(default)]
     pub agent_settings: HashMap<String, AgentSettings>,
 
+    // Endpoint policy
+    /// Opt-out for the local-only AI/STT endpoint allowlist. When `true`,
+    /// `validate_local_endpoint` accepts public hosts. Default `false`.
+    /// See `crates/core/src/endpoint_policy.rs`.
+    #[serde(default)]
+    pub allow_public_endpoint: bool,
+
     // Training corpus
     /// When true, every successful SOAP generation is captured into the
     /// `generations` table for the training-corpus feature. Defaults to
@@ -635,6 +642,12 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert!(back.capture_for_training);
+    }
+
+    #[test]
+    fn allow_public_endpoint_defaults_to_false() {
+        let cfg: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(!cfg.allow_public_endpoint);
     }
 
 }

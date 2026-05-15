@@ -140,6 +140,13 @@ pub async fn pair_with_server(
 
     // Update in-memory provider endpoints immediately so the "models visible"
     // success message in ClientPair.svelte is truthful without an app restart.
+    let allow_public = {
+        let conn = state.db.conn().map_err(|e| e.to_string())?;
+        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+            .map_err(|e| e.to_string())?;
+        cfg.migrate();
+        cfg.allow_public_endpoint
+    };
     use medical_core::types::RemoteEndpoint;
     let bearer = Some(token.clone());
 
@@ -165,13 +172,15 @@ pub async fn pair_with_server(
     {
         let guard = state.ollama_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(ollama_ep).await;
+            p.set_endpoint(ollama_ep, allow_public).await
+                .map_err(|e| e.to_string())?;
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(lmstudio_ep).await;
+            p.set_endpoint(lmstudio_ep, allow_public).await
+                .map_err(|e| e.to_string())?;
         }
     }
 

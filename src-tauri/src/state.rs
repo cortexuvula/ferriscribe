@@ -275,7 +275,7 @@ pub fn init_ai_providers(
     let ollama_url = format!("http://{}:{}", ollama_host, config.ollama_port);
     // Bearer is taken from the endpoint (if set) for proxied remote connections.
     let ollama_bearer = ollama_ep.as_ref().and_then(|ep| ep.bearer.clone());
-    match OllamaProvider::new_with_endpoint(Some(&ollama_url), ollama_bearer, policy.clone(), ollama_ep) {
+    match OllamaProvider::new_with_endpoint(Some(&ollama_url), config.allow_public_endpoint, ollama_bearer, policy.clone(), ollama_ep) {
         Ok(p) => {
             info!(url = %ollama_url, "Registering Ollama provider");
             let arc = Arc::new(p);
@@ -289,7 +289,7 @@ pub fn init_ai_providers(
     let lmstudio_host = if config.lmstudio_host.is_empty() { "localhost" } else { &config.lmstudio_host };
     let lmstudio_url = format!("http://{}:{}", lmstudio_host, config.lmstudio_port);
     let lmstudio_bearer = lmstudio_ep.as_ref().and_then(|ep| ep.bearer.clone());
-    match LmStudioProvider::new_with_endpoint(Some(&lmstudio_url), lmstudio_bearer, policy.clone(), lmstudio_ep) {
+    match LmStudioProvider::new_with_endpoint(Some(&lmstudio_url), config.allow_public_endpoint, lmstudio_bearer, policy.clone(), lmstudio_ep) {
         Ok(p) => {
             info!(url = %lmstudio_url, "Registering LM Studio provider");
             let arc = Arc::new(p);
@@ -374,6 +374,7 @@ pub fn init_stt_providers_with_config(
                 &config.stt_remote_host,
                 config.stt_remote_port,
                 &config.stt_remote_model,
+                config.allow_public_endpoint,
                 bearer,
                 seg_path,
                 emb_path,
@@ -633,6 +634,8 @@ mod tests {
         let mut config = AppConfig::default();
         config.ollama_host = "tailnet-node".into();
         config.ollama_port = 11500;
+        // Non-localhost hostname requires allow_public_endpoint = true.
+        config.allow_public_endpoint = true;
         let handles = init_ai_providers(&config, None, None);
         assert!(
             handles.registry.list_available().contains(&"ollama".to_string()),
@@ -649,6 +652,8 @@ mod tests {
         cfg.stt_remote_host = "tailnet-node".into();
         cfg.stt_remote_port = 8080;
         cfg.stt_remote_model = "whisper-1".into();
+        // Non-localhost hostname requires allow_public_endpoint = true.
+        cfg.allow_public_endpoint = true;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let handles = init_stt_providers_with_config(tmp.path(), &cfg, None);

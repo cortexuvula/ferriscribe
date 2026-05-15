@@ -4,6 +4,12 @@
   import { listModels, setActiveProvider, reinitProviders, type ModelInfo } from '../../api/chat';
   import { testLmStudioConnection, testOllamaConnection, getApiKey } from '../../api/settings';
   import { formatError } from '../../types/errors';
+  import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
+
+  const ollamaOk = $derived(isLocalOrAllowed($settings.ollama_host ?? '', $settings.allow_public_endpoint));
+  const ollamaKind = $derived(classifyEndpoint($settings.ollama_host ?? ''));
+  const lmstudioOk = $derived(isLocalOrAllowed($settings.lmstudio_host ?? '', $settings.allow_public_endpoint));
+  const lmstudioKind = $derived(classifyEndpoint($settings.lmstudio_host ?? ''));
 
   let availableModels = $state<ModelInfo[]>([]);
   let modelsLoading = $state(false);
@@ -188,6 +194,12 @@
       onchange={handleLmStudioHostChange}
       class="text-input"
     />
+    {#if !lmstudioOk}
+      <div class="endpoint-warning" role="alert">
+        ⚠ This is a public-internet address ({lmstudioKind}). PHI may leave your device.
+        Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
+      </div>
+    {/if}
   </div>
 
   <div class="form-group">
@@ -245,6 +257,12 @@
       }}
       class="text-input"
     />
+    {#if !ollamaOk}
+      <div class="endpoint-warning" role="alert">
+        ⚠ This is a public-internet address ({ollamaKind}). PHI may leave your device.
+        Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
+      </div>
+    {/if}
   </div>
 
   <div class="form-group">
@@ -403,5 +421,15 @@
     background-color: var(--bg-tertiary, #374151);
     padding: 1px 5px;
     border-radius: 3px;
+  }
+
+  .endpoint-warning {
+    color: #b45309;
+    background: #fef3c7;
+    border: 1px solid #fbbf24;
+    border-radius: 4px;
+    padding: 6px 10px;
+    margin-top: 4px;
+    font-size: 0.85rem;
   }
 </style>

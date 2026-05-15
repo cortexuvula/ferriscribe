@@ -64,6 +64,7 @@ pub(super) fn unwrap_app_error_message(err: AppError) -> String {
         AppError::Serialization(e) => e.to_string(),
         AppError::Cancelled => "Cancelled".to_string(),
         AppError::EndpointOffline { .. } => err.to_string(),
+        AppError::InvalidEndpoint { .. } => err.to_string(),
     }
 }
 
@@ -91,6 +92,7 @@ pub(super) fn unwrap_app_error_message_ref(err: &AppError) -> String {
         AppError::Serialization(e) => e.to_string(),
         AppError::Cancelled => "Cancelled".to_string(),
         AppError::EndpointOffline { .. } => err.to_string(),
+        AppError::InvalidEndpoint { .. } => err.to_string(),
     }
 }
 

@@ -88,10 +88,15 @@ impl RemoteSttProvider {
         host: &str,
         port: u16,
         model: &str,
+        allow_public: bool,
         api_key: Option<String>,
         segmentation_model_path: PathBuf,
         embedding_model_path: PathBuf,
     ) -> AppResult<Self> {
+        if !host.is_empty() {
+            medical_core::endpoint_policy::validate_local_endpoint(host, allow_public)
+                .map_err(|e| AppError::invalid_endpoint_for(e, "stt_remote_host"))?;
+        }
         let host = if host.is_empty() { "localhost" } else { host };
         let base_url = http_url(host, port);
 
@@ -122,11 +127,16 @@ impl RemoteSttProvider {
         host: &str,
         port: u16,
         model: &str,
+        allow_public: bool,
         api_key: Option<String>,
         segmentation_model_path: PathBuf,
         embedding_model_path: PathBuf,
         ep: Option<RemoteEndpoint>,
     ) -> AppResult<Self> {
+        if !host.is_empty() {
+            medical_core::endpoint_policy::validate_local_endpoint(host, allow_public)
+                .map_err(|e| AppError::invalid_endpoint_for(e, "stt_remote_host"))?;
+        }
         let host = if host.is_empty() { "localhost" } else { host };
         let base_url = http_url(host, port);
         let client = Client::builder()
@@ -154,11 +164,30 @@ impl RemoteSttProvider {
     /// in-session Unpair → Pair leaves a stale bearer baked in at
     /// construction time — a 401 source if the office admin revoked the
     /// previous client entry.
-    pub async fn set_endpoint(&self, ep: Option<RemoteEndpoint>) {
+    pub async fn set_endpoint(
+        &self,
+        ep: Option<RemoteEndpoint>,
+        allow_public: bool,
+    ) -> AppResult<()> {
+        if let Some(ref e) = ep {
+            for (label, opt_host) in [
+                ("lan", e.lan.as_deref()),
+                ("tailscale", e.tailscale.as_deref()),
+            ] {
+                if let Some(h) = opt_host {
+                    medical_core::endpoint_policy::validate_local_endpoint(h, allow_public)
+                        .map_err(|err| AppError::invalid_endpoint_for(
+                            err,
+                            format!("stt_remote_host.{label}"),
+                        ))?;
+                }
+            }
+        }
         let new_bearer = ep.as_ref().and_then(|e| e.bearer.clone());
         *self.url_cache.lock().await = None;
         *self.endpoint.write().await = ep;
         *self.api_key.write().await = new_bearer;
+        Ok(())
     }
 
     /// Resolve the current base URL (no trailing path).
@@ -481,6 +510,7 @@ mod tests {
             &host,
             port,
             "whisper-1",
+            /* allow_public */ false,
             api_key,
             PathBuf::from("/nonexistent-seg.onnx"),
             PathBuf::from("/nonexistent-emb.onnx"),
@@ -646,6 +676,7 @@ mod tests {
             "localhost",
             8080,
             "whisper-1",
+            /* allow_public */ false,
             None,
             PathBuf::from("/nowhere/seg.onnx"),
             PathBuf::from("/nowhere/emb.onnx"),
@@ -735,6 +766,7 @@ mod tests {
             "localhost",
             8080,
             "whisper-1",
+            /* allow_public */ false,
             None,
             PathBuf::from("/no/seg.onnx"),
             PathBuf::from("/no/emb.onnx"),
@@ -747,16 +779,19 @@ mod tests {
             resolved_at: std::time::Instant::now(),
         });
 
-        p.set_endpoint(None).await;
+        p.set_endpoint(None, false).await.expect("clear endpoint");
         assert!(p.url_cache.lock().await.is_none(), "cache must be cleared on set_endpoint");
     }
 
     #[tokio::test]
     async fn current_base_url_returns_static_when_no_endpoint() {
+        // allow_public=true so the test can use an arbitrary hostname to verify
+        // that URL construction round-trips the host as-is.
         let p = RemoteSttProvider::new(
             "myhost",
             8080,
             "whisper-1",
+            /* allow_public */ true,
             None,
             PathBuf::from("/no/seg.onnx"),
             PathBuf::from("/no/emb.onnx"),
@@ -797,6 +832,7 @@ mod tests {
             "localhost",
             9999,
             "whisper-1",
+            /* allow_public */ false,
             None,
             PathBuf::from("/no/seg.onnx"),
             PathBuf::from("/no/emb.onnx"),
@@ -808,8 +844,9 @@ mod tests {
             tailscale: None,
             port,
             bearer: None,
-        }))
-        .await;
+        }), false)
+        .await
+        .expect("set endpoint");
 
         // First call: port is open — should resolve.
         let url1 = p.current_base_url().await.expect("first resolve");
@@ -821,6 +858,117 @@ mod tests {
         // Second call immediately: cache should return the same URL.
         let url2 = p.current_base_url().await.expect("cached resolve");
         assert_eq!(url1, url2, "should return cached URL without re-probing");
+    }
+
+    #[test]
+    fn new_blocks_public_host_by_default() {
+        let result = RemoteSttProvider::new(
+            "api.openai.com",
+            8080,
+            "whisper-1",
+            /* allow_public */ false,
+            None,
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        );
+        assert!(matches!(
+            result,
+            Err(medical_core::error::AppError::InvalidEndpoint {
+                field, ..
+            }) if field == "stt_remote_host"
+        ));
+    }
+
+    #[test]
+    fn new_accepts_public_host_when_allow_public() {
+        let result = RemoteSttProvider::new(
+            "api.openai.com",
+            8080,
+            "whisper-1",
+            /* allow_public */ true,
+            None,
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn new_accepts_local_hosts_with_default_allow_public() {
+        for host in ["localhost", "192.168.1.42", "100.64.0.1", "clinic.local"] {
+            let r = RemoteSttProvider::new(
+                host,
+                8080,
+                "whisper-1",
+                /* allow_public */ false,
+                None,
+                std::path::PathBuf::from("/dev/null"),
+                std::path::PathBuf::from("/dev/null"),
+            );
+            assert!(r.is_ok(), "expected Ok for {host}");
+        }
+    }
+
+    #[test]
+    fn new_accepts_empty_host() {
+        // Empty host means "use default" — provider-level no-op; Settings save
+        // layer enforces the stricter empty-vs-non-empty + mode policy.
+        let r = RemoteSttProvider::new(
+            "",
+            8080,
+            "whisper-1",
+            /* allow_public */ false,
+            None,
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        );
+        assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn set_endpoint_rejects_public_lan_address() {
+        let p = RemoteSttProvider::new(
+            "localhost",
+            8080,
+            "whisper-1",
+            /* allow_public */ false,
+            None,
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        )
+        .expect("build");
+        let bad = medical_core::types::RemoteEndpoint {
+            lan: Some("api.openai.com".into()),
+            tailscale: None,
+            port: 8080,
+            bearer: None,
+        };
+        let r = p.set_endpoint(Some(bad), false).await;
+        assert!(matches!(
+            r,
+            Err(medical_core::error::AppError::InvalidEndpoint { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_endpoint_accepts_lan_and_tailscale_addresses() {
+        let p = RemoteSttProvider::new(
+            "localhost",
+            8080,
+            "whisper-1",
+            /* allow_public */ false,
+            None,
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        )
+        .expect("build");
+        let good = medical_core::types::RemoteEndpoint {
+            lan: Some("192.168.1.42".into()),
+            tailscale: Some("100.64.0.1".into()),
+            port: 8080,
+            bearer: None,
+        };
+        assert!(p.set_endpoint(Some(good), false).await.is_ok());
     }
 }
 
@@ -843,6 +991,7 @@ mod offline_tests {
             "127.0.0.1",
             port,
             "whisper-1",
+            /* allow_public */ false,
             None,
             PathBuf::from("/nonexistent-seg.onnx"),
             PathBuf::from("/nonexistent-emb.onnx"),

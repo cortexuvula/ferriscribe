@@ -68,6 +68,13 @@ pub enum AppError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    #[error("invalid endpoint '{host}' for {field}: public/unknown endpoints are blocked (kind={kind:?}). Enable 'Allow public endpoints' in Advanced settings to override.")]
+    InvalidEndpoint {
+        field: String,
+        host: String,
+        kind: crate::endpoint_policy::EndpointKind,
+    },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -98,6 +105,7 @@ impl AppError {
             AppError::Export(_) => "Export",
             AppError::Translation(_) => "Translation",
             AppError::Config(_) => "Config",
+            AppError::InvalidEndpoint { .. } => "InvalidEndpoint",
             AppError::Io(_) => "Io",
             AppError::Serialization(_) => "Serialization",
             AppError::Cancelled => "Cancelled",
@@ -128,6 +136,15 @@ impl serde::Serialize for AppError {
                 s.serialize_field("provider_name", provider_name)?;
                 s.end()
             }
+            AppError::InvalidEndpoint { field, host, kind } => {
+                let mut s = serializer.serialize_struct("AppError", 5)?;
+                s.serialize_field("kind", self.kind_str())?;
+                s.serialize_field("message", &self.to_string())?;
+                s.serialize_field("field", field)?;
+                s.serialize_field("host", host)?;
+                s.serialize_field("endpointKind", kind)?;
+                s.end()
+            }
             _ => {
                 let mut s = serializer.serialize_struct("AppError", 2)?;
                 s.serialize_field("kind", self.kind_str())?;
@@ -147,6 +164,22 @@ impl From<String> for AppError {
 impl From<&str> for AppError {
     fn from(s: &str) -> Self {
         AppError::Other(s.to_string())
+    }
+}
+
+impl AppError {
+    /// Convert an `EndpointPolicyError` into an `AppError::InvalidEndpoint`
+    /// by attaching the settings field name the caller was validating.
+    pub fn invalid_endpoint_for(
+        err: crate::endpoint_policy::EndpointPolicyError,
+        field: impl Into<String>,
+    ) -> Self {
+        let crate::endpoint_policy::EndpointPolicyError::Blocked { host, kind } = err;
+        AppError::InvalidEndpoint {
+            field: field.into(),
+            host,
+            kind,
+        }
     }
 }
 

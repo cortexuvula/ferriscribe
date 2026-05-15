@@ -532,6 +532,9 @@ mod preflight_tests {
         config.ollama_host = host.to_string();
         config.ollama_port = port;
         config.ai_model = "llama3".to_string();
+        // Tests use non-localhost addresses (e.g. TEST-NET 192.0.2.1); allow
+        // them so the provider can be registered and the offline path exercised.
+        config.allow_public_endpoint = true;
 
         let db = Arc::new(medical_db::Database::open_in_memory().expect("open in-memory db"));
         {
@@ -548,6 +551,7 @@ mod preflight_tests {
         let ollama_url = format!("http://{}:{}", ollama_host, config.ollama_port);
         if let Ok(p) = medical_ai_providers::ollama::OllamaProvider::new_with_endpoint(
             Some(&ollama_url),
+            config.allow_public_endpoint,
             None,
             medical_ai_providers::http_client::RetryConfig::default(),
             None,

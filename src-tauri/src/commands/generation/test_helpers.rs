@@ -63,6 +63,7 @@ pub(super) async fn build_test_state_with_recording(
     let ollama_url = format!("http://{}:{}", ollama_host, config.ollama_port);
     if let Ok(p) = medical_ai_providers::ollama::OllamaProvider::new_with_endpoint(
         Some(&ollama_url),
+        config.allow_public_endpoint,
         None,
         medical_ai_providers::http_client::RetryConfig::default(),
         None,

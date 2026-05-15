@@ -43,6 +43,7 @@ const defaults: AppConfig = {
   rsvp_remember_sections: false,
   rsvp_remembered_sections: [],
   capture_for_training: false,
+  allow_public_endpoint: false,
 };
 
 function createSettingsStore() {
