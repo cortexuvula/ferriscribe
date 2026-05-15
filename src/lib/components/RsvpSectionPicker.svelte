@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { rsvp } from '../stores/rsvp';
-  import { settings } from '../stores/settings';
+  import { rsvp } from '../stores/rsvp.svelte';
+  import { settings } from '../stores/settings.svelte';
   import { tokenize, type Section } from '../rsvp/engine';
 
   let selected = $state<Set<string>>(new Set());
@@ -8,20 +8,20 @@
   let initialised = false;
 
   $effect(() => {
-    if (!$rsvp.picker.open) {
+    if (!rsvp.state.picker.open) {
       initialised = false;
       return;
     }
     if (initialised) return;
     initialised = true;
 
-    rememberChoice = $settings.rsvp_remember_sections;
-    const remembered = new Set($settings.rsvp_remembered_sections);
+    rememberChoice = settings.state.rsvp_remember_sections;
+    const remembered = new Set(settings.state.rsvp_remembered_sections);
     const useRemembered =
-      $settings.rsvp_remember_sections && remembered.size > 0;
+      settings.state.rsvp_remember_sections && remembered.size > 0;
 
     selected = new Set(
-      $rsvp.picker.sections
+      rsvp.state.picker.sections
         .filter((s) => (useRemembered ? remembered.has(s.name) : true))
         .map((s) => s.name),
     );
@@ -34,15 +34,15 @@
   }
 
   function start(): void {
-    const picked = $rsvp.picker.sections.filter((s) => selected.has(s.name));
+    const picked = rsvp.state.picker.sections.filter((s) => selected.has(s.name));
     if (picked.length === 0) return;
-    const pieces = picked.map((s) => sectionText($rsvp.picker.text, s));
+    const pieces = picked.map((s) => sectionText(rsvp.state.picker.text, s));
     const joined = pieces.join('\n\n');
 
     if (rememberChoice) {
       settings.updateField('rsvp_remember_sections', true);
       settings.updateField('rsvp_remembered_sections', [...selected]);
-    } else if ($settings.rsvp_remember_sections) {
+    } else if (settings.state.rsvp_remember_sections) {
       settings.updateField('rsvp_remember_sections', false);
     }
 
@@ -60,7 +60,7 @@
   }
 </script>
 
-{#if $rsvp.picker.open}
+{#if rsvp.state.picker.open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="backdrop" onclick={cancel} role="presentation">
     <div class="dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()}>
@@ -70,7 +70,7 @@
       </div>
 
       <ul class="sections">
-        {#each $rsvp.picker.sections as section (section.name)}
+        {#each rsvp.state.picker.sections as section (section.name)}
           <li>
             <label>
               <input

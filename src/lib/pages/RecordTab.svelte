@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { audio } from '../stores/audio';
-  import { settings } from '../stores/settings';
-  import { pipeline } from '../stores/pipeline';
-  import { recordings } from '../stores/recordings';
+  import { audio } from '../stores/audio.svelte';
+  import { settings } from '../stores/settings.svelte';
+  import { pipeline } from '../stores/pipeline.svelte';
+  import { recordings } from '../stores/recordings.svelte';
   import { importAudioFile, getRecording } from '../api/recordings';
   import { checkRecordingAudioLevels } from '../api/audio';
   import { copyWithStatus } from '../utils/clipboard';
   import { clampSidebarWidth } from '../utils/resize';
-  import { recordSidebar } from '../stores/recordSidebar';
+  import { recordSidebar } from '../stores/recordSidebar.svelte.ts';
   import RecordingHeader from '../components/RecordingHeader.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import RecordingStateCards from './record/RecordingStateCards.svelte';
@@ -16,9 +16,9 @@
   import ResizeHandle from './record/ResizeHandle.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
-  import { contextTemplates } from '../stores/contextTemplates';
-  import { toasts } from '../stores/toasts';
-  import { rsvp } from '../stores/rsvp';
+  import { contextTemplates } from '../stores/contextTemplates.svelte';
+  import { toasts } from '../stores/toasts.svelte';
+  import { rsvp } from '../stores/rsvp.svelte';
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
 
@@ -37,19 +37,10 @@
   let sidebarOpen = $state(true);
   let sidebarWidth = $state(360);
 
-  // Snapshot initial store values once on mount, then write back on toggle/resize-end.
-  // (We avoid two-way reactive subscription to keep the data flow simple.)
+  // Sync local state from the persisted recordSidebar rune store.
   $effect(() => {
-    const unsubOpen = recordSidebar.open.subscribe((v) => {
-      sidebarOpen = v;
-    });
-    const unsubWidth = recordSidebar.width.subscribe((v) => {
-      sidebarWidth = v;
-    });
-    return () => {
-      unsubOpen();
-      unsubWidth();
-    };
+    sidebarOpen = recordSidebar.open;
+    sidebarWidth = recordSidebar.width;
   });
 
   function toggleSidebar() {
@@ -193,12 +184,12 @@
 
   function handleStopRecording() {
     audio.stop().then(() => {
-      const recordingId = $audio.lastRecordingId;
+      const recordingId = audio.state.lastRecordingId;
       if (!recordingId) return;
 
       pipelineRecordingId = recordingId;
 
-      if ($settings.auto_generate_soap) {
+      if (settings.state.auto_generate_soap) {
         maybeLaunchPipeline(recordingId);
       } else {
         warnIfSilent(recordingId);
@@ -207,7 +198,7 @@
   }
 
   function handleProcessRecording() {
-    const recordingId = $audio.lastRecordingId ?? importedRecordingId;
+    const recordingId = audio.state.lastRecordingId ?? importedRecordingId;
     if (!recordingId) return;
     pipelineRecordingId = recordingId;
     maybeLaunchPipeline(recordingId);
@@ -241,7 +232,7 @@
       importedFilename = filePath.split('/').pop()?.split('\\').pop() ?? 'audio file';
       await recordings.load();
 
-      // Always launch — upload doesn't respect $settings.auto_generate_soap (live recording still does).
+      // Always launch — upload doesn't respect settings.state.auto_generate_soap (live recording still does).
       pipelineRecordingId = recordingId;
       maybeLaunchPipeline(recordingId);
     } catch (e) {
@@ -294,7 +285,7 @@
 
   <div class="record-body">
     <div class="record-main">
-      {#if $pipeline.current && pipelineRecordingId}
+      {#if pipeline.state.current && pipelineRecordingId}
         <PipelineStatus
           bind:copyStatus
           onCancel={handleCancelPipeline}

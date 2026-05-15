@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { endpointHealth, type EndpointHealthState } from '../stores/endpointHealth';
-  import { settings } from '../stores/settings';
+  import { endpointHealth, type EndpointHealthState } from '../stores/endpointHealth.svelte';
+  import { settings } from '../stores/settings.svelte';
 
   type Props = {
     onopenSettings: (target: 'models' | 'audio') => void;
@@ -16,7 +16,7 @@
 
   function aiProviderLabel(): string {
     // Valid providers are 'ollama' and 'lmstudio'; binary fallback is intentional.
-    return $settings.ai_provider === 'ollama' ? 'Ollama' : 'LM Studio';
+    return settings.state.ai_provider === 'ollama' ? 'Ollama' : 'LM Studio';
   }
 
   function lastCheckedDescription(): string {

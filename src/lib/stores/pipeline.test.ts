@@ -33,25 +33,21 @@ vi.mock('../api/logging', () => ({
 
 const selectRecordingMock = vi.fn(async (_id: string) => {});
 const recordingsLoadMock = vi.fn(async () => {});
-vi.mock('./recordings', () => ({
+vi.mock('./recordings.svelte', () => ({
   recordings: {
-    subscribe: vi.fn(),
+    list: [],
+    loading: false,
+    searchQuery: '',
+    selectedRecording: null,
     load: (...args: unknown[]) => recordingsLoadMock(...(args as [])),
     search: vi.fn(),
     remove: vi.fn(),
     removeAll: vi.fn(),
   },
   selectRecording: (id: string) => selectRecordingMock(id),
-  selectedRecording: {
-    subscribe: vi.fn(),
-    set: vi.fn(),
-    update: vi.fn(),
-  },
-  loading: { subscribe: vi.fn(), set: vi.fn(), update: vi.fn() },
-  searchQuery: { subscribe: vi.fn(), set: vi.fn(), update: vi.fn() },
 }));
 
-import { pipeline } from './pipeline';
+import { pipeline } from './pipeline.svelte';
 
 describe('pipeline auto-select on completion', () => {
   let handler: (event: { payload: { recording_id: string; stage: string; error?: string } }) => void;

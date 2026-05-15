@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { settings } from '../../stores/settings';
-  import { theme } from '../../stores/theme';
-  import { contextTemplates } from '../../stores/contextTemplates';
+  import { settings } from '../../stores/settings.svelte';
+  import { theme } from '../../stores/theme.svelte.ts';
+  import { contextTemplates } from '../../stores/contextTemplates.svelte';
   import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import VocabularyDialog from '../VocabularyDialog.svelte';
   import ContextTemplateDialog from '../ContextTemplateDialog.svelte';
@@ -13,7 +13,7 @@
   let vocabDialogOpen = $state(false);
   let vocabCount = $state<[number, number]>([0, 0]);
   let ctxTemplateDialogOpen = $state(false);
-  let ctxTemplateCount = $derived($contextTemplates.length);
+  let ctxTemplateCount = $derived(contextTemplates.list.length);
   let encryptionState = $state<'no-database' | 'plaintext' | 'encrypted' | 'unknown'>('unknown');
 
   async function handleThemeChange(e: Event) {
@@ -158,7 +158,7 @@
 </script>
 
 <section class="settings-section">
-  {#if $settings.allow_public_endpoint}
+  {#if settings.state.allow_public_endpoint}
     <div class="public-endpoint-banner" role="alert">
       ⚠ <strong>Public endpoints enabled.</strong> AI / STT requests may leave your device.
     </div>
@@ -170,7 +170,7 @@
     <label for="theme-select" class="form-label">Theme</label>
     <select
       id="theme-select"
-      value={$settings.theme}
+      value={settings.state.theme}
       onchange={handleThemeChange}
     >
       <option value="dark">Dark</option>
@@ -182,7 +182,7 @@
     <label class="form-label checkbox-label">
       <input
         type="checkbox"
-        checked={$settings.autosave_enabled}
+        checked={settings.state.autosave_enabled}
         onchange={handleAutosaveChange}
       />
       <span>Enable Autosave</span>
@@ -198,9 +198,9 @@
       type="number"
       min="10"
       max="600"
-      value={$settings.autosave_interval_secs}
+      value={settings.state.autosave_interval_secs}
       onchange={handleAutosaveIntervalChange}
-      disabled={!$settings.autosave_enabled}
+      disabled={!settings.state.autosave_enabled}
     />
     <span class="form-hint">Between 10 and 600 seconds</span>
   </div>
@@ -209,12 +209,12 @@
     <span class="form-label">Recording Storage Folder</span>
     <div class="storage-path-row">
       <span class="storage-path-display">
-        {$settings.storage_path || 'Default (application data)'}
+        {settings.state.storage_path || 'Default (application data)'}
       </span>
       <button class="btn-browse" onclick={handleBrowseStoragePath}>
         Browse
       </button>
-      {#if $settings.storage_path}
+      {#if settings.state.storage_path}
         <button class="btn-reset" onclick={handleResetStoragePath}>
           Reset
         </button>
@@ -250,8 +250,8 @@
     <label class="toggle-label">
       <input
         type="checkbox"
-        checked={$settings.vocabulary_enabled}
-        onchange={() => settings.updateField('vocabulary_enabled', !$settings.vocabulary_enabled)}
+        checked={settings.state.vocabulary_enabled}
+        onchange={() => settings.updateField('vocabulary_enabled', !settings.state.vocabulary_enabled)}
       />
       <span>Enable vocabulary corrections</span>
     </label>
@@ -300,7 +300,7 @@
       <label class="form-row">
         <input
           type="checkbox"
-          checked={$settings.allow_public_endpoint}
+          checked={settings.state.allow_public_endpoint}
           onchange={(e) => settings.updateField('allow_public_endpoint', (e.target as HTMLInputElement).checked)}
         />
         <span>

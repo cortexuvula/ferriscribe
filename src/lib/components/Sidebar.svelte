@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { get } from 'svelte/store';
-  import { theme } from '../stores/theme';
-  import { settings } from '../stores/settings';
+  import { theme } from '../stores/theme.svelte.ts';
+  import { settings } from '../stores/settings.svelte';
 
   interface Props {
     activeTab: string;
@@ -56,7 +55,7 @@
   </div>
 
   <div class="sidebar-footer">
-    <button class="footer-btn" onclick={() => { theme.toggle(); settings.updateField('theme', get(theme)); }} title="Toggle theme">
+    <button class="footer-btn" onclick={() => { theme.toggle(); settings.updateField('theme', theme.current); }} title="Toggle theme">
       <span>☀/🌙</span>
       <span>Theme</span>
     </button>

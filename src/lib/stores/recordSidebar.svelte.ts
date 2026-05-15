@@ -1,10 +1,8 @@
-import { writable, type Readable } from 'svelte/store';
-
 const OPEN_KEY = 'record.sidebar.open';
 const WIDTH_KEY = 'record.sidebar.width';
-const DEFAULT_WIDTH = 360;
-const MIN_WIDTH = 280;
-const MAX_WIDTH = 600;
+export const DEFAULT_WIDTH = 360;
+export const MIN_WIDTH = 280;
+export const MAX_WIDTH = 600;
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
@@ -32,34 +30,33 @@ function readWidth(): number {
   }
 }
 
-const _open = writable<boolean>(readOpen());
-const _width = writable<number>(readWidth());
+class RecordSidebarStore {
+  open = $state<boolean>(readOpen());
+  width = $state<number>(readWidth());
 
-export const recordSidebar = {
-  open: { subscribe: _open.subscribe } as Readable<boolean>,
-  width: { subscribe: _width.subscribe } as Readable<number>,
+  // Exposed for tests and for the resize-helper consumer.
+  readonly MIN_WIDTH = MIN_WIDTH;
+  readonly MAX_WIDTH = MAX_WIDTH;
+  readonly DEFAULT_WIDTH = DEFAULT_WIDTH;
 
   setOpen(v: boolean) {
-    _open.set(v);
+    this.open = v;
     try {
       localStorage.setItem(OPEN_KEY, v ? 'true' : 'false');
     } catch {
       // Persistence best-effort; in-memory value is authoritative.
     }
-  },
+  }
 
   setWidth(v: number) {
     const clamped = clamp(Math.round(v), MIN_WIDTH, MAX_WIDTH);
-    _width.set(clamped);
+    this.width = clamped;
     try {
       localStorage.setItem(WIDTH_KEY, String(clamped));
     } catch {
       // Persistence best-effort; in-memory value is authoritative.
     }
-  },
+  }
+}
 
-  // Exposed for tests and for the resize-helper consumer.
-  MIN_WIDTH,
-  MAX_WIDTH,
-  DEFAULT_WIDTH,
-};
+export const recordSidebar = new RecordSidebarStore();

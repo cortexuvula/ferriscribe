@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { toasts, type Toast } from '../stores/toasts';
+  import { toasts, type Toast } from '../stores/toasts.svelte';
 
   interface Props {
     onNavigate?: (tab: string, recordingId: string) => void;
@@ -14,9 +14,9 @@
   }
 </script>
 
-{#if $toasts.length > 0}
+{#if toasts.list.length > 0}
   <div class="toast-container">
-    {#each $toasts as toast (toast.id)}
+    {#each toasts.list as toast (toast.id)}
       <div class="toast" class:toast-success={toast.type === 'success'} class:toast-error={toast.type === 'error'}>
         <span class="toast-message">{toast.message}</span>
         <div class="toast-actions">

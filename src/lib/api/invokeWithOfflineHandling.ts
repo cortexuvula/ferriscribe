@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { endpointOfflineStore } from '../stores/endpointOffline';
+import { endpointOfflineStore } from '../stores/endpointOffline.svelte.ts';
 
 /** Discriminant strings emitted by AppError::EndpointOffline. */
 export type ServiceKind = 'AiProvider' | 'RemoteStt';

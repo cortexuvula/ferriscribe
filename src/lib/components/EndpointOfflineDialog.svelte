@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-  import { endpointOfflineStore } from '../stores/endpointOffline';
+  import { endpointOfflineStore } from '../stores/endpointOffline.svelte.ts';
   import type {
     EndpointOfflinePayload,
     OfflineReason,
@@ -12,16 +11,12 @@
   };
   let { onopenSettings }: Props = $props();
 
-  let storeState = $state<{ payload: EndpointOfflinePayload } | null>(null);
-  const unsub = endpointOfflineStore.subscribe((s) => (storeState = s));
-  onDestroy(unsub);
-
   let dialogEl: HTMLDivElement | undefined = $state(undefined);
   let retryBtn: HTMLButtonElement | undefined = $state(undefined);
 
   // When the dialog opens, focus the Retry button on the next microtask.
   $effect(() => {
-    if (storeState && retryBtn) {
+    if (endpointOfflineStore.state && retryBtn) {
       setTimeout(() => retryBtn?.focus(), 0);
     }
   });
@@ -47,8 +42,8 @@
     endpointOfflineStore._resolve('cancel');
   }
   function onOpenSettingsClick() {
-    if (storeState) {
-      onopenSettings(storeState.payload.service);
+    if (endpointOfflineStore.state) {
+      onopenSettings(endpointOfflineStore.state.payload.service);
     }
     endpointOfflineStore._resolve('opened_settings');
   }
@@ -83,7 +78,7 @@
   }
 </script>
 
-{#if storeState}
+{#if endpointOfflineStore.state}
   <div
     class="modal-backdrop"
     role="presentation"
@@ -101,7 +96,7 @@
     >
       <h2 id="endpoint-offline-title">Office server isn't responding</h2>
       <div id="endpoint-offline-body">
-        <p>{reasonSentence(storeState.payload)}</p>
+        <p>{reasonSentence(endpointOfflineStore.state.payload)}</p>
         <p>Common causes:</p>
         <ul>
           <li>The server app isn't running on your Mac</li>

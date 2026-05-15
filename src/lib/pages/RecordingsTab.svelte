@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { recordings, loading, selectedRecording, selectRecording } from '../stores/recordings';
-  import { toasts } from '../stores/toasts';
+  import { recordings, selectRecording } from '../stores/recordings.svelte';
+  import { toasts } from '../stores/toasts.svelte';
   import SearchBar from '../components/SearchBar.svelte';
   import RecordingCard from '../components/RecordingCard.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
@@ -48,12 +48,12 @@
   />
 
   <div class="recordings-list">
-    {#if $loading}
+    {#if recordings.loading}
       <div class="state-msg">
         <span>Loading recordings…</span>
       </div>
 
-    {:else if $recordings.length === 0}
+    {:else if recordings.list.length === 0}
       <div class="state-msg">
         <div class="state-icon">📋</div>
         <p>No recordings yet.</p>
@@ -62,7 +62,7 @@
 
     {:else}
       <div class="list-toolbar">
-        <span class="recording-count">{$recordings.length} recording{$recordings.length === 1 ? '' : 's'}</span>
+        <span class="recording-count">{recordings.list.length} recording{recordings.list.length === 1 ? '' : 's'}</span>
         <button
           class="btn-delete-all"
           onclick={() => showDeleteAll = true}
@@ -70,10 +70,10 @@
           Delete All
         </button>
       </div>
-      {#each $recordings as rec (rec.id)}
+      {#each recordings.list as rec (rec.id)}
         <RecordingCard
           recording={rec}
-          selected={$selectedRecording?.id === rec.id}
+          selected={recordings.selectedRecording?.id === rec.id}
           onClick={() => selectRecording(rec.id)}
           onDelete={() => requestDelete(rec.id, rec.patient_name || rec.filename)}
         />
@@ -94,7 +94,7 @@
 <ConfirmDialog
   open={showDeleteAll}
   title="Delete All Recordings"
-  message={`This will permanently delete all ${$recordings.length} recording${$recordings.length === 1 ? '' : 's'}, including audio files, transcripts, SOAP notes, and all generated documents. This cannot be undone.`}
+  message={`This will permanently delete all ${recordings.list.length} recording${recordings.list.length === 1 ? '' : 's'}, including audio files, transcripts, SOAP notes, and all generated documents. This cannot be undone.`}
   confirmLabel="Delete All"
   onConfirm={confirmDeleteAll}
   onCancel={() => showDeleteAll = false}

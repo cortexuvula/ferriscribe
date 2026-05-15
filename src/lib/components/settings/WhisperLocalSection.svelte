@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { settings } from '../../stores/settings';
+  import { settings } from '../../stores/settings.svelte';
   import type { ModelInfo as WhisperModelInfo } from '../../api/models';
 
   interface Props {
@@ -29,7 +29,7 @@
   <label for="whisper-model" class="form-label">Whisper Model</label>
   <select
     id="whisper-model"
-    value={$settings.whisper_model}
+    value={settings.state.whisper_model}
     onchange={(e) => onModelChange((e.target as HTMLSelectElement).value)}
     disabled={modelsRefreshing}
   >
@@ -58,8 +58,8 @@
             <button
               class="btn-delete-model"
               onclick={() => onDelete(model.id)}
-              disabled={model.id === $settings.whisper_model}
-              title={model.id === $settings.whisper_model ? 'Cannot delete the active model' : 'Delete to free disk space'}
+              disabled={model.id === settings.state.whisper_model}
+              title={model.id === settings.state.whisper_model ? 'Cannot delete the active model' : 'Delete to free disk space'}
             >
               Delete
             </button>

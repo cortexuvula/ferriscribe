@@ -1,10 +1,10 @@
 <script lang="ts">
   import type { Recording } from '../types';
-  import { selectedRecording } from '../stores/recordings';
+  import { recordings } from '../stores/recordings.svelte';
   import { copyToClipboard } from '../utils/clipboard';
   import TextEditor from '../components/TextEditor.svelte';
-  import { rsvp } from '../stores/rsvp';
-  import type { DocKind } from '../stores/rsvp';
+  import { rsvp } from '../stores/rsvp.svelte';
+  import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
 
   let { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' } = $props();
@@ -20,8 +20,8 @@
 
   const config = $derived(tabConfigs[tabId]);
   const content = $derived(
-    $selectedRecording
-      ? ($selectedRecording[config.field] as string | null) ?? ''
+    recordings.selectedRecording
+      ? (recordings.selectedRecording[config.field] as string | null) ?? ''
       : null
   );
 
@@ -38,7 +38,7 @@
   // previous tab's content under the new tab's key.
   let lastSeenKey: string | null = null;
   const currentKey = $derived(
-    $selectedRecording ? `${$selectedRecording.id}::${String(config.field)}` : null
+    recordings.selectedRecording ? `${recordings.selectedRecording.id}::${String(config.field)}` : null
   );
 
   $effect(() => {
@@ -57,15 +57,15 @@
   });
 
   function onEditorChange(newValue: string) {
-    if (!$selectedRecording) return;
+    if (!recordings.selectedRecording) return;
     // Avoid triggering saves on programmatic value binding (no actual edit).
     if (newValue === content) return;
 
     pendingValue = newValue;
 
     // Optimistic local update so the UI doesn't flicker.
-    $selectedRecording = {
-      ...$selectedRecording,
+    recordings.selectedRecording = {
+      ...recordings.selectedRecording,
       [config.field]: newValue,
     };
 
@@ -74,12 +74,12 @@
       saveTimer = null;
       const value = pendingValue;
       pendingValue = null;
-      if (value === null || !$selectedRecording) return;
+      if (value === null || !recordings.selectedRecording) return;
       saveStatus = 'saving';
       saveError = null;
       try {
         await invoke('save_recording_field', {
-          recordingId: $selectedRecording.id,
+          recordingId: recordings.selectedRecording.id,
           field: String(config.field),
           value,
         });
@@ -130,8 +130,8 @@
   <div class="editor-header">
     <div class="editor-header-left">
       <h2 class="doc-type">{config.label}</h2>
-      {#if $selectedRecording?.patient_name}
-        <span class="patient-name">— {$selectedRecording.patient_name}</span>
+      {#if recordings.selectedRecording?.patient_name}
+        <span class="patient-name">— {recordings.selectedRecording.patient_name}</span>
       {/if}
     </div>
     <div class="editor-header-right">

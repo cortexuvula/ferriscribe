@@ -1,15 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { settings } from '../../stores/settings';
+  import { settings } from '../../stores/settings.svelte';
   import { listModels, setActiveProvider, reinitProviders, type ModelInfo } from '../../api/chat';
   import { testLmStudioConnection, testOllamaConnection, getApiKey } from '../../api/settings';
   import { formatError } from '../../types/errors';
   import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
 
-  const ollamaOk = $derived(isLocalOrAllowed($settings.ollama_host ?? '', $settings.allow_public_endpoint));
-  const ollamaKind = $derived(classifyEndpoint($settings.ollama_host ?? ''));
-  const lmstudioOk = $derived(isLocalOrAllowed($settings.lmstudio_host ?? '', $settings.allow_public_endpoint));
-  const lmstudioKind = $derived(classifyEndpoint($settings.lmstudio_host ?? ''));
+  const ollamaOk = $derived(isLocalOrAllowed(settings.state.ollama_host ?? '', settings.state.allow_public_endpoint));
+  const ollamaKind = $derived(classifyEndpoint(settings.state.ollama_host ?? ''));
+  const lmstudioOk = $derived(isLocalOrAllowed(settings.state.lmstudio_host ?? '', settings.state.allow_public_endpoint));
+  const lmstudioKind = $derived(classifyEndpoint(settings.state.lmstudio_host ?? ''));
 
   let availableModels = $state<ModelInfo[]>([]);
   let modelsLoading = $state(false);
@@ -33,11 +33,11 @@
   }
 
   onMount(async () => {
-    if ($settings.ai_provider && $settings.ai_model) {
-      modelMemory[$settings.ai_provider] = $settings.ai_model;
+    if (settings.state.ai_provider && settings.state.ai_model) {
+      modelMemory[settings.state.ai_provider] = settings.state.ai_model;
     }
     try {
-      await fetchModelsForProvider($settings.ai_provider);
+      await fetchModelsForProvider(settings.state.ai_provider);
     } catch (e) {
       console.error('Settings init: fetchModelsForProvider failed:', e);
     }
@@ -45,9 +45,9 @@
 
   async function handleAiProviderChange(e: Event) {
     const newProvider = (e.target as HTMLSelectElement).value;
-    const oldProvider = $settings.ai_provider;
-    if (oldProvider && $settings.ai_model) {
-      modelMemory[oldProvider] = $settings.ai_model;
+    const oldProvider = settings.state.ai_provider;
+    if (oldProvider && settings.state.ai_model) {
+      modelMemory[oldProvider] = settings.state.ai_model;
     }
     await settings.updateField('ai_provider', newProvider);
     await setActiveProvider(newProvider);
@@ -63,7 +63,7 @@
   async function handleAiModelChange(e: Event) {
     const value = (e.target as HTMLSelectElement).value;
     await settings.updateField('ai_model', value);
-    modelMemory[$settings.ai_provider] = value;
+    modelMemory[settings.state.ai_provider] = value;
   }
 
   async function handleTemperatureChange(e: Event) {
@@ -93,8 +93,8 @@
     lmstudioTestStatus = 'testing';
     lmstudioTestMessage = '';
     try {
-      const host = $settings.lmstudio_host || 'localhost';
-      const port = $settings.lmstudio_port || 1234;
+      const host = settings.state.lmstudio_host || 'localhost';
+      const port = settings.state.lmstudio_port || 1234;
       let apiKey: string | null = null;
       try {
         apiKey = await getApiKey('lmstudio_api_key');
@@ -118,7 +118,7 @@
     <label for="ai-provider" class="form-label">AI Provider</label>
     <select
       id="ai-provider"
-      value={$settings.ai_provider}
+      value={settings.state.ai_provider}
       onchange={handleAiProviderChange}
     >
       <option value="lmstudio">LM Studio</option>
@@ -131,7 +131,7 @@
     <div class="model-select-row">
       <select
         id="ai-model"
-        value={$settings.ai_model}
+        value={settings.state.ai_model}
         onchange={handleAiModelChange}
         disabled={modelsLoading}
       >
@@ -147,7 +147,7 @@
       </select>
       <button
         class="btn-refresh"
-        onclick={() => fetchModelsForProvider($settings.ai_provider)}
+        onclick={() => fetchModelsForProvider(settings.state.ai_provider)}
         disabled={modelsLoading}
         title="Refresh model list"
       >
@@ -159,7 +159,7 @@
   <div class="form-group">
     <label for="temperature" class="form-label">
       Temperature
-      <span class="value-display">{$settings.temperature.toFixed(1)}</span>
+      <span class="value-display">{settings.state.temperature.toFixed(1)}</span>
     </label>
     <input
       id="temperature"
@@ -167,7 +167,7 @@
       min="0"
       max="2"
       step="0.1"
-      value={$settings.temperature}
+      value={settings.state.temperature}
       oninput={handleTemperatureChange}
       class="range-input"
     />
@@ -189,7 +189,7 @@
     <input
       id="lmstudio-host"
       type="text"
-      value={$settings.lmstudio_host}
+      value={settings.state.lmstudio_host}
       placeholder="localhost"
       onchange={handleLmStudioHostChange}
       class="text-input"
@@ -207,7 +207,7 @@
     <input
       id="lmstudio-port"
       type="number"
-      value={$settings.lmstudio_port}
+      value={settings.state.lmstudio_port}
       placeholder="1234"
       min="1"
       max="65535"
@@ -247,7 +247,7 @@
     <input
       id="ollama-host"
       type="text"
-      value={$settings.ollama_host ?? ''}
+      value={settings.state.ollama_host ?? ''}
       placeholder="localhost"
       onchange={async (e) => {
         await settings.updateField('ollama_host', (e.target as HTMLInputElement).value);
@@ -270,7 +270,7 @@
     <input
       id="ollama-port"
       type="number"
-      value={$settings.ollama_port ?? 11434}
+      value={settings.state.ollama_port ?? 11434}
       placeholder="11434"
       min="1"
       max="65535"
@@ -302,8 +302,8 @@
             // Keychain unavailable — try without auth.
           }
           const msg = await testOllamaConnection(
-            $settings.ollama_host || 'localhost',
-            $settings.ollama_port || 11434,
+            settings.state.ollama_host || 'localhost',
+            settings.state.ollama_port || 11434,
             apiKey,
           );
           ollamaTestStatus = 'success';

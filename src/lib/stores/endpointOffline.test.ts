@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { get } from 'svelte/store';
-import { endpointOfflineStore } from './endpointOffline';
+import { endpointOfflineStore } from './endpointOffline.svelte.ts';
 import type { EndpointOfflinePayload } from '../api/invokeWithOfflineHandling';
 
 const samplePayload: EndpointOfflinePayload = {
@@ -18,12 +17,12 @@ describe('endpointOfflineStore', () => {
   });
 
   it('starts in a closed state', () => {
-    expect(get(endpointOfflineStore)).toBeNull();
+    expect(endpointOfflineStore.state).toBeNull();
   });
 
   it('openAndWait populates state with the payload', () => {
     void endpointOfflineStore.openAndWait(samplePayload);
-    const s = get(endpointOfflineStore);
+    const s = endpointOfflineStore.state;
     expect(s).not.toBeNull();
     expect(s?.payload).toEqual(samplePayload);
   });
@@ -32,7 +31,7 @@ describe('endpointOfflineStore', () => {
     const pending = endpointOfflineStore.openAndWait(samplePayload);
     endpointOfflineStore._resolve('retry');
     await expect(pending).resolves.toBe('retry');
-    expect(get(endpointOfflineStore)).toBeNull();
+    expect(endpointOfflineStore.state).toBeNull();
   });
 
   it('openAndWait resolves with cancel', async () => {
@@ -59,7 +58,7 @@ describe('endpointOfflineStore', () => {
     });
 
     // Verify the store state reflects the SECOND payload (it overrode the first).
-    expect(get(endpointOfflineStore)?.payload.provider_name).toBe('LM Studio');
+    expect(endpointOfflineStore.state?.payload.provider_name).toBe('LM Studio');
 
     // Now resolve once — both promises must settle with the same decision,
     // proving the prior resolver was chained.
@@ -71,12 +70,12 @@ describe('endpointOfflineStore', () => {
   it('_resolve is a no-op when no dialog is open', () => {
     // No openAndWait called; state is null.
     expect(() => endpointOfflineStore._resolve('cancel')).not.toThrow();
-    expect(get(endpointOfflineStore)).toBeNull();
+    expect(endpointOfflineStore.state).toBeNull();
   });
 
   it('close() clears state without resolving', () => {
     void endpointOfflineStore.openAndWait(samplePayload);
     endpointOfflineStore.close();
-    expect(get(endpointOfflineStore)).toBeNull();
+    expect(endpointOfflineStore.state).toBeNull();
   });
 });

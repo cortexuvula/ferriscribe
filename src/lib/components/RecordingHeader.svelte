@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { audio } from '../stores/audio';
+  import { audio } from '../stores/audio.svelte';
   import { formatDuration } from '../utils/format';
   import Waveform from './Waveform.svelte';
   import OfflineRecordBanner from './OfflineRecordBanner.svelte';
@@ -38,9 +38,9 @@
 </script>
 
 <div class="recording-header">
-  {#if $audio.error}
+  {#if audio.state.error}
     <div class="error-banner">
-      <span class="error-text">{$audio.error}</span>
+      <span class="error-text">{audio.state.error}</span>
       <button class="error-dismiss" onclick={() => audio.reset()}>Dismiss</button>
     </div>
   {/if}
@@ -49,15 +49,15 @@
 
   <div class="controls-row">
     <div class="timer">
-      {formatDuration($audio.elapsed)}
+      {formatDuration(audio.state.elapsed)}
     </div>
 
     <div class="controls">
-      {#if $audio.state === 'idle'}
+      {#if audio.state.state === 'idle'}
         <button class="btn btn-record" onclick={handleStart}>
           <span class="btn-icon">●</span> Record
         </button>
-      {:else if $audio.state === 'recording'}
+      {:else if audio.state.state === 'recording'}
         <button class="btn btn-pause" onclick={() => audio.pause()}>
           <span class="btn-icon">⏸</span> Pause
         </button>
@@ -67,7 +67,7 @@
         <button class="btn btn-cancel" onclick={() => audio.cancel()}>
           <span class="btn-icon">✕</span> Cancel
         </button>
-      {:else if $audio.state === 'paused'}
+      {:else if audio.state.state === 'paused'}
         <button class="btn btn-resume" onclick={() => audio.resume()}>
           <span class="btn-icon">▶</span> Resume
         </button>
@@ -77,7 +77,7 @@
         <button class="btn btn-cancel" onclick={() => audio.cancel()}>
           <span class="btn-icon">✕</span> Cancel
         </button>
-      {:else if $audio.state === 'stopped'}
+      {:else if audio.state.state === 'stopped'}
         <button class="btn btn-new" onclick={handleNew}>
           <span class="btn-icon">+</span> New Recording
         </button>

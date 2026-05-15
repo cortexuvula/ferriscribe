@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { settings } from '../../stores/settings';
+  import { settings } from '../../stores/settings.svelte';
   import type { AudioDevice } from '../../types';
 
   interface Props {
@@ -19,7 +19,7 @@
   <label for="input-device" class="form-label">Input Device</label>
   <select
     id="input-device"
-    value={$settings.input_device ?? ''}
+    value={settings.state.input_device ?? ''}
     onchange={handleInputDeviceChange}
     disabled={devicesLoading}
   >

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { audio } from '../stores/audio';
+  import { audio } from '../stores/audio.svelte';
 
   let canvas: HTMLCanvasElement | undefined = $state();
   let canvasWidth = $state(600);
@@ -14,7 +14,7 @@
 
     const w = canvas.width;
     const h = canvas.height;
-    const data = $audio.waveformData;
+    const data = audio.state.waveformData;
 
     const style = getComputedStyle(canvas);
     ctx.fillStyle = style.getPropertyValue('--bg-tertiary').trim() || '#2c2e33';
@@ -56,7 +56,7 @@
   }
 
   $effect(() => {
-    $audio.waveformData;
+    audio.state.waveformData;
     draw();
   });
 

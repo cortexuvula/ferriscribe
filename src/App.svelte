@@ -1,9 +1,9 @@
 <script lang="ts">
   import './app.css';
   import { onMount, onDestroy } from 'svelte';
-  import { settings } from './lib/stores/settings';
-  import { theme } from './lib/stores/theme';
-  import { generation } from './lib/stores/generation';
+  import { settings } from './lib/stores/settings.svelte';
+  import { theme } from './lib/stores/theme.svelte.ts';
+  import { generation } from './lib/stores/generation.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onOpenUrl } from '@tauri-apps/plugin-deep-link';
@@ -14,17 +14,16 @@
   import SettingsDialog from './lib/dialogs/SettingsDialog.svelte';
   import DatabaseRecoveryDialog from './lib/dialogs/DatabaseRecoveryDialog.svelte';
   import EndpointOfflineDialog from './lib/components/EndpointOfflineDialog.svelte';
-  import { settingsNav } from './lib/stores/settingsNav';
+  import { settingsNav } from './lib/stores/settingsNav.svelte.ts';
   import type { ServiceKind } from './lib/api/invokeWithOfflineHandling';
-  import { selectedRecording, selectRecording } from './lib/stores/recordings';
-  import { pipeline } from './lib/stores/pipeline';
-  import { audio } from './lib/stores/audio';
-  import { toasts } from './lib/stores/toasts';
+  import { recordings, selectRecording } from './lib/stores/recordings.svelte';
+  import { pipeline } from './lib/stores/pipeline.svelte';
+  import { audio } from './lib/stores/audio.svelte';
+  import { toasts } from './lib/stores/toasts.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import RsvpReader from './lib/components/RsvpReader.svelte';
   import RsvpSectionPicker from './lib/components/RsvpSectionPicker.svelte';
-  import { rsvp } from './lib/stores/rsvp';
-  import { get } from 'svelte/store';
+  import { rsvp } from './lib/stores/rsvp.svelte';
 
   // Pages
   import RecordTab from './lib/pages/RecordTab.svelte';
@@ -68,10 +67,15 @@
     }
   });
 
+  // Keep theme in sync with the loaded settings state.
+  $effect(() => {
+    theme.set(settings.state.theme);
+  });
+
   let progressUnlisten: UnlistenFn | null = null;
   let pipelineCompleteUnlisten: UnlistenFn | null = null;
   let pipelineFailedUnlisten: UnlistenFn | null = null;
-  let settingsUnsubscribe: (() => void) | null = null;
+  // Theme sync is handled reactively via $effect below.
   let onGlobalKeydown: ((e: KeyboardEvent) => void) | null = null;
 
   async function navigateToSoap(tab: string, recordingId: string) {
@@ -107,19 +111,14 @@
     );
 
     await settings.load();
-    // Set theme from loaded settings
-    settingsUnsubscribe = settings.subscribe((cfg) => {
-      theme.set(cfg.theme);
-    });
 
     onGlobalKeydown = (e: KeyboardEvent) => {
       const cmdOrCtrl = e.metaKey || e.ctrlKey;
       if (!(cmdOrCtrl && e.shiftKey && (e.key === 'r' || e.key === 'R'))) return;
       e.preventDefault();
       // Already open — don't stack another reader/picker on top.
-      const rsvpState = get(rsvp);
-      if (rsvpState.reader.open || rsvpState.picker.open) return;
-      const rec = $selectedRecording;
+      if (rsvp.state.reader.open || rsvp.state.picker.open) return;
+      const rec = recordings.selectedRecording;
       if (!rec) return;
       // Respect the active tab so editor users speed-read the doc they see.
       if (activeTab === 'soap' && rec.soap_note) {
@@ -189,7 +188,6 @@
   onDestroy(() => {
     if (onGlobalKeydown) window.removeEventListener('keydown', onGlobalKeydown);
     progressUnlisten?.();
-    settingsUnsubscribe?.();
     pipeline.destroy();
     pipelineCompleteUnlisten?.();
     pipelineFailedUnlisten?.();
@@ -205,11 +203,11 @@
   </aside>
 
   <main class="app-content">
-    {#if $selectedRecording}
+    {#if recordings.selectedRecording}
       <div class="selected-recording-banner">
         <span class="banner-icon">🎙</span>
-        <span class="banner-name">{$selectedRecording.patient_name || $selectedRecording.filename}</span>
-        <span class="banner-meta">{new Date($selectedRecording.created_at).toLocaleDateString()}</span>
+        <span class="banner-name">{recordings.selectedRecording.patient_name || recordings.selectedRecording.filename}</span>
+        <span class="banner-meta">{new Date(recordings.selectedRecording.created_at).toLocaleDateString()}</span>
       </div>
     {/if}
     {#if activeTab === 'record'}

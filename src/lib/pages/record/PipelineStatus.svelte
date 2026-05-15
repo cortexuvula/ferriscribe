@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { pipeline, type PipelineStage } from '../../stores/pipeline';
+  import { pipeline, type PipelineStage } from '../../stores/pipeline.svelte';
 
   type CopyStatus = 'idle' | 'copying' | 'copied';
 
@@ -32,7 +32,7 @@
   // a pipeline is in flight, then stops so we don't burn a timer forever.
   let nowMs = $state(Date.now());
   $effect(() => {
-    const cur = $pipeline.current;
+    const cur = pipeline.state.current;
     if (!cur || cur.finishedAt !== null) return;
     nowMs = Date.now();
     const id = setInterval(() => { nowMs = Date.now(); }, 1000);
@@ -47,13 +47,13 @@
   }
 </script>
 
-{#if $pipeline.current}
+{#if pipeline.state.current}
   <div class="pipeline-status">
     <div class="pipeline-stages">
-      <div class="stage" class:active={$pipeline.current.stage === 'transcribing'} class:done={['generating_soap', 'completed'].includes($pipeline.current.stage)}>
-        {#if $pipeline.current.stage === 'transcribing'}
+      <div class="stage" class:active={pipeline.state.current.stage === 'transcribing'} class:done={['generating_soap', 'completed'].includes(pipeline.state.current.stage)}>
+        {#if pipeline.state.current.stage === 'transcribing'}
           <span class="spinner"></span>
-        {:else if ['generating_soap', 'completed'].includes($pipeline.current.stage)}
+        {:else if ['generating_soap', 'completed'].includes(pipeline.state.current.stage)}
           <span class="stage-check">✓</span>
         {:else}
           <span class="stage-dot">○</span>
@@ -61,10 +61,10 @@
         Transcribe
       </div>
       <span class="stage-arrow">→</span>
-      <div class="stage" class:active={$pipeline.current.stage === 'generating_soap'} class:done={$pipeline.current.stage === 'completed'}>
-        {#if $pipeline.current.stage === 'generating_soap'}
+      <div class="stage" class:active={pipeline.state.current.stage === 'generating_soap'} class:done={pipeline.state.current.stage === 'completed'}>
+        {#if pipeline.state.current.stage === 'generating_soap'}
           <span class="spinner"></span>
-        {:else if $pipeline.current.stage === 'completed'}
+        {:else if pipeline.state.current.stage === 'completed'}
           <span class="stage-check">✓</span>
         {:else}
           <span class="stage-dot">○</span>
@@ -72,8 +72,8 @@
         SOAP Note
       </div>
       <span class="stage-arrow">→</span>
-      <div class="stage" class:done={$pipeline.current.stage === 'completed'}>
-        {#if $pipeline.current.stage === 'completed'}
+      <div class="stage" class:done={pipeline.state.current.stage === 'completed'}>
+        {#if pipeline.state.current.stage === 'completed'}
           <span class="stage-check">✓</span>
         {:else}
           <span class="stage-dot">○</span>
@@ -82,27 +82,27 @@
       </div>
     </div>
 
-    <p class="pipeline-label">{stageLabel($pipeline.current.stage)}</p>
+    <p class="pipeline-label">{stageLabel(pipeline.state.current.stage)}</p>
 
     <p class="pipeline-elapsed">
-      {#if $pipeline.current.finishedAt !== null}
-        {#if $pipeline.current.stage === 'completed'}
-          Processing took {formatPipelineElapsed($pipeline.current.finishedAt - $pipeline.current.startedAt)}
+      {#if pipeline.state.current.finishedAt !== null}
+        {#if pipeline.state.current.stage === 'completed'}
+          Processing took {formatPipelineElapsed(pipeline.state.current.finishedAt - pipeline.state.current.startedAt)}
         {:else}
-          Stopped after {formatPipelineElapsed($pipeline.current.finishedAt - $pipeline.current.startedAt)}
+          Stopped after {formatPipelineElapsed(pipeline.state.current.finishedAt - pipeline.state.current.startedAt)}
         {/if}
       {:else}
-        Elapsed {formatPipelineElapsed(nowMs - $pipeline.current.startedAt)}
+        Elapsed {formatPipelineElapsed(nowMs - pipeline.state.current.startedAt)}
       {/if}
     </p>
 
-    {#if ['transcribing', 'generating_soap'].includes($pipeline.current.stage)}
+    {#if ['transcribing', 'generating_soap'].includes(pipeline.state.current.stage)}
       <div class="post-actions">
         <button class="btn-secondary" onclick={onCancel}>Cancel</button>
       </div>
     {/if}
 
-    {#if $pipeline.current.stage === 'completed'}
+    {#if pipeline.state.current.stage === 'completed'}
       <div class="post-actions">
         <button class="btn-secondary" onclick={onSpeedRead}>Speed Read</button>
         <button
@@ -115,8 +115,8 @@
       </div>
     {/if}
 
-    {#if $pipeline.current.stage === 'failed'}
-      <div class="error-text">{$pipeline.current.error}</div>
+    {#if pipeline.state.current.stage === 'failed'}
+      <div class="error-text">{pipeline.state.current.error}</div>
       <div class="post-actions">
         <button class="btn-primary" onclick={onRetry}>Retry</button>
       </div>

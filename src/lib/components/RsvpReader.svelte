@@ -1,7 +1,7 @@
 <script lang="ts">
 import { onMount, onDestroy } from 'svelte';
-import { rsvp } from '../stores/rsvp';
-import { settings } from '../stores/settings';
+import { rsvp } from '../stores/rsvp.svelte';
+import { settings } from '../stores/settings.svelte';
 import {
   tokenize,
   orpIndex,
@@ -17,23 +17,23 @@ let timerHandle: ReturnType<typeof setTimeout> | null = null;
 let autoStartHandle: ReturnType<typeof setTimeout> | null = null;
 
 $effect(() => {
-  if (!$rsvp.reader.open) return;
-  tokens = tokenize($rsvp.reader.text);
+  if (!rsvp.state.reader.open) return;
+  tokens = tokenize(rsvp.state.reader.text);
   index = 0;
   playing = false;
   clearTimer();
   clearAutoStart();
-  if ($settings.rsvp_auto_start) {
+  if (settings.state.rsvp_auto_start) {
     autoStartHandle = setTimeout(() => {
       autoStartHandle = null;
       // Only kick off if the reader is still open and we haven't already started.
-      if ($rsvp.reader.open && !playing) play();
+      if (rsvp.state.reader.open && !playing) play();
     }, 500);
   }
 });
 
 function currentWords(): Token[] {
-  const chunk = $settings.rsvp_chunk_size || 1;
+  const chunk = settings.state.rsvp_chunk_size || 1;
   return tokens.slice(index, index + chunk);
 }
 
@@ -52,9 +52,9 @@ function scheduleNext(): void {
     playing = false;
     return;
   }
-  const chunk = $settings.rsvp_chunk_size || 1;
+  const chunk = settings.state.rsvp_chunk_size || 1;
   const midToken = tokens[Math.min(index + Math.floor(chunk / 2), tokens.length - 1)];
-  const ms = delayMs(midToken, baseDelayMs($settings.rsvp_wpm || 300));
+  const ms = delayMs(midToken, baseDelayMs(settings.state.rsvp_wpm || 300));
   timerHandle = setTimeout(() => {
     index = Math.min(index + chunk, tokens.length);
     scheduleNext();
@@ -95,13 +95,13 @@ function togglePlay(): void {
 
 function stepForward(): void {
   pause();
-  const chunk = $settings.rsvp_chunk_size || 1;
+  const chunk = settings.state.rsvp_chunk_size || 1;
   index = Math.min(index + chunk, tokens.length);
 }
 
 function stepBack(): void {
   pause();
-  const chunk = $settings.rsvp_chunk_size || 1;
+  const chunk = settings.state.rsvp_chunk_size || 1;
   index = Math.max(0, index - chunk);
 }
 
@@ -116,7 +116,7 @@ function goEnd(): void {
 }
 
 function bumpWpm(delta: number): void {
-  const next = Math.max(50, Math.min(2000, ($settings.rsvp_wpm || 300) + delta));
+  const next = Math.max(50, Math.min(2000, (settings.state.rsvp_wpm || 300) + delta));
   settings.updateField('rsvp_wpm', next);
 }
 
@@ -125,7 +125,7 @@ function setChunk(n: number): void {
 }
 
 function toggleTheme(): void {
-  settings.updateField('rsvp_dark_theme', !$settings.rsvp_dark_theme);
+  settings.updateField('rsvp_dark_theme', !settings.state.rsvp_dark_theme);
 }
 
 function close(): void {
@@ -135,7 +135,7 @@ function close(): void {
 }
 
 function onKeydown(e: KeyboardEvent): void {
-  if (!$rsvp.reader.open) return;
+  if (!rsvp.state.reader.open) return;
   switch (e.key) {
     case ' ': e.preventDefault(); togglePlay(); break;
     case 'ArrowLeft': e.preventDefault(); stepBack(); break;
@@ -169,7 +169,7 @@ onDestroy(() => {
 });
 
 let stageFont = $derived(
-  ($settings.rsvp_font_size ?? 48) - (($settings.rsvp_chunk_size ?? 1) > 1 ? 8 : 0),
+  (settings.state.rsvp_font_size ?? 48) - ((settings.state.rsvp_chunk_size ?? 1) > 1 ? 8 : 0),
 );
 
 let progressPct = $derived(
@@ -179,7 +179,7 @@ let progressPct = $derived(
 let etaSecs = $derived(
   Math.max(
     0,
-    Math.round(((tokens.length - index) * 60) / ($settings.rsvp_wpm || 300)),
+    Math.round(((tokens.length - index) * 60) / (settings.state.rsvp_wpm || 300)),
   ),
 );
 
@@ -190,11 +190,11 @@ function formatEta(secs: number): string {
 }
 </script>
 
-{#if $rsvp.reader.open}
+{#if rsvp.state.reader.open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
     class="backdrop"
-    class:dark={$settings.rsvp_dark_theme}
+    class:dark={settings.state.rsvp_dark_theme}
     onclick={close}
     role="presentation"
   >
@@ -247,10 +247,10 @@ function formatEta(secs: number): string {
             min="50"
             max="2000"
             step="25"
-            value={$settings.rsvp_wpm}
+            value={settings.state.rsvp_wpm}
             onchange={(e) => settings.updateField('rsvp_wpm', Number((e.currentTarget as HTMLInputElement).value))}
           />
-          <span class="num">{$settings.rsvp_wpm}</span>
+          <span class="num">{settings.state.rsvp_wpm}</span>
         </label>
 
         <label title="Font size">
@@ -260,23 +260,23 @@ function formatEta(secs: number): string {
             min="24"
             max="96"
             step="2"
-            value={$settings.rsvp_font_size}
+            value={settings.state.rsvp_font_size}
             onchange={(e) => settings.updateField('rsvp_font_size', Number((e.currentTarget as HTMLInputElement).value))}
           />
-          <span class="num">{$settings.rsvp_font_size}</span>
+          <span class="num">{settings.state.rsvp_font_size}</span>
         </label>
 
         <div class="chunk-group" title="Chunk size (1/2/3)">
           {#each [1, 2, 3] as n}
             <button
-              class:active={$settings.rsvp_chunk_size === n}
+              class:active={settings.state.rsvp_chunk_size === n}
               onclick={() => setChunk(n)}
             >{n}</button>
           {/each}
         </div>
 
         <button onclick={toggleTheme} title="Theme (T)">
-          {$settings.rsvp_dark_theme ? '☀' : '☾'}
+          {settings.state.rsvp_dark_theme ? '☀' : '☾'}
         </button>
       </div>
     </div>
