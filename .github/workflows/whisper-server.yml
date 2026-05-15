@@ -144,7 +144,7 @@ jobs:
           echo "::notice title=whisper-server ${{ matrix.triple }}::SHA256=$SHA"
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: whisper-server-${{ matrix.triple }}.${{ matrix.archive }}
           tag_name: ${{ github.ref_name }}
