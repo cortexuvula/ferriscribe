@@ -342,7 +342,7 @@
             );
             sttRemoteTestStatus = 'success';
             sttRemoteTestMessage = msg;
-          } catch (err: any) {
+          } catch (err) {
             sttRemoteTestStatus = 'error';
             sttRemoteTestMessage = formatError(err) || 'Connection failed';
           }

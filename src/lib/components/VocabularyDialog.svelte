@@ -150,7 +150,7 @@
       }
       closeForm();
       await loadEntries();
-    } catch (err: any) {
+    } catch (err) {
       formError = formatError(err) || 'Failed to save entry.';
     }
   }

@@ -56,7 +56,7 @@
       await upsertContextTemplate(name, contextText);
       await contextTemplates.load();
       closeSaveModal();
-    } catch (err: any) {
+    } catch (err) {
       saveModalError = formatError(err) || 'Failed to save template.';
     }
   }

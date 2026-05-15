@@ -98,7 +98,7 @@
       const msg = await testLmStudioConnection(host, port, apiKey);
       lmstudioTestStatus = 'success';
       lmstudioTestMessage = msg;
-    } catch (err: any) {
+    } catch (err) {
       lmstudioTestStatus = 'error';
       lmstudioTestMessage = formatError(err) || 'Connection failed';
     }
@@ -290,7 +290,7 @@
           );
           ollamaTestStatus = 'success';
           ollamaTestMessage = msg;
-        } catch (err: any) {
+        } catch (err) {
           ollamaTestStatus = 'error';
           ollamaTestMessage = formatError(err) || 'Connection failed';
         }
