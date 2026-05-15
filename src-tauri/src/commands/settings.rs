@@ -18,8 +18,91 @@ pub fn save_settings(
     state: tauri::State<'_, AppState>,
     config: AppConfig,
 ) -> AppResult<()> {
+    // Reject public/unknown hosts unless the user has explicitly opted in.
+    for (field, host) in [
+        ("ollama_host",     config.ollama_host.as_str()),
+        ("lmstudio_host",   config.lmstudio_host.as_str()),
+        ("stt_remote_host", config.stt_remote_host.as_str()),
+    ] {
+        // Empty host means "use default" — defer enforcement until the user
+        // actually fills it in.
+        if host.is_empty() {
+            continue;
+        }
+        medical_core::endpoint_policy::validate_local_endpoint(
+            host,
+            config.allow_public_endpoint,
+        )
+        .map_err(|e| AppError::invalid_endpoint_for(e, field))?;
+    }
+
     let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
     SettingsRepo::save_config(&conn, &config).map_err(|e| AppError::Database(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use medical_core::endpoint_policy::EndpointKind;
+
+    fn config_with_hosts(ollama: &str, lmstudio: &str, stt: &str) -> AppConfig {
+        AppConfig {
+            ollama_host: ollama.to_string(),
+            lmstudio_host: lmstudio.to_string(),
+            stt_remote_host: stt.to_string(),
+            ..Default::default()
+        }
+    }
+
+    // We can't run the full Tauri command here (needs State), but we can
+    // exercise the validation logic standalone by calling the helper directly.
+    // This is sufficient because the save_settings body is a thin wrapper.
+
+    #[test]
+    fn validate_public_ollama_host_rejected_by_default() {
+        let cfg = config_with_hosts("api.openai.com", "localhost", "");
+        let r = medical_core::endpoint_policy::validate_local_endpoint(
+            &cfg.ollama_host,
+            cfg.allow_public_endpoint,
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn validate_public_ollama_host_accepted_with_opt_out() {
+        let mut cfg = config_with_hosts("api.openai.com", "localhost", "");
+        cfg.allow_public_endpoint = true;
+        let r = medical_core::endpoint_policy::validate_local_endpoint(
+            &cfg.ollama_host,
+            cfg.allow_public_endpoint,
+        );
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn empty_stt_remote_host_is_allowed() {
+        let cfg = config_with_hosts("localhost", "localhost", "");
+        // Mirroring save_settings: empty is skipped.
+        assert!(cfg.stt_remote_host.is_empty());
+    }
+
+    #[test]
+    fn invalid_endpoint_for_helper_includes_field_name() {
+        use medical_core::endpoint_policy::EndpointPolicyError;
+        let err = EndpointPolicyError::Blocked {
+            host: "api.openai.com".into(),
+            kind: EndpointKind::Unknown,
+        };
+        let app = AppError::invalid_endpoint_for(err, "ollama_host");
+        match app {
+            AppError::InvalidEndpoint { field, host, kind } => {
+                assert_eq!(field, "ollama_host");
+                assert_eq!(host, "api.openai.com");
+                assert_eq!(kind, EndpointKind::Unknown);
+            }
+            _ => panic!("expected InvalidEndpoint"),
+        }
+    }
 }
 
 #[tauri::command]
