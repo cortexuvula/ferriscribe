@@ -420,3 +420,246 @@ async fn spawn_pairing_service(
         ).await;
     }))
 }
+
+#[cfg(test)]
+mod pairing_router_tests {
+    use super::*;
+    use crate::mdns::ServerPorts;
+    use crate::pairing::PairingState;
+    use crate::token_store::TokenStore;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::ConnectInfo;
+    use axum::http::{Method, Request, StatusCode};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    fn fresh_store_and_pairing() -> (tempfile::TempDir, Arc<TokenStore>, Arc<PairingState>) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("tokens.db");
+        let key = [0u8; 32];
+        let store = Arc::new(TokenStore::open(&path, &key).expect("open store"));
+        let pairing = Arc::new(PairingState::new(store.clone()));
+        (dir, store, pairing)
+    }
+
+    fn sample_info() -> InfoSnapshot {
+        InfoSnapshot {
+            host: "test-host".into(),
+            version: "9.9.9".into(),
+            ports: ServerPorts {
+                ollama: Some(11435),
+                whisper: Some(8081),
+                lmstudio: None,
+                pairing: Some(11436),
+                vocab: Some(11437),
+            },
+        }
+    }
+
+    fn loopback_connect_info() -> ConnectInfo<SocketAddr> {
+        ConnectInfo("127.0.0.1:50000".parse().unwrap())
+    }
+
+    fn lan_connect_info() -> ConnectInfo<SocketAddr> {
+        ConnectInfo("192.168.1.50:50000".parse().unwrap())
+    }
+
+    fn json_body<T: serde::Serialize>(v: &T) -> Body {
+        Body::from(serde_json::to_vec(v).unwrap())
+    }
+
+    #[tokio::test]
+    async fn enroll_succeeds_with_valid_code() {
+        let (_dir, store, pairing) = fresh_store_and_pairing();
+        let code = pairing.issue_code().await;
+        let app = build_pairing_router(pairing.clone(), store.clone(), sample_info());
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/pair/enroll")
+            .header("content-type", "application/json")
+            .body(json_body(&serde_json::json!({ "code": code, "label": "iPad" })))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(parsed["token"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn enroll_returns_401_on_invalid_code() {
+        let (_dir, store, pairing) = fresh_store_and_pairing();
+        let app = build_pairing_router(pairing, store.clone(), sample_info());
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/pair/enroll")
+            .header("content-type", "application/json")
+            .body(json_body(&serde_json::json!({ "code": "000000", "label": "iPad" })))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn enroll_persists_token_in_store() {
+        let (_dir, store, pairing) = fresh_store_and_pairing();
+        let code = pairing.issue_code().await;
+        let app = build_pairing_router(pairing.clone(), store.clone(), sample_info());
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/pair/enroll")
+            .header("content-type", "application/json")
+            .body(json_body(&serde_json::json!({ "code": code, "label": "phone-1" })))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rows = store.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "phone-1");
+    }
+
+    #[tokio::test]
+    async fn list_clients_from_loopback_returns_paired_clients() {
+        let (_dir, store, pairing) = fresh_store_and_pairing();
+        let code = pairing.issue_code().await;
+        let _ = pairing.enroll(&code, "loopback-client").await.unwrap();
+        let app = build_pairing_router(pairing, store, sample_info());
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/pair/clients")
+            .extension(loopback_connect_info())
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["label"], "loopback-client");
+    }
+
+    #[tokio::test]
+    async fn list_clients_from_non_loopback_returns_403() {
+        let (_dir, store, pairing) = fresh_store_and_pairing();
+        let code = pairing.issue_code().await;
+        let _ = pairing.enroll(&code, "client").await.unwrap();
+        let app = build_pairing_router(pairing, store, sample_info());
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/pair/clients")
+            .extension(lan_connect_info())
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn revoke_from_loopback_removes_token() {
+        let (_dir, store, pairing) = fresh_store_and_pairing();
+        let code = pairing.issue_code().await;
+        let _ = pairing.enroll(&code, "to-revoke").await.unwrap();
+        let id = store.list().unwrap()[0].id;
+        let app = build_pairing_router(pairing, store.clone(), sample_info());
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/pair/revoke/{id}"))
+            .extension(loopback_connect_info())
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn revoke_from_non_loopback_returns_403() {
+        let (_dir, store, pairing) = fresh_store_and_pairing();
+        let code = pairing.issue_code().await;
+        let _ = pairing.enroll(&code, "to-keep").await.unwrap();
+        let id = store.list().unwrap()[0].id;
+        let app = build_pairing_router(pairing, store.clone(), sample_info());
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/pair/revoke/{id}"))
+            .extension(lan_connect_info())
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn revoke_returns_204_even_for_unknown_id() {
+        let (_dir, store, pairing) = fresh_store_and_pairing();
+        let app = build_pairing_router(pairing, store, sample_info());
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/pair/revoke/99999")
+            .extension(loopback_connect_info())
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn info_returns_snapshot_with_configured_ports() {
+        let (_dir, store, pairing) = fresh_store_and_pairing();
+        let app = build_pairing_router(pairing, store, sample_info());
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/info")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["host"], "test-host");
+        assert_eq!(parsed["version"], "9.9.9");
+        assert_eq!(parsed["ports"]["ollama"], 11435);
+        assert_eq!(parsed["ports"]["pairing"], 11436);
+        assert_eq!(parsed["ports"]["vocab"], 11437);
+        assert!(parsed["ports"]["lmstudio"].is_null());
+    }
+
+    #[tokio::test]
+    async fn info_requires_no_auth_or_loopback() {
+        let (_dir, store, pairing) = fresh_store_and_pairing();
+        let app = build_pairing_router(pairing, store, sample_info());
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/info")
+            .extension(lan_connect_info())
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+}
