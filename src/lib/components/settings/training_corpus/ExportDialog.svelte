@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -11,8 +12,10 @@
   let { onclose, onsuccess, promotedCount, availableModels }: Props = $props();
 
   let outputDir = $state<string | null>(null);
-  // Pre-select the first available model (props are stable for modal lifetime).
-  let selectedModels = $state<string[]>([...(availableModels.slice(0, 1))]);
+  // Pre-select the first available model. The intent is initial-only — once
+  // the user toggles checkboxes, selectedModels diverges from availableModels.
+  // untrack() makes that explicit and silences `state_referenced_locally`.
+  let selectedModels = $state<string[]>(untrack(() => availableModels.slice(0, 1)));
   let strictness: 'standard' | 'aggressive' = $state('standard');
   let exporting = $state(false);
   let error: string | null = $state(null);
