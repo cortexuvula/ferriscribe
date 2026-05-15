@@ -3699,6 +3699,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "urlencoding",
+ "wiremock",
  "zip 2.4.2",
 ]
 
