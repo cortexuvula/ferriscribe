@@ -46,8 +46,15 @@ impl LmStudioProvider {
     /// `host` defaults to `http://localhost:1234` when `None`.
     /// `bearer` is an optional bearer token for auth-proxied remote connections.
     /// `policy` controls retry behavior for inner HTTP calls.
-    pub fn new(host: Option<&str>, bearer: Option<String>, policy: RetryConfig) -> AppResult<Self> {
+    pub fn new(
+        host: Option<&str>,
+        allow_public: bool,
+        bearer: Option<String>,
+        policy: RetryConfig,
+    ) -> AppResult<Self> {
         let base = host.unwrap_or("http://localhost:1234");
+        medical_core::endpoint_policy::validate_url(base, allow_public)
+            .map_err(|e| AppError::invalid_endpoint_for(e, "lmstudio_host"))?;
         let base_url = format!("{base}/v1");
         let http = Client::builder()
             .pool_max_idle_per_host(5)
@@ -68,11 +75,14 @@ impl LmStudioProvider {
     /// Usable in synchronous initialization code (no running async runtime required).
     pub fn new_with_endpoint(
         host: Option<&str>,
+        allow_public: bool,
         bearer: Option<String>,
         policy: RetryConfig,
         ep: Option<RemoteEndpoint>,
     ) -> AppResult<Self> {
         let base = host.unwrap_or("http://localhost:1234");
+        medical_core::endpoint_policy::validate_url(base, allow_public)
+            .map_err(|e| AppError::invalid_endpoint_for(e, "lmstudio_host"))?;
         let base_url = format!("{base}/v1");
         let http = Client::builder()
             .pool_max_idle_per_host(5)
@@ -224,7 +234,7 @@ mod tests {
 
     #[test]
     fn creates_with_default_host() {
-        let p = LmStudioProvider::new(None, None, RetryConfig::default()).expect("build default provider");
+        let p = LmStudioProvider::new(None, false, None, RetryConfig::default()).expect("build default provider");
         assert_eq!(p.static_base_url, "http://localhost:1234/v1");
     }
 
@@ -232,6 +242,7 @@ mod tests {
     fn creates_with_custom_host() {
         let p = LmStudioProvider::new(
             Some("http://192.168.1.10:1234"),
+            false,
             None,
             RetryConfig::default(),
         )
@@ -243,6 +254,7 @@ mod tests {
     fn stores_bearer_token() {
         let _p = LmStudioProvider::new(
             None,
+            false,
             Some("tok_lms".into()),
             RetryConfig::default(),
         )
@@ -252,7 +264,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_endpoint_clears_cache() {
-        let p = LmStudioProvider::new(None, None, RetryConfig::default()).expect("build");
+        let p = LmStudioProvider::new(None, false, None, RetryConfig::default()).expect("build");
         *p.url_cache.lock().await = Some(ResolvedCache {
             url: "http://stale:9999/v1".to_string(),
             resolved_at: std::time::Instant::now(),
@@ -265,6 +277,7 @@ mod tests {
     async fn current_base_url_returns_static_when_no_endpoint() {
         let p = LmStudioProvider::new(
             Some("http://192.168.1.42:1234"),
+            false,
             None,
             RetryConfig::default(),
         )
@@ -280,7 +293,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let p = LmStudioProvider::new(None, None, RetryConfig::default()).expect("build");
+        let p = LmStudioProvider::new(None, false, None, RetryConfig::default()).expect("build");
         p.set_endpoint(Some(RemoteEndpoint {
             lan: Some("127.0.0.1".to_string()),
             tailscale: None,
@@ -297,6 +310,47 @@ mod tests {
         // Cache should still return the URL without re-probing.
         let url2 = p.current_base_url().await.expect("cached resolve");
         assert_eq!(url1, url2);
+    }
+
+    #[test]
+    fn new_blocks_public_endpoint_by_default() {
+        let result = LmStudioProvider::new(
+            Some("http://api.openai.com/v1"),
+            /* allow_public */ false,
+            None,
+            RetryConfig::default(),
+        );
+        assert!(matches!(
+            result,
+            Err(medical_core::error::AppError::InvalidEndpoint {
+                field, ..
+            }) if field == "lmstudio_host"
+        ));
+    }
+
+    #[test]
+    fn new_accepts_public_endpoint_when_allow_public() {
+        let result = LmStudioProvider::new(
+            Some("http://api.openai.com/v1"),
+            /* allow_public */ true,
+            None,
+            RetryConfig::default(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn new_accepts_local_endpoints_with_default_allow_public() {
+        for host in [
+            None,
+            Some("http://localhost:1234"),
+            Some("http://192.168.1.42:1234"),
+            Some("http://100.64.0.1:1234"),
+            Some("http://clinic.local:1234"),
+        ] {
+            let r = LmStudioProvider::new(host, /* allow_public */ false, None, RetryConfig::default());
+            assert!(r.is_ok(), "expected Ok for {host:?}");
+        }
     }
 }
 
@@ -337,7 +391,7 @@ mod offline_tests {
     async fn resolve_failure_returns_endpoint_offline() {
         let port = dead_port();
 
-        let p = LmStudioProvider::new(None, None, RetryConfig::default()).expect("build");
+        let p = LmStudioProvider::new(None, false, None, RetryConfig::default()).expect("build");
         p.set_endpoint(Some(RemoteEndpoint {
             lan: Some("127.0.0.1".to_string()),
             tailscale: None,
@@ -379,7 +433,7 @@ mod offline_tests {
             max_retries: 0,
             ..RetryConfig::default()
         };
-        let p = LmStudioProvider::new(Some(&host), None, policy).expect("build");
+        let p = LmStudioProvider::new(Some(&host), false, None, policy).expect("build");
 
         let req = minimal_request("default");
         let err = p.complete(req).await.unwrap_err();
