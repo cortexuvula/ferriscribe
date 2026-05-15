@@ -87,6 +87,13 @@ pub async fn start_sharing_inner(
     // calls to the upstream services on localhost directly — no proxy hop, no
     // bearer needed. Ports are the upstream ports (Ollama 11434, LM Studio 1234,
     // whisper.cpp 8080), NOT the proxy ports (11435 / 8081).
+    let allow_public = {
+        let conn = state.db.conn().map_err(|e| e.to_string())?;
+        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+            .map_err(|e| e.to_string())?;
+        cfg.migrate();
+        cfg.allow_public_endpoint
+    };
     use medical_core::types::RemoteEndpoint;
     let local_ollama = Some(RemoteEndpoint {
         lan: Some("127.0.0.1".to_string()),
@@ -110,19 +117,22 @@ pub async fn start_sharing_inner(
     {
         let guard = state.ollama_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(local_ollama).await;
+            p.set_endpoint(local_ollama, allow_public).await
+                .map_err(|e| e.to_string())?;
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(local_lmstudio).await;
+            p.set_endpoint(local_lmstudio, allow_public).await
+                .map_err(|e| e.to_string())?;
         }
     }
     {
         let guard = state.remote_stt_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(local_whisper).await;
+            p.set_endpoint(local_whisper, allow_public).await
+                .map_err(|e| e.to_string())?;
         }
     }
 
@@ -145,6 +155,13 @@ pub async fn stop_sharing(state: State<'_, AppState>) -> Result<(), String> {
     // Restore provider endpoints to pre-sharing configuration.
     // If this machine is also paired as a client to another server, restore the
     // paired endpoint; otherwise revert to None (local-only mode).
+    let allow_public = {
+        let conn = state.db.conn().map_err(|e| e.to_string())?;
+        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+            .map_err(|e| e.to_string())?;
+        cfg.migrate();
+        cfg.allow_public_endpoint
+    };
     let paired = crate::state::load_paired_connection();
     let bearer = if paired.is_some() { crate::state::load_sharing_bearer() } else { None };
 
@@ -162,19 +179,22 @@ pub async fn stop_sharing(state: State<'_, AppState>) -> Result<(), String> {
     {
         let guard = state.ollama_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(ollama_ep).await;
+            p.set_endpoint(ollama_ep, allow_public).await
+                .map_err(|e| e.to_string())?;
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(lmstudio_ep).await;
+            p.set_endpoint(lmstudio_ep, allow_public).await
+                .map_err(|e| e.to_string())?;
         }
     }
     {
         let guard = state.remote_stt_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(whisper_ep).await;
+            p.set_endpoint(whisper_ep, allow_public).await
+                .map_err(|e| e.to_string())?;
         }
     }
 

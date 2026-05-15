@@ -108,11 +108,30 @@ impl OllamaProvider {
     /// in-session Unpair → Pair leaves the inner client carrying the bearer
     /// it had at construction time — a 401 source if the office admin
     /// revoked the previous client entry before re-pairing.
-    pub async fn set_endpoint(&self, ep: Option<RemoteEndpoint>) {
+    pub async fn set_endpoint(
+        &self,
+        ep: Option<RemoteEndpoint>,
+        allow_public: bool,
+    ) -> AppResult<()> {
+        if let Some(ref e) = ep {
+            for (label, opt_host) in [
+                ("lan", e.lan.as_deref()),
+                ("tailscale", e.tailscale.as_deref()),
+            ] {
+                if let Some(h) = opt_host {
+                    medical_core::endpoint_policy::validate_local_endpoint(h, allow_public)
+                        .map_err(|err| AppError::invalid_endpoint_for(
+                            err,
+                            format!("ollama_host.{label}"),
+                        ))?;
+                }
+            }
+        }
         let new_bearer = ep.as_ref().and_then(|e| e.bearer.clone());
         *self.url_cache.lock().await = None;
         *self.endpoint.write().await = ep;
         self.client.lock().await.bearer = new_bearer;
+        Ok(())
     }
 
     /// Resolve the current base URL (without the `/v1` suffix applied here).
@@ -283,7 +302,7 @@ mod tests {
             resolved_at: std::time::Instant::now(),
         });
         // Setting a new endpoint must clear the cache.
-        p.set_endpoint(None).await;
+        p.set_endpoint(None, false).await.expect("clear endpoint");
         assert!(p.url_cache.lock().await.is_none());
     }
 
@@ -314,8 +333,9 @@ mod tests {
             tailscale: None,
             port,
             bearer: None,
-        }))
-        .await;
+        }), false)
+        .await
+        .expect("set endpoint");
 
         // First call: listener up — should resolve.
         let url1 = p.current_base_url().await.expect("first resolve");
@@ -369,6 +389,34 @@ mod tests {
             assert!(r.is_ok(), "expected Ok for {host:?}");
         }
     }
+
+    #[tokio::test]
+    async fn set_endpoint_rejects_public_lan_address() {
+        let p = OllamaProvider::new(None, false, None, RetryConfig::default()).expect("build");
+        let bad = medical_core::types::RemoteEndpoint {
+            lan: Some("api.openai.com".into()),
+            tailscale: None,
+            port: 11434,
+            bearer: None,
+        };
+        let r = p.set_endpoint(Some(bad), false).await;
+        assert!(matches!(
+            r,
+            Err(medical_core::error::AppError::InvalidEndpoint { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_endpoint_accepts_lan_and_tailscale_addresses() {
+        let p = OllamaProvider::new(None, false, None, RetryConfig::default()).expect("build");
+        let good = medical_core::types::RemoteEndpoint {
+            lan: Some("192.168.1.42".into()),
+            tailscale: Some("100.64.0.1".into()),
+            port: 11434,
+            bearer: None,
+        };
+        assert!(p.set_endpoint(Some(good), false).await.is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -414,8 +462,9 @@ mod offline_tests {
             tailscale: None,
             port,
             bearer: None,
-        }))
-        .await;
+        }), false)
+        .await
+        .expect("set endpoint");
 
         let err = p.current_base_url().await.unwrap_err();
         match err {

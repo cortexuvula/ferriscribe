@@ -164,11 +164,30 @@ impl RemoteSttProvider {
     /// in-session Unpair → Pair leaves a stale bearer baked in at
     /// construction time — a 401 source if the office admin revoked the
     /// previous client entry.
-    pub async fn set_endpoint(&self, ep: Option<RemoteEndpoint>) {
+    pub async fn set_endpoint(
+        &self,
+        ep: Option<RemoteEndpoint>,
+        allow_public: bool,
+    ) -> AppResult<()> {
+        if let Some(ref e) = ep {
+            for (label, opt_host) in [
+                ("lan", e.lan.as_deref()),
+                ("tailscale", e.tailscale.as_deref()),
+            ] {
+                if let Some(h) = opt_host {
+                    medical_core::endpoint_policy::validate_local_endpoint(h, allow_public)
+                        .map_err(|err| AppError::invalid_endpoint_for(
+                            err,
+                            format!("stt_remote_host.{label}"),
+                        ))?;
+                }
+            }
+        }
         let new_bearer = ep.as_ref().and_then(|e| e.bearer.clone());
         *self.url_cache.lock().await = None;
         *self.endpoint.write().await = ep;
         *self.api_key.write().await = new_bearer;
+        Ok(())
     }
 
     /// Resolve the current base URL (no trailing path).
@@ -760,7 +779,7 @@ mod tests {
             resolved_at: std::time::Instant::now(),
         });
 
-        p.set_endpoint(None).await;
+        p.set_endpoint(None, false).await.expect("clear endpoint");
         assert!(p.url_cache.lock().await.is_none(), "cache must be cleared on set_endpoint");
     }
 
@@ -825,8 +844,9 @@ mod tests {
             tailscale: None,
             port,
             bearer: None,
-        }))
-        .await;
+        }), false)
+        .await
+        .expect("set endpoint");
 
         // First call: port is open — should resolve.
         let url1 = p.current_base_url().await.expect("first resolve");
@@ -903,6 +923,52 @@ mod tests {
             std::path::PathBuf::from("/dev/null"),
         );
         assert!(r.is_ok());
+    }
+
+    #[tokio::test]
+    async fn set_endpoint_rejects_public_lan_address() {
+        let p = RemoteSttProvider::new(
+            "localhost",
+            8080,
+            "whisper-1",
+            /* allow_public */ false,
+            None,
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        )
+        .expect("build");
+        let bad = medical_core::types::RemoteEndpoint {
+            lan: Some("api.openai.com".into()),
+            tailscale: None,
+            port: 8080,
+            bearer: None,
+        };
+        let r = p.set_endpoint(Some(bad), false).await;
+        assert!(matches!(
+            r,
+            Err(medical_core::error::AppError::InvalidEndpoint { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_endpoint_accepts_lan_and_tailscale_addresses() {
+        let p = RemoteSttProvider::new(
+            "localhost",
+            8080,
+            "whisper-1",
+            /* allow_public */ false,
+            None,
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        )
+        .expect("build");
+        let good = medical_core::types::RemoteEndpoint {
+            lan: Some("192.168.1.42".into()),
+            tailscale: Some("100.64.0.1".into()),
+            port: 8080,
+            bearer: None,
+        };
+        assert!(p.set_endpoint(Some(good), false).await.is_ok());
     }
 }
 
