@@ -116,22 +116,19 @@ pub async fn start_sharing_inner(
     {
         let guard = state.ollama_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(local_ollama, allow_public).await
-                .map_err(|e| AppError::Other(e.to_string()))?;
+            p.set_endpoint(local_ollama, allow_public).await?;
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(local_lmstudio, allow_public).await
-                .map_err(|e| AppError::Other(e.to_string()))?;
+            p.set_endpoint(local_lmstudio, allow_public).await?;
         }
     }
     {
         let guard = state.remote_stt_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(local_whisper, allow_public).await
-                .map_err(|e| AppError::Other(e.to_string()))?;
+            p.set_endpoint(local_whisper, allow_public).await?;
         }
     }
 
@@ -178,22 +175,19 @@ pub async fn stop_sharing(state: State<'_, AppState>) -> AppResult<()> {
     {
         let guard = state.ollama_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(ollama_ep, allow_public).await
-                .map_err(|e| AppError::Other(e.to_string()))?;
+            p.set_endpoint(ollama_ep, allow_public).await?;
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(lmstudio_ep, allow_public).await
-                .map_err(|e| AppError::Other(e.to_string()))?;
+            p.set_endpoint(lmstudio_ep, allow_public).await?;
         }
     }
     {
         let guard = state.remote_stt_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(whisper_ep, allow_public).await
-                .map_err(|e| AppError::Other(e.to_string()))?;
+            p.set_endpoint(whisper_ep, allow_public).await?;
         }
     }
 
