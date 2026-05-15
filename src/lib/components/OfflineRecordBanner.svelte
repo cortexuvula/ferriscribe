@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { endpointHealth, type EndpointHealthState } from '../stores/endpointHealth';
+  import { endpointHealth, type EndpointHealthState } from '../stores/endpointHealth.svelte';
 
   type Props = {
     onopenSettings: (target: 'models' | 'audio') => void;

@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
@@ -23,7 +22,7 @@ vi.mock('../stores/settings', () => {
 });
 
 // Import after mocks are set up.
-import { endpointHealth } from './endpointHealth';
+import { endpointHealth } from './endpointHealth.svelte';
 // The vi.mock above replaces settings with a plain writable; cast to any so
 // svelte-check doesn't complain that .set() / .update() don't exist on the
 // real settings store type.
@@ -38,7 +37,7 @@ describe('endpointHealth store', () => {
   });
 
   it('starts in hidden state before any subscriber', () => {
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.ai).toBe('skipped');
     expect(state.stt).toBe('skipped');
     expect(state.overall).toBe('hidden');
@@ -73,7 +72,7 @@ describe('endpointHealth store', () => {
       probePath: '/v1/models',
       apiKey: undefined,
     });
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.ai).toBe('online');
     expect(state.stt).toBe('skipped');
     expect(state.overall).toBe('online');
@@ -102,7 +101,7 @@ describe('endpointHealth store', () => {
 
     await endpointHealth.probeNow();
 
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.ai).toBe('offline');
     expect(state.overall).toBe('offline');
   });
@@ -137,7 +136,7 @@ describe('endpointHealth store', () => {
 
     await endpointHealth.probeNow();
 
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.ai).toBe('online');
     expect(state.stt).toBe('offline');
     expect(state.overall).toBe('partial');
@@ -159,7 +158,7 @@ describe('endpointHealth store', () => {
     await endpointHealth.probeNow();
 
     expect(invokeMock).not.toHaveBeenCalled();
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.ai).toBe('skipped');
     expect(state.stt).toBe('skipped');
     expect(state.overall).toBe('hidden');
@@ -186,7 +185,7 @@ describe('endpointHealth store', () => {
 
     expect(invokeMock).toHaveBeenCalledTimes(2);
     expect(invokeMock).toHaveBeenCalledWith('probe_endpoint_reachable', expect.anything());
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.stt).toBe('skipped');
   });
 
@@ -206,7 +205,7 @@ describe('endpointHealth store', () => {
     await endpointHealth.probeNow();
 
     expect(invokeMock).not.toHaveBeenCalled();
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.stt).toBe('skipped');
     expect(state.overall).toBe('hidden');
   });
@@ -227,7 +226,7 @@ describe('endpointHealth store', () => {
     await endpointHealth.probeNow();
 
     expect(invokeMock).not.toHaveBeenCalled();
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.ai).toBe('skipped');
   });
 
@@ -356,7 +355,7 @@ describe('endpointHealth store', () => {
       probePath: '/v1/models',
       apiKey: 'secret-token-abc',
     });
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.stt).toBe('online');
   });
 
@@ -388,7 +387,7 @@ describe('endpointHealth store', () => {
       probePath: '/v1/models',
       apiKey: undefined,
     });
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.stt).toBe('online'); // probe ran, succeeded without auth
   });
 
@@ -421,7 +420,7 @@ describe('endpointHealth store', () => {
       probePath: '/api/tags',
       apiKey: 'bearer-token-xyz',
     });
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.ai).toBe('online');
   });
 
@@ -454,7 +453,7 @@ describe('endpointHealth store', () => {
       probePath: '/v1/models',
       apiKey: 'lm-bearer-token',
     });
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.ai).toBe('online');
   });
 
@@ -486,7 +485,7 @@ describe('endpointHealth store', () => {
       probePath: '/api/tags',
       apiKey: undefined,
     });
-    const state = get(endpointHealth);
+    const state = endpointHealth.state;
     expect(state.ai).toBe('online'); // probe ran, succeeded without auth
   });
 

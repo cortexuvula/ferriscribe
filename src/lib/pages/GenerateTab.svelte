@@ -5,8 +5,8 @@
   import { copyWithStatus } from '../utils/clipboard';
   import { buildPatientContext } from '../utils/patient_context';
   import GenerateItem from '../components/GenerateItem.svelte';
-  import { rsvp } from '../stores/rsvp';
-  import type { DocKind } from '../stores/rsvp';
+  import { rsvp } from '../stores/rsvp.svelte';
+  import type { DocKind } from '../stores/rsvp.svelte';
   import type { PatientContext } from '../types';
   import { formatError } from '../types/errors';
   import { OfflineCancelled } from '../api/invokeWithOfflineHandling';

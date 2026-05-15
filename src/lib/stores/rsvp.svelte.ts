@@ -1,4 +1,3 @@
-import { writable } from 'svelte/store';
 import { detectSections, preprocessSoap, type Section } from '../rsvp/engine';
 import { toasts } from './toasts.svelte';
 
@@ -22,10 +21,13 @@ const initial: RsvpState = {
   reader: { open: false, text: '', kind: 'soap' },
 };
 
-function createRsvpStore() {
-  const { subscribe, update, set } = writable<RsvpState>(initial);
+class RsvpStore {
+  state = $state<RsvpState>({
+    picker: { open: false, text: '', sections: [] },
+    reader: { open: false, text: '', kind: 'soap' },
+  });
 
-  function openSoap(rawText: string): void {
+  openSoap(rawText: string): void {
     const text = preprocessSoap(rawText ?? '');
     if (!text.trim()) {
       toasts.error('Nothing to read.');
@@ -34,43 +36,41 @@ function createRsvpStore() {
     const sections = detectSections(text);
     if (sections.length === 0) {
       // No sections detected — skip the picker, read the whole doc.
-      update((s) => ({
-        ...s,
+      this.state = {
+        ...this.state,
         reader: { open: true, text, kind: 'soap' },
-      }));
+      };
       return;
     }
-    update((s) => ({
-      ...s,
+    this.state = {
+      ...this.state,
       picker: { open: true, text, sections },
-    }));
+    };
   }
 
-  function openGeneric(rawText: string, kind: DocKind): void {
+  openGeneric(rawText: string, kind: DocKind): void {
     const text = (rawText ?? '').trim();
     if (!text) {
       toasts.error('Nothing to read.');
       return;
     }
-    update((s) => ({
-      ...s,
+    this.state = {
+      ...this.state,
       reader: { open: true, text, kind },
-    }));
+    };
   }
 
-  function startReading(text: string, kind: DocKind): void {
-    update((s) => ({
-      ...s,
+  startReading(text: string, kind: DocKind): void {
+    this.state = {
+      ...this.state,
       picker: { open: false, text: '', sections: [] },
       reader: { open: true, text, kind },
-    }));
+    };
   }
 
-  function closeAll(): void {
-    set(initial);
+  closeAll(): void {
+    this.state = { ...initial };
   }
-
-  return { subscribe, openSoap, openGeneric, startReading, closeAll };
 }
 
-export const rsvp = createRsvpStore();
+export const rsvp = new RsvpStore();

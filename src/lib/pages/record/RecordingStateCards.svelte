@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { audio } from '../../stores/audio';
+  import { audio } from '../../stores/audio.svelte';
   import { settings } from '../../stores/settings';
 
   interface Props {
@@ -20,7 +20,7 @@
   }: Props = $props();
 </script>
 
-{#if importedRecordingId && $audio.state === 'idle'}
+{#if importedRecordingId && audio.state.state === 'idle'}
   <!-- Imported file, pipeline not yet started -->
   <div class="state-message">
     <div class="state-icon">✓</div>
@@ -40,7 +40,7 @@
     {/if}
   </div>
 
-{:else if $audio.state === 'idle'}
+{:else if audio.state.state === 'idle'}
   <div class="state-message">
     <div class="state-icon">🎙</div>
     <h2>Ready to Record</h2>
@@ -65,27 +65,27 @@
     {/if}
   </div>
 
-{:else if $audio.state === 'recording'}
+{:else if audio.state.state === 'recording'}
   <div class="state-message">
     <div class="state-icon recording-pulse">●</div>
     <h2>Recording in Progress</h2>
     <p>Audio is being captured. Press <strong>Pause</strong> or <strong>Stop</strong> when done.</p>
   </div>
 
-{:else if $audio.state === 'paused'}
+{:else if audio.state.state === 'paused'}
   <div class="state-message">
     <div class="state-icon">⏸</div>
     <h2>Recording Paused</h2>
     <p>Press <strong>Resume</strong> to continue or <strong>Stop</strong> to finish.</p>
   </div>
 
-{:else if $audio.state === 'stopped'}
+{:else if audio.state.state === 'stopped'}
   <div class="state-message">
     <div class="state-icon">✓</div>
     <h2>Recording Complete</h2>
     <p>Your recording has been saved.</p>
 
-    {#if !$settings.auto_generate_soap && $audio.lastRecordingId}
+    {#if !$settings.auto_generate_soap && audio.state.lastRecordingId}
       <div class="post-actions">
         <button class="btn-primary" onclick={onProcessRecording}>
           Process Recording

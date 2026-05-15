@@ -1,6 +1,6 @@
 <script lang="ts">
 import { onMount, onDestroy } from 'svelte';
-import { rsvp } from '../stores/rsvp';
+import { rsvp } from '../stores/rsvp.svelte';
 import { settings } from '../stores/settings';
 import {
   tokenize,
@@ -17,8 +17,8 @@ let timerHandle: ReturnType<typeof setTimeout> | null = null;
 let autoStartHandle: ReturnType<typeof setTimeout> | null = null;
 
 $effect(() => {
-  if (!$rsvp.reader.open) return;
-  tokens = tokenize($rsvp.reader.text);
+  if (!rsvp.state.reader.open) return;
+  tokens = tokenize(rsvp.state.reader.text);
   index = 0;
   playing = false;
   clearTimer();
@@ -27,7 +27,7 @@ $effect(() => {
     autoStartHandle = setTimeout(() => {
       autoStartHandle = null;
       // Only kick off if the reader is still open and we haven't already started.
-      if ($rsvp.reader.open && !playing) play();
+      if (rsvp.state.reader.open && !playing) play();
     }, 500);
   }
 });
@@ -135,7 +135,7 @@ function close(): void {
 }
 
 function onKeydown(e: KeyboardEvent): void {
-  if (!$rsvp.reader.open) return;
+  if (!rsvp.state.reader.open) return;
   switch (e.key) {
     case ' ': e.preventDefault(); togglePlay(); break;
     case 'ArrowLeft': e.preventDefault(); stepBack(); break;
@@ -190,7 +190,7 @@ function formatEta(secs: number): string {
 }
 </script>
 
-{#if $rsvp.reader.open}
+{#if rsvp.state.reader.open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
     class="backdrop"

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { audio } from '../stores/audio';
+  import { audio } from '../stores/audio.svelte';
   import { settings } from '../stores/settings';
   import { formatDuration } from '../utils/format';
   import EndpointHealthPill from './EndpointHealthPill.svelte';
@@ -44,13 +44,13 @@
 
 <div class="statusbar">
   <div class="status-left">
-    {#if $audio.state === 'recording'}
+    {#if audio.state.state === 'recording'}
       <span class="status-indicator recording">● REC</span>
-      <span class="status-timer">{formatDuration($audio.elapsed)}</span>
-    {:else if $audio.state === 'paused'}
+      <span class="status-timer">{formatDuration(audio.state.elapsed)}</span>
+    {:else if audio.state.state === 'paused'}
       <span class="status-indicator paused">⏸ PAUSED</span>
-      <span class="status-timer">{formatDuration($audio.elapsed)}</span>
-    {:else if $audio.state === 'stopped'}
+      <span class="status-timer">{formatDuration(audio.state.elapsed)}</span>
+    {:else if audio.state.state === 'stopped'}
       <span class="status-indicator stopped">■ Stopped</span>
     {:else}
       <span class="status-indicator ready">Ready</span>

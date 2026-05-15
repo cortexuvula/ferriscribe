@@ -1,4 +1,4 @@
-import { writable, get, type Readable } from 'svelte/store';
+import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { settings } from './settings';
 import type { AppConfig } from '../types';
@@ -13,11 +13,6 @@ export interface EndpointHealthState {
   stt: ServiceStatus;
   lastCheckedAt: number | null;
   overall: Overall;
-}
-
-export interface EndpointHealthStore extends Readable<EndpointHealthState> {
-  /** Force an immediate probe (used by settings-change and visibilitychange triggers). */
-  probeNow(): Promise<void>;
 }
 
 const INITIAL: EndpointHealthState = {
@@ -43,20 +38,19 @@ function computeOverall(ai: ServiceStatus, stt: ServiceStatus): Overall {
   return 'partial';
 }
 
-function createEndpointHealthStore(): EndpointHealthStore {
-  let timer: ReturnType<typeof setInterval> | null = null;
-  let settingsUnsub: (() => void) | null = null;
-  let visibilityHandler: (() => void) | null = null;
-  let primed = false;
-  let lastProbedKey = '';
+class EndpointHealthStore {
+  state = $state<EndpointHealthState>({ ...INITIAL });
 
-  const state = writable<EndpointHealthState>(INITIAL, () => {
-    // Runs on first subscribe.
-    startPolling();
-    return () => stopPolling();
-  });
+  // Private non-reactive internal state
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private settingsUnsub: (() => void) | null = null;
+  private visibilityHandler: (() => void) | null = null;
+  private primed = false;
+  private lastProbedKey = '';
+  private subscriberCount = 0;
+  private subscribers = new Set<(value: EndpointHealthState) => void>();
 
-  function probedKey(cfg: AppConfig): string {
+  private probedKey(cfg: AppConfig): string {
     return [
       cfg.ai_provider,
       cfg.lmstudio_host, cfg.lmstudio_port,
@@ -66,7 +60,7 @@ function createEndpointHealthStore(): EndpointHealthStore {
     ].join('|');
   }
 
-  async function probeAi(cfg: AppConfig): Promise<ServiceStatus> {
+  private async probeAi(cfg: AppConfig): Promise<ServiceStatus> {
     const provider = cfg.ai_provider;
     if (provider === 'ollama') {
       if (isLoopbackHost(cfg.ollama_host)) return 'skipped';
@@ -123,7 +117,7 @@ function createEndpointHealthStore(): EndpointHealthStore {
     return 'skipped';
   }
 
-  async function probeStt(cfg: AppConfig): Promise<ServiceStatus> {
+  private async probeStt(cfg: AppConfig): Promise<ServiceStatus> {
     if (cfg.stt_mode !== 'remote') return 'skipped';
     if (isLoopbackHost(cfg.stt_remote_host)) return 'skipped';
 
@@ -154,59 +148,84 @@ function createEndpointHealthStore(): EndpointHealthStore {
     }
   }
 
-  async function probeAll(): Promise<void> {
+  private async probeAll(): Promise<void> {
     const cfg = get(settings);
-    lastProbedKey = probedKey(cfg);
-    primed = true;
-    const [ai, stt] = await Promise.all([probeAi(cfg), probeStt(cfg)]);
+    this.lastProbedKey = this.probedKey(cfg);
+    this.primed = true;
+    const [ai, stt] = await Promise.all([this.probeAi(cfg), this.probeStt(cfg)]);
     const overall = computeOverall(ai, stt);
-    state.set({ ai, stt, lastCheckedAt: Date.now(), overall });
+    const next: EndpointHealthState = { ai, stt, lastCheckedAt: Date.now(), overall };
+    this.state = next;
+    // Notify Svelte-store-compatible subscribers (used by tests and legacy consumers).
+    for (const cb of this.subscribers) {
+      cb(next);
+    }
   }
 
-  function startPolling(): void {
-    void probeAll();
-    timer = setInterval(() => { void probeAll(); }, POLL_INTERVAL_MS);
+  private startPolling(): void {
+    void this.probeAll();
+    this.timer = setInterval(() => { void this.probeAll(); }, POLL_INTERVAL_MS);
 
-    settingsUnsub = settings.subscribe((cfg) => {
-      const key = probedKey(cfg);
-      if (primed && key !== lastProbedKey) {
-        void probeAll();
+    this.settingsUnsub = settings.subscribe((cfg) => {
+      const key = this.probedKey(cfg);
+      if (this.primed && key !== this.lastProbedKey) {
+        void this.probeAll();
       }
     });
 
     if (typeof document !== 'undefined') {
-      visibilityHandler = () => {
+      this.visibilityHandler = () => {
         if (document.visibilityState === 'hidden') {
-          if (timer) {
-            clearInterval(timer);
-            timer = null;
+          if (this.timer) {
+            clearInterval(this.timer);
+            this.timer = null;
           }
         } else {
-          if (!timer) {
-            void probeAll();
-            timer = setInterval(() => { void probeAll(); }, POLL_INTERVAL_MS);
+          if (!this.timer) {
+            void this.probeAll();
+            this.timer = setInterval(() => { void this.probeAll(); }, POLL_INTERVAL_MS);
           }
         }
       };
-      document.addEventListener('visibilitychange', visibilityHandler);
+      document.addEventListener('visibilitychange', this.visibilityHandler);
     }
   }
 
-  function stopPolling(): void {
-    if (timer) { clearInterval(timer); timer = null; }
-    if (settingsUnsub) { settingsUnsub(); settingsUnsub = null; }
-    if (visibilityHandler && typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', visibilityHandler);
-      visibilityHandler = null;
+  private stopPolling(): void {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.settingsUnsub) { this.settingsUnsub(); this.settingsUnsub = null; }
+    if (this.visibilityHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityHandler);
+      this.visibilityHandler = null;
     }
-    primed = false;
-    lastProbedKey = '';
+    this.primed = false;
+    this.lastProbedKey = '';
   }
 
-  return {
-    subscribe: state.subscribe,
-    probeNow: probeAll,
-  };
+  /** Svelte-store-compatible subscribe for lifecycle management and legacy consumers. */
+  subscribe(cb: (value: EndpointHealthState) => void): () => void {
+    // Emit current value immediately (Svelte store contract).
+    cb(this.state);
+    this.subscribers.add(cb);
+    this.subscriberCount++;
+    if (this.subscriberCount === 1) {
+      // First subscriber — start polling.
+      this.startPolling();
+    }
+    return () => {
+      this.subscribers.delete(cb);
+      this.subscriberCount--;
+      if (this.subscriberCount === 0) {
+        // Last subscriber gone — stop polling.
+        this.stopPolling();
+      }
+    };
+  }
+
+  /** Force an immediate probe (used by settings-change and visibilitychange triggers). */
+  async probeNow(): Promise<void> {
+    return this.probeAll();
+  }
 }
 
-export const endpointHealth = createEndpointHealthStore();
+export const endpointHealth = new EndpointHealthStore();

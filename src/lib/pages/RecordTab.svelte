@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { audio } from '../stores/audio';
+  import { audio } from '../stores/audio.svelte';
   import { settings } from '../stores/settings';
   import { pipeline } from '../stores/pipeline.svelte';
   import { recordings } from '../stores/recordings.svelte';
@@ -18,7 +18,7 @@
   import { onMount } from 'svelte';
   import { contextTemplates } from '../stores/contextTemplates.svelte';
   import { toasts } from '../stores/toasts.svelte';
-  import { rsvp } from '../stores/rsvp';
+  import { rsvp } from '../stores/rsvp.svelte';
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
 
@@ -184,7 +184,7 @@
 
   function handleStopRecording() {
     audio.stop().then(() => {
-      const recordingId = $audio.lastRecordingId;
+      const recordingId = audio.state.lastRecordingId;
       if (!recordingId) return;
 
       pipelineRecordingId = recordingId;
@@ -198,7 +198,7 @@
   }
 
   function handleProcessRecording() {
-    const recordingId = $audio.lastRecordingId ?? importedRecordingId;
+    const recordingId = audio.state.lastRecordingId ?? importedRecordingId;
     if (!recordingId) return;
     pipelineRecordingId = recordingId;
     maybeLaunchPipeline(recordingId);

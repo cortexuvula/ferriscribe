@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { endpointHealth, type EndpointHealthState } from '../stores/endpointHealth';
+  import { endpointHealth, type EndpointHealthState } from '../stores/endpointHealth.svelte';
   import { settings } from '../stores/settings';
 
   type Props = {

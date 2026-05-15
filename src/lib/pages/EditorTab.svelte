@@ -3,8 +3,8 @@
   import { recordings } from '../stores/recordings.svelte';
   import { copyToClipboard } from '../utils/clipboard';
   import TextEditor from '../components/TextEditor.svelte';
-  import { rsvp } from '../stores/rsvp';
-  import type { DocKind } from '../stores/rsvp';
+  import { rsvp } from '../stores/rsvp.svelte';
+  import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
 
   let { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' } = $props();

@@ -18,13 +18,12 @@
   import type { ServiceKind } from './lib/api/invokeWithOfflineHandling';
   import { recordings, selectRecording } from './lib/stores/recordings.svelte';
   import { pipeline } from './lib/stores/pipeline.svelte';
-  import { audio } from './lib/stores/audio';
+  import { audio } from './lib/stores/audio.svelte';
   import { toasts } from './lib/stores/toasts.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
   import RsvpReader from './lib/components/RsvpReader.svelte';
   import RsvpSectionPicker from './lib/components/RsvpSectionPicker.svelte';
-  import { rsvp } from './lib/stores/rsvp';
-  import { get } from 'svelte/store';
+  import { rsvp } from './lib/stores/rsvp.svelte';
 
   // Pages
   import RecordTab from './lib/pages/RecordTab.svelte';
@@ -117,8 +116,7 @@
       if (!(cmdOrCtrl && e.shiftKey && (e.key === 'r' || e.key === 'R'))) return;
       e.preventDefault();
       // Already open — don't stack another reader/picker on top.
-      const rsvpState = get(rsvp);
-      if (rsvpState.reader.open || rsvpState.picker.open) return;
+      if (rsvp.state.reader.open || rsvp.state.picker.open) return;
       const rec = recordings.selectedRecording;
       if (!rec) return;
       // Respect the active tab so editor users speed-read the doc they see.
