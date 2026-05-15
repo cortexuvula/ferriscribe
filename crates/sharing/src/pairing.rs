@@ -90,3 +90,55 @@ pub fn generate_code() -> String {
     let n: u32 = rand::thread_rng().gen_range(0..1_000_000);
     format!("{n:06}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn generate_code_is_six_digits() {
+        let code = generate_code();
+        assert_eq!(code.len(), 6, "got {:?}", code);
+        assert!(
+            code.chars().all(|c| c.is_ascii_digit()),
+            "non-digit in {:?}",
+            code
+        );
+    }
+
+    #[test]
+    fn generate_code_produces_distinct_outputs() {
+        // 100 draws from a 1-million space → birthday collisions are astronomically
+        // rare. A duplicate rate above 5% indicates a broken RNG.
+        let mut seen = HashSet::new();
+        for _ in 0..100 {
+            seen.insert(generate_code());
+        }
+        assert!(
+            seen.len() >= 95,
+            "RNG looks weak: only {} unique codes out of 100",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn generate_code_covers_the_full_digit_range() {
+        // 1000 draws should hit every first-digit at least once if uniform.
+        // Use a small set of leading digits as a sanity check.
+        let mut first_digits = HashSet::new();
+        for _ in 0..1000 {
+            if let Some(c) = generate_code().chars().next() {
+                first_digits.insert(c);
+            }
+        }
+        assert!(
+            first_digits.contains(&'0'),
+            "1000 draws produced no leading-0 code — RNG distribution is suspect"
+        );
+        assert!(
+            first_digits.contains(&'9'),
+            "1000 draws produced no leading-9 code — RNG distribution is suspect"
+        );
+    }
+}
