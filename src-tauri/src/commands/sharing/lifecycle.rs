@@ -20,7 +20,7 @@ pub async fn start_sharing(
     start_sharing_inner(&state, friendly_name.clone()).await?;
     // Persist after a successful start so a crash mid-start doesn't leave a
     // stale config that would auto-resume into a half-built service.
-    write_server_config(&ServerConfig { version: 1, friendly_name })?;
+    write_server_config(&ServerConfig { version: 1, friendly_name }).map_err(|e| e.to_string())?;
     Ok(())
 }
 

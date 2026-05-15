@@ -135,7 +135,7 @@ pub async fn pair_with_server(
     // Persist non-secret endpoint metadata.
     let conn = PairedConnection { lan: lan.clone(), tailscale: tailscale.clone(), ports: ports.clone(), label };
     let json = serde_json::to_string(&conn).map_err(|e| e.to_string())?;
-    let path = paired_connection_path()?;
+    let path = paired_connection_path().map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
 
     // Update in-memory provider endpoints immediately so the "models visible"
@@ -265,7 +265,7 @@ pub async fn pair_with_server(
 /// Returns the saved paired-connection metadata, or `None` if not paired.
 #[tauri::command]
 pub async fn paired_endpoint() -> Result<Option<PairedConnection>, String> {
-    let path = paired_connection_path()?;
+    let path = paired_connection_path().map_err(|e| e.to_string())?;
     if !path.exists() {
         return Ok(None);
     }
@@ -285,7 +285,7 @@ pub async fn unpair(state: State<'_, AppState>) -> Result<(), String> {
     }
 
     // Remove the metadata file (ignore not-found).
-    let path = paired_connection_path()?;
+    let path = paired_connection_path().map_err(|e| e.to_string())?;
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
     }
