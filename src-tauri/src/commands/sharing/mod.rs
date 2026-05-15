@@ -9,6 +9,7 @@
 //! This file holds the cross-cutting DTOs and persistence helpers that all
 //! three submodules touch.
 
+use medical_core::error::{AppError, AppResult};
 use medical_sharing::{SharingStatus, qr::PairPorts};
 use serde::{Deserialize, Serialize};
 
@@ -56,11 +57,11 @@ pub struct PairedConnection {
     pub label: String,
 }
 
-pub(super) fn paired_connection_path() -> Result<std::path::PathBuf, String> {
+pub(super) fn paired_connection_path() -> AppResult<std::path::PathBuf> {
     let app_data = dirs::data_dir()
-        .ok_or_else(|| "no app data dir".to_string())?
+        .ok_or_else(|| AppError::Other("no app data dir".into()))?
         .join("rust-medical-assistant");
-    std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&app_data)?;
     Ok(app_data.join("sharing-paired.json"))
 }
 
@@ -80,18 +81,19 @@ fn default_server_config_version() -> u32 {
     1
 }
 
-pub fn server_config_path() -> Result<std::path::PathBuf, String> {
+pub fn server_config_path() -> AppResult<std::path::PathBuf> {
     let app_data = dirs::data_dir()
-        .ok_or_else(|| "no app data dir".to_string())?
+        .ok_or_else(|| AppError::Other("no app data dir".into()))?
         .join("rust-medical-assistant");
-    std::fs::create_dir_all(&app_data).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&app_data)?;
     Ok(app_data.join("sharing-server.json"))
 }
 
-pub(super) fn write_server_config(cfg: &ServerConfig) -> Result<(), String> {
+pub(super) fn write_server_config(cfg: &ServerConfig) -> AppResult<()> {
     let path = server_config_path()?;
-    let json = serde_json::to_string(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    let json = serde_json::to_string(cfg)?;
+    std::fs::write(&path, json)?;
+    Ok(())
 }
 
 /// Idempotently delete the persisted server config. Missing file is not an
