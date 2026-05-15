@@ -115,6 +115,8 @@ export interface AppConfig {
   rsvp_remembered_sections: string[];
   // Training corpus
   capture_for_training: boolean;
+  // Security
+  allow_public_endpoint: boolean;
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
