@@ -230,13 +230,13 @@ function formatEta(secs: number): string {
       </div>
 
       <div class="controls">
-        <button onclick={goHome} title="Restart (Home)">⏮</button>
-        <button onclick={stepBack} title="Previous (←)">◀</button>
-        <button onclick={togglePlay} title="Play / Pause (Space)">
+        <button onclick={goHome} aria-label="Restart" title="Restart (Home)">⏮</button>
+        <button onclick={stepBack} aria-label="Previous" title="Previous (←)">◀</button>
+        <button onclick={togglePlay} aria-label={playing ? 'Pause' : 'Play'} title="Play / Pause (Space)">
           {playing ? '❚❚' : '▶'}
         </button>
-        <button onclick={stepForward} title="Next (→)">▶</button>
-        <button onclick={goEnd} title="Skip to end (End)">⏭</button>
+        <button onclick={stepForward} aria-label="Next" title="Next (→)">▶</button>
+        <button onclick={goEnd} aria-label="Skip to end" title="Skip to end (End)">⏭</button>
 
         <div class="sep"></div>
 
