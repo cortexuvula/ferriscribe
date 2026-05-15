@@ -9,6 +9,10 @@
   import type { AudioDevice } from '../../types';
   import { toasts } from '../../stores/toasts';
   import { formatError } from '../../types/errors';
+  import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
+
+  const sttOk = $derived(isLocalOrAllowed($settings.stt_remote_host ?? '', $settings.allow_public_endpoint));
+  const sttKind = $derived(classifyEndpoint($settings.stt_remote_host ?? ''));
 
   let audioDevices = $state<AudioDevice[]>([]);
   let devicesLoading = $state(false);
@@ -266,6 +270,12 @@
         }}
         class="text-input"
       />
+      {#if !sttOk}
+        <div class="endpoint-warning">
+          ⚠ This is a public-internet address ({sttKind}). PHI may leave your device.
+          Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
+        </div>
+      {/if}
     </div>
     <div class="form-group">
       <label for="stt-remote-port" class="form-label">Port</label>
@@ -668,5 +678,15 @@
 
   .test-error {
     color: var(--danger, #ef4444);
+  }
+
+  .endpoint-warning {
+    color: #b45309;
+    background: #fef3c7;
+    border: 1px solid #fbbf24;
+    border-radius: 4px;
+    padding: 6px 10px;
+    margin-top: 4px;
+    font-size: 0.85rem;
   }
 </style>

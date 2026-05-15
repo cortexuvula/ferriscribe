@@ -158,6 +158,12 @@
 </script>
 
 <section class="settings-section">
+  {#if $settings.allow_public_endpoint}
+    <div class="public-endpoint-banner">
+      ⚠ <strong>Public endpoints enabled.</strong> AI / STT requests may leave your device.
+    </div>
+  {/if}
+
   <h3 class="section-title">General</h3>
 
   <div class="form-group">
@@ -287,6 +293,27 @@
       </button>
     </div>
   </div>
+
+  <details class="advanced-section">
+    <summary>Advanced</summary>
+    <div class="advanced-content">
+      <label class="form-row">
+        <input
+          type="checkbox"
+          checked={$settings.allow_public_endpoint}
+          onchange={(e) => settings.updateField('allow_public_endpoint', (e.target as HTMLInputElement).checked)}
+        />
+        <span>
+          Allow public AI / STT endpoints
+          <p class="hint">
+            By default, FerriScribe blocks public-internet AI or STT hosts to keep
+            PHI on-device. Enable this only if you understand that data may leave
+            your machine.
+          </p>
+        </span>
+      </label>
+    </div>
+  </details>
 </section>
 
 <VocabularyDialog open={vocabDialogOpen} onclose={handleVocabDialogClose} />
@@ -375,5 +402,38 @@
     background: rgba(255, 193, 7, 0.1);
     color: #856404;
     border-color: rgba(255, 193, 7, 0.3);
+  }
+
+  .public-endpoint-banner {
+    background: #fef2f2;
+    color: #991b1b;
+    border: 1px solid #fca5a5;
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    font-size: 0.9rem;
+  }
+
+  .advanced-section summary {
+    cursor: pointer;
+    font-weight: 600;
+    margin-top: 16px;
+  }
+
+  .advanced-content {
+    margin-top: 8px;
+    padding-left: 16px;
+  }
+
+  .form-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .hint {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin: 4px 0 0 0;
   }
 </style>
