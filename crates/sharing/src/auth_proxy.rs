@@ -158,3 +158,212 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     let v = headers.get(reqwest::header::AUTHORIZATION)?.to_str().ok()?;
     v.strip_prefix("Bearer ").map(|s| s.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::token_store::TokenStore;
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use wiremock::matchers::{header, method as http_method, path as http_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Open a TokenStore in a tempdir and return both (store, tempdir-guard).
+    fn fresh_store() -> (Arc<TokenStore>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.db");
+        let store = Arc::new(
+            TokenStore::open(&path, &[7u8; 32]).expect("open token store"),
+        );
+        (store, dir)
+    }
+
+    /// Bind on 127.0.0.1:0, capture the kernel-assigned port, drop the
+    /// listener so spawn_auth_proxy can re-bind. Rare race with other
+    /// processes for the same port; acceptable for tests.
+    async fn ephemeral_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+        port
+    }
+
+    /// Start the proxy and return (port, JoinHandle). The TempDir from
+    /// fresh_store() must outlive the test — keep it bound.
+    async fn spawn_test_proxy(
+        store: Arc<TokenStore>,
+        backend_url: String,
+        inject_api_key: Option<String>,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        let port = ephemeral_port().await;
+        let cfg = ProxyConfig {
+            listen_port: port,
+            backend_url,
+            path_prefix: "/".into(),
+            inject_api_key,
+        };
+        let handle = spawn_auth_proxy(cfg, store).await.expect("spawn");
+        // Give the spawned task a moment to begin serving. axum::serve
+        // is ready immediately after spawn but on slow CI a 50ms warmup
+        // avoids flakes.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        (port, handle)
+    }
+
+    #[tokio::test]
+    async fn proxy_401_missing_bearer() {
+        let (store, _dir) = fresh_store();
+        let upstream = MockServer::start().await;
+        let (port, handle) = spawn_test_proxy(store, upstream.uri(), None).await;
+
+        let resp = reqwest::get(&format!("http://127.0.0.1:{port}/anything"))
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 401);
+        assert_eq!(
+            resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok()),
+            Some("missing-bearer"),
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_401_unknown_token() {
+        let (store, _dir) = fresh_store();
+        let _issued = store.issue("good-client").expect("issue");
+        let upstream = MockServer::start().await;
+        let (port, handle) = spawn_test_proxy(store, upstream.uri(), None).await;
+
+        let resp = reqwest::Client::new()
+            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .bearer_auth("not-a-real-token")
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 401);
+        assert_eq!(
+            resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok()),
+            Some("unknown-token"),
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_401_revoked_token() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("doomed").expect("issue");
+        store.revoke(issued.id).expect("revoke");
+        let upstream = MockServer::start().await;
+        let (port, handle) = spawn_test_proxy(store, upstream.uri(), None).await;
+
+        let resp = reqwest::Client::new()
+            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .bearer_auth(&issued.token)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 401);
+        assert_eq!(
+            resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok()),
+            Some("unknown-token"),
+            "revoked tokens classify as unknown-token because validate() filters revoked rows"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_200_proxies_to_backend_on_valid_bearer() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("clinic-laptop").expect("issue");
+        let store_for_check = Arc::clone(&store);
+
+        let upstream = MockServer::start().await;
+        Mock::given(http_method("GET"))
+            .and(http_path("/anything"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok-body"))
+            .mount(&upstream)
+            .await;
+
+        let (port, handle) = spawn_test_proxy(store, upstream.uri(), None).await;
+
+        let resp = reqwest::Client::new()
+            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .bearer_auth(&issued.token)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 200);
+        let body = resp.text().await.expect("text");
+        assert_eq!(body, "ok-body");
+
+        // Validate that touch() fired (last_seen_at is now Some).
+        let rows = store_for_check.list().expect("list");
+        let row = rows.iter().find(|r| r.id == issued.id).expect("issued row");
+        assert!(
+            row.last_seen_at.is_some(),
+            "successful proxy call should have fired touch()"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_strips_client_bearer_and_injects_api_key() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("a").expect("issue");
+
+        let upstream = MockServer::start().await;
+        // Only match requests where the upstream sees the INJECTED key —
+        // wiremock returns 404 (default) for any other auth header. So a
+        // 200 response proves the swap happened.
+        Mock::given(http_method("GET"))
+            .and(http_path("/anything"))
+            .and(header("authorization", "Bearer server-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("authed"))
+            .mount(&upstream)
+            .await;
+
+        let (port, handle) = spawn_test_proxy(
+            store,
+            upstream.uri(),
+            Some("server-secret".to_string()),
+        )
+        .await;
+
+        let resp = reqwest::Client::new()
+            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .bearer_auth(&issued.token) // client uses its own token
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(
+            resp.status(),
+            200,
+            "200 proves wiremock saw 'Bearer server-secret', not the client token"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_502_when_backend_unreachable() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("a").expect("issue");
+        // Port 1 is privileged on Unix and almost certainly not listening.
+        // Even if it were, the connect_timeout would fire after 10s; tests
+        // run in <1s for the typical "connection refused" case.
+        let (port, handle) =
+            spawn_test_proxy(store, "http://127.0.0.1:1".to_string(), None).await;
+
+        let resp = reqwest::Client::new()
+            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .bearer_auth(&issued.token)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 502);
+        handle.abort();
+    }
+}
