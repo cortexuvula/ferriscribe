@@ -16,8 +16,8 @@
   import EndpointOfflineDialog from './lib/components/EndpointOfflineDialog.svelte';
   import { settingsNav } from './lib/stores/settingsNav.svelte.ts';
   import type { ServiceKind } from './lib/api/invokeWithOfflineHandling';
-  import { selectedRecording, selectRecording } from './lib/stores/recordings';
-  import { pipeline } from './lib/stores/pipeline';
+  import { recordings, selectRecording } from './lib/stores/recordings.svelte';
+  import { pipeline } from './lib/stores/pipeline.svelte';
   import { audio } from './lib/stores/audio';
   import { toasts } from './lib/stores/toasts.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
@@ -119,7 +119,7 @@
       // Already open — don't stack another reader/picker on top.
       const rsvpState = get(rsvp);
       if (rsvpState.reader.open || rsvpState.picker.open) return;
-      const rec = $selectedRecording;
+      const rec = recordings.selectedRecording;
       if (!rec) return;
       // Respect the active tab so editor users speed-read the doc they see.
       if (activeTab === 'soap' && rec.soap_note) {
@@ -205,11 +205,11 @@
   </aside>
 
   <main class="app-content">
-    {#if $selectedRecording}
+    {#if recordings.selectedRecording}
       <div class="selected-recording-banner">
         <span class="banner-icon">🎙</span>
-        <span class="banner-name">{$selectedRecording.patient_name || $selectedRecording.filename}</span>
-        <span class="banner-meta">{new Date($selectedRecording.created_at).toLocaleDateString()}</span>
+        <span class="banner-name">{recordings.selectedRecording.patient_name || recordings.selectedRecording.filename}</span>
+        <span class="banner-meta">{new Date(recordings.selectedRecording.created_at).toLocaleDateString()}</span>
       </div>
     {/if}
     {#if activeTab === 'record'}

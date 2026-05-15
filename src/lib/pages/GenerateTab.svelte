@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { selectedRecording, recordings, selectRecording } from '../stores/recordings';
+  import { recordings, selectRecording } from '../stores/recordings.svelte';
   import { generateSoap, generateReferral, generateLetter } from '../api/generation';
   import { generation } from '../stores/generation.svelte';
   import { copyWithStatus } from '../utils/clipboard';
@@ -30,7 +30,7 @@
   // the recording ID changes. Prevents overwriting user-typed values on the
   // store-refresh that follows generation.
   $effect(() => {
-    const rec = $selectedRecording;
+    const rec = recordings.selectedRecording;
     const currentId = rec?.id ?? null;
     if (currentId === lastContextRecordingId) return;
     lastContextRecordingId = currentId;
@@ -64,10 +64,10 @@
 
   async function handleCopy(type: string) {
     if (copyStatus[type] && copyStatus[type] !== 'idle') return;
-    if (!$selectedRecording) return;
-    const text = type === 'soap' ? $selectedRecording.soap_note
-      : type === 'referral' ? $selectedRecording.referral
-      : $selectedRecording.letter;
+    if (!recordings.selectedRecording) return;
+    const text = type === 'soap' ? recordings.selectedRecording.soap_note
+      : type === 'referral' ? recordings.selectedRecording.referral
+      : recordings.selectedRecording.letter;
     if (!text) return;
     await copyWithStatus({
       setStatus: (s) => (copyStatus = { ...copyStatus, [type]: s }),
@@ -76,10 +76,10 @@
   }
 
   function handleSpeedRead(type: string) {
-    if (!$selectedRecording) return;
-    const text = type === 'soap' ? $selectedRecording.soap_note
-      : type === 'referral' ? $selectedRecording.referral
-      : $selectedRecording.letter;
+    if (!recordings.selectedRecording) return;
+    const text = type === 'soap' ? recordings.selectedRecording.soap_note
+      : type === 'referral' ? recordings.selectedRecording.referral
+      : recordings.selectedRecording.letter;
     if (!text) return;
     if (type === 'soap') {
       rsvp.openSoap(text);
@@ -89,8 +89,8 @@
   }
 
   async function handleGenerate(type: 'soap' | 'referral' | 'letter') {
-    if (!$selectedRecording) return;
-    const recordingId = $selectedRecording.id;
+    if (!recordings.selectedRecording) return;
+    const recordingId = recordings.selectedRecording.id;
     generation.startGenerating(type);
     try {
       if (type === 'soap') {
@@ -126,7 +126,7 @@
 </script>
 
 <div class="generate-tab">
-  {#if !$selectedRecording}
+  {#if !recordings.selectedRecording}
     <div class="empty-state">
       <div class="empty-icon">⚡</div>
       <h2>Generate Documentation</h2>
@@ -137,8 +137,8 @@
     <div class="generate-content">
       <div class="generate-header">
         <h2>Generate Documentation</h2>
-        {#if $selectedRecording.patient_name}
-          <p class="patient">for {$selectedRecording.patient_name}</p>
+        {#if recordings.selectedRecording.patient_name}
+          <p class="patient">for {recordings.selectedRecording.patient_name}</p>
         {/if}
       </div>
 
@@ -226,7 +226,7 @@
           description="Structured clinical note (Subjective, Objective, Assessment, Plan)"
           generating={generation.state.generating === 'soap'}
           anyGenerating={generation.state.generating !== null}
-          done={!!$selectedRecording.soap_note}
+          done={!!recordings.selectedRecording.soap_note}
           copyStatus={copyStatus['soap']}
           onGenerate={() => handleGenerate('soap')}
           onCopy={() => handleCopy('soap')}
@@ -237,7 +237,7 @@
           description="Specialist referral letter based on the consultation"
           generating={generation.state.generating === 'referral'}
           anyGenerating={generation.state.generating !== null}
-          done={!!$selectedRecording.referral}
+          done={!!recordings.selectedRecording.referral}
           copyStatus={copyStatus['referral']}
           onGenerate={() => handleGenerate('referral')}
           onCopy={() => handleCopy('referral')}
@@ -248,7 +248,7 @@
           description="Patient-friendly summary of the consultation"
           generating={generation.state.generating === 'letter'}
           anyGenerating={generation.state.generating !== null}
-          done={!!$selectedRecording.letter}
+          done={!!recordings.selectedRecording.letter}
           copyStatus={copyStatus['letter']}
           onGenerate={() => handleGenerate('letter')}
           onCopy={() => handleCopy('letter')}

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { audio } from '../stores/audio';
   import { settings } from '../stores/settings';
-  import { pipeline } from '../stores/pipeline';
-  import { recordings } from '../stores/recordings';
+  import { pipeline } from '../stores/pipeline.svelte';
+  import { recordings } from '../stores/recordings.svelte';
   import { importAudioFile, getRecording } from '../api/recordings';
   import { checkRecordingAudioLevels } from '../api/audio';
   import { copyWithStatus } from '../utils/clipboard';
@@ -285,7 +285,7 @@
 
   <div class="record-body">
     <div class="record-main">
-      {#if $pipeline.current && pipelineRecordingId}
+      {#if pipeline.state.current && pipelineRecordingId}
         <PipelineStatus
           bind:copyStatus
           onCancel={handleCancelPipeline}
