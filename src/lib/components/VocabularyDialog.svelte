@@ -143,7 +143,7 @@
     <div class="vocab-dialog" onclick={(e) => e.stopPropagation()}>
       <div class="vocab-header">
         <h2>Manage Vocabulary</h2>
-        <button class="btn-close" onclick={onclose}>&times;</button>
+        <button class="btn-close" aria-label="Close" onclick={onclose}>&times;</button>
       </div>
 
       <div class="vocab-toolbar">
