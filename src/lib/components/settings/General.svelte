@@ -159,7 +159,7 @@
 
 <section class="settings-section">
   {#if $settings.allow_public_endpoint}
-    <div class="public-endpoint-banner">
+    <div class="public-endpoint-banner" role="alert">
       ⚠ <strong>Public endpoints enabled.</strong> AI / STT requests may leave your device.
     </div>
   {/if}

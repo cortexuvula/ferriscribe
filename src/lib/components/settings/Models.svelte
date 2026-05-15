@@ -195,7 +195,7 @@
       class="text-input"
     />
     {#if !lmstudioOk}
-      <div class="endpoint-warning">
+      <div class="endpoint-warning" role="alert">
         ⚠ This is a public-internet address ({lmstudioKind}). PHI may leave your device.
         Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
       </div>
@@ -258,7 +258,7 @@
       class="text-input"
     />
     {#if !ollamaOk}
-      <div class="endpoint-warning">
+      <div class="endpoint-warning" role="alert">
         ⚠ This is a public-internet address ({ollamaKind}). PHI may leave your device.
         Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
       </div>
