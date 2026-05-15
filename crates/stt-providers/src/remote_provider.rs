@@ -88,10 +88,15 @@ impl RemoteSttProvider {
         host: &str,
         port: u16,
         model: &str,
+        allow_public: bool,
         api_key: Option<String>,
         segmentation_model_path: PathBuf,
         embedding_model_path: PathBuf,
     ) -> AppResult<Self> {
+        if !host.is_empty() {
+            medical_core::endpoint_policy::validate_local_endpoint(host, allow_public)
+                .map_err(|e| AppError::invalid_endpoint_for(e, "stt_remote_host"))?;
+        }
         let host = if host.is_empty() { "localhost" } else { host };
         let base_url = http_url(host, port);
 
@@ -122,11 +127,16 @@ impl RemoteSttProvider {
         host: &str,
         port: u16,
         model: &str,
+        allow_public: bool,
         api_key: Option<String>,
         segmentation_model_path: PathBuf,
         embedding_model_path: PathBuf,
         ep: Option<RemoteEndpoint>,
     ) -> AppResult<Self> {
+        if !host.is_empty() {
+            medical_core::endpoint_policy::validate_local_endpoint(host, allow_public)
+                .map_err(|e| AppError::invalid_endpoint_for(e, "stt_remote_host"))?;
+        }
         let host = if host.is_empty() { "localhost" } else { host };
         let base_url = http_url(host, port);
         let client = Client::builder()
@@ -481,6 +491,7 @@ mod tests {
             &host,
             port,
             "whisper-1",
+            /* allow_public */ false,
             api_key,
             PathBuf::from("/nonexistent-seg.onnx"),
             PathBuf::from("/nonexistent-emb.onnx"),
@@ -646,6 +657,7 @@ mod tests {
             "localhost",
             8080,
             "whisper-1",
+            /* allow_public */ false,
             None,
             PathBuf::from("/nowhere/seg.onnx"),
             PathBuf::from("/nowhere/emb.onnx"),
@@ -735,6 +747,7 @@ mod tests {
             "localhost",
             8080,
             "whisper-1",
+            /* allow_public */ false,
             None,
             PathBuf::from("/no/seg.onnx"),
             PathBuf::from("/no/emb.onnx"),
@@ -753,10 +766,13 @@ mod tests {
 
     #[tokio::test]
     async fn current_base_url_returns_static_when_no_endpoint() {
+        // allow_public=true so the test can use an arbitrary hostname to verify
+        // that URL construction round-trips the host as-is.
         let p = RemoteSttProvider::new(
             "myhost",
             8080,
             "whisper-1",
+            /* allow_public */ true,
             None,
             PathBuf::from("/no/seg.onnx"),
             PathBuf::from("/no/emb.onnx"),
@@ -797,6 +813,7 @@ mod tests {
             "localhost",
             9999,
             "whisper-1",
+            /* allow_public */ false,
             None,
             PathBuf::from("/no/seg.onnx"),
             PathBuf::from("/no/emb.onnx"),
@@ -822,6 +839,71 @@ mod tests {
         let url2 = p.current_base_url().await.expect("cached resolve");
         assert_eq!(url1, url2, "should return cached URL without re-probing");
     }
+
+    #[test]
+    fn new_blocks_public_host_by_default() {
+        let result = RemoteSttProvider::new(
+            "api.openai.com",
+            8080,
+            "whisper-1",
+            /* allow_public */ false,
+            None,
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        );
+        assert!(matches!(
+            result,
+            Err(medical_core::error::AppError::InvalidEndpoint {
+                field, ..
+            }) if field == "stt_remote_host"
+        ));
+    }
+
+    #[test]
+    fn new_accepts_public_host_when_allow_public() {
+        let result = RemoteSttProvider::new(
+            "api.openai.com",
+            8080,
+            "whisper-1",
+            /* allow_public */ true,
+            None,
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn new_accepts_local_hosts_with_default_allow_public() {
+        for host in ["localhost", "192.168.1.42", "100.64.0.1", "clinic.local"] {
+            let r = RemoteSttProvider::new(
+                host,
+                8080,
+                "whisper-1",
+                /* allow_public */ false,
+                None,
+                std::path::PathBuf::from("/dev/null"),
+                std::path::PathBuf::from("/dev/null"),
+            );
+            assert!(r.is_ok(), "expected Ok for {host}");
+        }
+    }
+
+    #[test]
+    fn new_accepts_empty_host() {
+        // Empty host means "use default" — provider-level no-op; Settings save
+        // layer enforces the stricter empty-vs-non-empty + mode policy.
+        let r = RemoteSttProvider::new(
+            "",
+            8080,
+            "whisper-1",
+            /* allow_public */ false,
+            None,
+            std::path::PathBuf::from("/dev/null"),
+            std::path::PathBuf::from("/dev/null"),
+        );
+        assert!(r.is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -843,6 +925,7 @@ mod offline_tests {
             "127.0.0.1",
             port,
             "whisper-1",
+            /* allow_public */ false,
             None,
             PathBuf::from("/nonexistent-seg.onnx"),
             PathBuf::from("/nonexistent-emb.onnx"),
