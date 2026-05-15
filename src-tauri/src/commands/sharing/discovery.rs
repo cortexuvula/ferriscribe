@@ -5,14 +5,15 @@
 //! The Tailscale path enumerates tailnet peers via `tailscale status --json`
 //! and probes each at `:11436/info`.
 
+use medical_core::error::{AppError, AppResult};
 use medical_sharing::mdns::DiscoveredServer;
 use serde::Deserialize;
 
 #[tauri::command]
-pub async fn discover_servers(timeout_ms: u64) -> Result<Vec<DiscoveredServer>, String> {
+pub async fn discover_servers(timeout_ms: u64) -> AppResult<Vec<DiscoveredServer>> {
     let mut rx =
         medical_sharing::mdns::browse(std::time::Duration::from_millis(timeout_ms))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| AppError::Other(e.to_string()))?;
     let mut out = Vec::new();
     while let Some(d) = rx.recv().await {
         out.push(d);
@@ -27,7 +28,7 @@ pub async fn discover_servers(timeout_ms: u64) -> Result<Vec<DiscoveredServer>, 
 #[tauri::command]
 pub async fn discover_via_tailscale(
     timeout_ms: u64,
-) -> Result<Vec<DiscoveredServer>, String> {
+) -> AppResult<Vec<DiscoveredServer>> {
     let peers = tailscale_peers().await.unwrap_or_default();
     if peers.is_empty() {
         return Ok(Vec::new());
