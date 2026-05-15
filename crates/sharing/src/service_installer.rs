@@ -289,3 +289,22 @@ pub fn install_persistent_ollama() -> Result<(), SharingError> {
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn ollama_service_state() -> ServiceState { ServiceState::UnknownPlatform }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xml_escape_replaces_special_chars() {
+        assert_eq!(
+            xml_escape(r#"a & b < c > d "e""#),
+            "a &amp; b &lt; c &gt; d &quot;e&quot;"
+        );
+        assert_eq!(xml_escape("safe-string_123"), "safe-string_123");
+    }
+
+    #[test]
+    fn xml_escape_empty_input_is_empty() {
+        assert_eq!(xml_escape(""), "");
+    }
+}
