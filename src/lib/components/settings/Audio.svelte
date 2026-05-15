@@ -8,6 +8,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { AudioDevice } from '../../types';
   import AudioInputSection from './AudioInputSection.svelte';
+  import WhisperLocalSection from './WhisperLocalSection.svelte';
   import { toasts } from '../../stores/toasts';
   import { formatError } from '../../types/errors';
   import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
@@ -89,9 +90,8 @@
     return `${(bytes / 1073741824).toFixed(1)} GB`;
   }
 
-  async function handleWhisperModelChange(e: Event) {
-    const value = (e.target as HTMLSelectElement).value;
-    await settings.updateField('whisper_model', value);
+  async function handleWhisperModelChange(modelId: string) {
+    await settings.updateField('whisper_model', modelId);
   }
 
   onMount(async () => {
@@ -171,66 +171,16 @@
   </fieldset>
 
   {#if sttMode === 'local'}
-    <div class="form-group">
-      <label for="whisper-model" class="form-label">Whisper Model</label>
-      <select
-        id="whisper-model"
-        value={$settings.whisper_model}
-        onchange={handleWhisperModelChange}
-        disabled={modelsRefreshing}
-      >
-        {#each whisperModels as model}
-          <option value={model.id}>
-            {model.id} ({formatBytes(model.size_bytes)}) {model.downloaded ? '' : '- not downloaded'}
-          </option>
-        {/each}
-      </select>
-      <span class="form-hint">Larger models are more accurate but use more memory and take longer.</span>
-    </div>
-
-    <div class="form-group">
-      <span class="form-label">Model Management</span>
-      <div class="model-list">
-        {#each whisperModels as model}
-          <div class="model-row">
-            <div class="model-info">
-              <span class="model-name">{model.id}</span>
-              <span class="model-desc">{model.description}</span>
-              <span class="model-size">{formatBytes(model.size_bytes)}</span>
-            </div>
-            <div class="model-actions">
-              {#if model.downloaded}
-                <span class="badge-downloaded">Downloaded</span>
-                <button
-                  class="btn-delete-model"
-                  onclick={() => handleDeleteModel(model.id)}
-                  disabled={model.id === $settings.whisper_model}
-                  title={model.id === $settings.whisper_model ? 'Cannot delete the active model' : 'Delete to free disk space'}
-                >
-                  Delete
-                </button>
-              {:else if downloadingModel === model.id}
-                <span class="download-progress">
-                  {#if downloadProgress[model.id]}
-                    {Math.round((downloadProgress[model.id].downloaded / (downloadProgress[model.id].total || 1)) * 100)}%
-                  {:else}
-                    Starting...
-                  {/if}
-                </span>
-              {:else}
-                <button
-                  class="btn-download-model"
-                  onclick={() => handleDownloadModel(model.id)}
-                  disabled={downloadingModel !== null}
-                >
-                  Download
-                </button>
-              {/if}
-            </div>
-          </div>
-        {/each}
-      </div>
-    </div>
+    <WhisperLocalSection
+      {whisperModels}
+      {modelsRefreshing}
+      {downloadingModel}
+      {downloadProgress}
+      onModelChange={handleWhisperModelChange}
+      onDownload={handleDownloadModel}
+      onDelete={handleDeleteModel}
+      {formatBytes}
+    />
   {:else}
     <div class="form-group">
       <label for="stt-remote-host" class="form-label">Host</label>
