@@ -37,6 +37,12 @@ pub fn classify_endpoint(host: &str) -> EndpointKind {
     if lower == "localhost" {
         return EndpointKind::Loopback;
     }
+    // Tailscale MagicDNS: <machine>.<tailnet>.ts.net. Match the FQDN suffix
+    // ".ts.net" (with leading dot) so we don't false-positive on things like
+    // "fakets.net". This is a static, DNS-free trust signal.
+    if lower.ends_with(".ts.net") {
+        return EndpointKind::Tailscale;
+    }
     for suffix in [".local", ".lan", ".home.arpa", ".internal"] {
         if lower.ends_with(suffix) {
             return EndpointKind::Mdns;
@@ -225,6 +231,41 @@ mod tests {
         assert_eq!(classify_endpoint("fe00::1"), EndpointKind::Public);
     }
 
+    #[test]
+    fn tailscale_magicdns_suffix() {
+        // Real-world shape from the bug report.
+        assert_eq!(
+            classify_endpoint("mac.tail161478.ts.net"),
+            EndpointKind::Tailscale
+        );
+        // Tailnet name with a dash is valid.
+        assert_eq!(
+            classify_endpoint("clinic.example-tailnet.ts.net"),
+            EndpointKind::Tailscale
+        );
+        // Case-insensitive: classification lowercases the hostname first.
+        assert_eq!(
+            classify_endpoint("MAC.TAILNET.TS.NET"),
+            EndpointKind::Tailscale
+        );
+        // Minimal MagicDNS-shaped host directly under .ts.net.
+        assert_eq!(classify_endpoint("server.ts.net"), EndpointKind::Tailscale);
+    }
+
+    #[test]
+    fn tailscale_magicdns_partial_match_is_unknown() {
+        // The bare apex "ts.net" does NOT end with ".ts.net" (no leading dot),
+        // so it should NOT be classified as Tailscale. Treat as Unknown.
+        assert_eq!(classify_endpoint("ts.net"), EndpointKind::Unknown);
+        // ".ts.net" appears mid-string, not as the suffix.
+        assert_eq!(
+            classify_endpoint("notreally.ts.net.example.com"),
+            EndpointKind::Unknown
+        );
+        // Ends with "ts.net" but NOT ".ts.net" — must not false-match.
+        assert_eq!(classify_endpoint("fakets.net"), EndpointKind::Unknown);
+    }
+
     // ── classify_endpoint: mDNS / non-routable TLDs ────────────────
     #[test]
     fn mdns_suffix_local() {
@@ -283,8 +324,9 @@ mod tests {
             "192.168.1.42",       // RFC1918
             "10.0.0.5",
             "172.20.0.1",
-            "100.64.0.1",         // Tailscale CGNAT
-            "fd7a:115c:a1e0::1",  // Tailscale ULA
+            "100.64.0.1",                  // Tailscale CGNAT
+            "fd7a:115c:a1e0::1",           // Tailscale ULA
+            "mac.tail161478.ts.net",       // Tailscale MagicDNS
             "169.254.0.1",        // Link-local
             "fe80::1",
             "clinic.local",       // mDNS
@@ -295,6 +337,15 @@ mod tests {
             assert!(validate_local_endpoint(host, false).is_ok(), "should accept: {host}");
             assert!(validate_local_endpoint(host, true).is_ok(),  "should still accept with opt-out: {host}");
         }
+    }
+
+    #[test]
+    fn validate_accepts_tailscale_magicdns_without_allow_public() {
+        // Regression: remote clients pairing via Tailscale MagicDNS were being
+        // rejected because *.ts.net fell through to Unknown. Tailscale is a
+        // trusted local-network kind, so this must succeed even when
+        // allow_public_endpoint = false.
+        assert!(validate_local_endpoint("mac.tail161478.ts.net", false).is_ok());
     }
 
     // ── extract_host ───────────────────────────────────────────────
