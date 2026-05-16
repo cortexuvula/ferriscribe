@@ -3,6 +3,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { suggestedClientLabel } from '../../../api/sharing';
   import { settings } from '../../../stores/settings.svelte';
+  import { formatError } from '../../../types/errors';
 
   type Discovered = {
     instance_name: string;
@@ -137,7 +138,7 @@
       await settings.load();
       await loadPaired();
     } catch (e) {
-      error = String(e);
+      error = formatError(e);
     } finally {
       busy = false;
     }
@@ -207,7 +208,7 @@
       // Repopulate the discovery list so the connect form is immediately useful.
       rescan();
     } catch (e) {
-      error = String(e);
+      error = formatError(e);
     } finally {
       unpairBusy = false;
     }
