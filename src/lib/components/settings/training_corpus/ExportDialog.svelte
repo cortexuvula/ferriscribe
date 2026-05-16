@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
+  import { formatError } from '../../../types/errors';
 
   type Props = {
     onclose: () => void;
@@ -50,7 +51,7 @@
       });
       onsuccess(resp.corpus_dir, resp.pairs_written, resp.warning_count);
     } catch (e) {
-      error = String(e);
+      error = formatError(e);
     } finally {
       exporting = false;
     }

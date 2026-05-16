@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { createEventDispatcher } from 'svelte';
+  import { formatError } from '../../../types/errors';
   const dispatch = createEventDispatcher();
 
   let friendlyName = 'Clinic Server';
@@ -14,7 +15,7 @@
       await invoke('start_sharing', { friendlyName });
       dispatch('done');
     } catch (e) {
-      error = String(e);
+      error = formatError(e);
     } finally {
       busy = false;
     }

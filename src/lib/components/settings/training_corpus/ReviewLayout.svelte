@@ -3,6 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import MasterRow from './MasterRow.svelte';
   import DetailPane from './DetailPane.svelte';
+  import { formatError } from '../../../types/errors';
 
   type Generation = {
     id: string;
@@ -56,7 +57,7 @@
       items = page.items;
       total = page.total;
     } catch (e) {
-      error = String(e);
+      error = formatError(e);
       items = [];
       total = 0;
     } finally {
@@ -94,7 +95,7 @@
       await load();
       onchange?.();
     } catch (e) {
-      error = String(e);
+      error = formatError(e);
       loading = false;
     }
   }

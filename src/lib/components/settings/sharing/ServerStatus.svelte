@@ -3,6 +3,7 @@
   import { onMount, createEventDispatcher, tick } from 'svelte';
   import PairingQr from './PairingQr.svelte';
   import { renameClient } from '../../../api/sharing';
+  import { formatError } from '../../../types/errors';
   const dispatch = createEventDispatcher();
 
   type SharingStatus = {
@@ -72,7 +73,7 @@
       draftLabel = '';
       await refresh();
     } catch (e) {
-      editError = String(e);
+      editError = formatError(e);
     }
   }
 

@@ -6,6 +6,7 @@
   import { rsvp } from '../stores/rsvp.svelte';
   import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { formatError } from '../types/errors';
 
   let { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' } = $props();
 
@@ -90,7 +91,7 @@
         }, 1500);
       } catch (e) {
         saveStatus = 'error';
-        saveError = String(e);
+        saveError = formatError(e);
       }
     }, 1000); // 1 s debounce
   }

@@ -4,6 +4,7 @@
   import CandidatesList from './training_corpus/CandidatesList.svelte';
   import PromotedList from './training_corpus/PromotedList.svelte';
   import RejectedList from './training_corpus/RejectedList.svelte';
+  import { formatError } from '../../types/errors';
 
   type CorpusCounts = {
     candidates: number;
@@ -20,7 +21,7 @@
     try {
       counts = await invoke<CorpusCounts>('training_corpus_counts');
     } catch (e) {
-      error = String(e);
+      error = formatError(e);
     }
   }
 
