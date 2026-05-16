@@ -76,6 +76,52 @@ pub fn suggested_client_label() -> String {
     medical_sharing::suggested_label::suggested_client_label()
 }
 
+/// Outcome of a single pair-enroll attempt against one base URL.
+///
+/// `Connect` signals a transport-level failure (TCP refused, DNS unresolved,
+/// timeout) — the caller may choose to retry against a different address.
+/// `Final` signals a definitive outcome (HTTP rejection, malformed body,
+/// missing token field) that should bubble up without retry.
+enum PairAttemptError {
+    Connect(reqwest::Error),
+    Final(AppError),
+}
+
+/// Perform a single pair-enroll POST against `base` and return the parsed
+/// JSON body on success. Discriminates connect-level failures (retryable)
+/// from server-level rejections (not retryable). Private to this module.
+async fn try_pair_at_base(
+    http: &reqwest::Client,
+    base: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, PairAttemptError> {
+    let resp = http
+        .post(format!("{base}/pair/enroll"))
+        .timeout(std::time::Duration::from_secs(10))
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_connect() || e.is_timeout() {
+                PairAttemptError::Connect(e)
+            } else {
+                PairAttemptError::Final(AppError::Other(e.to_string()))
+            }
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = medical_core::http_error_body::read_error_body(resp, 200).await;
+        return Err(PairAttemptError::Final(AppError::Other(format!(
+            "server rejected pair: {status} {body_text}"
+        ))));
+    }
+
+    resp.json()
+        .await
+        .map_err(|e| PairAttemptError::Final(AppError::Other(e.to_string())))
+}
+
 /// Pair with an office server: POST the enroll code, receive a bearer token,
 /// persist the token in the OS keychain, and persist the non-secret endpoint
 /// metadata to disk. Returns nothing to the frontend — no raw token is ever
@@ -93,33 +139,65 @@ pub async fn pair_with_server(
     code: String,
     label: String,
 ) -> AppResult<()> {
-    // Prefer LAN address; fall back to Tailscale. http_url brackets IPv6
-    // literals — without it, an mDNS-discovered IPv6 address makes reqwest
-    // emit a generic "Builder error" with no URL context.
-    let base = if let Some(ref l) = lan {
-        medical_core::types::http_url(l, ports.pairing)
-    } else if let Some(ref ts) = tailscale {
-        medical_core::types::http_url(ts, ports.pairing)
-    } else {
-        return Err(AppError::Other("no reachable address provided".into()));
+    // The QR encodes BOTH LAN and Tailscale addresses; a remote client over
+    // Tailscale cannot reach the office LAN IP. Try LAN first, and on a
+    // connect-level failure (TCP refused, DNS unresolved, timeout) fall back
+    // to Tailscale exactly once. HTTP-level rejections (4xx/5xx) are NOT
+    // retried — those are real server-side responses, not connectivity.
+    //
+    // http_url brackets IPv6 literals — without it, an mDNS-discovered IPv6
+    // address makes reqwest emit a generic "Builder error" with no URL context.
+    let body = serde_json::json!({ "code": code, "label": label });
+
+    let v: serde_json::Value = match (lan.as_ref(), tailscale.as_ref()) {
+        (Some(l), ts_opt) => {
+            let lan_base = medical_core::types::http_url(l, ports.pairing);
+            tracing::info!(host = %l, port = ports.pairing, "pair: trying LAN");
+            match try_pair_at_base(&state.http_client, &lan_base, &body).await {
+                Ok(v) => v,
+                Err(PairAttemptError::Connect(_)) => {
+                    if let Some(ts) = ts_opt {
+                        tracing::info!(
+                            host = %ts,
+                            port = ports.pairing,
+                            "pair: LAN unreachable, falling back to Tailscale"
+                        );
+                        let ts_base = medical_core::types::http_url(ts, ports.pairing);
+                        match try_pair_at_base(&state.http_client, &ts_base, &body).await {
+                            Ok(v) => v,
+                            Err(PairAttemptError::Connect(e)) => {
+                                return Err(AppError::Other(e.to_string()));
+                            }
+                            Err(PairAttemptError::Final(e)) => return Err(e),
+                        }
+                    } else {
+                        // No Tailscale fallback available — surface the
+                        // LAN connect failure as a normal AppError.
+                        return Err(AppError::Other(
+                            "could not connect to server (LAN unreachable, no Tailscale address)"
+                                .into(),
+                        ));
+                    }
+                }
+                Err(PairAttemptError::Final(e)) => return Err(e),
+            }
+        }
+        (None, Some(ts)) => {
+            let ts_base = medical_core::types::http_url(ts, ports.pairing);
+            tracing::info!(host = %ts, port = ports.pairing, "pair: trying Tailscale");
+            match try_pair_at_base(&state.http_client, &ts_base, &body).await {
+                Ok(v) => v,
+                Err(PairAttemptError::Connect(e)) => {
+                    return Err(AppError::Other(e.to_string()));
+                }
+                Err(PairAttemptError::Final(e)) => return Err(e),
+            }
+        }
+        (None, None) => {
+            return Err(AppError::Other("no reachable address provided".into()));
+        }
     };
 
-    let body = serde_json::json!({ "code": code, "label": label });
-    let resp = state.http_client
-        .post(format!("{base}/pair/enroll"))
-        .timeout(std::time::Duration::from_secs(10))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| AppError::Other(e.to_string()))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = medical_core::http_error_body::read_error_body(resp, 200).await;
-        return Err(AppError::Other(format!("server rejected pair: {status} {body}")));
-    }
-
-    let v: serde_json::Value = resp.json().await.map_err(|e| AppError::Other(e.to_string()))?;
     let token = v
         .get("token")
         .and_then(|t| t.as_str())
@@ -330,4 +408,44 @@ async fn tailscale_address() -> Option<String> {
         return None;
     }
     medical_sharing::tailscale::parse_self_dns_name(&out.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for `try_pair_at_base`. The full `pair_with_server` command depends
+    //! on Tauri `State` and the keychain, which are awkward to fake — but the
+    //! retry-discrimination logic lives entirely in the helper, so unit-testing
+    //! the helper covers the bug fix.
+    use super::*;
+
+    /// Bind a TCP listener to grab an ephemeral port, then drop the listener so
+    /// the port is free again. The OS will return ECONNREFUSED for the next
+    /// connect against that port — exactly the "LAN unreachable" condition we
+    /// need to exercise.
+    fn closed_port_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn try_pair_at_base_returns_connect_error_for_closed_port() {
+        // A closed port surfaces as a connect-level reqwest error — the kind
+        // that should trigger Tailscale fallback. If this discrimination
+        // breaks, the user-facing bug returns (LAN failure becomes a fatal
+        // error instead of a fallback).
+        let http = reqwest::Client::new();
+        let base = closed_port_url();
+        let body = serde_json::json!({ "code": "x", "label": "y" });
+
+        let result = try_pair_at_base(&http, &base, &body).await;
+        match result {
+            Err(PairAttemptError::Connect(_)) => {} // expected — retryable
+            Err(PairAttemptError::Final(e)) => {
+                panic!("expected Connect (retryable), got Final: {e:?}");
+            }
+            Ok(_) => panic!("expected error from closed port"),
+        }
+    }
 }
