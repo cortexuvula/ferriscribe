@@ -13,7 +13,13 @@ pub const SERVICE_TYPE: &str = "_ferriscribe._tcp.local.";
 pub struct DiscoveredServer {
     pub instance_name: String,
     pub host: String,
+    /// Addresses learned via mDNS broadcast (LAN multicast).
     pub addresses: Vec<String>,
+    /// Addresses learned via Tailscale peer enumeration. Kept separate from
+    /// `addresses` so the frontend can route them into the `tailscale` slot
+    /// of `RemoteEndpoint` instead of misclassifying them as LAN hosts.
+    #[serde(default)]
+    pub tailscale_addresses: Vec<String>,
     pub ports: ServerPorts,
     pub version: String,
 }
@@ -113,6 +119,7 @@ pub fn browse(timeout: Duration) -> crate::Result<mpsc::Receiver<DiscoveredServe
                             .iter()
                             .map(|a| a.to_string())
                             .collect(),
+                        tailscale_addresses: Vec::new(),
                         ports: ServerPorts {
                             ollama: parse_port("ollama"),
                             whisper: parse_port("whisper"),

@@ -8,7 +8,11 @@
   type Discovered = {
     instance_name: string;
     host: string;
+    /// Addresses learned via mDNS broadcast (LAN multicast).
     addresses: string[];
+    /// Addresses learned via Tailscale peer enumeration. Optional for
+    /// serde backward-compat with older clients that didn't emit this field.
+    tailscale_addresses?: string[];
     ports: { ollama: number | null; whisper: number | null; lmstudio: number | null; pairing: number | null };
     version: string;
   };
@@ -44,29 +48,43 @@
   // same logical office server appears N times with overlapping address
   // sets. Dedupe by instance_name (unique per service registration) and
   // merge addresses across events so the picker has every candidate.
+  //
+  // The same logical office server can also surface via both mDNS and
+  // the Tailscale peer probe — when that happens we merge the LAN
+  // addresses (`addresses`) and the tailnet addresses
+  // (`tailscale_addresses`) into a single entry, keeping each channel's
+  // set separate so the slot routing in `pairDiscovered` is correct.
   $: deduped = (() => {
     const seen = new Map<string, Discovered>();
     for (const d of discovered) {
       const existing = seen.get(d.instance_name);
       if (!existing) {
-        seen.set(d.instance_name, { ...d, addresses: [...d.addresses] });
+        seen.set(d.instance_name, {
+          ...d,
+          addresses: [...d.addresses],
+          tailscale_addresses: [...(d.tailscale_addresses ?? [])],
+        });
       } else {
         for (const a of d.addresses) {
           if (!existing.addresses.includes(a)) existing.addresses.push(a);
+        }
+        const tsList = (existing.tailscale_addresses ??= []);
+        for (const a of d.tailscale_addresses ?? []) {
+          if (!tsList.includes(a)) tsList.push(a);
         }
       }
     }
     return Array.from(seen.values());
   })();
 
-  // Pick the most useful address from a server's resolved set:
+  // Pick the most useful address from a set of resolved addresses:
   //   1. RFC1918 IPv4 (192.168/10/172.16-31) — almost always the right answer
   //      on a clinic LAN
   //   2. Other IPv4 (e.g. 100.x Tailscale CGNAT, public-routable)
   //   3. IPv6 ULA (fc/fd) or globally-routable
   //   4. IPv6 link-local (fe80::, last resort — usually unreachable across hosts)
-  function bestAddress(d: Discovered): string | null {
-    if (d.addresses.length === 0) return null;
+  function bestFrom(addresses: string[]): string | null {
+    if (addresses.length === 0) return null;
     const score = (a: string): number => {
       const isV6 = a.includes(':');
       if (!isV6) {
@@ -76,7 +94,7 @@
       if (/^fe80:/i.test(a)) return 3;
       return 2;
     };
-    return [...d.addresses].sort((a, b) => score(a) - score(b))[0];
+    return [...addresses].sort((a, b) => score(a) - score(b))[0];
   }
 
   async function loadPaired() {
@@ -185,7 +203,17 @@
   }
 
   function pairDiscovered(d: Discovered) {
-    const lan = bestAddress(d);
+    // Route discovery-channel addresses into their semantically correct
+    // RemoteEndpoint slots: mDNS-learned addresses go to `lan`,
+    // Tailscale-learned addresses (e.g. MagicDNS hostnames like
+    // `mac.tail161478.ts.net`) go to `tailscale`. `pair_with_server`
+    // already handles all three combinations (lan-only, ts-only, both).
+    const lan = bestFrom(d.addresses);
+    const tailscale = (d.tailscale_addresses ?? [])[0] ?? null;
+    if (!lan && !tailscale) {
+      error = 'No reachable address for this server.';
+      return;
+    }
     const ports: PairPorts = {
       ollama: d.ports.ollama ?? 11435,
       whisper: d.ports.whisper ?? 8081,
@@ -195,7 +223,7 @@
     };
     const code = prompt('Enter the 6-digit code from the office server.') ?? '';
     if (!code) return;
-    pairManual(lan, null, ports, code);
+    pairManual(lan, tailscale, ports, code);
   }
 
   async function unpair() {

@@ -55,7 +55,12 @@ pub async fn discover_via_tailscale(
             Some(DiscoveredServer {
                 instance_name: format!("{}._ferriscribe._tcp.local.", info.host),
                 host: peer.host,
-                addresses: vec![peer.dial],
+                // Tailscale-discovered peers are reached via the tailnet
+                // overlay, not LAN multicast. Keep `addresses` empty and
+                // populate `tailscale_addresses` so the frontend can route
+                // this into the RemoteEndpoint.tailscale slot.
+                addresses: Vec::new(),
+                tailscale_addresses: vec![peer.dial],
                 ports: medical_sharing::mdns::ServerPorts {
                     ollama: info.ports.ollama,
                     whisper: info.ports.whisper,
