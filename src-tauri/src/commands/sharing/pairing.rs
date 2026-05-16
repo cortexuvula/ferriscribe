@@ -149,12 +149,16 @@ pub async fn pair_with_server(
     // address makes reqwest emit a generic "Builder error" with no URL context.
     let body = serde_json::json!({ "code": code, "label": label });
 
-    let v: serde_json::Value = match (lan.as_ref(), tailscale.as_ref()) {
+    // Track which host actually answered the pair handshake. The QR carries
+    // both LAN and Tailscale, but a remote client may only reach the latter;
+    // downstream AppConfig autofill must use the reachable address, not just
+    // whichever one happened to be present in the QR.
+    let (winning_host, v): (String, serde_json::Value) = match (lan.as_ref(), tailscale.as_ref()) {
         (Some(l), ts_opt) => {
             let lan_base = medical_core::types::http_url(l, ports.pairing);
             tracing::info!(host = %l, port = ports.pairing, "pair: trying LAN");
             match try_pair_at_base(&state.http_client, &lan_base, &body).await {
-                Ok(v) => v,
+                Ok(v) => (l.clone(), v),
                 Err(PairAttemptError::Connect(_)) => {
                     if let Some(ts) = ts_opt {
                         tracing::info!(
@@ -164,7 +168,7 @@ pub async fn pair_with_server(
                         );
                         let ts_base = medical_core::types::http_url(ts, ports.pairing);
                         match try_pair_at_base(&state.http_client, &ts_base, &body).await {
-                            Ok(v) => v,
+                            Ok(v) => (ts.clone(), v),
                             Err(PairAttemptError::Connect(e)) => {
                                 return Err(AppError::Other(e.to_string()));
                             }
@@ -186,7 +190,7 @@ pub async fn pair_with_server(
             let ts_base = medical_core::types::http_url(ts, ports.pairing);
             tracing::info!(host = %ts, port = ports.pairing, "pair: trying Tailscale");
             match try_pair_at_base(&state.http_client, &ts_base, &body).await {
-                Ok(v) => v,
+                Ok(v) => (ts.clone(), v),
                 Err(PairAttemptError::Connect(e)) => {
                     return Err(AppError::Other(e.to_string()));
                 }
@@ -301,14 +305,15 @@ pub async fn pair_with_server(
     {
         use super::settings_helpers::apply_paired_settings;
 
-        // 1. Pick the resolved host. Prefer LAN; fall back to Tailscale. The
-        //    in-memory RemoteEndpoint will still try LAN-then-Tailscale at call
-        //    time, but the static AppConfig field shows ONE address — LAN is
-        //    more meaningful for the user reading the Settings UI than a
-        //    Tailscale CGNAT address.
-        let host = lan.clone()
-            .or_else(|| tailscale.clone())
-            .ok_or_else(|| AppError::Other("no reachable address for paired-settings autofill".into()))?;
+        // 1. Use the host that actually answered the pair handshake above.
+        //    The in-memory RemoteEndpoint still carries BOTH LAN and Tailscale
+        //    and probes both at call time; but the static AppConfig field has
+        //    to be a single address that the client can actually reach. Using
+        //    `winning_host` ensures a remote-paired client doesn't get the
+        //    server's unreachable LAN IP written into Settings (which would
+        //    poison pre-flight checks and health polling that read AppConfig
+        //    host fields directly).
+        let host = winning_host;
 
         // 2. Write the bearer to per-service keychain slots via state.keys.
         //    Same KeyStorage abstraction the set_api_key Tauri command uses.
