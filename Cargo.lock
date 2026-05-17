@@ -5585,7 +5585,7 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.10.72"
+version = "0.10.73"
 dependencies = [
  "axum",
  "chrono",
