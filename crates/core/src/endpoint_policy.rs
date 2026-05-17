@@ -34,6 +34,11 @@ pub fn classify_endpoint(host: &str) -> EndpointKind {
 
     // Otherwise it's a hostname. Case-insensitive checks.
     let lower = trimmed.to_ascii_lowercase();
+    // Defensive: normalize away any trailing dot(s) so fully-qualified domain
+    // names like "foo.ts.net." or "clinic.local." still match the suffix
+    // checks below. Mirrors the `trim_end_matches('.')` idiom used by
+    // `parse_self_dns_name` in `crates/sharing/src/tailscale.rs`.
+    let lower = lower.trim_end_matches('.');
     if lower == "localhost" {
         return EndpointKind::Loopback;
     }
@@ -304,6 +309,41 @@ mod tests {
         assert_eq!(classify_endpoint("clinic.example.com"), EndpointKind::Unknown);
         assert_eq!(classify_endpoint("api.anthropic.com"), EndpointKind::Unknown);
         assert_eq!(classify_endpoint("example.com"), EndpointKind::Unknown);
+    }
+
+    // ── classify_endpoint: trailing-dot FQDN normalization ─────────
+    #[test]
+    fn tailscale_magicdns_with_trailing_dot() {
+        // Fully-qualified DNS name with a trailing root-zone dot must still
+        // classify as Tailscale.
+        assert_eq!(
+            classify_endpoint("mac.tail161478.ts.net."),
+            EndpointKind::Tailscale
+        );
+        // Pathological double trailing dot — defensive guard.
+        assert_eq!(
+            classify_endpoint("foo.ts.net.."),
+            EndpointKind::Tailscale
+        );
+    }
+
+    #[test]
+    fn mdns_with_trailing_dot() {
+        assert_eq!(classify_endpoint("clinic.local."), EndpointKind::Mdns);
+        assert_eq!(classify_endpoint("host.home.arpa."), EndpointKind::Mdns);
+        assert_eq!(classify_endpoint("server.internal."), EndpointKind::Mdns);
+    }
+
+    #[test]
+    fn localhost_with_trailing_dot() {
+        assert_eq!(classify_endpoint("localhost."), EndpointKind::Loopback);
+        assert_eq!(classify_endpoint("LOCALHOST."), EndpointKind::Loopback);
+    }
+
+    #[test]
+    fn trailing_dot_does_not_break_unknown() {
+        // Normalization must not turn public domains into something else.
+        assert_eq!(classify_endpoint("api.openai.com."), EndpointKind::Unknown);
     }
 
     // ── validate_local_endpoint matrix ─────────────────────────────
