@@ -118,7 +118,7 @@
     right: 16px;
     z-index: 10;
     background: var(--bg-secondary);
-    border: 1px solid var(--border-primary);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 6px 8px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
@@ -130,7 +130,7 @@
   .row input[type="text"] {
     background: var(--bg-primary);
     color: var(--text-primary);
-    border: 1px solid var(--border-primary);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 3px 6px;
     font-size: 13px;
@@ -139,12 +139,12 @@
   .row button {
     background: transparent;
     color: var(--text-primary);
-    border: 1px solid var(--border-primary);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 2px 8px;
     font-size: 12px;
     cursor: pointer;
   }
-  .row button:hover { background-color: var(--bg-tertiary); }
+  .row button:hover { background-color: var(--bg-hover); }
   .opt { font-size: 12px; display: flex; align-items: center; gap: 2px; }
 </style>
