@@ -3,6 +3,7 @@
   import { recordings } from '../stores/recordings.svelte';
   import { copyToClipboard } from '../utils/clipboard';
   import TextEditor from '../components/TextEditor.svelte';
+  import RichEditor from '../components/RichEditor.svelte';
   import { rsvp } from '../stores/rsvp.svelte';
   import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
@@ -178,7 +179,11 @@
       <p>Go to the <strong>Generate</strong> tab to create this document.</p>
     </div>
   {:else}
-    <TextEditor value={content} placeholder="No content…" onChange={onEditorChange} />
+    {#if tabId === 'transcript'}
+      <TextEditor value={content} placeholder="No content…" onChange={onEditorChange} />
+    {:else}
+      <RichEditor value={content} placeholder="No content…" onChange={onEditorChange} />
+    {/if}
   {/if}
 </div>
 
