@@ -4,7 +4,9 @@
   import StarterKit from '@tiptap/starter-kit';
   import Underline from '@tiptap/extension-underline';
   import { Markdown } from 'tiptap-markdown';
+  import { SearchAndReplace } from '@sereneinserenade/tiptap-search-and-replace';
   import Toolbar from './rich_editor/Toolbar.svelte';
+  import FindPanel from './rich_editor/FindPanel.svelte';
 
   interface Props {
     value?: string;
@@ -19,6 +21,18 @@
   // `editor` is $state so the reassignment in onMount flows to child components
   // (Toolbar) that consume it as a reactive prop.
   let editor = $state<Editor | null>(null);
+  let findOpen = $state(false);
+
+  // Hoisted so onDestroy can detach the same handler instance.
+  const onKeyDown = (e: KeyboardEvent) => {
+    const metaOrCtrl = e.metaKey || e.ctrlKey;
+    if (!metaOrCtrl) return;
+    const key = e.key.toLowerCase();
+    if (key === 'f' || key === 'h') {
+      e.preventDefault();
+      findOpen = true;
+    }
+  };
 
   onMount(() => {
     editor = new Editor({
@@ -28,6 +42,10 @@
         StarterKit,
         Underline,
         Markdown.configure({ html: false, breaks: true }),
+        SearchAndReplace.configure({
+          searchResultClass: 'rich-editor-search-hit',
+          disableRegex: false,
+        }),
       ],
       editable: !readonly,
       content: value,
@@ -44,9 +62,11 @@
         onChange(md);
       },
     });
+    editorEl.addEventListener('keydown', onKeyDown);
   });
 
   onDestroy(() => {
+    editorEl?.removeEventListener('keydown', onKeyDown);
     editor?.destroy();
     editor = null;
   });
@@ -72,13 +92,30 @@
 
 <div class="rich-editor-wrapper">
   {#if !readonly}
-    <Toolbar {editor} onFindClick={() => { /* wired in Task 4 */ }} />
+    <Toolbar {editor} onFindClick={() => (findOpen = true)} />
   {/if}
-  <div class="rich-editor" bind:this={editorEl} aria-label={placeholder || 'Editor'}></div>
+  <div class="rich-editor-host">
+    <FindPanel
+      {editor}
+      open={findOpen}
+      {readonly}
+      onClose={() => (findOpen = false)}
+    />
+    <div class="rich-editor" bind:this={editorEl} aria-label={placeholder || 'Editor'}></div>
+  </div>
 </div>
 
 <style>
   .rich-editor-wrapper {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .rich-editor-host {
+    position: relative;
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -111,4 +148,13 @@
   :global(.rich-editor-area p:last-child) { margin-bottom: 0; }
   :global(.rich-editor-area ul),
   :global(.rich-editor-area ol) { margin: 0 0 0.5em 1.5em; }
+
+  /* Search & Replace highlight. The package adds the base class to every
+     match and `<base>-current` to the currently-selected one. */
+  :global(.rich-editor-search-hit) {
+    background-color: rgba(255, 215, 0, 0.4);
+  }
+  :global(.rich-editor-search-hit-current) {
+    background-color: rgba(255, 165, 0, 0.7);
+  }
 </style>
