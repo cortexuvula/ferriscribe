@@ -103,7 +103,7 @@
     align-items: center;
     gap: 4px;
     padding: 6px 10px;
-    border-bottom: 1px solid var(--border-primary);
+    border-bottom: 1px solid var(--border);
     background-color: var(--bg-secondary);
     flex-shrink: 0;
   }
@@ -116,16 +116,16 @@
     font-size: 13px;
     cursor: pointer;
   }
-  .toolbar button:hover { background-color: var(--bg-tertiary); }
+  .toolbar button:hover { background-color: var(--bg-hover); }
   .toolbar button.active {
-    background-color: var(--accent-primary, #4a90e2);
-    color: var(--text-on-accent, white);
+    background-color: var(--accent);
+    color: var(--text-inverse);
   }
   .sep {
     display: inline-block;
     width: 1px;
     height: 18px;
-    background-color: var(--border-primary);
+    background-color: var(--border);
     margin: 0 4px;
   }
 </style>
