@@ -4,6 +4,7 @@
   import StarterKit from '@tiptap/starter-kit';
   import Underline from '@tiptap/extension-underline';
   import { Markdown } from 'tiptap-markdown';
+  import Toolbar from './rich_editor/Toolbar.svelte';
 
   interface Props {
     value?: string;
@@ -15,7 +16,9 @@
   let { value = '', placeholder = '', readonly = false, onChange = () => {} }: Props = $props();
 
   let editorEl: HTMLDivElement;
-  let editor: Editor | null = null;
+  // `editor` is $state so the reassignment in onMount flows to child components
+  // (Toolbar) that consume it as a reactive prop.
+  let editor = $state<Editor | null>(null);
 
   onMount(() => {
     editor = new Editor({
@@ -67,9 +70,22 @@
   });
 </script>
 
-<div class="rich-editor" bind:this={editorEl} aria-label={placeholder || 'Editor'}></div>
+<div class="rich-editor-wrapper">
+  {#if !readonly}
+    <Toolbar {editor} onFindClick={() => { /* wired in Task 4 */ }} />
+  {/if}
+  <div class="rich-editor" bind:this={editorEl} aria-label={placeholder || 'Editor'}></div>
+</div>
 
 <style>
+  .rich-editor-wrapper {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+  }
+
   .rich-editor {
     flex: 1;
     display: flex;
