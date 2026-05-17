@@ -90,8 +90,9 @@
         <input type="checkbox" bind:checked={caseSensitive} /> Aa
       </label>
       {#if !readonly}
-        <button type="button" aria-label="Toggle replace row" title="Toggle replace"
-          onclick={() => (showReplace = !showReplace)}>↕</button>
+        <button type="button" class:active={showReplace}
+          aria-label="Toggle replace row" aria-expanded={showReplace} title="Toggle replace"
+          onclick={() => (showReplace = !showReplace)}>Replace</button>
       {/if}
       <button type="button" aria-label="Close find panel" title="Close (Esc)" onclick={onClose}>✕</button>
     </div>
@@ -104,7 +105,7 @@
           aria-label="Replace text"
           onkeydown={onKey}
         />
-        <button type="button" onclick={replaceOne}>Replace</button>
+        <button type="button" onclick={replaceOne}>Apply</button>
         <button type="button" onclick={replaceAll}>All</button>
       </div>
     {/if}
@@ -146,5 +147,10 @@
     cursor: pointer;
   }
   .row button:hover { background-color: var(--bg-hover); }
+  .row button.active {
+    background-color: var(--accent);
+    color: var(--text-inverse);
+    border-color: var(--accent);
+  }
   .opt { font-size: 12px; display: flex; align-items: center; gap: 2px; }
 </style>
