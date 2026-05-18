@@ -16,6 +16,7 @@ pub mod sharing;
 pub mod training_corpus;
 pub mod training_corpus_export;
 pub mod transcription;
+pub mod user_dictionary;
 pub mod vocabulary;
 
 use std::path::{Path, PathBuf};

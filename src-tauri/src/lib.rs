@@ -266,6 +266,9 @@ pub fn run() {
             commands::training_corpus::training_corpus_list,
             commands::training_corpus::training_corpus_set_status,
             commands::training_corpus_export::training_corpus_export,
+            commands::user_dictionary::user_dict_list,
+            commands::user_dictionary::user_dict_add,
+            commands::user_dictionary::user_dict_remove,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
