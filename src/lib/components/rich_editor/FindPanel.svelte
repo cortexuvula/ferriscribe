@@ -127,7 +127,8 @@
     flex-direction: column;
     gap: 4px;
   }
-  .row { display: flex; align-items: center; gap: 4px; }
+  .row { display: flex; align-items: center; gap: 6px; }
+  .row > * { flex-shrink: 0; }
   .row input[type="text"] {
     background: var(--bg-primary);
     color: var(--text-primary);
@@ -145,6 +146,7 @@
     padding: 2px 8px;
     font-size: 12px;
     cursor: pointer;
+    white-space: nowrap;
   }
   .row button:hover { background-color: var(--bg-hover); }
   .row button.active {
@@ -152,5 +154,13 @@
     color: var(--text-inverse);
     border-color: var(--accent);
   }
-  .opt { font-size: 12px; display: flex; align-items: center; gap: 2px; }
+  .opt {
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 4px;
+    user-select: none;
+  }
+  .opt input[type="checkbox"] { margin: 0; }
 </style>
