@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 medical-core = { path = "../core" }
 medical-security = { path = "../security" }
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.8", features = ["macros"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }
