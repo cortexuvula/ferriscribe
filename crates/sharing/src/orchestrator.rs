@@ -395,7 +395,7 @@ pub(crate) fn build_pairing_router(
     Router::new()
         .route("/pair/enroll", post(enroll))
         .route("/pair/clients", get(list_clients))
-        .route("/pair/revoke/:id", post(revoke))
+        .route("/pair/revoke/{id}", post(revoke))
         .route("/info", get(info_handler))
         .with_state(st)
 }

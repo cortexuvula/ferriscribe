@@ -61,7 +61,7 @@ pub async fn spawn(
     let app = Router::new()
         .route("/v1/vocabulary", get(list_handler).post(insert_handler).delete(delete_all_handler))
         .route("/v1/vocabulary/count", get(count_handler))
-        .route("/v1/vocabulary/:id", put(update_handler).delete(delete_handler))
+        .route("/v1/vocabulary/{id}", put(update_handler).delete(delete_handler))
         .route("/v1/context-templates", get(templates_list_handler))
         .route("/v1/context-templates/upsert", axum::routing::post(templates_upsert_handler))
         .route("/v1/context-templates/rename", axum::routing::post(templates_rename_handler))

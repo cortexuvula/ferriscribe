@@ -52,7 +52,7 @@ rand = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
-axum = "0.7"
+axum = "0.8"
 urlencoding = { workspace = true }
 
 [dev-dependencies]
