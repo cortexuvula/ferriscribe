@@ -21,6 +21,8 @@
 
   let { editor, request, onClose }: Props = $props();
 
+  let menuEl = $state<HTMLDivElement | null>(null);
+
   const spell = getSpellchecker();
 
   // Recompute suggestions when the request changes.
@@ -59,12 +61,25 @@
       onClose();
     }
   }
+
+  function onWindowMouseDown(e: MouseEvent) {
+    // Guard: only act when the menu is actually mounted/open. This also
+    // prevents firing on the initial right-click that opened the menu —
+    // at that point menuEl is bound but `request` only becomes non-null
+    // after this event has already dispatched.
+    if (request == null || menuEl == null) return;
+    const target = e.target as Node | null;
+    if (target && !menuEl.contains(target)) {
+      onClose();
+    }
+  }
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} onmousedown={onWindowMouseDown} />
 
 {#if request}
   <div
+    bind:this={menuEl}
     class="spellcheck-menu"
     style="left: {request.clientX}px; top: {request.clientY}px"
     role="menu"

@@ -7,6 +7,8 @@
   import { SearchAndReplace } from '@sereneinserenade/tiptap-search-and-replace';
   import Toolbar from './rich_editor/Toolbar.svelte';
   import FindPanel from './rich_editor/FindPanel.svelte';
+  import { Spellcheck, type SpellcheckContextMenuRequest } from './rich_editor/spellcheck/spellcheck_extension';
+  import SpellcheckMenu from './rich_editor/spellcheck/SpellcheckMenu.svelte';
 
   interface Props {
     value?: string;
@@ -22,6 +24,7 @@
   // (Toolbar) that consume it as a reactive prop.
   let editor = $state<Editor | null>(null);
   let findOpen = $state(false);
+  let spellcheckRequest = $state<SpellcheckContextMenuRequest | null>(null);
 
   // Hoisted so onDestroy can detach the same handler instance.
   const onKeyDown = (e: KeyboardEvent) => {
@@ -46,13 +49,18 @@
           searchResultClass: 'rich-editor-search-hit',
           disableRegex: false,
         }),
+        Spellcheck.configure({
+          onContextMenu: (req) => {
+            spellcheckRequest = req;
+          },
+        }),
       ],
       editable: !readonly,
       content: value,
       editorProps: {
         attributes: {
           class: 'rich-editor-area',
-          spellcheck: 'true',
+          spellcheck: 'false',
         },
       },
       onUpdate: ({ editor }) => {
@@ -102,6 +110,11 @@
       onClose={() => (findOpen = false)}
     />
     <div class="rich-editor" bind:this={editorEl} aria-label={placeholder || 'Editor'}></div>
+    <SpellcheckMenu
+      {editor}
+      request={spellcheckRequest}
+      onClose={() => (spellcheckRequest = null)}
+    />
   </div>
 </div>
 
@@ -156,5 +169,11 @@
   }
   :global(.rich-editor-search-hit-current) {
     background-color: rgba(255, 165, 0, 0.7);
+  }
+
+  :global(.spellcheck-misspelled) {
+    text-decoration: underline wavy var(--accent, #d33);
+    text-decoration-skip-ink: none;
+    text-underline-offset: 2px;
   }
 </style>
