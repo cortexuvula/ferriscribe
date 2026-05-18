@@ -8,6 +8,7 @@ pub mod m001_initial;
 pub mod m002_rag_tables;
 pub mod m003_vocabulary;
 pub mod m004_generations;
+pub mod m005_user_dictionary;
 
 use rusqlite::Connection;
 
@@ -42,6 +43,11 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 4,
             name: "generations",
             up: m004_generations::up,
+        },
+        Migration {
+            version: 5,
+            name: "user_dictionary",
+            up: m005_user_dictionary::up,
         },
     ]
 }
