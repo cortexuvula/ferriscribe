@@ -20,10 +20,10 @@ jobs:
             target: x86_64-pc-windows-msvc
           - platform: macos-latest
             target: aarch64-apple-darwin
-          # Intel Macs (clinical sites with older hardware) — runs natively
-          # on the last Intel-hosted GitHub runner image.
-          - platform: macos-13
-            target: x86_64-apple-darwin
+          # Intel macOS dropped: GitHub-hosted macos-13 Intel runners are
+          # effectively unavailable (jobs queue indefinitely, get cancelled
+          # at 24h). Apple Silicon DMG only. Re-add a universal-apple-darwin
+          # target on macos-latest if Intel support becomes necessary again.
 
     runs-on: ${{ matrix.platform }}
 
