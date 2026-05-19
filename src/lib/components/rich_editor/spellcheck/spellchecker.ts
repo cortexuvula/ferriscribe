@@ -3,12 +3,12 @@
 // leakage, complies with the local-only constraint), and combines its
 // suggestions with a per-user wordlist persisted in SQLite + an in-memory
 // session ignore set.
-import { invoke } from '@tauri-apps/api/core';
 import nspell from 'nspell';
 // Vite resolves these at build time and inlines them as URLs.
 // dictionary-en ships the Hunspell .aff/.dic files via its package exports.
 import affUrl from 'dictionary-en/index.aff?url';
 import dicUrl from 'dictionary-en/index.dic?url';
+import { listUserDict, addUserDict, removeUserDict } from '../../../api/userDictionary';
 
 export interface Spellchecker {
   /** Returns true once the dictionary has loaded. */
@@ -20,6 +20,8 @@ export interface Spellchecker {
   suggest(word: string, max?: number): string[];
   /** Add to user dictionary (persisted). Returns true if newly added. */
   addToUserDict(word: string): Promise<boolean>;
+  /** Remove from user dictionary (persisted). Returns true if a row was deleted. */
+  removeFromUserDict(word: string): Promise<boolean>;
   /** Add to session ignore (not persisted). */
   ignoreInSession(word: string): void;
 }
@@ -40,7 +42,7 @@ class SpellcheckerImpl implements Spellchecker {
       const [affRes, dicRes, userListRaw] = await Promise.all([
         fetch(affUrl).then((r) => r.text()),
         fetch(dicUrl).then((r) => r.text()),
-        invoke<string[]>('user_dict_list').catch(() => [] as string[]),
+        listUserDict().catch(() => [] as string[]),
       ]);
       this.nspell = nspell(affRes, dicRes);
       for (const w of userListRaw) this.userWords.add(w.toLowerCase());
@@ -62,9 +64,15 @@ class SpellcheckerImpl implements Spellchecker {
   }
 
   async addToUserDict(word: string): Promise<boolean> {
-    const newlyAdded = await invoke<boolean>('user_dict_add', { word });
+    const newlyAdded = await addUserDict(word);
     this.userWords.add(word.toLowerCase());
     return newlyAdded;
+  }
+
+  async removeFromUserDict(word: string): Promise<boolean> {
+    const removed = await removeUserDict(word);
+    this.userWords.delete(word.toLowerCase());
+    return removed;
   }
 
   ignoreInSession(word: string): void {

@@ -7,13 +7,17 @@
   import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
   import VocabularyDialog from '../VocabularyDialog.svelte';
   import ContextTemplateDialog from '../ContextTemplateDialog.svelte';
+  import DictionaryDialog from '../DictionaryDialog.svelte';
   import { getVocabularyCount, importVocabularyJson, exportVocabularyJson } from '../../api/vocabulary';
   import { importContextTemplatesJson, exportContextTemplatesJson } from '../../api/contextTemplates';
+  import { listUserDict } from '../../api/userDictionary';
 
   let vocabDialogOpen = $state(false);
   let vocabCount = $state<[number, number]>([0, 0]);
   let ctxTemplateDialogOpen = $state(false);
   let ctxTemplateCount = $derived(contextTemplates.list.length);
+  let dictDialogOpen = $state(false);
+  let dictCount = $state(0);
   let encryptionState = $state<'no-database' | 'plaintext' | 'encrypted' | 'unknown'>('unknown');
 
   async function handleThemeChange(e: Event) {
@@ -95,6 +99,20 @@
     loadVocabCount();
   }
 
+  async function loadDictCount() {
+    try {
+      const words = await listUserDict();
+      dictCount = words.length;
+    } catch (err) {
+      console.error('Failed to load dictionary count:', err);
+    }
+  }
+
+  function handleDictDialogClose() {
+    dictDialogOpen = false;
+    loadDictCount();
+  }
+
   async function handleImportCtxTemplates() {
     const selected = await openDialog({
       multiple: false,
@@ -137,8 +155,9 @@
       loadVocabCount(),
       contextTemplates.load(),
       loadEncryptionStatus(),
+      loadDictCount(),
     ]);
-    const labels = ['loadVocabCount', 'contextTemplates.load', 'loadEncryptionStatus'];
+    const labels = ['loadVocabCount', 'contextTemplates.load', 'loadEncryptionStatus', 'loadDictCount'];
     for (const [i, r] of results.entries()) {
       if (r.status === 'rejected') {
         console.error(`Settings init: ${labels[i]} failed:`, r.reason);
@@ -294,6 +313,20 @@
     </div>
   </div>
 
+  <h3 class="section-title" style="margin-top: 24px">Spellcheck Dictionary</h3>
+  <p class="section-desc">Accepted spellings for the in-app spellchecker. Words added here (or via right-click → Add to dictionary in the editor) won't be flagged as misspelled.</p>
+
+  <div class="form-group">
+    <span class="form-label">
+      {dictCount} word{dictCount === 1 ? '' : 's'} saved
+    </span>
+    <div class="vocab-buttons">
+      <button class="btn-browse" onclick={() => { dictDialogOpen = true; }}>
+        Manage Dictionary
+      </button>
+    </div>
+  </div>
+
   <details class="advanced-section">
     <summary>Advanced</summary>
     <div class="advanced-content">
@@ -318,6 +351,7 @@
 
 <VocabularyDialog open={vocabDialogOpen} onclose={handleVocabDialogClose} />
 <ContextTemplateDialog open={ctxTemplateDialogOpen} onclose={handleCtxTemplateDialogClose} />
+<DictionaryDialog open={dictDialogOpen} onclose={handleDictDialogClose} />
 
 <style>
   .section-desc {

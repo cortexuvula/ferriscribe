@@ -9,6 +9,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (cmd: string) => {
     if (cmd === 'user_dict_list') return ['atenolol'];
     if (cmd === 'user_dict_add') return true;
+    if (cmd === 'user_dict_remove') return true;
     return null;
   }),
 }));
@@ -64,6 +65,18 @@ describe('Spellchecker wrapper', () => {
     expect(s.check('lisinopril')).toBe(false);
     await s.addToUserDict('lisinopril');
     expect(s.check('lisinopril')).toBe(true);
+  });
+
+  it('removeFromUserDict re-flags a previously-accepted word', async () => {
+    const { getSpellchecker } = await import('./spellchecker');
+    const s = getSpellchecker() as ReturnType<typeof getSpellchecker> & { load: () => Promise<void> };
+    await s.load();
+    // 'atenolol' came from the mocked user_dict_list, so it's accepted.
+    expect(s.check('atenolol')).toBe(true);
+    await s.removeFromUserDict('atenolol');
+    // After removal it should no longer be in the in-memory cache; nspell's
+    // mocked `correct` returns false for 'atenolol', so check() must now be false.
+    expect(s.check('atenolol')).toBe(false);
   });
 
   it('ignoreInSession unflags the word for the session', async () => {
