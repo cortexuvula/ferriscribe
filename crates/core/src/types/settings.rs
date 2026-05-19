@@ -223,6 +223,10 @@ fn default_vocabulary_enabled() -> bool {
     true
 }
 
+fn default_medical_dict_enabled() -> bool {
+    true
+}
+
 fn default_rsvp_wpm() -> u32 {
     300
 }
@@ -331,6 +335,8 @@ pub struct AppConfig {
     pub auto_index_rag: bool,
     #[serde(default = "default_vocabulary_enabled")]
     pub vocabulary_enabled: bool,
+    #[serde(default = "default_medical_dict_enabled")]
+    pub medical_dict_enabled: bool,
     // RSVP speed-reader
     #[serde(default = "default_rsvp_wpm")]
     pub rsvp_wpm: u32,

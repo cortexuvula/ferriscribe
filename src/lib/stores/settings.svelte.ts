@@ -27,6 +27,7 @@ const defaults: AppConfig = {
   ollama_host: 'localhost',
   ollama_port: 11434,
   vocabulary_enabled: true,
+  medical_dict_enabled: true,
   custom_context_templates: [],
   custom_soap_prompt: null,
   custom_referral_prompt: null,

@@ -317,6 +317,18 @@
   <p class="section-desc">Accepted spellings for the in-app spellchecker. Words added here (or via right-click → Add to dictionary in the editor) won't be flagged as misspelled.</p>
 
   <div class="form-group">
+    <label class="toggle-label">
+      <input
+        type="checkbox"
+        checked={settings.state.medical_dict_enabled}
+        onchange={() => settings.updateField('medical_dict_enabled', !settings.state.medical_dict_enabled)}
+      />
+      <span>Use bundled medical wordlist (~110,000 terms)</span>
+    </label>
+    <span class="form-hint">Drug names, anatomy, conditions, and syndromes. Toggling applies on the next document open.</span>
+  </div>
+
+  <div class="form-group">
     <span class="form-label">
       {dictCount} word{dictCount === 1 ? '' : 's'} saved
     </span>

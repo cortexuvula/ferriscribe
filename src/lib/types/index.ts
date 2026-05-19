@@ -98,6 +98,7 @@ export interface AppConfig {
   search_top_k: number;
   mmr_lambda: number;
   vocabulary_enabled: boolean;
+  medical_dict_enabled: boolean;
   custom_context_templates: ContextTemplate[];
   custom_soap_prompt: string | null;
   custom_referral_prompt: string | null;

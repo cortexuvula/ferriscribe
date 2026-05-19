@@ -16,6 +16,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 vi.mock('dictionary-en/index.aff?url', () => ({ default: '/test.aff' }));
 vi.mock('dictionary-en/index.dic?url', () => ({ default: '/test.dic' }));
+vi.mock('./medical_terms.txt?url', () => ({ default: '/test-medical.txt' }));
 
 vi.mock('nspell', () => ({
   default: () => ({
@@ -29,7 +30,11 @@ beforeEach(() => {
   vi.resetModules();
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => ({ text: async () => '' })),
+    vi.fn(async (url: string) => ({
+      // Return a small mock medical wordlist when the medical URL is fetched.
+      text: async () =>
+        url === '/test-medical.txt' ? 'lisinopril\nmetformin\namoxicillin\n' : '',
+    })),
   );
 });
 
@@ -62,9 +67,30 @@ describe('Spellchecker wrapper', () => {
     const { getSpellchecker } = await import('./spellchecker');
     const s = getSpellchecker() as ReturnType<typeof getSpellchecker> & { load: () => Promise<void> };
     await s.load();
-    expect(s.check('lisinopril')).toBe(false);
-    await s.addToUserDict('lisinopril');
+    // Pick a word that's not in any of: nspell mock, user dict mock, medical mock.
+    expect(s.check('zzznewword')).toBe(false);
+    await s.addToUserDict('zzznewword');
+    expect(s.check('zzznewword')).toBe(true);
+  });
+
+  it('accepts bundled medical terms when medical mode is enabled', async () => {
+    const { getSpellchecker } = await import('./spellchecker');
+    const s = getSpellchecker() as ReturnType<typeof getSpellchecker> & { load: () => Promise<void> };
+    await s.load();
+    // 'lisinopril' is in the mocked medical wordlist but not in nspell's correct() set.
     expect(s.check('lisinopril')).toBe(true);
+    expect(s.medicalTermCount).toBe(3);
+  });
+
+  it('setMedicalEnabled(false) re-flags medical terms', async () => {
+    const { getSpellchecker } = await import('./spellchecker');
+    const s = getSpellchecker() as ReturnType<typeof getSpellchecker> & { load: () => Promise<void> };
+    await s.load();
+    expect(s.check('metformin')).toBe(true);
+    s.setMedicalEnabled(false);
+    expect(s.check('metformin')).toBe(false);
+    s.setMedicalEnabled(true);
+    expect(s.check('metformin')).toBe(true);
   });
 
   it('removeFromUserDict re-flags a previously-accepted word', async () => {
