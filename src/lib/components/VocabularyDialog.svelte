@@ -8,7 +8,7 @@
     type VocabularyEntry,
   } from '../api/vocabulary';
   import { toasts } from '../stores/toasts.svelte';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import VocabularyForm from './VocabularyForm.svelte';
   import VocabularyTable from './VocabularyTable.svelte';
   import VocabularyTestPanel from './VocabularyTestPanel.svelte';
@@ -126,7 +126,10 @@
   $effect(() => {
     if (open) {
       loadEntries();
-      resetSignal += 1;
+      // `resetSignal += 1` is a read+write; without untrack the read would
+      // make this effect depend on resetSignal, and the write would then
+      // re-trigger it — pegging the JS thread and freezing the dialog.
+      untrack(() => { resetSignal += 1; });
     }
   });
 
