@@ -206,6 +206,17 @@ select {
   width: 100%;
 }
 
+/* Checkboxes and radios use the native control sizing — width:100% would
+   stretch them to the row width and push their label text onto the next
+   line (most visible on Windows; macOS sometimes shrugs it off). */
+input[type="checkbox"],
+input[type="radio"] {
+  width: auto;
+  padding: 0;
+  background-color: transparent;
+  border: none;
+}
+
 input:focus,
 textarea:focus,
 select:focus {

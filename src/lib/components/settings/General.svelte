@@ -482,4 +482,16 @@
     font-size: 0.8rem;
     margin: 4px 0 0 0;
   }
+
+  /* Inline a checkbox with its label text on a single row. */
+  .toggle-label,
+  .checkbox-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
 </style>
