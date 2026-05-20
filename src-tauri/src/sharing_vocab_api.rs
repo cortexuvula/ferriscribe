@@ -1,7 +1,8 @@
-//! Server-canonical sync APIs for paired clients (vocabulary + context
-//! templates). Lives on the office server alongside the sharing service.
-//! Bearer-validated against the same `TokenStore` the auth proxy uses,
-//! so any client whose pairing has been revoked is rejected here too.
+//! Server-canonical sync APIs for paired clients (vocabulary, context
+//! templates, and the per-user spellcheck dictionary). Lives on the
+//! office server alongside the sharing service. Bearer-validated against
+//! the same `TokenStore` the auth proxy uses, so any client whose
+//! pairing has been revoked is rejected here too.
 //!
 //! Routes:
 //!   /v1/vocabulary
@@ -16,14 +17,21 @@
 //!     POST   /upsert                 — { name, body }
 //!     POST   /rename                 — { old_name, new_name }
 //!     POST   /delete                 — { name }
+//!   /v1/user-dictionary
+//!     GET    /                       — list all words
+//!     POST   /                       — add word { word }
+//!     DELETE /{word}                 — remove word
 //!
 //! Wire formats reuse the existing `VocabularyEntry` and `ContextTemplate`
 //! serde definitions, so clients deserialize directly into the same types
-//! used for the local DB.
+//! used for the local DB. The dictionary uses `Vec<String>` (list) and
+//! `bool` (add/remove outcome).
 //!
-//! No PHI passes through these routes — vocabulary is correction terms
-//! and templates are visit-style boilerplate; neither carries patient
-//! content — so logging request paths and status codes is safe.
+//! Vocabulary and context templates carry no patient content. Dictionary
+//! words MAY include patient-context-specific terms a clinician added,
+//! so the dictionary handlers log only word lengths and boolean outcomes
+//! — never the word value. Request paths and status codes remain safe to
+//! log for all three route groups.
 
 use std::sync::Arc;
 
