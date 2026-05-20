@@ -206,16 +206,26 @@ impl SpeakerDiarizer {
             }
         }
 
-        // Flush final segment if still speaking at end
+        // Flush final segment if still speaking at end.
+        //
+        // `start_offset` is set from the model's frame `offset`, which advances
+        // across the zero-padded tail (we pad to a 10 s window boundary at
+        // line 132). When a recording ends mid-speech, `start_offset` can
+        // land past `samples_i16.len()` — past the real audio, inside the
+        // padding — and `samples_i16[start_idx..]` panics. Clamp the same way
+        // the in-loop end-of-speech branch already does (lines 189–193); drop
+        // the segment when the open-speech region was wholly inside the pad.
         if is_speeching {
             let start = start_offset / sample_rate as f64;
             let end = samples_i16.len() as f64 / sample_rate as f64;
             let start_idx = (start * sample_rate as f64) as usize;
-            segments.push(SpeechSegment {
-                start,
-                end,
-                samples: samples_i16[start_idx..].to_vec(),
-            });
+            if start_idx < samples_i16.len() {
+                segments.push(SpeechSegment {
+                    start,
+                    end,
+                    samples: samples_i16[start_idx..].to_vec(),
+                });
+            }
         }
 
         Ok(segments)
