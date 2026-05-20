@@ -40,7 +40,7 @@ handlers to that same router:
 |--------|-------------------------------|---------------------|----------------|
 | GET    | `/v1/user-dictionary`         | —                   | `Vec<String>`  |
 | POST   | `/v1/user-dictionary`         | `{ "word": "..." }` | `bool` (true if a new row was inserted) |
-| DELETE | `/v1/user-dictionary/{word}`  | —                   | 204 No Content |
+| DELETE | `/v1/user-dictionary/{word}`  | —                   | `bool` (true if a row was deleted) |
 
 - All three call `medical_db::user_dictionary::UserDictionaryRepo` against
   the office server's local SQLite DB.
@@ -112,8 +112,10 @@ port" branch on the client, all to solve a problem the 404 already solves.
 - `user_dict_add(word)` paired → `POST /v1/user-dictionary { word }` →
   server runs `UserDictionaryRepo::add`. Returns `bool`.
 - `user_dict_remove(word)` paired → `DELETE /v1/user-dictionary/{word}`
-  (path-encoded) → server runs `UserDictionaryRepo::remove`. Returns
-  `bool`.
+  (path-encoded) → server runs `UserDictionaryRepo::remove`. Server
+  responds 200 with a JSON `bool` (true if a row was deleted) so the
+  frontend's `removeUserDict(): Promise<boolean>` contract is
+  preserved on both code paths.
 - Unpaired paths unchanged.
 
 ### Source-of-truth rule
