@@ -1,7 +1,8 @@
-//! Server-canonical sync APIs for paired clients (vocabulary + context
-//! templates). Lives on the office server alongside the sharing service.
-//! Bearer-validated against the same `TokenStore` the auth proxy uses,
-//! so any client whose pairing has been revoked is rejected here too.
+//! Server-canonical sync APIs for paired clients (vocabulary, context
+//! templates, and the per-user spellcheck dictionary). Lives on the
+//! office server alongside the sharing service. Bearer-validated against
+//! the same `TokenStore` the auth proxy uses, so any client whose
+//! pairing has been revoked is rejected here too.
 //!
 //! Routes:
 //!   /v1/vocabulary
@@ -16,14 +17,21 @@
 //!     POST   /upsert                 — { name, body }
 //!     POST   /rename                 — { old_name, new_name }
 //!     POST   /delete                 — { name }
+//!   /v1/user-dictionary
+//!     GET    /                       — list all words
+//!     POST   /                       — add word { word }
+//!     DELETE /{word}                 — remove word
 //!
 //! Wire formats reuse the existing `VocabularyEntry` and `ContextTemplate`
 //! serde definitions, so clients deserialize directly into the same types
-//! used for the local DB.
+//! used for the local DB. The dictionary uses `Vec<String>` (list) and
+//! `bool` (add/remove outcome).
 //!
-//! No PHI passes through these routes — vocabulary is correction terms
-//! and templates are visit-style boilerplate; neither carries patient
-//! content — so logging request paths and status codes is safe.
+//! Vocabulary and context templates carry no patient content. Dictionary
+//! words MAY include patient-context-specific terms a clinician added,
+//! so the dictionary handlers log only word lengths and boolean outcomes
+//! — never the word value. Request paths and status codes remain safe to
+//! log for all three route groups.
 
 use std::sync::Arc;
 
@@ -66,6 +74,8 @@ pub async fn spawn(
         .route("/v1/context-templates/upsert", axum::routing::post(templates_upsert_handler))
         .route("/v1/context-templates/rename", axum::routing::post(templates_rename_handler))
         .route("/v1/context-templates/delete", axum::routing::post(templates_delete_handler))
+        .route("/v1/user-dictionary", get(dict_list_handler).post(dict_add_handler))
+        .route("/v1/user-dictionary/{word}", axum::routing::delete(dict_remove_handler))
         .with_state(state);
 
     let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse()
@@ -445,5 +455,85 @@ async fn templates_delete_handler(
         code
     })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── User dictionary handlers ────────────────────────────────────────────
+//
+// Per-user spellcheck wordlist. Reads/writes hit
+// `medical_db::user_dictionary::UserDictionaryRepo` against the office
+// server's local SQLite DB. Same bearer auth + spawn_blocking pattern as
+// the vocab handlers above. No PHI in logs.
+
+#[derive(Deserialize)]
+struct DictAddBody {
+    word: String,
+}
+
+async fn dict_list_handler(
+    AxumState(state): AxumState<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<String>>, StatusCode> {
+    let _ = authorize(&state, &headers)?;
+    let db = Arc::clone(&state.db);
+    let words = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+        let conn = db.conn().map_err(|e| e.to_string())?;
+        medical_db::user_dictionary::UserDictionaryRepo::list(&conn)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        warn!("dict_api list failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    debug!(count = words.len(), "dict_api: list");
+    Ok(Json(words))
+}
+
+async fn dict_add_handler(
+    AxumState(state): AxumState<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<DictAddBody>,
+) -> Result<Json<bool>, StatusCode> {
+    let _ = authorize(&state, &headers)?;
+    let db = Arc::clone(&state.db);
+    let word = body.word;
+    let word_len = word.len();
+    let added = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let conn = db.conn().map_err(|e| e.to_string())?;
+        medical_db::user_dictionary::UserDictionaryRepo::add(&conn, &word)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        warn!("dict_api add failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    info!(word_len, added, "dict_api: add");
+    Ok(Json(added))
+}
+
+async fn dict_remove_handler(
+    AxumState(state): AxumState<ApiState>,
+    headers: HeaderMap,
+    Path(word): Path<String>,
+) -> Result<Json<bool>, StatusCode> {
+    let _ = authorize(&state, &headers)?;
+    let db = Arc::clone(&state.db);
+    let word_len = word.len();
+    let removed = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let conn = db.conn().map_err(|e| e.to_string())?;
+        medical_db::user_dictionary::UserDictionaryRepo::remove(&conn, &word)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        warn!("dict_api remove failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    info!(word_len, removed, "dict_api: remove");
+    Ok(Json(removed))
 }
 
