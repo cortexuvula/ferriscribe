@@ -12,7 +12,7 @@ A Tauri + Svelte 5 + Rust desktop app for clinicians: records consultations, tra
 
 - **Plan execution:** prefer subagent-driven development (`superpowers:subagent-driven-development`) with TDD per task, fresh subagent per task, two-stage review (spec compliance, then code quality).
 - **Branch hygiene:** isolated git worktrees under `.worktrees/` (already gitignored). Never start implementation directly on `master`.
-- **Versioning:** synchronized across `src-tauri/Cargo.toml`, `package.json`, and `src-tauri/tauri.conf.json`. Tag releases as `vX.Y.Z`; the GitHub Actions workflow `release.yml` builds installers on tag push.
+- **Versioning:** synchronized across `src-tauri/Cargo.toml`, `package.json`, and `src-tauri/tauri.conf.json`. Tag releases as `vX.Y.Z` for stable or `vX.Y.Z-beta.N` (or any semver pre-release suffix containing `-`) for prereleases. `release.yml` builds installers on tag push and marks tags with a `-` as GitHub prereleases. Promote a beta to stable by tagging the same commit `vX.Y.Z`.
 
 ## Toolchain notes
 

@@ -87,5 +87,8 @@ jobs:
           releaseName: 'FerriScribe ${{ github.ref_name }}'
           releaseBody: 'See the assets below to download and install this version.'
           releaseDraft: false
-          prerelease: false
+          # Tags with a semver pre-release suffix (e.g. v0.10.85-beta.1) ship
+          # as GitHub prereleases; plain vX.Y.Z tags ship as stable. Promote
+          # a beta to stable by tagging the same commit vX.Y.Z.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           args: --target ${{ matrix.target }}
