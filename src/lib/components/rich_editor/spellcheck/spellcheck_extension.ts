@@ -77,6 +77,11 @@ function scanDecorations(doc: ProseMirrorNode): DecorationSet {
 // re-scan exactly once.
 let DICT_LOADED = false;
 let SEEN_LOADED = false;
+
+/** Active editor views — tracked so `requestSpellcheckRescan` can be called
+ *  without a specific view reference (e.g., from the DictionaryDialog in
+ *  Settings, which doesn't have access to any editor). */
+const activeViews = new Set<EditorView>();
 function DICT_JUST_LOADED(): boolean {
   if (DICT_LOADED && !SEEN_LOADED) {
     SEEN_LOADED = true;
@@ -134,6 +139,14 @@ export const Spellcheck = Extension.create<SpellcheckOptions>({
     return [
       new Plugin<DecorationSet>({
         key: SPELLCHECK_PLUGIN_KEY,
+        view(editorView) {
+          activeViews.add(editorView);
+          return {
+            destroy() {
+              activeViews.delete(editorView);
+            },
+          };
+        },
         state: {
           init: (_cfg, state) => scanDecorations(state.doc),
           apply(tr: Transaction, oldSet, _oldState, newState) {
@@ -185,7 +198,20 @@ export const Spellcheck = Extension.create<SpellcheckOptions>({
 
 /** Dispatch a no-op transaction tagged with the rescan meta so the
  *  spellcheck plugin re-runs `scanDecorations`. Use after mutating the
- *  user dictionary or session-ignore set from outside the editor. */
-export function requestSpellcheckRescan(view: EditorView): void {
-  view.dispatch(view.state.tr.setMeta(RESCAN_META, true));
+ *  user dictionary or session-ignore set from outside the editor.
+ *
+ *  If `view` is provided, rescans only that view. Otherwise rescans all
+ *  active editor views (tracked via the plugin's `view` lifecycle hook). */
+export function requestSpellcheckRescan(view?: EditorView): void {
+  if (view) {
+    view.dispatch(view.state.tr.setMeta(RESCAN_META, true));
+  } else {
+    for (const v of activeViews) {
+      try {
+        v.dispatch(v.state.tr.setMeta(RESCAN_META, true));
+      } catch (e) {
+        console.error('spellcheck rescan failed for view:', e);
+      }
+    }
+  }
 }

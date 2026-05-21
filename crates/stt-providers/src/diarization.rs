@@ -31,32 +31,32 @@ struct SpeechSegment {
     samples: Vec<i16>,
 }
 
-/// Safely push a speech segment if the start index is within bounds.
+/// Safely push a speech segment if it spans a non-empty range of real audio.
 ///
-/// Converts time offsets to sample indices and guards against out-of-bounds
-/// slicing when the model's frame offset lands past the real audio (e.g., in
-/// zero-padded regions). Returns true if a segment was pushed.
+/// `start_offset` and `end_samples` are both in **sample units** (not seconds).
+/// Guards against out-of-bounds slicing when the model's frame offset lands
+/// past the real audio (e.g., in zero-padded regions), and drops segments
+/// whose clamped range is empty — the downstream fbank extractor panics or
+/// produces NaN on zero-length input.
 fn push_segment_if_valid(
     segments: &mut Vec<SpeechSegment>,
     start_offset: f64,
     end_samples: usize,
     samples_i16: &[i16],
     sample_rate: f64,
-) -> bool {
-    let start = start_offset / sample_rate;
-    let end = end_samples as f64 / sample_rate;
-    let start_idx = (start * sample_rate) as usize;
+) {
+    let start_idx = start_offset as usize;
+    let end_idx = end_samples.min(samples_i16.len());
 
-    if start_idx < samples_i16.len() {
-        segments.push(SpeechSegment {
-            start,
-            end,
-            samples: samples_i16[start_idx..end_samples.min(samples_i16.len())].to_vec(),
-        });
-        true
-    } else {
-        false
+    if start_idx >= end_idx {
+        return;
     }
+
+    segments.push(SpeechSegment {
+        start: start_offset / sample_rate,
+        end: end_idx as f64 / sample_rate,
+        samples: samples_i16[start_idx..end_idx].to_vec(),
+    });
 }
 
 /// Speaker diarization using pyannote ONNX models.
@@ -235,9 +235,9 @@ impl SpeakerDiarizer {
         // Flush final segment if still speaking at end.
         //
         // `start_offset` is set from the model's frame `offset`, which advances
-        // across the zero-padded tail (we pad to a 10 s window boundary at
-        // line 132). When a recording ends mid-speech, `start_offset` can
-        // land past `samples_i16.len()` — past the real audio, inside the
+        // across the zero-padded tail (we pad to a 10 s window boundary in the
+        // padding block above). When a recording ends mid-speech, `start_offset`
+        // can land past `samples_i16.len()` — past the real audio, inside the
         // padding — and `samples_i16[start_idx..]` panics. The helper drops
         // the segment when the open-speech region was wholly inside the pad.
         if is_speeching {
@@ -417,5 +417,57 @@ mod tests {
         );
         let result = diarizer.diarize(&[0i16; 16000], 16000);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn push_segment_if_valid_normal_case() {
+        let mut segments = Vec::new();
+        let samples = vec![0i16; 16000];
+        push_segment_if_valid(&mut segments, 0.0, 8000, &samples, 16000.0);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start, 0.0);
+        assert_eq!(segments[0].end, 0.5);
+        assert_eq!(segments[0].samples.len(), 8000);
+    }
+
+    #[test]
+    fn push_segment_if_valid_start_past_end() {
+        let mut segments = Vec::new();
+        let samples = vec![0i16; 16000];
+        push_segment_if_valid(&mut segments, 10000.0, 5000, &samples, 16000.0);
+        assert_eq!(segments.len(), 0);
+    }
+
+    #[test]
+    fn push_segment_if_valid_start_past_buffer() {
+        let mut segments = Vec::new();
+        let samples = vec![0i16; 16000];
+        push_segment_if_valid(&mut segments, 20000.0, 25000, &samples, 16000.0);
+        assert_eq!(segments.len(), 0);
+    }
+
+    #[test]
+    fn push_segment_if_valid_end_clamped() {
+        let mut segments = Vec::new();
+        let samples = vec![0i16; 16000];
+        push_segment_if_valid(&mut segments, 8000.0, 20000, &samples, 16000.0);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].samples.len(), 8000);
+    }
+
+    #[test]
+    fn push_segment_if_valid_empty_buffer() {
+        let mut segments = Vec::new();
+        let samples: Vec<i16> = Vec::new();
+        push_segment_if_valid(&mut segments, 0.0, 100, &samples, 16000.0);
+        assert_eq!(segments.len(), 0);
+    }
+
+    #[test]
+    fn push_segment_if_valid_zero_length_segment() {
+        let mut segments = Vec::new();
+        let samples = vec![0i16; 16000];
+        push_segment_if_valid(&mut segments, 5000.0, 5000, &samples, 16000.0);
+        assert_eq!(segments.len(), 0);
     }
 }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { getSpellchecker } from './rich_editor/spellcheck/spellchecker';
+  import { requestSpellcheckRescan } from './rich_editor/spellcheck/spellcheck_extension';
   import { listUserDict } from '../api/userDictionary';
   import { toasts } from '../stores/toasts.svelte';
 
@@ -56,6 +57,7 @@
       }
       newWord = '';
       await loadWords();
+      requestSpellcheckRescan();
     } catch (err) {
       console.error('Failed to add word:', err);
       addError = String(err) || 'Failed to add word.';
@@ -66,6 +68,7 @@
     try {
       await getSpellchecker().removeFromUserDict(word);
       await loadWords();
+      requestSpellcheckRescan();
     } catch (err) {
       console.error('Failed to remove word:', err);
       toasts.error(`Failed to remove word: ${err}`);

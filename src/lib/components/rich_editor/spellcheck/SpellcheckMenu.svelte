@@ -43,15 +43,15 @@
   async function addToDictionary() {
     if (!request) return;
     await spell.addToUserDict(request.word);
-    // Re-scan so the squiggle clears on this and other occurrences.
-    if (editor) requestSpellcheckRescan(editor.view);
+    // Re-scan all active editors so the squiggle clears everywhere.
+    requestSpellcheckRescan();
     onClose();
   }
 
   function ignoreOnce() {
     if (!request) return;
     spell.ignoreInSession(request.word);
-    if (editor) requestSpellcheckRescan(editor.view);
+    requestSpellcheckRescan();
     onClose();
   }
 
