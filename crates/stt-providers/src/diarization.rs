@@ -31,6 +31,34 @@ struct SpeechSegment {
     samples: Vec<i16>,
 }
 
+/// Safely push a speech segment if the start index is within bounds.
+///
+/// Converts time offsets to sample indices and guards against out-of-bounds
+/// slicing when the model's frame offset lands past the real audio (e.g., in
+/// zero-padded regions). Returns true if a segment was pushed.
+fn push_segment_if_valid(
+    segments: &mut Vec<SpeechSegment>,
+    start_offset: f64,
+    end_samples: usize,
+    samples_i16: &[i16],
+    sample_rate: f64,
+) -> bool {
+    let start = start_offset / sample_rate;
+    let end = end_samples as f64 / sample_rate;
+    let start_idx = (start * sample_rate) as usize;
+
+    if start_idx < samples_i16.len() {
+        segments.push(SpeechSegment {
+            start,
+            end,
+            samples: samples_i16[start_idx..end_samples.min(samples_i16.len())].to_vec(),
+        });
+        true
+    } else {
+        false
+    }
+}
+
 /// Speaker diarization using pyannote ONNX models.
 pub struct SpeakerDiarizer {
     segmentation_path: PathBuf,
@@ -112,6 +140,10 @@ impl SpeakerDiarizer {
         samples_i16: &[i16],
         sample_rate: u32,
     ) -> AppResult<Vec<SpeechSegment>> {
+        if samples_i16.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut session = Session::builder()
             .map_err(|e| AppError::SttProvider(format!("Failed to create segmentation session builder: {e}")))?
             .with_intra_threads(1)
@@ -123,6 +155,8 @@ impl SpeakerDiarizer {
         let frame_size: usize = 270;
         let frame_start: usize = 721;
 
+        let sr_f64 = sample_rate as f64;
+
         let mut is_speeching = false;
         let mut offset: usize;
         let mut start_offset = 0.0_f64;
@@ -132,7 +166,8 @@ impl SpeakerDiarizer {
         let mut padded = Vec::from(samples_i16);
         let remainder = padded.len() % window_size;
         if remainder != 0 {
-            padded.extend(vec![0i16; window_size - remainder]);
+            let pad_len = window_size - remainder;
+            padded.resize(padded.len() + pad_len, 0i16);
         }
 
         for chunk_start in (0..padded.len()).step_by(window_size) {
@@ -183,22 +218,13 @@ impl SpeakerDiarizer {
                         }
                     } else if is_speeching {
                         // End of speech segment
-                        let start = start_offset / sample_rate as f64;
-                        let end = offset as f64 / sample_rate as f64;
-
-                        let start_idx =
-                            (start * sample_rate as f64).min((samples_i16.len() - 1) as f64)
-                                as usize;
-                        let end_idx =
-                            (end * sample_rate as f64).min(samples_i16.len() as f64) as usize;
-
-                        if end_idx > start_idx {
-                            segments.push(SpeechSegment {
-                                start,
-                                end,
-                                samples: samples_i16[start_idx..end_idx].to_vec(),
-                            });
-                        }
+                        push_segment_if_valid(
+                            &mut segments,
+                            start_offset,
+                            offset,
+                            samples_i16,
+                            sr_f64,
+                        );
                         is_speeching = false;
                     }
                     offset += frame_size;
@@ -212,20 +238,16 @@ impl SpeakerDiarizer {
         // across the zero-padded tail (we pad to a 10 s window boundary at
         // line 132). When a recording ends mid-speech, `start_offset` can
         // land past `samples_i16.len()` — past the real audio, inside the
-        // padding — and `samples_i16[start_idx..]` panics. Clamp the same way
-        // the in-loop end-of-speech branch already does (lines 189–193); drop
+        // padding — and `samples_i16[start_idx..]` panics. The helper drops
         // the segment when the open-speech region was wholly inside the pad.
         if is_speeching {
-            let start = start_offset / sample_rate as f64;
-            let end = samples_i16.len() as f64 / sample_rate as f64;
-            let start_idx = (start * sample_rate as f64) as usize;
-            if start_idx < samples_i16.len() {
-                segments.push(SpeechSegment {
-                    start,
-                    end,
-                    samples: samples_i16[start_idx..].to_vec(),
-                });
-            }
+            push_segment_if_valid(
+                &mut segments,
+                start_offset,
+                samples_i16.len(),
+                samples_i16,
+                sr_f64,
+            );
         }
 
         Ok(segments)
