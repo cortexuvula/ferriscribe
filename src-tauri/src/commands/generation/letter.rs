@@ -101,6 +101,7 @@ async fn generate_letter_inner(
     let (system_prompt, user_prompt) = document_generator::build_letter_prompt(
         soap_note,
         ltype,
+        None, // audience — legacy command, no audience support yet
         settings.custom_letter_prompt.as_deref(),
     );
 

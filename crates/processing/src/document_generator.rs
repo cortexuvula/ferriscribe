@@ -10,6 +10,22 @@ use chrono::Local;
 
 use crate::prompt_resolver::resolve_prompt;
 
+// ---------------------------------------------------------------------------
+// Letter audience context
+// ---------------------------------------------------------------------------
+
+/// Lightweight prompt-relevant subset of `medical_core::types::LetterAudience`.
+///
+/// Carries only the fields needed for prompt construction so that callers don't
+/// need to pass the full DB entity (with id, timestamps, etc.) into the prompt
+/// builder.
+#[derive(Debug, Clone)]
+pub struct LetterAudienceContext {
+    pub name: String,
+    pub system_prompt: String,
+    pub user_template: Option<String>,
+}
+
 fn format_now_for_prompt() -> String {
     Local::now().format("Time %H:%M Date %d %b %Y").to_string()
 }
@@ -82,21 +98,57 @@ pub fn build_referral_prompt(
 // ---------------------------------------------------------------------------
 
 /// Build `(system_prompt, user_prompt)` for generating patient correspondence.
+///
+/// # Resolution order
+/// 1. If `audience` is provided AND has `user_template`, use the audience's
+///    `system_prompt` and `user_template` (with `{letter_type}`, `{soap_note}`,
+///    `{time_date}` placeholders resolved).
+/// 2. If `audience` is provided but has no `user_template`, use the audience's
+///    `system_prompt` and the default user template with the audience name.
+/// 3. If `audience` is `None`, fall back to legacy behaviour: use
+///    `custom_template` if provided, otherwise the default letter prompt.
 pub fn build_letter_prompt(
     soap_note: &str,
     letter_type: &str,
+    audience: Option<&LetterAudienceContext>,
     custom_template: Option<&str>,
 ) -> (String, String) {
-    let template = custom_template
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default_letter_prompt());
+    let time_date = format_now_for_prompt();
 
     let mut placeholders = HashMap::new();
     placeholders.insert("letter_type", letter_type.to_string());
 
-    let system = resolve_prompt(template, &placeholders);
+    if let Some(aud) = audience {
+        // Audience provided — use its system prompt
+        let system = aud.system_prompt.clone();
 
-    let time_date = format_now_for_prompt();
+        if let Some(ref user_tmpl) = aud.user_template {
+            // Case 1: audience with user_template — resolve placeholders
+            let user = resolve_audience_user_template(
+                user_tmpl, letter_type, &time_date, soap_note,
+            );
+            return (system, user);
+        }
+
+        // Case 2: audience without user_template — default user template with audience name
+        let user = format!(
+            "Please write a {letter_type} letter for {audience_name} based on the following SOAP \
+             note:\n\n{time_date}\n\n{soap_note}",
+            letter_type = letter_type,
+            audience_name = aud.name,
+            time_date = time_date,
+            soap_note = soap_note,
+        );
+        return (system, user);
+    }
+
+    // Case 3: no audience — legacy behaviour
+    let template = custom_template
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_letter_prompt());
+
+    let system = resolve_prompt(&template, &placeholders);
+
     let user = format!(
         "Please write a {letter_type} letter for the patient based on the following SOAP \
          note:\n\n{time_date}\n\n{soap_note}",
@@ -106,6 +158,20 @@ pub fn build_letter_prompt(
     );
 
     (system, user)
+}
+
+/// Resolve `{letter_type}`, `{time_date}`, and `{soap_note}` in an audience user template.
+fn resolve_audience_user_template(
+    template: &str,
+    letter_type: &str,
+    time_date: &str,
+    soap_note: &str,
+) -> String {
+    let mut out = template.to_string();
+    out = out.replace("{letter_type}", letter_type);
+    out = out.replace("{time_date}", time_date);
+    out = out.replace("{soap_note}", soap_note);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +240,7 @@ mod tests {
     #[test]
     fn letter_default_contains_type() {
         let soap = "S: Anxiety\nO: HR 90\nA: GAD\nP: CBT referral";
-        let (system, user) = build_letter_prompt(soap, "results", None);
+        let (system, user) = build_letter_prompt(soap, "results", None, None);
 
         assert!(system.contains("results"));
         assert!(!system.contains("{letter_type}"));
@@ -186,8 +252,82 @@ mod tests {
     fn letter_custom_template_overrides() {
         let soap = "S: foo";
         let custom = "CUSTOM: {letter_type} letter";
-        let (system, _user) = build_letter_prompt(soap, "follow-up", Some(custom));
+        let (system, _user) = build_letter_prompt(soap, "follow-up", None, Some(custom));
         assert!(system.starts_with("CUSTOM: follow-up letter"));
+    }
+
+    #[test]
+    fn letter_with_audience_uses_audience_prompts() {
+        let soap = "S: Chest tightness\nO: ECG normal\nA: Musculoskeletal chest pain\nP: Reassure";
+        let audience = LetterAudienceContext {
+            name: "Insurance Company".into(),
+            system_prompt: "You are writing to an insurance company. Be factual and concise.".into(),
+            user_template: Some(
+                "Generate a {letter_type} letter for the insurance company.\n\
+                 Reference date: {time_date}\n\nSOAP note:\n{soap_note}"
+                    .into(),
+            ),
+        };
+        let (system, user) = build_letter_prompt(soap, "medical report", Some(&audience), None);
+
+        assert!(system.contains("insurance company"));
+        assert!(system.contains("factual and concise"));
+        assert!(user.contains("medical report"));
+        assert!(user.contains("insurance company"));
+        assert!(user.contains("Chest tightness"));
+        assert!(user.contains("Time"));
+    }
+
+    #[test]
+    fn letter_with_audience_no_user_template_uses_default() {
+        let soap = "S: Headache\nO: Neuro exam normal\nA: Tension headache\nP: Analgesia";
+        let audience = LetterAudienceContext {
+            name: "Employer".into(),
+            system_prompt: "Write a professional letter to an employer regarding fitness for work.".into(),
+            user_template: None,
+        };
+        let (system, user) = build_letter_prompt(soap, "fitness", Some(&audience), None);
+
+        assert!(system.contains("fitness for work"));
+        // Default user template should include audience name
+        assert!(user.contains("for Employer"));
+        assert!(user.contains("fitness"));
+        assert!(user.contains("Headache"));
+    }
+
+    #[test]
+    fn letter_without_audience_uses_legacy_behavior() {
+        let soap = "S: Back pain\nO: Limited flexion\nA: Lumbar strain\nP: Physio";
+        // audience=None, custom_template=None -> default
+        let (system, user) = build_letter_prompt(soap, "results", None, None);
+        assert!(system.contains("patient-friendly"));
+        assert!(user.contains("for the patient"));
+        assert!(user.contains("results"));
+
+        // audience=None, custom_template=Some -> custom
+        let custom = "LEGACY CUSTOM: {letter_type}";
+        let (system2, _user2) = build_letter_prompt(soap, "summary", None, Some(custom));
+        assert!(system2.starts_with("LEGACY CUSTOM: summary"));
+    }
+
+    #[test]
+    fn letter_audience_ignores_custom_template() {
+        let soap = "S: Dizziness\nO: CN intact\nA: BPPV\nP: Epley manoeuvre";
+        let audience = LetterAudienceContext {
+            name: "Specialist".into(),
+            system_prompt: "Write to a specialist colleague.".into(),
+            user_template: Some("AUDIENCE USER: {letter_type} re {soap_note}".into()),
+        };
+        let custom = "THIS CUSTOM TEMPLATE SHOULD BE IGNORED";
+
+        // Even though custom_template is provided, audience takes precedence
+        let (system, user) = build_letter_prompt(soap, "referral", Some(&audience), Some(custom));
+
+        assert!(system.contains("specialist colleague"));
+        assert!(!system.contains("THIS CUSTOM TEMPLATE"));
+        assert!(user.starts_with("AUDIENCE USER:"));
+        assert!(user.contains("referral"));
+        assert!(user.contains("Dizziness"));
     }
 
     #[test]
