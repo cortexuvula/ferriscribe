@@ -8,6 +8,7 @@ pub mod rag;
 pub mod settings;
 pub mod vocabulary;
 pub mod endpoint;
+pub mod letter_audience;
 
 pub use recording::*;
 pub use processing::*;
@@ -19,3 +20,4 @@ pub use rag::*;
 pub use settings::*;
 pub use vocabulary::*;
 pub use endpoint::*;
+pub use letter_audience::LetterAudience;
