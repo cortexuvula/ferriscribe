@@ -1,9 +1,11 @@
 //! `generate_letter` Tauri command — turns a recording's SOAP note into a patient letter.
 
 use medical_core::error::{AppError, AppResult};
-use medical_processing::document_generator;
+use medical_db::LetterAudiencesRepo;
+use medical_processing::document_generator::{self, LetterAudienceContext};
 use tauri::Emitter;
 use tracing::debug;
+use uuid::Uuid;
 
 use crate::state::AppState;
 
@@ -21,6 +23,7 @@ pub async fn generate_letter(
     state: tauri::State<'_, AppState>,
     recording_id: String,
     letter_type: Option<String>,
+    audience_id: Option<Uuid>,
 ) -> AppResult<String> {
     let _ = app.emit(
         "generation-progress",
@@ -31,7 +34,9 @@ pub async fn generate_letter(
         },
     );
 
-    let result = generate_letter_inner(&state, &recording_id, letter_type.as_deref()).await;
+    let result =
+        generate_letter_inner(&state, &recording_id, letter_type.as_deref(), audience_id.as_ref())
+            .await;
 
     match &result {
         Ok(_) => {
@@ -63,9 +68,25 @@ async fn generate_letter_inner(
     state: &AppState,
     recording_id: &str,
     letter_type: Option<&str>,
+    audience_id: Option<&Uuid>,
 ) -> AppResult<String> {
     let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
+
+    // If an audience_id is provided, fetch it from the DB and convert to context.
+    let audience_context: Option<LetterAudienceContext> = match audience_id {
+        Some(id) => {
+            let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+            let audience = LetterAudiencesRepo::get_by_id(&conn, id)
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            Some(LetterAudienceContext {
+                name: audience.name,
+                system_prompt: audience.system_prompt,
+                user_template: audience.user_template,
+            })
+        }
+        None => None,
+    };
 
     // Pre-flight: probe the remote AI endpoint before doing any work.
     // Skipped for loopback hosts; returns EndpointOffline on failure
@@ -101,7 +122,7 @@ async fn generate_letter_inner(
     let (system_prompt, user_prompt) = document_generator::build_letter_prompt(
         soap_note,
         ltype,
-        None, // audience — legacy command, no audience support yet
+        audience_context.as_ref(),
         settings.custom_letter_prompt.as_deref(),
     );
 
@@ -174,7 +195,8 @@ mod preflight_tests {
         let result = generate_letter_inner(
             &state,
             &recording_id,
-            None, // letter_type
+            None,  // letter_type
+            None,  // audience_id
         )
         .await;
         let elapsed = start.elapsed();
