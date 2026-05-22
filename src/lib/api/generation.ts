@@ -31,11 +31,13 @@ export async function generateReferral(
 
 export async function generateLetter(
   recordingId: string,
-  letterType?: string
+  letterType?: string,
+  audienceId?: string
 ): Promise<string> {
   return invokeWithOfflineHandling('generate_letter', {
     recordingId,
     letterType: letterType ?? null,
+    audienceId: audienceId ?? null,
   });
 }
 

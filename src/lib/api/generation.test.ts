@@ -46,17 +46,19 @@ describe('generation api', () => {
     });
   });
 
-  it('generateLetter null-coalesces letterType', async () => {
+  it('generateLetter null-coalesces letterType + audienceId', async () => {
     await generateLetter('rec-1', 'discharge');
     expect(invokeMock).toHaveBeenCalledWith('generate_letter', {
       recordingId: 'rec-1',
       letterType: 'discharge',
+      audienceId: null,
     });
     invokeMock.mockReset();
     await generateLetter('rec-2');
     expect(invokeMock).toHaveBeenCalledWith('generate_letter', {
       recordingId: 'rec-2',
       letterType: null,
+      audienceId: null,
     });
   });
 
