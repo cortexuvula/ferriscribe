@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 use medical_core::types::letter_audience::LetterAudience;
@@ -61,29 +61,28 @@ impl LetterAudiencesRepo {
     }
 
     pub fn delete(conn: &Connection, id: &Uuid) -> DbResult<()> {
-        // Check if the audience exists and whether it's built-in
-        let is_builtin: Result<i32, _> = conn.query_row(
-            "SELECT is_builtin FROM letter_audiences WHERE id = ?1",
+        let rows = conn.execute(
+            "DELETE FROM letter_audiences WHERE id = ?1 AND is_builtin = 0",
             [id.to_string()],
-            |r| r.get(0),
-        );
-
-        match is_builtin {
-            Ok(1) => Err(DbError::Constraint(
-                "cannot delete built-in letter audience".to_string(),
-            )),
-            Ok(0) => {
-                conn.execute(
-                    "DELETE FROM letter_audiences WHERE id = ?1",
+        )?;
+        if rows == 0 {
+            // Check if it's built-in (exists but can't be deleted) or truly not found
+            let is_builtin: Option<i32> = conn
+                .query_row(
+                    "SELECT is_builtin FROM letter_audiences WHERE id = ?1",
                     [id.to_string()],
-                )?;
-                Ok(())
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(DbError::Sqlite)?;
+            match is_builtin {
+                Some(1) => Err(DbError::Constraint(format!(
+                    "cannot delete built-in letter audience {id}"
+                ))),
+                _ => Err(DbError::NotFound(format!("letter audience {id}"))),
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                Err(DbError::NotFound(format!("letter audience {id}")))
-            }
-            Err(other) => Err(DbError::Sqlite(other)),
-            Ok(_) => unreachable!("is_builtin should only be 0 or 1"),
+        } else {
+            Ok(())
         }
     }
 
@@ -111,7 +110,7 @@ impl LetterAudiencesRepo {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Connection, LetterAudiencesRepo};
+    use crate::{Connection, Database, DbError, LetterAudiencesRepo};
     use medical_core::types::letter_audience::LetterAudience;
     use uuid::Uuid;
 
@@ -184,5 +183,46 @@ mod tests {
 
         let result = LetterAudiencesRepo::get_by_id(&conn, &id);
         assert!(result.is_err(), "audience should no longer exist");
+    }
+
+    #[test]
+    fn get_by_id_not_found() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+
+        let result = LetterAudiencesRepo::get_by_id(&conn, &Uuid::new_v4());
+        assert!(matches!(result, Err(DbError::NotFound(_))));
+    }
+
+    #[test]
+    fn delete_not_found() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+
+        let result = LetterAudiencesRepo::delete(&conn, &Uuid::new_v4());
+        assert!(matches!(result, Err(DbError::NotFound(_))));
+    }
+
+    #[test]
+    fn upsert_updates_existing() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+
+        let mut audience = LetterAudience::new(
+            "Original".to_string(),
+            "Original prompt".to_string(),
+            None,
+        );
+        LetterAudiencesRepo::upsert(&conn, &audience).unwrap();
+
+        audience.name = "Updated".to_string();
+        audience.system_prompt = "Updated prompt".to_string();
+        audience.user_template = Some("Template".to_string());
+        LetterAudiencesRepo::upsert(&conn, &audience).unwrap();
+
+        let fetched = LetterAudiencesRepo::get_by_id(&conn, &audience.id).unwrap();
+        assert_eq!(fetched.name, "Updated");
+        assert_eq!(fetched.system_prompt, "Updated prompt");
+        assert_eq!(fetched.user_template, Some("Template".to_string()));
     }
 }
