@@ -5,6 +5,7 @@
   import Audio from './settings/Audio.svelte';
   import Sharing from './settings/Sharing.svelte';
   import TrainingCorpus from './settings/TrainingCorpus.svelte';
+  import LetterAudiences from './settings/LetterAudiences.svelte';
   import { settingsNav, type SettingsSection } from '../stores/settingsNav.svelte.ts';
 
   type Section = SettingsSection;
@@ -26,6 +27,7 @@
     { id: 'audio', label: 'Audio / STT' },
     { id: 'sharing', label: 'Sharing' },
     { id: 'training-corpus', label: 'Training Corpus' },
+    { id: 'letter-audiences', label: 'Letter Audiences' },
   ];
 </script>
 
@@ -60,6 +62,9 @@
 
     {:else if activeSection === 'training-corpus'}
       <TrainingCorpus />
+
+    {:else if activeSection === 'letter-audiences'}
+      <LetterAudiences />
     {/if}
   </div>
 </div>

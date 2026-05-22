@@ -1,4 +1,4 @@
-export type SettingsSection = 'general' | 'prompts' | 'models' | 'audio' | 'sharing' | 'training-corpus';
+export type SettingsSection = 'general' | 'prompts' | 'models' | 'audio' | 'sharing' | 'training-corpus' | 'letter-audiences';
 
 interface SettingsNavState {
   /** When non-null the Settings dialog should open and navigate to this section. */
