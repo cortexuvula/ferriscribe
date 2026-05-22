@@ -22,41 +22,41 @@ pub fn up(conn: &Connection) -> DbResult<()> {
         "#,
     )?;
 
-    // Seed 6 built-in audiences
+    // Seed 6 built-in audiences (using valid UUIDs so the repo can reference them)
     let now = "2026-05-22T00:00:00Z";
     let builtins: Vec<(&str, &str, &str, Option<&str>)> = vec![
         (
-            "builtin-patient",
+            "00000000-0000-0000-0000-000000000001",
             "Patient",
             "You are a medical scribe assistant helping to write patient-friendly correspondence. Use clear, plain language the patient can understand. Avoid unexplained medical jargon. Be empathetic and professional.",
             None,
         ),
         (
-            "builtin-insurance",
+            "00000000-0000-0000-0000-000000000002",
             "Insurance Company",
             "You are a medical scribe assistant writing formal correspondence for insurance companies. Use precise medical necessity language, reference ICD-10 and CPT codes where applicable, and structure the letter to justify medical necessity for the requested service or treatment.",
             Some("Please write a {letter_type} letter for the insurance company based on the following SOAP note. Include a medical necessity statement, relevant diagnosis codes (ICD-10), and procedure codes (CPT) if applicable:\n\n{time_date}\n\n{soap_note}"),
         ),
         (
-            "builtin-tax",
+            "00000000-0000-0000-0000-000000000003",
             "Tax Authority",
             "You are a medical scribe assistant writing correspondence for tax authorities or disability benefit agencies. Focus on factual timeline, expense justification, and medical necessity. Use formal, objective language.",
             Some("Please write a {letter_type} letter for the tax authority based on the following SOAP note. Include service dates, cost justification, and medical necessity for the expenses or disability claim:\n\n{time_date}\n\n{soap_note}"),
         ),
         (
-            "builtin-specialist",
+            "00000000-0000-0000-0000-000000000004",
             "Specialist/Consultant",
             "You are a medical scribe assistant writing professional referral correspondence to a specialist or consultant. Use clinical detail, professional peer tone, and include relevant history, findings, and specific questions for the consultant.",
             Some("Please write a {letter_type} referral letter to the specialist based on the following SOAP note. Include relevant medical history, objective findings, and specific questions or requests for the consultant:\n\n{time_date}\n\n{soap_note}"),
         ),
         (
-            "builtin-employer",
+            "00000000-0000-0000-0000-000000000005",
             "Employer/School",
             "You are a medical scribe assistant writing correspondence for employers or educational institutions. Focus on functional limitations, recommended accommodations, and fitness-for-duty. Keep medical details minimal and HIPAA-compliant.",
             Some("Please write a {letter_type} letter for the employer or school based on the following SOAP note. Focus on functional limitations and recommended accommodations. Avoid unnecessary medical details:\n\n{time_date}\n\n{soap_note}"),
         ),
         (
-            "builtin-legal",
+            "00000000-0000-0000-0000-000000000006",
             "Legal/Court",
             "You are a medical scribe assistant writing formal medical opinion letters for legal proceedings or court. Use objective, factual language. Include chronological timeline, clinical findings, and professional medical opinion.",
             Some("Please write a {letter_type} letter for legal or court purposes based on the following SOAP note. Include a chronological timeline, objective clinical findings, and your professional medical opinion:\n\n{time_date}\n\n{soap_note}"),
@@ -148,7 +148,7 @@ mod tests {
         super::up(&conn).expect("migration");
         let template: Option<String> = conn
             .query_row(
-                "SELECT user_template FROM letter_audiences WHERE id='builtin-patient'",
+                "SELECT user_template FROM letter_audiences WHERE id='00000000-0000-0000-0000-000000000001'",
                 [],
                 |r| r.get(0),
             )
@@ -162,7 +162,7 @@ mod tests {
         super::up(&conn).expect("migration");
         let template: Option<String> = conn
             .query_row(
-                "SELECT user_template FROM letter_audiences WHERE id='builtin-insurance'",
+                "SELECT user_template FROM letter_audiences WHERE id='00000000-0000-0000-0000-000000000002'",
                 [],
                 |r| r.get(0),
             )

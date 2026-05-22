@@ -8,6 +8,8 @@ pub mod settings;
 pub mod audit;
 pub mod search;
 pub mod vocabulary;
+pub mod letter_audiences;
+pub use letter_audiences::LetterAudiencesRepo;
 pub mod vectors;
 pub mod generations;
 pub use generations::{Generation, GenerationInsert, GenerationsRepo};
