@@ -10,6 +10,21 @@
   import type { PatientContext } from '../types';
   import { formatError } from '../types/errors';
   import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
+  import { letterAudiences } from '../stores/letterAudiences.svelte';
+
+  let selectedAudienceId = $state<string | null>(null);
+  let letterType = $state('follow-up');
+
+  $effect(() => {
+    letterAudiences.list();
+  });
+
+  $effect(() => {
+    if (!selectedAudienceId && letterAudiences.audiences.length > 0) {
+      const patient = letterAudiences.audiences.find((a) => a.id === 'builtin-patient');
+      if (patient) selectedAudienceId = patient.id;
+    }
+  });
 
   let copyStatus = $state<Record<string, 'idle' | 'copying' | 'copied'>>({});
   let contextText = $state('');
@@ -106,8 +121,8 @@
         await generateSoap(recordingId, undefined, ctx, pc);
       } else if (type === 'referral') {
         await generateReferral(recordingId);
-      } else {
-        await generateLetter(recordingId);
+      } else if (type === 'letter') {
+        await generateLetter(recordingId, letterType || undefined, selectedAudienceId ?? undefined);
       }
       await Promise.all([
         selectRecording(recordingId),
@@ -243,9 +258,35 @@
           onCopy={() => handleCopy('referral')}
           onSpeedRead={() => handleSpeedRead('referral')}
         />
+        <div class="letter-controls">
+          <label class="field-label" for="letter-audience">Audience</label>
+          <select
+            id="letter-audience"
+            class="letter-select"
+            bind:value={selectedAudienceId}
+          >
+            {#each letterAudiences.audiences as audience}
+              <option value={audience.id}>{audience.name}</option>
+            {/each}
+          </select>
+
+          <label class="field-label" for="letter-type">Letter purpose</label>
+          <input
+            id="letter-type"
+            type="text"
+            class="letter-input"
+            placeholder="e.g. follow-up, pre-authorization"
+            bind:value={letterType}
+          />
+        </div>
         <GenerateItem
-          title="Patient Letter"
-          description="Patient-friendly summary of the consultation"
+          title="Letter"
+          description={selectedAudienceId
+            ? (() => {
+                const a = letterAudiences.audiences.find((x) => x.id === selectedAudienceId);
+                return a ? `Letter for ${a.name}` : 'Letter';
+              })()
+            : 'Letter'}
           generating={generation.state.generating === 'letter'}
           anyGenerating={generation.state.generating !== null}
           done={!!recordings.selectedRecording.letter}
@@ -508,5 +549,43 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  .letter-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background-color: var(--bg-card);
+  }
+
+  .letter-select,
+  .letter-input {
+    width: 100%;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    color: var(--text-primary);
+    background-color: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    transition: border-color 0.15s ease;
+  }
+
+  .letter-select {
+    appearance: auto;
+    cursor: pointer;
+  }
+
+  .letter-input::placeholder {
+    color: var(--text-muted);
+  }
+
+  .letter-select:focus,
+  .letter-input:focus {
+    outline: none;
+    border-color: var(--accent);
   }
 </style>
