@@ -564,7 +564,8 @@
   .letter-select,
   .letter-input {
     width: 100%;
-    padding: 8px 10px;
+    height: 34px;
+    padding: 0 10px;
     font-size: 13px;
     font-family: inherit;
     color: var(--text-primary);
@@ -572,6 +573,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     transition: border-color 0.15s ease;
+    box-sizing: border-box;
   }
 
   .letter-select {
