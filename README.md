@@ -13,6 +13,15 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 ### Documents & Review
 - **SOAP Note Generation** — AI-powered Subjective / Objective / Assessment / Plan notes from transcripts.
 - **Referral, Clinical Letter, and Synopsis Generation** — Templated AI generation with per-document custom prompts.
+- **Letter Audiences** — Generate letters tailored to different recipients:
+  - **Patient** — Plain language, empathetic
+  - **Insurance Company** — Medical necessity language, ICD/CPT codes
+  - **Tax Authority** — Expense justification, timeline
+  - **Specialist/Consultant** — Clinical detail, peer tone
+  - **Employer/School** — Accommodations, HIPAA-minimal
+  - **Legal/Court** — Formal opinion, timeline
+
+  Create custom audiences in **Settings → Letter Audiences** with your own system prompts and user templates.
 - **Context Templates** — Pre-built visit types (e.g. Follow-up, New Patient) with custom instructions layered on top of the base prompt; import/export as JSON.
 - **RSVP Speed Reader** — Rapid-serial-visual-presentation review mode for SOAP notes and transcripts — chunk-size, WPM, and per-section filters configurable in Settings.
 
