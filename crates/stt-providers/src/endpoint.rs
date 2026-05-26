@@ -24,10 +24,10 @@ pub async fn current_base_url(
 ) -> AppResult<String> {
     if let Some(ep) = endpoint {
         // Check cache validity
-        if let Some(c) = cache.as_ref() {
-            if c.resolved_at.elapsed() < CACHE_TTL {
-                return Ok(c.url.clone());
-            }
+        if let Some(c) = cache.as_ref()
+            && c.resolved_at.elapsed() < CACHE_TTL
+        {
+            return Ok(c.url.clone());
         }
 
         // Resolve endpoint (probe LAN then Tailscale)

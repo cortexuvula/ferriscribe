@@ -6,6 +6,7 @@
 //! so speaker labels still work even when Whisper is remote.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -31,7 +32,7 @@ use crate::endpoint;
 use crate::merge;
 use crate::whisper::WhisperSegment;
 
-const TRANSCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(600);
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 
 pub struct RemoteSttProvider {
@@ -89,7 +90,7 @@ impl RemoteSttProvider {
 
         let client = Client::builder()
             .pool_max_idle_per_host(4)
-            .connect_timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(10))
             .timeout(TRANSCRIBE_TIMEOUT)
             .build()
             .map_err(|e| AppError::SttProvider(format!("Failed to build HTTP client: {e}")))?;
@@ -128,7 +129,7 @@ impl RemoteSttProvider {
         let base_url = http_url(host, port);
         let client = Client::builder()
             .pool_max_idle_per_host(4)
-            .connect_timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(10))
             .timeout(TRANSCRIBE_TIMEOUT)
             .build()
             .map_err(|e| AppError::SttProvider(format!("Failed to build HTTP client: {e}")))?;
@@ -183,7 +184,7 @@ impl RemoteSttProvider {
     async fn current_base_url(&self) -> AppResult<String> {
         let ep_guard = self.endpoint.read().await;
         let mut cache_guard = self.url_cache.lock().await;
-        endpoint::current_base_url(&*ep_guard, &self.base_url, &mut *cache_guard).await
+        endpoint::current_base_url(&ep_guard, &self.base_url, &mut cache_guard).await
     }
 
     fn diarization_available(&self) -> bool {
