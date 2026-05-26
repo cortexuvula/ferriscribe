@@ -5,6 +5,9 @@ use medical_core::types::tts::{TtsConfig, VoiceInfo};
 use reqwest::Client;
 use serde::Serialize;
 
+use crate::TtsError;
+
+#[derive(Debug)]
 pub struct ElevenLabsTtsProvider {
     client: Client,
 }
@@ -25,17 +28,24 @@ struct VoiceSettings {
 }
 
 impl ElevenLabsTtsProvider {
-    pub fn new(api_key: &str) -> AppResult<Self> {
+    pub fn new(api_key: &str) -> Result<Self, TtsError> {
+        let api_key_header = api_key
+            .parse()
+            .map_err(|e| TtsError::InvalidHeader(format!("xi-api-key header: {e}")))?;
+        let content_type_header = "application/json"
+            .parse()
+            .map_err(|e| TtsError::InvalidHeader(format!("Content-Type header: {e}")))?;
+
         let client = Client::builder()
             .default_headers({
                 let mut h = reqwest::header::HeaderMap::new();
-                h.insert("xi-api-key", api_key.parse().unwrap());
-                h.insert("Content-Type", "application/json".parse().unwrap());
+                h.insert("xi-api-key", api_key_header);
+                h.insert("Content-Type", content_type_header);
                 h
             })
             .timeout(std::time::Duration::from_secs(60))
             .build()
-            .map_err(|e| AppError::TtsProvider(e.to_string()))?;
+            .map_err(|e| TtsError::Http(format!("failed to build HTTP client: {e}")))?;
         Ok(Self { client })
     }
 }
@@ -150,5 +160,30 @@ mod tests {
             client: reqwest::Client::new(),
         };
         assert_eq!(provider.name(), "elevenlabs");
+    }
+
+    #[test]
+    fn invalid_api_key_header_returns_error() {
+        // HTTP header values cannot contain newlines or non-ASCII characters
+        let invalid_api_key = "invalid\nkey\rwith\0control";
+        let result = ElevenLabsTtsProvider::new(invalid_api_key);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, TtsError::InvalidHeader(_)));
+
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("xi-api-key header"),
+            "error message should mention which header failed, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn valid_api_key_creates_provider() {
+        // Valid ASCII string should work
+        let valid_api_key = "test-api-key-12345_ABCDE";
+        let result = ElevenLabsTtsProvider::new(valid_api_key);
+        assert!(result.is_ok(), "valid API key should create provider");
     }
 }

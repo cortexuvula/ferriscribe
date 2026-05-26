@@ -25,7 +25,7 @@ impl EmbeddingGenerator {
     /// Create a generator backed by a local Ollama instance.
     ///
     /// Defaults to `http://localhost:11434` and the `nomic-embed-text` model (768 dims).
-    pub fn new_ollama(host: Option<&str>, model: Option<&str>) -> Self {
+    pub fn new_ollama(host: Option<&str>, model: Option<&str>) -> AppResult<Self> {
         // Embedding requests are short; bound connection at 10s and total
         // request at 120s — long enough for Ollama to load a model on first
         // call but short enough to avoid indefinite RAG ingestion stalls.
@@ -33,13 +33,13 @@ impl EmbeddingGenerator {
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .expect("reqwest client builder should not fail with valid config");
-        Self {
+            .map_err(|e| AppError::HttpClient(format!("failed to build HTTP client: {e}")))?;
+        Ok(Self {
             client,
             host: host.unwrap_or("http://localhost:11434").to_owned(),
             model: model.unwrap_or("nomic-embed-text").to_owned(),
             dim: 768,
-        }
+        })
     }
 
     /// The dimensionality of the vectors produced by this generator.
@@ -105,9 +105,14 @@ impl EmbeddingGenerator {
 }
 
 /// Default creates a local Ollama backend (local-first experience).
+///
+/// # Panics
+/// Panics only if the reqwest TLS backend fails to initialize, which cannot
+/// happen under normal system configurations. Use [`Self::new_ollama`] for
+/// fallible construction.
 impl Default for EmbeddingGenerator {
     fn default() -> Self {
-        Self::new_ollama(None, None)
+        Self::new_ollama(None, None).expect("default reqwest client config is valid")
     }
 }
 
@@ -121,7 +126,7 @@ mod tests {
 
     #[test]
     fn ollama_constructor_defaults() {
-        let emb = EmbeddingGenerator::new_ollama(None, None);
+        let emb = EmbeddingGenerator::new_ollama(None, None).unwrap();
         assert_eq!(emb.dimension(), 768);
         assert_eq!(emb.host, "http://localhost:11434");
         assert_eq!(emb.model, "nomic-embed-text");
@@ -132,11 +137,20 @@ mod tests {
         let emb = EmbeddingGenerator::new_ollama(
             Some("http://myhost:1234"),
             Some("custom-model"),
-        );
+        )
+        .unwrap();
         assert_eq!(emb.dimension(), 768);
         assert_eq!(emb.host, "http://myhost:1234");
         assert_eq!(emb.model, "custom-model");
     }
+
+    // NOTE: A test for HTTP client construction failure is intentionally
+    // omitted. The reqwest client builder only fails when the TLS backend
+    // cannot be initialized (e.g. missing native-tls libraries or an invalid
+    // rustls config). This cannot be reliably triggered in a unit test
+    // without mocking reqwest internals or manipulating system TLS state,
+    // both of which are fragile and platform-specific. The error propagation
+    // path is trivially correct by inspection: `.map_err(...)?`.
 
     #[test]
     fn default_is_ollama() {

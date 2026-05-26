@@ -42,6 +42,7 @@ Each crate defines its own error type:
 - `SecurityError` (crates/security/src/lib.rs) — Encryption, key storage
 - `SharingError` (crates/sharing/src/lib.rs) — Device pairing, network operations
 - `ProcessingError` (crates/processing/src/lib.rs) — SOAP generation, document processing
+- `TtsError` (crates/tts-providers/src/lib.rs) — Text-to-speech providers
 
 **Pattern:** Crate errors convert to `AppError` at Tauri command boundaries:
 
@@ -188,6 +189,71 @@ fn test_happy_path() {
 
 **Why:** Tests should fail fast on unexpected errors. Panics are appropriate here.
 
+## Specialized Error Patterns (v0.10.92)
+
+Extended error handling to cover 16 additional unwrap/expect calls across 5 files:
+
+### Mutex Poisoning (11 calls)
+
+**When to use:** When calling `Mutex::lock()` in production code.
+
+```rust
+let mut guard = mutex.lock()
+    .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
+```
+
+**Why:** A poisoned mutex indicates a thread panicked while holding the lock. Returning an error allows graceful degradation instead of cascading thread failures.
+
+**Used in:**
+- `src-tauri/src/commands/audio.rs` (10 calls)
+- `src-tauri/src/commands/pipeline.rs` (1 call)
+
+### Invalid Path (2 calls)
+
+**When to use:** When calling `Path::parent()` which can return `None` for root paths.
+
+```rust
+let parent = path.parent()
+    .ok_or_else(|| SharingError::InvalidPath(format!("no parent dir: {}", path.display())))?;
+std::fs::create_dir_all(parent).map_err(SharingError::Io)?;
+```
+
+**Why:** Service installation paths might not have a parent directory (e.g., root path). Returning an error provides clear feedback instead of panicking.
+
+**Used in:**
+- `crates/sharing/src/service_installer.rs` (2 calls)
+
+### HTTP Client (1 call)
+
+**When to use:** When building HTTP clients with `reqwest::Client::builder()`.
+
+```rust
+let client = Client::builder()
+    .connect_timeout(std::time::Duration::from_secs(10))
+    .timeout(std::time::Duration::from_secs(120))
+    .build()
+    .map_err(|e| AppError::HttpClient(format!("failed to build client: {e}")))?;
+```
+
+**Why:** Client construction can fail due to system-level issues (e.g., TLS library initialization). Returning an error allows the RAG system to fail gracefully.
+
+**Used in:**
+- `crates/rag/src/embeddings.rs` (1 call)
+
+### Invalid Header (2 calls)
+
+**When to use:** When parsing HTTP header values from user input or API keys.
+
+```rust
+let header_value = api_key.parse()
+    .map_err(|e| TtsError::InvalidHeader(format!("api-key header: {e}")))?;
+```
+
+**Why:** HTTP headers must be valid ASCII without control characters. Validating upfront provides clear error messages for invalid API keys.
+
+**Used in:**
+- `crates/tts-providers/src/elevenlabs_tts.rs` (2 calls)
+
 ## Summary
 
 | Pattern | When to Use | Example |
@@ -200,5 +266,7 @@ fn test_happy_path() {
 
 ## Related Documentation
 
-- [Design Spec](specs/2026-05-26-error-handling-refactor-design.md)
-- [Implementation Plan](plans/2026-05-26-error-handling-refactor.md)
+- [Initial Error Handling Refactor](specs/2026-05-26-error-handling-refactor-design.md) — Original 5-file refactor (v0.10.91)
+- [Error Handling Expansion](specs/2026-05-26-error-handling-expansion-design.md) — Extended patterns (v0.10.92)
+- [Implementation Plan](plans/2026-05-26-error-handling-refactor.md) — Initial refactor tasks
+- [Expansion Implementation Plan](plans/2026-05-26-error-handling-expansion.md) — Extended patterns tasks

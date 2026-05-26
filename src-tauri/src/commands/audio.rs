@@ -124,13 +124,15 @@ pub async fn start_recording(
 
     // Store capture handle in AppState.
     {
-        let mut handle_lock = state.capture_handle.lock().unwrap();
+        let mut handle_lock = state.capture_handle.lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
         *handle_lock = send_handle;
     }
 
     // Store current recording info.
     {
-        let mut rec_lock = state.current_recording.lock().unwrap();
+        let mut rec_lock = state.current_recording.lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
         *rec_lock = Some(CurrentRecording {
             id: recording_id.to_string(),
             wav_path,
@@ -180,7 +182,8 @@ pub async fn stop_recording(
     // Send+Sync).  We must NOT hold a bare CaptureHandle across an .await
     // because CaptureHandle is !Send.
     let wrapper = {
-        let mut handle_lock = state.capture_handle.lock().unwrap();
+        let mut handle_lock = state.capture_handle.lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
         let inner = handle_lock.0.take();
         SendCaptureHandle(inner)
     };
@@ -211,7 +214,8 @@ pub async fn stop_recording(
 
     // Take the current recording info.
     let current = {
-        let mut rec_lock = state.current_recording.lock().unwrap();
+        let mut rec_lock = state.current_recording.lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
         rec_lock.take()
     };
 
@@ -279,7 +283,8 @@ pub async fn cancel_recording(
 ) -> AppResult<()> {
     // Take the CaptureHandle out of AppState.
     let wrapper = {
-        let mut handle_lock = state.capture_handle.lock().unwrap();
+        let mut handle_lock = state.capture_handle.lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
         let inner = handle_lock.0.take();
         SendCaptureHandle(inner)
     };
@@ -293,7 +298,8 @@ pub async fn cancel_recording(
         }
         // Also clear any stale current_recording slot.
         {
-            let mut rec_lock = state.current_recording.lock().unwrap();
+            let mut rec_lock = state.current_recording.lock()
+                .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
             *rec_lock = None;
         }
         return Err(AppError::Audio(
@@ -315,7 +321,8 @@ pub async fn cancel_recording(
 
     // Take the current recording info and delete the WAV file.
     let current = {
-        let mut rec_lock = state.current_recording.lock().unwrap();
+        let mut rec_lock = state.current_recording.lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
         rec_lock.take()
     };
 
@@ -333,7 +340,8 @@ pub async fn cancel_recording(
 
 #[tauri::command]
 pub fn pause_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
-    let handle_lock = state.capture_handle.lock().unwrap();
+    let handle_lock = state.capture_handle.lock()
+        .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
     match &handle_lock.0 {
         Some(handle) => {
             handle.pause();
@@ -351,7 +359,8 @@ pub fn pause_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
 
 #[tauri::command]
 pub fn resume_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
-    let handle_lock = state.capture_handle.lock().unwrap();
+    let handle_lock = state.capture_handle.lock()
+        .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
     match &handle_lock.0 {
         Some(handle) => {
             handle.resume();
@@ -382,7 +391,8 @@ pub async fn get_recording_state(
 ) -> AppResult<RecordingStateSnapshot> {
     let active = *state.recording_active.lock().await;
     let current = {
-        let guard = state.current_recording.lock().unwrap();
+        let guard = state.current_recording.lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
         guard.as_ref().map(|c| (c.id.clone(), c.started_at))
     };
     let (recording_id, elapsed_secs) = match current {
@@ -516,4 +526,49 @@ fn compute_audio_levels(path: &std::path::Path) -> AppResult<RecordingAudioLevel
         rms,
         is_silent: count > 0 && rms < 0.001,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Simulates a poisoned `std::sync::Mutex` and verifies the lock attempt
+    /// produces an `AppError::MutexPoisoned` rather than panicking.
+    #[test]
+    fn poisoned_mutex_propagates_as_app_error() {
+        use std::sync::{Arc, Mutex};
+
+        let mutex: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        let mutex_clone = Arc::clone(&mutex);
+
+        // Poison the mutex by panicking while holding the lock.
+        let handle = std::thread::spawn(move || {
+            let _guard = mutex_clone.lock().unwrap();
+            panic!("poison the lock");
+        });
+        // Swallow the panic from the spawned thread.
+        let _ = handle.join();
+
+        // Attempt to lock the now-poisoned mutex using the same pattern as
+        // the production code.
+        let result: AppResult<u32> = (|| {
+            let guard = mutex
+                .lock()
+                .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
+            Ok(*guard)
+        })();
+
+        match result {
+            Err(AppError::MutexPoisoned(msg)) => {
+                assert!(
+                    msg.contains("capture_handle"),
+                    "error message should include the lock name, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Err(AppError::MutexPoisoned), got: {:?}",
+                other.map(|_| "Ok")
+            ),
+        }
+    }
 }

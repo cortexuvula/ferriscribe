@@ -35,8 +35,29 @@ pub enum SharingError {
     WhisperSupervisor(String),
     #[error("service installer: {0}")]
     ServiceInstaller(String),
+    #[error("Invalid path: {0}")]
+    InvalidPath(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, SharingError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_path_variant_includes_underlying_reason_and_path() {
+        let err = SharingError::InvalidPath("no parent dir: /".to_string());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no parent dir"),
+            "expected message to include the underlying reason, got: {msg}"
+        );
+        assert!(
+            msg.contains('/'),
+            "expected message to include the offending path '/', got: {msg}"
+        );
+    }
+}
