@@ -1,11 +1,29 @@
 //! Token-bucket rate limiter.
+//!
+//! A simple in-process rate limiter suitable for guarding per-provider
+//! API call rates, local-AI request bursts, or any "N requests per
+//! minute" budget. Not thread-safe on its own — wrap in a `Mutex` if
+//! you need to share it across async tasks.
+//!
+//! Tokens are refilled continuously (not in discrete per-minute windows)
+//! so the limiter behaves like a smooth leaky bucket rather than a
+//! fixed-window counter: a burst of `capacity` requests is allowed
+//! immediately after a long idle period, then subsequent requests are
+//! throttled until tokens accumulate.
 
 use std::time::Instant;
 
 /// A token-bucket rate limiter.
 ///
-/// Tokens are refilled continuously at `refill_rate` tokens per second (derived
-/// from the per-minute capacity), up to `capacity`.
+/// Constructed with a per-minute capacity; refills continuously at
+/// `capacity / 60` tokens per second. `try_acquire` consumes one token
+/// and returns `true` on success, `false` when the bucket is empty.
+///
+/// # Thread safety
+///
+/// `RateLimiter` is `Send` but not `Sync` — it holds an `Instant` and a
+/// `f64` token count with interior mutation on `try_acquire`. Wrap in a
+/// `Mutex` to share across tasks.
 pub struct RateLimiter {
     capacity: u32,
     tokens: f64,
@@ -14,7 +32,12 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    /// Create a limiter that allows `requests_per_minute` requests per minute.
+    /// Create a limiter that allows `requests_per_minute` requests per
+    /// minute.
+    ///
+    /// The bucket starts full — the first `requests_per_minute` calls to
+    /// [`RateLimiter::try_acquire`] will succeed immediately before
+    /// throttling kicks in.
     pub fn new(requests_per_minute: u32) -> Self {
         Self {
             capacity: requests_per_minute,
@@ -26,8 +49,10 @@ impl RateLimiter {
 
     /// Attempt to consume one token.
     ///
-    /// Returns `true` if the request is allowed, `false` if the bucket is
-    /// empty.
+    /// Returns `true` if the request is allowed (bucket had at least one
+    /// token), `false` if the bucket is empty and the caller should
+    /// back off. Each call also advances the internal refill clock so
+    /// tokens accumulated since the last call are credited.
     pub fn try_acquire(&mut self) -> bool {
         self.refill();
         if self.tokens >= 1.0 {

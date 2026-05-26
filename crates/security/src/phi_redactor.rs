@@ -1,7 +1,34 @@
 //! PHI/PII redactor using regular-expression pattern matching.
 //!
 //! `PhiRedactor::redact` replaces sensitive tokens with bracketed placeholders
-//! such as `[SSN]`, `[PHONE]`, `[EMAIL]`, etc.
+//! such as `[SSN]`, `[PHONE]`, `[EMAIL]`, `[DOB]`, `[MRN]`, `[ADDRESS]`,
+//! and `[ZIP]`.
+//!
+//! # Pattern ordering and false-positive avoidance
+//!
+//! Patterns are applied in a fixed order (SSN → PHONE → EMAIL → DOB → MRN →
+//! ADDRESS → ZIP). The SSN, MRN, DOB, and ZIP patterns require a **keyword
+//! prefix** (e.g. `SSN:`, `DOB:`, `zip code`) to avoid false positives on
+//! lab values, reference numbers, and clinical fractions like `BP 120/80`.
+//! Adding a new regex that matches bare 9-digit or 5-digit numbers will
+//! redact legitimate clinical content — always require contextual keywords.
+//!
+//! # Extensions
+//!
+//! Per-recording patterns (patient name, datetime) are passed as
+//! [`Extension`]s via [`PhiRedactor::redact_with`]. Extensions run
+//! *before* the static patterns so a patient name like "John Smith" is
+//! replaced with `[PT_NAME]` before the EMAIL regex could match an email
+//! containing "smith". Use [`names::build_patient_name_extension`] and
+//! [`datetime::build_datetime_extension`] rather than hand-rolling the
+//! regex — they handle possessives, salutations, and date-format edge
+//! cases.
+//!
+//! # Where it is used
+//!
+//! - [`crate::audit_logger::AuditLogger`] — redacts log payloads.
+//! - `src-tauri/corpus_export` — scrubs transcripts before writing the
+//!   training-corpus JSONL; emits manifest warnings on residual PHI.
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -68,30 +95,55 @@ lazy_static! {
 
 // ─── Extension API ───────────────────────────────────────────────────────────
 
-/// A compiled extension pattern that can be added to a redaction
-/// pass. Built per-export from the recording's patient_name and any
-/// other per-corpus identifiers.
+/// A compiled extension pattern that can be added to a redaction pass.
+///
+/// Built per-export from the recording's patient name (via
+/// [`names::build_patient_name_extension`]) and the datetime pattern (via
+/// [`datetime::build_datetime_extension`]). Extensions run *before* the
+/// static patterns in [`PhiRedactor::redact_with`] so they can catch
+/// identifiers that would otherwise collide with a static regex.
+///
+/// `Extension` is `Clone` so a single datetime extension can be reused
+/// across every row of a bulk export.
 #[derive(Clone)]
 pub struct Extension {
+    /// Compiled regex. Must be constructed once and reused — regex
+    /// compilation is expensive.
     pub regex: Regex,
+    /// Replacement text (e.g. `"[PT_NAME]"`, `"[DATE]"`). Use bracketed
+    /// uppercase names to match the static-pattern convention.
     pub placeholder: &'static str,
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Redacts PHI/PII from text.
+///
+/// `PhiRedactor` is a stateless unit struct — all state lives in the
+/// lazily-compiled static pattern table. Construct with `new()` or
+/// `Default::default()`; all redaction methods are also available as
+/// associated functions (no `self` required).
 pub struct PhiRedactor;
 
 impl PhiRedactor {
     /// Create a new redactor instance.
+    ///
+    /// Equivalent to `PhiRedactor::default()`. The instance itself carries
+    /// no state — it exists only so callers that prefer method-call syntax
+    /// (`PhiRedactor::new().redact(...)`) can use it.
     pub fn new() -> Self {
         Self
     }
 
     /// Replace all detected PHI tokens in `text` with bracketed placeholders.
     ///
-    /// Patterns are applied in order (SSN → PHONE → … → ZIP), so a more
-    /// specific pattern wins if it matches first.
+    /// Patterns are applied in order (SSN → PHONE → EMAIL → DOB → MRN →
+    /// ADDRESS → ZIP), so a more specific pattern wins if it matches first.
+    /// Returns the input unchanged when no patterns match.
+    ///
+    /// Use [`PhiRedactor::redact_with`] instead when per-recording context
+    /// (patient name, datetime) is available — those identifiers are not
+    /// covered by the static pattern set.
     pub fn redact(text: &str) -> String {
         let mut result = text.to_string();
         for pattern in PATTERNS.iter() {
@@ -104,16 +156,22 @@ impl PhiRedactor {
         result
     }
 
-    /// Returns `true` if `text` contains at least one PHI token.
+    /// Returns `true` if `text` contains at least one PHI token matched by
+    /// the static pattern set.
+    ///
+    /// Use [`PhiRedactor::contains_phi_with`] to also check per-recording
+    /// extensions (patient name, datetime).
     pub fn contains_phi(text: &str) -> bool {
         PATTERNS.iter().any(|p| p.regex.is_match(text))
     }
 
-    /// Same as `redact`, but applies the given extensions first.
-    /// Extensions run before the static patterns so a patient name
-    /// like "John Smith" gets replaced with [PT_NAME] before the
-    /// static EMAIL pattern could try to match an email containing
-    /// "smith". (Defense-in-depth ordering.)
+    /// Same as [`PhiRedactor::redact`], but applies the given `extensions`
+    /// **first**, then the static patterns.
+    ///
+    /// Extensions run before the static patterns so a patient name like
+    /// "John Smith" gets replaced with `[PT_NAME]` before the EMAIL regex
+    /// could try to match an email containing "smith". This ordering is
+    /// deliberate and should be preserved when adding new entry points.
     pub fn redact_with(text: &str, extensions: &[Extension]) -> String {
         let mut result = text.to_string();
         for ext in extensions {
@@ -125,8 +183,12 @@ impl PhiRedactor {
         result
     }
 
-    /// Same predicate as `contains_phi`, but checks both static
-    /// patterns and the supplied extensions.
+    /// Same predicate as [`PhiRedactor::contains_phi`], but checks both
+    /// the supplied extensions and the static pattern set.
+    ///
+    /// Used by `src-tauri/corpus_export` as a post-redaction sanity check:
+    /// if this still returns `true` after `redact_with`, a manifest
+    /// warning is emitted.
     pub fn contains_phi_with(text: &str, extensions: &[Extension]) -> bool {
         extensions.iter().any(|e| e.regex.is_match(text))
             || PATTERNS.iter().any(|p| p.regex.is_match(text))
@@ -139,12 +201,25 @@ impl Default for PhiRedactor {
     }
 }
 
-/// Datetime redaction extension. Matches ISO datetimes/dates, US short
-/// dates with 4-digit years (avoids clinical fraction collision), and
-/// long English dates.
+/// Datetime redaction extension.
+///
+/// Matches ISO datetimes/dates, US short dates with 4-digit years (avoids
+/// clinical-fraction collision on `BP 120/80`), and long English dates
+/// like "May 11, 2026".
 pub mod datetime {
     use super::{Extension, Regex};
 
+    /// Build a compiled [`Extension`] that replaces datetime tokens with
+    /// `[DATE]`.
+    ///
+    /// Safe to call repeatedly — the regex is compiled fresh each time but
+    /// is cheap enough for per-export construction. Clone the resulting
+    /// extension if you need to reuse it across many rows.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the hardcoded regex fails to compile. This is a bug —
+    /// the pattern is tested in CI and should never fail at runtime.
     pub fn build_datetime_extension() -> Extension {
         // Conservative: match ISO datetime first, then specific
         // unambiguous date formats. Avoid bare MM/DD which collides
@@ -169,13 +244,29 @@ pub mod datetime {
     }
 }
 
-/// Per-recording patient-name pattern construction. Builds a single
-/// Extension that matches the full name, possessive form, first
-/// name alone, and last name preceded by a salutation. Returns
-/// None if the input is empty/whitespace-only.
+/// Per-recording patient-name pattern construction.
+///
+/// Builds a single [`Extension`] that matches the full name, possessive
+/// form ("Jane Smith's"), first name alone, and last name preceded by a
+/// salutation ("Mr. Smith", "Dr. Smith"). Returns `None` if the input is
+/// empty or whitespace-only.
+///
+/// The regex is assembled from escaped name tokens so special characters
+/// in names (hyphens, apostrophes) are handled safely.
 pub mod names {
     use super::{Extension, Regex};
 
+    /// Build a compiled [`Extension`] that replaces occurrences of
+    /// `patient_name` with `[PT_NAME]`.
+    ///
+    /// Returns `None` when `patient_name` is empty or whitespace-only —
+    /// callers should skip adding the extension in that case rather than
+    /// passing a dummy regex.
+    ///
+    /// The returned regex matches (case-insensitively):
+    /// 1. The full name, with optional possessive `'s`
+    /// 2. The first name alone (word-boundary anchored)
+    /// 3. Salutation + last name: `(Mr|Mrs|Ms|Miss|Dr) Last`
     pub fn build_patient_name_extension(patient_name: &str) -> Option<Extension> {
         let trimmed = patient_name.trim();
         if trimmed.is_empty() {

@@ -5,16 +5,36 @@
 //! - Windows: Credential Manager via `windows-native`
 //! - Linux: libsecret / Secret Service via `sync-secret-service`
 //!
+//! This module manages a **single** 32-byte secret — the SQLCipher database
+//! encryption key — stored under service `rustMedicalAssistant` / account
+//! `db-key`. Other secrets (API keys, sharing tokens) live in
+//! [`crate::key_storage::KeyStorage`]; do not add new keychain entries
+//! here without coordinating with the recovery path in
+//! `src-tauri/src/commands/recovery.rs`.
+//!
+//! The sharing crate reuses this same keychain entry as the sharing-store
+//! encryption key so there is only one OS-level secret to manage per
+//! install. See the README "Cross-Crate Contracts" section.
+//!
+//! # Testing
+//!
 //! For tests, call `keyring::set_default_credential_builder(...)` with the
-//! mock builder before invoking these functions to isolate test runs.
+//! mock builder before invoking these functions to isolate test runs. Note
+//! the mock backend is `EntryOnly`: every `Entry::new()` returns a fresh
+//! empty credential, so cross-call persistence cannot be unit-tested —
+//! that is covered by integration tests and manual smoke testing.
 
 use keyring::Entry;
 use rand::RngCore;
 
-/// Service name used in the OS keychain. Exposed for tests and manual
-/// inspection (e.g. `security find-generic-password -s rustMedicalAssistant -a db-key`).
+/// Service name used in the OS keychain.
+///
+/// Exposed for tests and manual inspection (e.g.
+/// `security find-generic-password -s rustMedicalAssistant -a db-key`
+/// on macOS).
 pub const KEYCHAIN_SERVICE: &str = "rustMedicalAssistant";
-/// Account name used to identify the database encryption key.
+/// Account name used to identify the database encryption key within the
+/// [`KEYCHAIN_SERVICE`] service.
 pub const KEYCHAIN_DB_KEY_ACCOUNT: &str = "db-key";
 
 /// Errors returned by the keychain wrapper.
@@ -30,8 +50,18 @@ pub enum KeychainError {
 
 pub type KeychainResult<T> = Result<T, KeychainError>;
 
-/// Read the database key from the keychain. Returns `Ok(None)` if no entry
-/// exists yet (caller may want to generate one).
+/// Read the database key from the OS keychain.
+///
+/// Returns `Ok(None)` if no entry exists yet — callers that need a key
+/// should typically use [`get_or_create_db_key`] instead, which handles
+/// the first-run case automatically.
+///
+/// # Errors
+///
+/// - [`KeychainError::Access`] if the OS keychain is locked, the user
+///   denies the access prompt, or the keyring library otherwise fails.
+/// - [`KeychainError::Malformed`] if the stored entry is not exactly 32
+///   bytes (indicates corruption or a different writer).
 pub fn get_db_key() -> KeychainResult<Option<[u8; 32]>> {
     let entry = Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_DB_KEY_ACCOUNT)
         .map_err(|e| KeychainError::Access(e.to_string()))?;
@@ -52,8 +82,18 @@ pub fn get_db_key() -> KeychainResult<Option<[u8; 32]>> {
     }
 }
 
-/// Get the existing database key from the keychain, or generate and store a
-/// new random 32-byte key if none exists.
+/// Get the existing database key from the keychain, or generate and store
+/// a new random 32-byte key if none exists yet.
+///
+/// This is the recommended entry point for app startup — `AppState::initialize`
+/// calls it to obtain the SQLCipher key, and the sharing crate reuses the
+/// same value as the sharing-store encryption key.
+///
+/// # Errors
+///
+/// - [`KeychainError::Access`] on any OS keychain failure.
+/// - [`KeychainError::Entropy`] if the platform RNG cannot produce 32
+///   random bytes (effectively impossible on a functioning OS).
 pub fn get_or_create_db_key() -> KeychainResult<[u8; 32]> {
     if let Some(key) = get_db_key()? {
         return Ok(key);
@@ -70,8 +110,19 @@ pub fn get_or_create_db_key() -> KeychainResult<[u8; 32]> {
     Ok(key)
 }
 
-/// Remove the database key from the keychain. Used by the "Wipe and start
-/// fresh" recovery path.
+/// Remove the database key from the keychain.
+///
+/// Used by the "Wipe and start fresh" recovery path in
+/// `src-tauri/src/commands/recovery.rs`. After calling this, the
+/// encrypted database is unrecoverable — the next startup will generate
+/// a fresh key and an empty database.
+///
+/// Idempotent: returns `Ok(())` if no entry exists.
+///
+/// # Errors
+///
+/// - [`KeychainError::Access`] on OS keychain failure (other than
+///   "entry not found", which is treated as success).
 pub fn wipe_db_key() -> KeychainResult<()> {
     let entry = Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_DB_KEY_ACCOUNT)
         .map_err(|e| KeychainError::Access(e.to_string()))?;
@@ -82,7 +133,8 @@ pub fn wipe_db_key() -> KeychainResult<()> {
     }
 }
 
-/// Encode a 32-byte key as a 64-char hex string for `PRAGMA key="x'<hex>'"`.
+/// Encode a 32-byte key as a 64-character lowercase hex string suitable
+/// for SQLCipher's `PRAGMA key="x'<hex>'"` syntax.
 pub fn key_to_hex(key: &[u8; 32]) -> String {
     hex::encode(key)
 }

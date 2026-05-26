@@ -1,9 +1,31 @@
 //! AES-256-GCM key storage with PBKDF2 key derivation.
 //!
-//! API keys are encrypted with a per-entry random nonce and stored in a
-//! JSON file.  The master cipher key is derived from either the
-//! `MEDICAL_ASSISTANT_MASTER_KEY` environment variable or the machine ID
-//! using PBKDF2-HMAC-SHA256 with 600 000 iterations.
+//! API keys are encrypted with a per-entry random 12-byte nonce and stored in
+//! a JSON file (`keys.json`). The master cipher key is derived from either
+//! the `MEDICAL_ASSISTANT_MASTER_KEY` environment variable or the machine ID
+//! using PBKDF2-HMAC-SHA256 with 600,000 iterations over a 32-byte salt
+//! persisted to `salt.bin` next to the key file.
+//!
+//! # Lifecycle
+//!
+//! 1. `KeyStorage::open(config_dir)` loads or creates `salt.bin`, derives
+//!    the 32-byte cipher key, and constructs an `Aes256Gcm` instance.
+//! 2. `store_key(provider, api_key)` generates a fresh 12-byte nonce via
+//!    `OsRng`, encrypts, and writes `base64(nonce || ciphertext)` to
+//!    `keys.json` alongside an ISO-8601 timestamp and an 8-char hex prefix
+//!    of SHA-256(plaintext) used as an integrity hint.
+//! 3. `get_key(provider)` decodes, splits nonce from ciphertext, and
+//!    decrypts. Returns `Ok(None)` when the provider slot is empty.
+//!
+//! # Gotchas
+//!
+//! - The same plaintext stored twice yields different ciphertexts because
+//!   each `store_key` call draws a fresh nonce. Equality of ciphertexts
+//!   therefore does *not* leak equality of keys.
+//! - Deleting `salt.bin` invalidates every stored key: a new salt produces
+//!   a different PBKDF2 output, so AES-GCM's auth tag fails on decrypt.
+//! - The internal `file_lock` mutex serializes writes; reads are lock-free.
+//!   A poisoned mutex surfaces as `SecurityError::Other`.
 
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
@@ -53,6 +75,15 @@ struct KeyFile {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Manages encrypted storage of API keys for named providers.
+///
+/// Keys are encrypted with AES-256-GCM and persisted as JSON in a
+/// caller-supplied config directory. The cipher key is derived once at
+/// construction time via PBKDF2-HMAC-SHA256; subsequent `store_key` and
+/// `get_key` calls reuse the same cipher instance.
+///
+/// Instances are cheap to construct but not `Sync` (the internal mutex is
+/// `std::sync::Mutex` — wrap in `Arc` and share across threads as needed,
+/// which is how `src-tauri` holds it in `AppState::keys`).
 pub struct KeyStorage {
     cipher: Aes256Gcm,
     storage_path: PathBuf,
@@ -61,6 +92,19 @@ pub struct KeyStorage {
 
 impl KeyStorage {
     /// Open (or create) the key store located inside `config_dir`.
+    ///
+    /// Creates `config_dir` if it does not exist, loads or generates
+    /// `salt.bin`, and derives the master cipher key. This is the only
+    /// constructor; there is no in-memory-only variant because the salt
+    /// must persist alongside the ciphertext.
+    ///
+    /// # Errors
+    ///
+    /// - [`SecurityError::Io`] if the directory cannot be created or the
+    ///   salt file cannot be read/written.
+    /// - [`SecurityError::MasterKeyUnavailable`] if neither the
+    ///   `MEDICAL_ASSISTANT_MASTER_KEY` env var nor the machine-id lookup
+    ///   yields a non-empty password.
     pub fn open(config_dir: &Path) -> SecurityResult<Self> {
         std::fs::create_dir_all(config_dir)?;
 
@@ -77,6 +121,17 @@ impl KeyStorage {
     }
 
     /// Encrypt `api_key` and store it under `provider`.
+    ///
+    /// Generates a fresh 12-byte nonce via `OsRng` so that storing the
+    /// same plaintext twice yields different ciphertexts. Overwrites any
+    /// existing entry for `provider` atomically (read-modify-write under
+    /// the file lock).
+    ///
+    /// # Errors
+    ///
+    /// - [`SecurityError::Encryption`] if AES-GCM rejects the input.
+    /// - [`SecurityError::Io`] on filesystem failure.
+    /// - [`SecurityError::Other`] if the internal mutex is poisoned.
     pub fn store_key(&self, provider: &str, api_key: &str) -> SecurityResult<()> {
         let _lock = self.file_lock.lock().map_err(|e| {
             SecurityError::Other(format!("mutex poisoned in store_key: {e}"))
@@ -106,7 +161,18 @@ impl KeyStorage {
         self.save_file(&file)
     }
 
-    /// Decrypt and return the key for `provider`, or `None` if not stored.
+    /// Decrypt and return the key for `provider`, or `Ok(None)` if no
+    /// entry exists under that name.
+    ///
+    /// # Errors
+    ///
+    /// - [`SecurityError::Decryption`] if the ciphertext cannot be
+    ///   base64-decoded, the nonce is present but AES-GCM's auth tag
+    ///   rejects (wrong master key, tampered blob, or stale `salt.bin`),
+    ///   or the plaintext is not valid UTF-8.
+    /// - [`SecurityError::InvalidFormat`] if the stored blob is shorter
+    ///   than the 12-byte nonce prefix.
+    /// - [`SecurityError::Io`] if `keys.json` cannot be read.
     pub fn get_key(&self, provider: &str) -> SecurityResult<Option<String>> {
         let file = self.load_file()?;
         let Some(entry) = file.keys.get(provider) else {
@@ -134,7 +200,13 @@ impl KeyStorage {
             .map_err(|e| SecurityError::Decryption(e.to_string()))
     }
 
-    /// Remove the key for `provider`.  Returns `true` if it existed.
+    /// Remove the key for `provider`. Returns `true` if an entry existed
+    /// and was deleted, `false` if the slot was already empty.
+    ///
+    /// # Errors
+    ///
+    /// - [`SecurityError::Io`] on filesystem failure.
+    /// - [`SecurityError::Other`] if the internal mutex is poisoned.
     pub fn remove_key(&self, provider: &str) -> SecurityResult<bool> {
         let _lock = self.file_lock.lock().map_err(|e| {
             SecurityError::Other(format!("mutex poisoned in remove_key: {e}"))
@@ -147,7 +219,11 @@ impl KeyStorage {
         Ok(existed)
     }
 
-    /// List all stored provider names.
+    /// List all stored provider names (unordered).
+    ///
+    /// # Errors
+    ///
+    /// - [`SecurityError::Io`] if `keys.json` cannot be read.
     pub fn list_providers(&self) -> SecurityResult<Vec<String>> {
         let file = self.load_file()?;
         Ok(file.keys.keys().cloned().collect())

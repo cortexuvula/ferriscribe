@@ -1,7 +1,26 @@
 //! Cross-platform machine ID derivation.
 //!
-//! Returns a stable 64-character hex string (SHA-256) derived from a
-//! platform-specific hardware/OS identifier.
+//! Returns a stable 64-character lowercase hex SHA-256 string derived from a
+//! platform-specific hardware/OS identifier. Used as the PBKDF2 password
+//! when the `MEDICAL_ASSISTANT_MASTER_KEY` environment variable is not set,
+//! which is the common case for production installations.
+//!
+//! # Platform sources (in order of preference)
+//!
+//! | Platform | Source |
+//! |---|---|
+//! | Linux | `/etc/machine-id`, then `/var/lib/dbus/machine-id` |
+//! | macOS | `IOPlatformUUID` via `ioreg -rd1 -c IOPlatformExpertDevice` |
+//! | Windows | `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` |
+//! | Other / fallback | SHA-256 of `"<username>:<home_directory>"` |
+//!
+//! # Stability
+//!
+//! The returned hash is stable for a given machine as long as the underlying
+//! OS identifier does not change. It will change across:
+//! - OS reinstalls / VM clones (new `machine-id` or IOPlatformUUID)
+//! - Hardware changes that alter the platform UUID
+//! - CI runners with ephemeral identities (use the env-var override there)
 
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
@@ -10,6 +29,18 @@ use crate::SecurityResult;
 
 /// Returns a stable 64-character lowercase hex SHA-256 string that
 /// uniquely identifies this machine.
+///
+/// The value is derived from a platform-specific hardware identifier (see
+/// the module docs for the source on each OS). Callers should treat the
+/// result as opaque — its only guaranteed property is stability across
+/// calls on the same machine.
+///
+/// # Errors
+///
+/// Returns [`crate::SecurityError::Io`] only if the platform-specific
+/// lookup and the [`fallback_id`] both fail, which in practice requires
+/// the `USER`/`HOME` environment variables to be unset *and* the platform
+/// identifier to be unreadable.
 pub fn get_machine_id() -> SecurityResult<String> {
     let raw = raw_machine_id()?;
     Ok(sha256_hex(raw.as_bytes()))
@@ -111,7 +142,15 @@ fn raw_machine_id() -> SecurityResult<String> {
     Ok(fallback_id())
 }
 
-/// Fallback identifier: `username:home_directory`.
+/// Fallback identifier: `"<username>:<home_directory>"`.
+///
+/// Used when the platform-specific hardware identifier is unavailable.
+/// Reads `USER` (or `USERNAME` on Windows) and `HOME` (or `USERPROFILE`),
+/// defaulting to `"unknown"` and `"/"` respectively.
+///
+/// This is **public** so integration tests can verify that hashing the
+/// fallback still produces a valid 64-char hex machine ID. Production
+/// callers should always use [`get_machine_id`] instead.
 pub fn fallback_id() -> String {
     let username = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
