@@ -132,7 +132,9 @@ mod macos {
 </plist>
 "#
         );
-        std::fs::create_dir_all(path.parent().unwrap())
+        let parent = path.parent()
+            .ok_or_else(|| SharingError::InvalidPath(format!("no parent dir: {}", path.display())))?;
+        std::fs::create_dir_all(parent)
             .map_err(SharingError::Io)?;
         std::fs::write(&path, plist).map_err(SharingError::Io)?;
         let status = std::process::Command::new("launchctl")
@@ -186,7 +188,9 @@ mod linux {
         let unit = format!(
             "[Unit]\nDescription=Ollama (managed by FerriScribe)\n\n[Service]\nEnvironment=OLLAMA_HOST=127.0.0.1:11434\nExecStart={bin_str} serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n"
         );
-        std::fs::create_dir_all(path.parent().unwrap())
+        let parent = path.parent()
+            .ok_or_else(|| SharingError::InvalidPath(format!("no parent dir: {}", path.display())))?;
+        std::fs::create_dir_all(parent)
             .map_err(SharingError::Io)?;
         std::fs::write(&path, unit).map_err(SharingError::Io)?;
         let _ = std::process::Command::new("systemctl")
@@ -324,5 +328,41 @@ mod tests {
         let input = r"C:\Program Files & Co\ollama.exe";
         let expected = r"C:\Program Files &amp; Co\ollama.exe";
         assert_eq!(xml_escape(input), expected);
+    }
+
+    /// Resolves the parent directory of `path`, returning
+    /// `SharingError::InvalidPath` when `Path::parent()` yields `None`
+    /// (e.g. for the filesystem root "/").  Mirrors the exact pattern used
+    /// inside `macos::install()` and `linux::install()`.
+    fn resolve_parent(path: &std::path::Path) -> Result<&std::path::Path, SharingError> {
+        path.parent()
+            .ok_or_else(|| SharingError::InvalidPath(format!("no parent dir: {}", path.display())))
+    }
+
+    #[test]
+    fn path_parent_none_propagates_invalid_path_error() {
+        use std::path::Path;
+        // The filesystem root "/" has no parent.
+        let root = Path::new("/");
+        let result = resolve_parent(root);
+        assert!(result.is_err(), "expected Err for root path, got: {:?}", result);
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no parent dir"),
+            "expected reason in error message, got: {msg}"
+        );
+        assert!(
+            msg.contains('/'),
+            "expected offending path in error message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn path_parent_some_returns_parent_for_normal_path() {
+        use std::path::Path;
+        let path = Path::new("/Users/me/Library/LaunchAgents/com.ferriscribe.ollama.plist");
+        let parent = resolve_parent(path).expect("normal path must have a parent");
+        assert_eq!(parent, Path::new("/Users/me/Library/LaunchAgents"));
     }
 }
