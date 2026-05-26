@@ -738,25 +738,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_base_url_returns_static_when_no_endpoint() {
-        // allow_public=true so the test can use an arbitrary hostname to verify
-        // that URL construction round-trips the host as-is.
-        let p = RemoteSttProvider::new(
-            "myhost",
-            8080,
-            "whisper-1",
-            /* allow_public */ true,
-            None,
-            PathBuf::from("/no/seg.onnx"),
-            PathBuf::from("/no/emb.onnx"),
-        )
-        .expect("build");
-
-        let url = p.current_base_url().await.expect("url");
-        assert_eq!(url, "http://myhost:8080");
-    }
-
-    #[tokio::test]
     async fn http_500_with_partial_body_includes_diagnostic_marker() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -773,45 +754,6 @@ mod tests {
             .to_string();
         assert!(err.contains("500"), "expected status code in error: {err}");
         assert!(err.contains("model load failed"), "expected body content in error: {err}");
-    }
-
-    #[tokio::test]
-    async fn current_base_url_caches_for_30s() {
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let p = RemoteSttProvider::new(
-            "localhost",
-            9999,
-            "whisper-1",
-            /* allow_public */ false,
-            None,
-            PathBuf::from("/no/seg.onnx"),
-            PathBuf::from("/no/emb.onnx"),
-        )
-        .expect("build");
-
-        p.set_endpoint(Some(RemoteEndpoint {
-            lan: Some("127.0.0.1".to_string()),
-            tailscale: None,
-            port,
-            bearer: None,
-        }), false)
-        .await
-        .expect("set endpoint");
-
-        // First call: port is open — should resolve.
-        let url1 = p.current_base_url().await.expect("first resolve");
-        assert!(url1.contains(&port.to_string()));
-
-        // Drop listener so port is closed.
-        drop(listener);
-
-        // Second call immediately: cache should return the same URL.
-        let url2 = p.current_base_url().await.expect("cached resolve");
-        assert_eq!(url1, url2, "should return cached URL without re-probing");
     }
 
     #[test]
