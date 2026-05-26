@@ -78,7 +78,9 @@ impl KeyStorage {
 
     /// Encrypt `api_key` and store it under `provider`.
     pub fn store_key(&self, provider: &str, api_key: &str) -> SecurityResult<()> {
-        let _lock = self.file_lock.lock().unwrap();
+        let _lock = self.file_lock.lock().map_err(|e| {
+            SecurityError::Other(format!("mutex poisoned in store_key: {e}"))
+        })?;
         let mut nonce_bytes = [0u8; NONCE_LENGTH];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -134,7 +136,9 @@ impl KeyStorage {
 
     /// Remove the key for `provider`.  Returns `true` if it existed.
     pub fn remove_key(&self, provider: &str) -> SecurityResult<bool> {
-        let _lock = self.file_lock.lock().unwrap();
+        let _lock = self.file_lock.lock().map_err(|e| {
+            SecurityError::Other(format!("mutex poisoned in remove_key: {e}"))
+        })?;
         let mut file = self.load_file()?;
         let existed = file.keys.remove(provider).is_some();
         if existed {
@@ -231,7 +235,9 @@ fn key_hash_hex(data: &[u8]) -> String {
     let result = hasher.finalize();
     let mut hex = String::with_capacity(8);
     for byte in &result[..4] {
-        write!(hex, "{:02x}", byte).expect("infallible");
+        // fmt::Write for String is infallible: it appends to the buffer and
+        // never returns Err. The `let _ =` explicitly discards the Ok(()) value.
+        let _ = write!(hex, "{:02x}", byte);
     }
     hex
 }
@@ -343,5 +349,52 @@ mod tests {
             || panic!("machine id should not be called"),
         );
         assert!(result.is_ok());
+    }
+
+    /// Poison the file_lock mutex so subsequent lock() calls return an error.
+    fn poison_mutex(ks: &KeyStorage) {
+        let lock = ks.file_lock.lock().unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = lock;
+            panic!("intentional panic to poison mutex");
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn store_key_returns_error_when_mutex_poisoned() {
+        let (_dir, ks) = open_temp_store();
+        poison_mutex(&ks);
+        let result = ks.store_key("provider", "key");
+        assert!(result.is_err(), "store_key should return Err on poisoned mutex");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("mutex poisoned") || err_msg.contains("poisoned"),
+            "error should mention mutex poison, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn remove_key_returns_error_when_mutex_poisoned() {
+        let (_dir, ks) = open_temp_store();
+        ks.store_key("provider", "key").unwrap();
+        poison_mutex(&ks);
+        let result = ks.remove_key("provider");
+        assert!(result.is_err(), "remove_key should return Err on poisoned mutex");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("mutex poisoned") || err_msg.contains("poisoned"),
+            "error should mention mutex poison, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn key_hash_hex_produces_correct_output() {
+        // SHA-256 of empty slice, first 4 bytes -> 8 hex chars
+        let hash = key_hash_hex(b"");
+        assert_eq!(hash.len(), 8);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        // Known value: SHA-256("") starts with e3b0c442
+        assert_eq!(hash, "e3b0c442");
     }
 }
