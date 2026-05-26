@@ -5,7 +5,7 @@
   import type { GeneratingType } from '../stores/generation.svelte';
 
   interface Props {
-    recording: Recording | undefined;
+    recording: Recording | null;
     generationState: {
       generating: GeneratingType;
       progressStatus: string | null;
