@@ -83,7 +83,8 @@ pub(super) async fn build_test_state_with_recording(
 
     // ── RAG subsystem ─────────────────────────────────────────────────────────
     let embedding_generator = Arc::new(
-        medical_rag::embeddings::EmbeddingGenerator::new_ollama(None, None),
+        medical_rag::embeddings::EmbeddingGenerator::new_ollama(None, None)
+            .expect("reqwest client build in test"),
     );
     let vector_store = Arc::new(medical_rag::vector_store::VectorStore::new(Arc::clone(&db)));
     let bm25_search = Arc::new(medical_rag::bm25::Bm25Search::new(Arc::clone(&db)));

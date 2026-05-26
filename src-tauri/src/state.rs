@@ -77,6 +77,12 @@ impl From<medical_security::SecurityError> for InitError {
     }
 }
 
+impl From<medical_core::error::AppError> for InitError {
+    fn from(e: medical_core::error::AppError) -> Self {
+        InitError::Other(Box::new(e))
+    }
+}
+
 /// Holds the recovery reason between boot and the frontend's mount.
 ///
 /// Always registered with `app.manage(...)` (regardless of which init branch
@@ -574,7 +580,7 @@ impl AppState {
         let embedding_generator = Arc::new(EmbeddingGenerator::new_ollama(
             Some(&embedding_url),
             Some(&config_ref.embedding_model),
-        ));
+        )?);
 
         let vector_store = Arc::new(VectorStore::new(Arc::clone(&db)));
         let bm25_search = Arc::new(Bm25Search::new(Arc::clone(&db)));
