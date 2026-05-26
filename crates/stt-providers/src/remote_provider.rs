@@ -323,7 +323,7 @@ impl SttProvider for RemoteSttProvider {
 mod tests {
     use super::*;
     use medical_core::types::{AudioData, SttConfig};
-    use wiremock::matchers::{header_exists, method, path};
+    use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn dummy_audio() -> AudioData {
@@ -388,133 +388,6 @@ mod tests {
         assert_eq!(transcript.segments.len(), 1);
         assert_eq!(transcript.segments[0].text, "Hello patient.");
         assert!(transcript.segments[0].speaker.is_none());
-    }
-
-    #[tokio::test]
-    async fn authorization_header_sent_when_api_key_present() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/audio/transcriptions"))
-            .and(header_exists("Authorization"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(verbose_body()))
-            .mount(&server)
-            .await;
-
-        let provider = provider_at(&server.uri(), Some("sk-test".into()));
-        let res = provider
-            .transcribe(dummy_audio(), SttConfig::default(), CancellationToken::new())
-            .await;
-        assert!(res.is_ok(), "expected ok, got: {res:?}");
-    }
-
-    #[tokio::test]
-    async fn no_authorization_header_when_api_key_absent() {
-        let server = MockServer::start().await;
-        // Match requests that DO have Authorization — they should be zero.
-        Mock::given(method("POST"))
-            .and(path("/v1/audio/transcriptions"))
-            .and(header_exists("Authorization"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&server)
-            .await;
-        // Requests WITHOUT Authorization get a 200.
-        Mock::given(method("POST"))
-            .and(path("/v1/audio/transcriptions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(verbose_body()))
-            .mount(&server)
-            .await;
-
-        let provider = provider_at(&server.uri(), None);
-        let res = provider
-            .transcribe(dummy_audio(), SttConfig::default(), CancellationToken::new())
-            .await;
-        assert!(res.is_ok(), "should not send Authorization without key");
-    }
-
-    #[tokio::test]
-    async fn http_401_with_unknown_token_reason_maps_to_repair_message() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/audio/transcriptions"))
-            .respond_with(
-                ResponseTemplate::new(401).insert_header("x-auth-reason", "unknown-token"),
-            )
-            .mount(&server)
-            .await;
-
-        let provider = provider_at(&server.uri(), Some("stale".into()));
-        let err = provider
-            .transcribe(dummy_audio(), SttConfig::default(), CancellationToken::new())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("no longer recognizes"),
-            "expected orphaned-pairing specific message, got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn http_401_without_reason_header_maps_to_generic_auth_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/audio/transcriptions"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&server)
-            .await;
-
-        let provider = provider_at(&server.uri(), Some("bad".into()));
-        let err = provider
-            .transcribe(dummy_audio(), SttConfig::default(), CancellationToken::new())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("authentication"),
-            "expected generic auth error, got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn http_503_maps_to_server_internal_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/audio/transcriptions"))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&server)
-            .await;
-
-        let provider = provider_at(&server.uri(), None);
-        let err = provider
-            .transcribe(dummy_audio(), SttConfig::default(), CancellationToken::new())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("internal error"),
-            "expected 5xx error, got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn malformed_json_maps_to_parse_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/audio/transcriptions"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
-            .mount(&server)
-            .await;
-
-        let provider = provider_at(&server.uri(), None);
-        let err = provider
-            .transcribe(dummy_audio(), SttConfig::default(), CancellationToken::new())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("Unexpected response"),
-            "expected parse error, got: {err}"
-        );
     }
 
     #[test]
@@ -628,25 +501,6 @@ mod tests {
 
         p.set_endpoint(None, false).await.expect("clear endpoint");
         assert!(p.url_cache.lock().await.is_none(), "cache must be cleared on set_endpoint");
-    }
-
-    #[tokio::test]
-    async fn http_500_with_partial_body_includes_diagnostic_marker() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/audio/transcriptions"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("model load failed"))
-            .mount(&server)
-            .await;
-
-        let provider = provider_at(&server.uri(), None);
-        let err = provider
-            .transcribe(dummy_audio(), SttConfig::default(), CancellationToken::new())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("500"), "expected status code in error: {err}");
-        assert!(err.contains("model load failed"), "expected body content in error: {err}");
     }
 
     #[test]

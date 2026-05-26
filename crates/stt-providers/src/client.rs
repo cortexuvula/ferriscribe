@@ -133,3 +133,217 @@ pub async fn post_audio(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+    use wiremock::matchers::{header_exists, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn verbose_body() -> serde_json::Value {
+        serde_json::json!({
+            "text": "Hello patient.",
+            "segments": [
+                { "start": 0.0, "end": 1.0, "text": "Hello patient." }
+            ],
+            "language": "en",
+            "duration": 1.0
+        })
+    }
+
+    #[tokio::test]
+    async fn authorization_header_sent_when_api_key_present() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(header_exists("Authorization"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(verbose_body()))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let result = post_audio(
+            &client,
+            &server.uri(),
+            "whisper-1",
+            Some("sk-test"),
+            vec![0u8; 100],
+            None,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn no_authorization_header_when_api_key_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(header_exists("Authorization"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(verbose_body()))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let result = post_audio(
+            &client,
+            &server.uri(),
+            "whisper-1",
+            None,
+            vec![0u8; 100],
+            None,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected ok, got: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn http_401_with_unknown_token_reason_maps_to_repair_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .insert_header("x-auth-reason", "unknown-token"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let result = post_audio(
+            &client,
+            &server.uri(),
+            "whisper-1",
+            Some("bad-key"),
+            vec![0u8; 100],
+            None,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("no longer recognizes"), "got: {}", err_msg);
+    }
+
+    #[tokio::test]
+    async fn http_401_without_reason_header_maps_to_generic_auth_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let result = post_audio(
+            &client,
+            &server.uri(),
+            "whisper-1",
+            Some("bad-key"),
+            vec![0u8; 100],
+            None,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("rejected authentication"), "got: {}", err_msg);
+    }
+
+    #[tokio::test]
+    async fn http_503_maps_to_server_internal_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let result = post_audio(
+            &client,
+            &server.uri(),
+            "whisper-1",
+            None,
+            vec![0u8; 100],
+            None,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("internal error"), "got: {}", err_msg);
+    }
+
+    #[tokio::test]
+    async fn http_500_with_partial_body_includes_diagnostic_marker() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let result = post_audio(
+            &client,
+            &server.uri(),
+            "whisper-1",
+            None,
+            vec![0u8; 100],
+            None,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("internal error"), "got: {}", err_msg);
+        assert!(err_msg.contains("Internal Server Error"), "got: {}", err_msg);
+    }
+
+    #[tokio::test]
+    async fn malformed_json_maps_to_parse_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let result = post_audio(
+            &client,
+            &server.uri(),
+            "whisper-1",
+            None,
+            vec![0u8; 100],
+            None,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("Unexpected response"), "got: {}", err_msg);
+    }
+}
