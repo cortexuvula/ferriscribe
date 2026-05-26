@@ -53,7 +53,8 @@ pub async fn process_recording(
     // stages and interrupt in-flight provider work.
     let cancel = CancellationToken::new();
     {
-        let mut guard = state.pipeline_cancels.lock().unwrap();
+        let mut guard = state.pipeline_cancels.lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("pipeline_cancels: {e}")))?;
         guard.insert(recording_id.clone(), cancel.clone());
     }
     // Ensure the flag is removed on every exit path.
