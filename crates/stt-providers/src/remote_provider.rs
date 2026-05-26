@@ -176,10 +176,11 @@ impl RemoteSttProvider {
         language: Option<&str>,
         cancel: &CancellationToken,
     ) -> AppResult<client::VerboseJson> {
+        let base_url = self.current_base_url().await?;
         let api_key = self.api_key.read().await.clone();
         client::post_audio(
             &self.client,
-            &self.current_base_url().await?,
+            &base_url,
             &self.model,
             api_key.as_deref(),
             wav_bytes,

@@ -65,7 +65,10 @@ pub async fn post_audio(
         req = req.header("Authorization", format!("Bearer {}", key));
     }
 
-    // Send request with cancellation
+    // Drive the HTTP send concurrently with the cancellation token.
+    // With `biased;`, the cancel branch is checked first on each poll so a
+    // mid-flight cancellation is observed promptly. Dropping the request future
+    // tears down the underlying reqwest connection at the TCP layer.
     let resp = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
@@ -124,7 +127,8 @@ pub async fn post_audio(
         )));
     }
 
-    // Parse response with cancellation
+    // Body parsing is also awaited under cancellation — large/slow responses
+    // shouldn't pin the caller after they've asked to bail out.
     tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(AppError::Cancelled),
