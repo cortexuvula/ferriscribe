@@ -66,8 +66,6 @@ mod tests {
 
     #[tokio::test]
     async fn returns_cached_url_within_ttl() {
-        use std::time::Instant;
-
         let mut cache = Some(ResolvedCache {
             url: "http://cached.example.com:8080".to_string(),
             resolved_at: Instant::now(),
@@ -87,16 +85,33 @@ mod tests {
 
     #[tokio::test]
     async fn resolves_fresh_url_when_cache_expired() {
-        use std::time::Instant;
+        use std::net::TcpListener;
 
+        // Bind a local port so the probe succeeds
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let endpoint = Some(RemoteEndpoint {
+            lan: Some("127.0.0.1".to_string()),
+            tailscale: None,
+            port,
+            bearer: None,
+        });
+
+        // Pre-populate cache with expired entry pointing to different URL
         let mut cache = Some(ResolvedCache {
             url: "http://old.example.com:8080".to_string(),
             resolved_at: Instant::now() - Duration::from_secs(31), // Expired
         });
 
-        // With no endpoint, should return base_url (not cached URL)
-        let result = current_base_url(&None, "http://fresh.com:8080", &mut cache).await;
-        assert_eq!(result.unwrap(), "http://fresh.com:8080");
+        // Should ignore expired cache and resolve fresh
+        let result = current_base_url(&endpoint, "http://fallback.com:8080", &mut cache).await.unwrap();
+        assert_eq!(result, format!("http://127.0.0.1:{}", port), "should resolve fresh, not use expired cache");
+
+        // Cache should be updated with new URL
+        let updated = cache.unwrap();
+        assert_eq!(updated.url, result);
+        assert!(updated.resolved_at.elapsed() < Duration::from_secs(1), "cache timestamp should be fresh");
     }
 
     #[tokio::test]
@@ -108,22 +123,31 @@ mod tests {
 
     #[tokio::test]
     async fn current_base_url_caches_for_30s() {
-        use medical_core::types::RemoteEndpoint;
+        use std::net::TcpListener;
+
+        // Bind a local port so the probe succeeds
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
 
         let endpoint = Some(RemoteEndpoint {
-            lan: Some("192.168.1.100".to_string()),
+            lan: Some("127.0.0.1".to_string()),
             tailscale: None,
-            port: 8080,
+            port,
             bearer: None,
         });
 
         let mut cache = None;
 
-        // First call should resolve and cache
-        let url1 = current_base_url(&endpoint, "http://fallback.com:8080", &mut cache).await;
-        // Note: This will fail in test because resolve_base_url() requires network access
-        // The test is kept for documentation; in practice, mock the endpoint or skip
-        // For now, just verify the function signature works
-        assert!(url1.is_err() || url1.is_ok());
+        // First call resolves and caches
+        let url1 = current_base_url(&endpoint, "http://fallback.com:8080", &mut cache).await.unwrap();
+        assert_eq!(url1, format!("http://127.0.0.1:{}", port));
+        assert!(cache.is_some());
+
+        // Drop the listener (close the port)
+        drop(listener);
+
+        // Second call should return cached URL (port is closed, so fresh probe would fail)
+        let url2 = current_base_url(&endpoint, "http://fallback.com:8080", &mut cache).await.unwrap();
+        assert_eq!(url1, url2, "cache should serve URL even after port closes");
     }
 }
