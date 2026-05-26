@@ -6,7 +6,6 @@
 //! so speaker labels still work even when Whisper is remote.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -28,24 +27,12 @@ use medical_core::types::{
 
 use crate::audio_prep;
 use crate::diarization::SpeakerDiarizer;
+use crate::endpoint;
 use crate::merge;
 use crate::whisper::WhisperSegment;
 
-const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(600);
+const TRANSCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const TARGET_SAMPLE_RATE: u32 = 16_000;
-
-// ──────────────────────────────────────────────────────────────────────────────
-// 30-second resolved-URL cache for RemoteEndpoint resolution
-// ──────────────────────────────────────────────────────────────────────────────
-
-struct ResolvedCache {
-    url: String,
-    resolved_at: std::time::Instant,
-}
-
-const CACHE_TTL: Duration = Duration::from_secs(30);
-
-// ──────────────────────────────────────────────────────────────────────────────
 
 pub struct RemoteSttProvider {
     client: Client,
@@ -62,7 +49,7 @@ pub struct RemoteSttProvider {
     /// Optional LAN/Tailscale endpoint. When set, `current_base_url()` resolves
     /// the first reachable address with a 30-second cache.
     endpoint: RwLock<Option<RemoteEndpoint>>,
-    url_cache: Mutex<Option<ResolvedCache>>,
+    url_cache: Mutex<Option<endpoint::ResolvedCache>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,7 +89,7 @@ impl RemoteSttProvider {
 
         let client = Client::builder()
             .pool_max_idle_per_host(4)
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(TRANSCRIBE_TIMEOUT)
             .build()
             .map_err(|e| AppError::SttProvider(format!("Failed to build HTTP client: {e}")))?;
@@ -141,7 +128,7 @@ impl RemoteSttProvider {
         let base_url = http_url(host, port);
         let client = Client::builder()
             .pool_max_idle_per_host(4)
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(TRANSCRIBE_TIMEOUT)
             .build()
             .map_err(|e| AppError::SttProvider(format!("Failed to build HTTP client: {e}")))?;
@@ -195,42 +182,8 @@ impl RemoteSttProvider {
     /// cache.  Falls back to `self.base_url` when no endpoint is set.
     async fn current_base_url(&self) -> AppResult<String> {
         let ep_guard = self.endpoint.read().await;
-        if let Some(ep) = ep_guard.as_ref() {
-            let mut cache = self.url_cache.lock().await;
-            if let Some(c) = cache.as_ref() {
-                if c.resolved_at.elapsed() < CACHE_TTL {
-                    return Ok(c.url.clone());
-                }
-            }
-            let url = ep
-                .resolve_base_url()
-                .await
-                .ok_or_else(|| {
-                    use medical_core::error::{OfflineReason, ServiceKind};
-                    // RemoteEndpoint probed LAN then Tailscale and both failed. Pick
-                    // the LAN URL as the representative endpoint; if LAN isn't set,
-                    // fall back to Tailscale; if neither is set, "(unresolved)"
-                    // surfaces clearly in the dialog.
-                    let endpoint = ep
-                        .lan
-                        .as_deref()
-                        .map(|h| http_url(h, ep.port))
-                        .or_else(|| ep.tailscale.as_deref().map(|h| http_url(h, ep.port)))
-                        .unwrap_or_else(|| "(unresolved)".into());
-                    AppError::EndpointOffline {
-                        service: ServiceKind::RemoteStt,
-                        endpoint,
-                        reason: OfflineReason::Timeout,
-                        provider_name: "Whisper STT".into(),
-                    }
-                })?;
-            *cache = Some(ResolvedCache {
-                url: url.clone(),
-                resolved_at: std::time::Instant::now(),
-            });
-            return Ok(url);
-        }
-        Ok(self.base_url.clone())
+        let mut cache_guard = self.url_cache.lock().await;
+        endpoint::current_base_url(&*ep_guard, &self.base_url, &mut *cache_guard).await
     }
 
     fn diarization_available(&self) -> bool {
@@ -774,7 +727,7 @@ mod tests {
         .expect("build");
 
         // Seed the cache manually.
-        *p.url_cache.lock().await = Some(ResolvedCache {
+        *p.url_cache.lock().await = Some(endpoint::ResolvedCache {
             url: "http://stale:9999".to_string(),
             resolved_at: std::time::Instant::now(),
         });

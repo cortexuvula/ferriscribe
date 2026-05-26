@@ -5,6 +5,7 @@ pub mod diarization;
 pub mod merge;
 pub mod local_provider;
 pub mod remote_provider;
+pub mod endpoint;
 
 pub use local_provider::LocalSttProvider;
 
