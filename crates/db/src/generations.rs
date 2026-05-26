@@ -62,8 +62,7 @@ impl GenerationsRepo {
                  WHERE recording_id = ? AND output_type = ?",
                 params![input.recording_id.to_string(), input.output_type],
                 |r| r.get(0),
-            )
-            .unwrap_or(0);
+            )?;
         let seq = prev_max + 1;
 
         conn.execute(
@@ -352,6 +351,37 @@ mod tests {
         assert_eq!(g1.regeneration_seq, 1);
         assert_eq!(g2.regeneration_seq, 2);
         assert_eq!(g3.regeneration_seq, 3);
+    }
+
+    #[test]
+    fn record_generation_propagates_query_errors() {
+        let conn = migrated();
+        let rec_id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO recordings (id, filename, processing_status, created_at) \
+             VALUES (?, 'test.wav', 'done', datetime('now'))",
+            params![rec_id.to_string()],
+        )
+        .unwrap();
+
+        // Drop the table to simulate query failure
+        conn.execute("DROP TABLE generations", []).unwrap();
+
+        let result = GenerationsRepo::record_generation(
+            &conn,
+            GenerationInsert {
+                recording_id: rec_id,
+                output_type: "soap",
+                ai_provider: "ollama",
+                ai_model: "llama3",
+                prompt_template_name: None,
+                input_transcript: "t",
+                input_context_json: None,
+                draft_text: "d",
+            },
+        );
+
+        assert!(result.is_err(), "should propagate query error, not silently use 0");
     }
 
     #[test]
