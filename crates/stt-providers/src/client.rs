@@ -91,6 +91,13 @@ pub async fn post_audio(
     let status = resp.status();
 
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        // The auth proxy at crates/sharing/src/auth_proxy.rs tags its 401s
+        // with `x-auth-reason: unknown-token` when the bearer doesn't match
+        // any non-revoked row — the orphaned-pairing case (office server
+        // rebuilt after pair). Surface a specific re-pair instruction in
+        // that case; fall back to a generic auth-failure message otherwise.
+        // The header values are a contract with the proxy; do not change
+        // without coordinating the producer side.
         let reason = resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok());
         let msg = match reason {
             Some("unknown-token") => {
