@@ -62,6 +62,7 @@ pub(super) fn unwrap_app_error_message(err: AppError) -> String {
         | AppError::Translation(s)
         | AppError::Config(s)
         | AppError::MutexPoisoned(s)
+        | AppError::HttpClient(s)
         | AppError::Other(s) => s,
         AppError::Io(e) => e.to_string(),
         AppError::Serialization(e) => e.to_string(),
@@ -91,6 +92,7 @@ pub(super) fn unwrap_app_error_message_ref(err: &AppError) -> String {
         | AppError::Translation(s)
         | AppError::Config(s)
         | AppError::MutexPoisoned(s)
+        | AppError::HttpClient(s)
         | AppError::Other(s) => s.clone(),
         AppError::Io(e) => e.to_string(),
         AppError::Serialization(e) => e.to_string(),

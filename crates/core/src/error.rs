@@ -87,6 +87,9 @@ pub enum AppError {
     #[error("Mutex poisoned: {0}")]
     MutexPoisoned(String),
 
+    #[error("HTTP client error: {0}")]
+    HttpClient(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -113,6 +116,7 @@ impl AppError {
             AppError::Serialization(_) => "Serialization",
             AppError::Cancelled => "Cancelled",
             AppError::MutexPoisoned(_) => "MutexPoisoned",
+            AppError::HttpClient(_) => "HttpClient",
             AppError::Other(_) => "Other",
         }
     }
@@ -352,5 +356,20 @@ mod tests {
             "message should describe the failure, got: {msg}"
         );
         assert_eq!(err.kind_str(), "MutexPoisoned");
+    }
+
+    #[test]
+    fn http_client_variant_includes_context() {
+        let err = AppError::HttpClient("failed to build client: TLS error".to_string());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to build client"),
+            "message should include the construction failure, got: {msg}"
+        );
+        assert!(
+            msg.contains("TLS error"),
+            "message should include the underlying cause, got: {msg}"
+        );
+        assert_eq!(err.kind_str(), "HttpClient");
     }
 }
