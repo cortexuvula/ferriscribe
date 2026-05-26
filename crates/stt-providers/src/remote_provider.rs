@@ -10,11 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_core::Stream;
-use reqwest::{
-    Client,
-    multipart::{Form, Part},
-};
-use serde::Deserialize;
+use reqwest::Client;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -27,6 +23,7 @@ use medical_core::types::{
 };
 
 use crate::audio_prep;
+use crate::client;
 use crate::diarization::SpeakerDiarizer;
 use crate::endpoint;
 use crate::merge;
@@ -51,24 +48,6 @@ pub struct RemoteSttProvider {
     /// the first reachable address with a 30-second cache.
     endpoint: RwLock<Option<RemoteEndpoint>>,
     url_cache: Mutex<Option<endpoint::ResolvedCache>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct VerboseJson {
-    #[serde(default)]
-    segments: Vec<VerboseSegment>,
-    #[serde(default)]
-    language: Option<String>,
-    #[serde(default)]
-    text: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct VerboseSegment {
-    start: f32,
-    end: f32,
-    #[serde(default)]
-    text: Option<String>,
 }
 
 impl RemoteSttProvider {
@@ -196,104 +175,18 @@ impl RemoteSttProvider {
         wav_bytes: Vec<u8>,
         language: Option<&str>,
         cancel: &CancellationToken,
-    ) -> AppResult<VerboseJson> {
-        let base = self.current_base_url().await?;
-        let url = format!("{base}/v1/audio/transcriptions");
-
-        let mut form = Form::new()
-            .part(
-                "file",
-                Part::bytes(wav_bytes)
-                    .file_name("audio.wav")
-                    .mime_str("audio/wav")
-                    .map_err(|e| AppError::SttProvider(format!("multipart error: {e}")))?,
-            )
-            .text("model", self.model.clone())
-            .text("response_format", "verbose_json");
-        if let Some(lang) = language.filter(|l| !l.is_empty()) {
-            form = form.text("language", lang.to_string());
-        }
-
-        let mut req = self.client.post(&url).multipart(form);
-        let api_key_snapshot = self.api_key.read().await.clone();
-        if let Some(key) = api_key_snapshot.as_deref().filter(|k| !k.is_empty()) {
-            req = req.header("Authorization", format!("Bearer {key}"));
-        }
-
-        // Drive the HTTP send concurrently with the cancellation token. With
-        // `biased;`, the cancel branch is checked first on each poll so a
-        // mid-flight cancellation is observed promptly. Dropping the request
-        // future tears down the underlying reqwest connection at the TCP layer.
-        let resp = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                return Err(AppError::Cancelled);
-            }
-            result = req.send() => {
-                result.map_err(|e| {
-                    use medical_core::error::ServiceKind;
-                    use medical_core::preflight::classify_reqwest_error;
-                    match classify_reqwest_error(&e) {
-                        Some(reason) => AppError::EndpointOffline {
-                            service: ServiceKind::RemoteStt,
-                            endpoint: base.clone(),
-                            reason,
-                            provider_name: "Whisper STT".into(),
-                        },
-                        None => AppError::SttProvider(format!("Whisper request failed: {e}")),
-                    }
-                })?
-            }
-        };
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            // The auth proxy at crates/sharing/src/auth_proxy.rs tags its 401s
-            // with `x-auth-reason: unknown-token` when the bearer doesn't match
-            // any non-revoked row — the orphaned-pairing case (office server
-            // rebuilt after pair). Surface a specific re-pair instruction in
-            // that case; fall back to a generic auth-failure message otherwise.
-            // The header values are a contract with the proxy; do not change
-            // without coordinating the producer side.
-            let reason = resp
-                .headers()
-                .get("x-auth-reason")
-                .and_then(|v| v.to_str().ok());
-            let msg = match reason {
-                Some("unknown-token") => {
-                    "Office server no longer recognizes this client \
-                     \u{2014} please re-pair (Settings \u{2192} Sharing \u{2192} Unpair, \
-                     then scan a fresh code from the office machine)."
-                        .to_string()
-                }
-                _ => "Whisper server rejected authentication \u{2014} \
-                      re-pair the client if the office server was reinstalled."
-                    .to_string(),
-            };
-            return Err(AppError::SttProvider(msg));
-        }
-        if status.is_client_error() {
-            let body = medical_core::http_error_body::read_error_body(resp, 200).await;
-            return Err(AppError::SttProvider(format!(
-                "Whisper server rejected request: {status} {body}"
-            )));
-        }
-        if status.is_server_error() {
-            let body = medical_core::http_error_body::read_error_body(resp, 200).await;
-            return Err(AppError::SttProvider(format!(
-                "Whisper server internal error: {status} {body}"
-            )));
-        }
-
-        // Body parsing is also awaited under cancellation — large/slow responses
-        // shouldn't pin the caller after they've asked to bail out.
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(AppError::Cancelled),
-            result = resp.json::<VerboseJson>() => result.map_err(|e| {
-                AppError::SttProvider(format!("Unexpected response from Whisper server: {e}"))
-            }),
-        }
+    ) -> AppResult<client::VerboseJson> {
+        let api_key = self.api_key.read().await.clone();
+        client::post_audio(
+            &self.client,
+            &self.current_base_url().await?,
+            &self.model,
+            api_key.as_deref(),
+            wav_bytes,
+            language,
+            cancel,
+        )
+        .await
     }
 }
 

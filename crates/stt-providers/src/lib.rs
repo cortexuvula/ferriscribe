@@ -6,6 +6,7 @@ pub mod merge;
 pub mod local_provider;
 pub mod remote_provider;
 pub mod endpoint;
+pub mod client;
 
 pub use local_provider::LocalSttProvider;
 
