@@ -84,6 +84,9 @@ pub enum AppError {
     #[error("Cancelled")]
     Cancelled,
 
+    #[error("Mutex poisoned: {0}")]
+    MutexPoisoned(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -109,6 +112,7 @@ impl AppError {
             AppError::Io(_) => "Io",
             AppError::Serialization(_) => "Serialization",
             AppError::Cancelled => "Cancelled",
+            AppError::MutexPoisoned(_) => "MutexPoisoned",
             AppError::Other(_) => "Other",
         }
     }
@@ -333,5 +337,20 @@ mod tests {
     fn offline_reason_serializes_as_pascalcase() {
         let json = serde_json::to_value(OfflineReason::DnsFailure).unwrap();
         assert_eq!(json, serde_json::json!("DnsFailure"));
+    }
+
+    #[test]
+    fn mutex_poisoned_variant_includes_context() {
+        let err = AppError::MutexPoisoned("capture_handle: poisoned lock".to_string());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("capture_handle"),
+            "message should include the lock name for debugging, got: {msg}"
+        );
+        assert!(
+            msg.contains("poisoned lock"),
+            "message should describe the failure, got: {msg}"
+        );
+        assert_eq!(err.kind_str(), "MutexPoisoned");
     }
 }
