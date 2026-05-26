@@ -16,8 +16,8 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@tauri-apps/plugin-deep-link": "^2.4.9",
-    "@tauri-apps/plugin-dialog": "^2.7.0",
-    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "@tiptap/core": "^2.10.0",
     "@tiptap/extension-underline": "^2.10.0",
     "@tiptap/pm": "^2.10.0",
@@ -29,17 +29,17 @@
     "tiptap-markdown": "^0.8.10"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^5",
-    "@tauri-apps/cli": "^2",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tauri-apps/cli": "^2.11.2",
     "@tsconfig/svelte": "^5",
     "@types/nspell": "^2.1.6",
     "@types/qrcode": "^1.5.6",
-    "@vitest/ui": "^2.1.9",
-    "jsdom": "^25.0.1",
-    "svelte": "^5",
-    "svelte-check": "^4",
-    "typescript": "^5",
-    "vite": "^6",
-    "vitest": "^2.1.9"
+    "@vitest/ui": "^4.1.7",
+    "jsdom": "^29.1.1",
+    "svelte": "^5.55.9",
+    "svelte-check": "^4.4.8",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.14",
+    "vitest": "^4.1.7"
   }
 }
