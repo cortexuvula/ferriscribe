@@ -44,6 +44,8 @@ pub enum DbError {
     Constraint(String),
     #[error("Graph error: {0}")]
     Graph(String),
+    #[error("UUID parse error in {1}: {0}")]
+    UuidParse(String, String),
     #[error("{0}")]
     Other(String),
 }

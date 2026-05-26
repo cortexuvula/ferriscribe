@@ -104,9 +104,19 @@ impl GenerationsRepo {
     }
 
     fn row_to_generation(row: &rusqlite::Row) -> rusqlite::Result<Generation> {
+        let id_str: String = row.get(0)?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+
+        let recording_id_str: String = row.get(1)?;
+        let recording_id = Uuid::parse_str(&recording_id_str).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+
         Ok(Generation {
-            id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
-            recording_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap_or_else(|_| Uuid::nil()),
+            id,
+            recording_id,
             output_type: row.get(2)?,
             created_at: row.get(3)?,
             finalized_at: row.get(4)?,
@@ -631,6 +641,50 @@ mod tests {
             GenerationsRepo::list_by_status(&conn, "promoted", 10, 0).unwrap();
         assert_eq!(total, 1);
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn row_to_generation_returns_error_on_invalid_uuid() {
+        let conn = migrated();
+        let rec_id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO recordings (id, filename, processing_status, created_at) \
+             VALUES (?, 'test.wav', 'done', datetime('now'))",
+            params![rec_id.to_string()],
+        )
+        .unwrap();
+
+        // Insert a row with an invalid UUID format
+        let invalid_uuid = "not-a-valid-uuid";
+        conn.execute(
+            "INSERT INTO generations
+               (id, recording_id, output_type, created_at, ai_provider, ai_model,
+                input_transcript, draft_text, corpus_status, regeneration_seq)
+             VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'llama3',
+                     'transcript', 'draft', 'candidate', 1)",
+            params![invalid_uuid, rec_id.to_string()],
+        )
+        .unwrap();
+
+        // Attempt to retrieve should return error, not silently use nil UUID
+        let result = conn.query_row(
+            "SELECT id, recording_id, output_type, created_at, finalized_at,
+                    ai_provider, ai_model, prompt_template_name,
+                    input_transcript, input_context_json,
+                    draft_text, final_text,
+                    corpus_status, corpus_curated_at,
+                    edit_distance, edit_ratio, regeneration_seq
+             FROM generations WHERE id = ?",
+            params![invalid_uuid],
+            GenerationsRepo::row_to_generation,
+        );
+
+        // Should error due to invalid UUID, not return Ok with Uuid::nil()
+        assert!(
+            result.is_err()
+                || matches!(result, Ok(Generation { id, .. }) if id != Uuid::nil()),
+            "invalid UUID must produce an error, not a nil UUID"
+        );
     }
 
     #[test]
