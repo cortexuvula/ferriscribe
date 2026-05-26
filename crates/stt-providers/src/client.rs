@@ -297,7 +297,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/audio/transcriptions"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("model load failed"))
             .mount(&server)
             .await;
 
@@ -316,8 +316,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         let err_msg = err.to_string();
-        assert!(err_msg.contains("internal error"), "got: {}", err_msg);
-        assert!(err_msg.contains("Internal Server Error"), "got: {}", err_msg);
+        assert!(err_msg.contains("500"), "status code missing: {}", err_msg);
+        assert!(err_msg.contains("model load failed"), "body missing: {}", err_msg);
     }
 
     #[tokio::test]
