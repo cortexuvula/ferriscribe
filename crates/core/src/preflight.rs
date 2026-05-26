@@ -13,16 +13,23 @@ use tracing::{debug, warn};
 use crate::error::{AppError, OfflineReason, ServiceKind};
 use crate::types::settings::AppConfig;
 
-/// Cap on a single probe's wall time. Chosen to be long enough for a
-/// healthy LAN round-trip plus TLS handshake (~200ms typical) but short
-/// enough that an offline server doesn't visibly stall the UI.
+/// Cap on a single probe's wall time.
+///
+/// Chosen to be long enough for a healthy LAN round-trip plus TLS
+/// handshake (~200ms typical) but short enough that an offline server
+/// doesn't visibly stall the UI.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Classify a failed reqwest send into the user-facing `OfflineReason`.
+/// Classify a failed reqwest send into the user-facing [`OfflineReason`].
+///
 /// Returns `None` if the error is something other than a connection /
 /// timeout / DNS / TLS failure (e.g. URL parse error, body decode) —
 /// caller should treat that as a genuine bug rather than an offline
 /// endpoint.
+///
+/// Walks the [`std::error::Error::source`] chain looking for hyper /
+/// `std::io` signals that distinguish DNS failures from plain connection
+/// refusals (both report `is_connect() == true`).
 pub fn classify_reqwest_error(err: &reqwest::Error) -> Option<OfflineReason> {
     if err.is_timeout() {
         return Some(OfflineReason::Timeout);
@@ -47,9 +54,22 @@ pub fn classify_reqwest_error(err: &reqwest::Error) -> Option<OfflineReason> {
     None
 }
 
-/// Probe a single endpoint. Returns `Ok(())` if the server responded
-/// with *any* HTTP status (including 4xx / 5xx) — auth / API errors
-/// are not connectivity errors and are handled by the real call.
+/// Probe a single endpoint for connectivity.
+///
+/// Returns `Ok(())` if the server responded with *any* HTTP status
+/// (including 4xx / 5xx) — auth / API errors are not connectivity errors
+/// and are handled by the real call. Returns
+/// [`AppError::EndpointOffline`] if the connection fails, with the
+/// reason classified via [`classify_reqwest_error`].
+///
+/// If a `bearer` token is provided, it is sent as
+/// `Authorization: Bearer <token>` in the probe request.
+///
+/// # Errors
+///
+/// - [`AppError::Config`] if the reqwest client cannot be built.
+/// - [`AppError::EndpointOffline`] if the endpoint is unreachable.
+/// - [`AppError::Other`] if the error is not a connectivity failure.
 pub async fn probe_endpoint(
     service: ServiceKind,
     provider_name: &str,
@@ -122,25 +142,39 @@ pub async fn probe_endpoint(
     }
 }
 
-/// Which Tauri command is about to run. Drives which endpoint(s) are
-/// probed by `preflight_for_command`.
+/// Which Tauri command is about to run.
+///
+/// Drives which endpoint(s) are probed by
+/// [`preflight_for_command`]. Each variant maps to either the AI
+/// provider endpoint, the STT endpoint, or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
+    /// Speech-to-text — probes the remote STT endpoint (if configured).
     Transcribe,
+    /// SOAP note generation — probes the AI provider endpoint.
     GenerateSoap,
+    /// Referral letter generation — probes the AI provider endpoint.
     GenerateReferral,
+    /// Patient letter generation — probes the AI provider endpoint.
     GenerateLetter,
+    /// Synopsis generation — probes the AI provider endpoint.
     GenerateSynopsis,
+    /// Interactive chat — probes the AI provider endpoint.
     Chat,
 }
 
 /// Inspect settings, decide which remote endpoints this command needs,
-/// probe each in parallel with a 3s timeout, return Ok(()) if all are
-/// reachable (or skipped) and the first `EndpointOffline` error otherwise.
+/// probe each in parallel with a 3 s timeout, and return `Ok(())` if all
+/// are reachable (or skipped).
 ///
-/// Endpoints whose host is loopback (127.0.0.1, ::1, localhost, "")
-/// are skipped entirely — failures from local servers surface via the
-/// real call's error mapper using the same `EndpointOffline` variant.
+/// Endpoints whose host is loopback (`127.0.0.1`, `::1`, `localhost`,
+/// `""`) are skipped entirely — failures from local servers surface via
+/// the real call's error mapper using the same `EndpointOffline` variant.
+///
+/// # Errors
+///
+/// Returns the first [`AppError::EndpointOffline`] if any probed endpoint
+/// is unreachable.
 pub async fn preflight_for_command(
     kind: CommandKind,
     settings: &AppConfig,

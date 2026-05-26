@@ -1,3 +1,13 @@
+//! Provider trait interfaces implemented by workspace crates.
+//!
+//! Each trait defines the contract for a category of pluggable backend.
+//! Provider crates (`ai-providers`, `stt-providers`, `tts-providers`,
+//! etc.) implement these traits; consumer crates depend only on the
+//! trait, enabling runtime provider selection.
+//!
+//! All provider traits are `Send + Sync` and use `async_trait` for
+//! async method support.
+
 pub mod ai_provider;
 pub mod stt_provider;
 pub mod tts_provider;

@@ -1,3 +1,5 @@
+//! Application configuration types.
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -5,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use super::agent::AgentSettings;
 
 /// How speech-to-text is performed.
+///
+/// Selected in the settings UI. [`Local`](SttMode::Local) uses in-process
+/// whisper-rs; [`Remote`](SttMode::Remote) sends audio to an
+/// OpenAI-compatible Whisper server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SttMode {
@@ -15,8 +21,11 @@ pub enum SttMode {
     Remote,
 }
 
-/// AI providers supported at runtime. Used by AppConfig::migrate() to reject
-/// stale values left over from older versions of the app.
+/// AI providers supported at runtime.
+///
+/// Used by [`AppConfig::migrate`] to reject stale values left over from
+/// older versions of the app that supported cloud providers. Only
+/// `"lmstudio"` and `"ollama"` are valid.
 pub const SUPPORTED_AI_PROVIDERS: &[&str] = &["lmstudio", "ollama"];
 
 // ---------------------------------------------------------------------------
@@ -67,9 +76,13 @@ pub enum SoapTemplate {
 
 /// A named snippet of clinical context text the user can apply to the
 /// Patient Context field at recording time.
+///
+/// Stored in [`AppConfig::custom_context_templates`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextTemplate {
+    /// Display name shown in the template picker.
     pub name: String,
+    /// The context text to insert.
     pub body: String,
 }
 
@@ -436,8 +449,10 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Migrate deserialized config values to match the current supported set.
     ///
-    /// Run after deserialization; silently corrects values that are no longer
-    /// valid (e.g. cloud provider names left over from older versions).
+    /// Run after deserialization; silently corrects values that are no
+    /// longer valid (e.g. cloud provider names like `"openai"` or
+    /// `"anthropic"` left over from older versions are migrated to
+    /// `"lmstudio"`).
     pub fn migrate(&mut self) {
         if !SUPPORTED_AI_PROVIDERS.contains(&self.ai_provider.as_str()) {
             tracing::warn!(

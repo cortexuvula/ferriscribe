@@ -1,102 +1,181 @@
+//! AI completion types — requests, responses, messages, and streaming.
+
 use serde::{Deserialize, Serialize};
 
 /// Metadata about an available AI model.
+///
+/// Returned by [`AiProvider::available_models`](crate::traits::AiProvider::available_models).
+/// The `supports_tools` and `supports_streaming` flags let the agent
+/// orchestrator and UI decide which code path to use.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
+    /// Provider-specific model identifier (e.g. `"llama3:8b"`).
     pub id: String,
+    /// Human-readable model name for display.
     pub name: String,
+    /// Canonical provider name (e.g. `"ollama"`, `"lmstudio"`).
     pub provider: String,
+    /// Maximum context window in tokens.
     pub max_tokens: u32,
+    /// Whether this model supports function/tool calling.
     pub supports_tools: bool,
+    /// Whether this model supports streaming responses.
     pub supports_streaming: bool,
 }
 
 /// A request to generate a chat completion.
+///
+/// Passed to [`AiProvider::complete`](crate::traits::AiProvider::complete)
+/// and related methods. The `system_prompt` field, if present, is
+/// prepended as a system-role message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
+    /// Model identifier to use (must match a [`ModelInfo::id`]).
     pub model: String,
+    /// Conversation messages in order.
     pub messages: Vec<Message>,
+    /// Sampling temperature override (provider default if `None`).
     pub temperature: Option<f32>,
+    /// Maximum tokens to generate (provider default if `None`).
     pub max_tokens: Option<u32>,
+    /// System prompt prepended to the conversation.
     pub system_prompt: Option<String>,
 }
 
 /// A single message in a conversation.
+///
+/// The `tool_calls` field is populated only on assistant messages that
+/// request tool invocations. Tool-result messages use
+/// [`MessageContent::ToolResult`] as their content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// The role of the message author.
     pub role: Role,
+    /// The message body — either plain text or a tool result.
     pub content: MessageContent,
+    /// Tool calls requested by the model (assistant messages only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
 }
 
-/// The role of the message author.
+/// The role of a message author.
+///
+/// Serialized as `snake_case` strings to match the OpenAI-compatible API
+/// format used by both Ollama and LM Studio.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
+    /// System instructions that prime the model.
     System,
+    /// A message from the user.
     User,
+    /// A response from the model.
     Assistant,
+    /// The result of a tool invocation.
     Tool,
 }
 
 /// The body of a message — either plain text or a tool result.
+///
+/// Uses `#[serde(untagged)]` so that text messages serialize as bare
+/// strings (matching the OpenAI chat format), while tool results
+/// serialize as objects with `tool_call_id` and `content`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MessageContent {
+    /// Plain text content.
     Text(String),
+    /// The result of a tool invocation, linked by `tool_call_id`.
     ToolResult {
+        /// The ID of the [`ToolCall`] this result responds to.
         tool_call_id: String,
+        /// The tool's output as a string.
         content: String,
     },
 }
 
 /// A complete response from the AI provider.
+///
+/// Returned by [`AiProvider::complete`](crate::traits::AiProvider::complete).
+/// If the model requested tool calls, they appear in `tool_calls` and
+/// `content` may be empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionResponse {
+    /// The model's text output (may be empty if tool calls were made).
     pub content: String,
+    /// The model that produced the response.
     pub model: String,
+    /// Token usage statistics.
     pub usage: UsageInfo,
+    /// Tool calls requested by the model.
     pub tool_calls: Vec<ToolCall>,
 }
 
 /// A tool invocation requested by the model.
+///
+/// When the model decides to call a tool, it emits a `ToolCall` in its
+/// response. The agent orchestrator executes the tool and feeds the
+/// result back as a [`MessageContent::ToolResult`] message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    /// Unique ID linking this call to its result.
     pub id: String,
+    /// The tool name (must match a [`ToolDef::name`](crate::types::agent::ToolDef::name)).
     pub name: String,
+    /// JSON arguments for the tool.
     pub arguments: serde_json::Value,
 }
 
 /// Token usage statistics for a completion.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageInfo {
+    /// Tokens consumed by the prompt (input).
     pub prompt_tokens: u32,
+    /// Tokens consumed by the generated completion (output).
     pub completion_tokens: u32,
+    /// Sum of prompt and completion tokens.
     pub total_tokens: u32,
 }
 
 /// A chunk of a streaming completion response.
+///
+/// Used by [`AiProvider::complete_stream`](crate::traits::AiProvider::complete_stream).
+/// Tagged with `type` for JSON serialization so the frontend can
+/// dispatch on chunk kind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamChunk {
+    /// An incremental text delta from the model.
     Delta {
+        /// The text fragment to append.
         text: String,
     },
+    /// An incremental tool-call argument delta.
     ToolCallDelta {
+        /// The tool call ID being built.
         id: String,
+        /// Tool name (present only in the first delta for a call).
         name: Option<String>,
+        /// JSON argument fragment to append.
         arguments_delta: String,
     },
+    /// Final usage statistics (sent just before `Done`).
     Usage(UsageInfo),
+    /// Stream has ended.
     Done,
 }
 
 /// Response from a completion that may include tool calls.
+///
+/// Returned by [`AiProvider::complete_with_tools`](crate::traits::AiProvider::complete_with_tools).
+/// Either `content` or `tool_calls` (or both) may be present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCompletionResponse {
+    /// The model's text output, if any.
     pub content: Option<String>,
+    /// Tool calls requested by the model.
     pub tool_calls: Vec<ToolCall>,
+    /// Token usage statistics.
     pub usage: UsageInfo,
 }
 

@@ -3,10 +3,16 @@
 
 use reqwest::Response;
 
-/// Attempt to read up to `max_chars` characters of the response body. On
-/// read failure, returns a "(could not read body: <error>)" placeholder so
-/// the caller's downstream error message still has a useful tail. Truncates
-/// to bound log line length.
+/// Attempt to read up to `max_chars` characters of the response body.
+///
+/// On read failure, returns a `"(could not read body: <error>)"`
+/// placeholder so the caller's downstream error message still has a
+/// useful tail. Truncates to `max_chars` at a Unicode codepoint boundary
+/// (via [`char`] iteration) to avoid splitting multi-byte sequences.
+///
+/// Used by provider crates to capture a bounded snippet of error
+/// response bodies for inclusion in [`AppError`](crate::error::AppError)
+/// messages — never logged directly (PHI constraint).
 pub async fn read_error_body(resp: Response, max_chars: usize) -> String {
     match resp.text().await {
         Ok(body) => body.chars().take(max_chars).collect(),

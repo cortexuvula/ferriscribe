@@ -2,24 +2,61 @@
 //! constraint. Used to reject public endpoints (e.g. api.openai.com) at
 //! Settings save and at provider construction.
 
+/// How a host string was classified by the endpoint policy.
+///
+/// The classification is purely static — no DNS lookups or network probes
+/// are performed. The workspace's local-only constraint (PHI/HIPAA)
+/// rejects [`Public`](EndpointKind::Public) and
+/// [`Unknown`](EndpointKind::Unknown) hosts unless the user has opted out
+/// via `AppConfig::allow_public_endpoint`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EndpointKind {
+    /// `127.0.0.0/8`, `::1`, or the hostname `localhost`.
     Loopback,
+    /// RFC 1918 private ranges (`10/8`, `172.16/12`, `192.168/16`).
     LanRfc1918,
+    /// Link-local addresses (`169.254/16`, `fe80::/10`).
     LinkLocal,
+    /// Tailscale CGNAT (`100.64/10`) or MagicDNS (`*.ts.net`).
     Tailscale,
+    /// IPv6 Unique Local Address (`fc00::/7`).
     Ula,
+    /// mDNS / non-routable TLDs (`.local`, `.lan`, `.home.arpa`, `.internal`).
     Mdns,
+    /// A public IP address that doesn't match any local range.
     Public,
+    /// A hostname that couldn't be classified statically.
     Unknown,
 }
 
+/// Error returned when an endpoint is rejected by the local-only policy.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum EndpointPolicyError {
+    /// The host was classified as [`EndpointKind::Public`] or
+    /// [`EndpointKind::Unknown`] and `allow_public` was `false`.
     #[error("public endpoints are blocked; host='{host}' classified as {kind:?}")]
-    Blocked { host: String, kind: EndpointKind },
+    Blocked {
+        /// The host string that was rejected.
+        host: String,
+        /// How the host was classified.
+        kind: EndpointKind,
+    },
 }
 
+/// Classify a host string into an [`EndpointKind`] without performing any
+/// DNS lookups.
+///
+/// Handles bare hostnames, IP literals, and bracketed IPv6 addresses
+/// (e.g. `[fd00::1]`). Classification is case-insensitive and strips
+/// trailing dots from FQDNs.
+///
+/// # Recognition order
+///
+/// 1. IP literals — parsed via [`std::net::IpAddr`] and classified by range.
+/// 2. `localhost` (exact match, case-insensitive) → [`Loopback`](EndpointKind::Loopback).
+/// 3. `*.ts.net` suffix → [`Tailscale`](EndpointKind::Tailscale).
+/// 4. `.local`, `.lan`, `.home.arpa`, `.internal` suffixes → [`Mdns`](EndpointKind::Mdns).
+/// 5. Everything else → [`Unknown`](EndpointKind::Unknown).
 pub fn classify_endpoint(host: &str) -> EndpointKind {
     // Strip outer IPv6 brackets if present: "[fd00::1]" -> "fd00::1".
     let trimmed = host
@@ -97,6 +134,16 @@ fn classify_ip(ip: std::net::IpAddr) -> EndpointKind {
     }
 }
 
+/// Validate that a host string is a local/private endpoint.
+///
+/// Returns `Ok(())` if the host classifies as a local kind (loopback,
+/// RFC 1918, Tailscale, mDNS, etc.), or if `allow_public` is `true`.
+/// Returns [`EndpointPolicyError::Blocked`] if the host is
+/// [`Public`](EndpointKind::Public) or [`Unknown`](EndpointKind::Unknown)
+/// and `allow_public` is `false`.
+///
+/// Called at Settings-save time and at provider construction to enforce
+/// the local-only AI/STT constraint.
 pub fn validate_local_endpoint(
     host: &str,
     allow_public: bool,
@@ -113,9 +160,19 @@ pub fn validate_local_endpoint(
     }
 }
 
-/// Extract the bare host from a string that may be a bare host, host:port,
-/// or scheme://host:port/path. Returns the host with any surrounding IPv6
-/// brackets stripped. Returns the original input if it can't be parsed.
+/// Extract the bare host from a string that may be a bare host, `host:port`,
+/// or `scheme://host:port/path`.
+///
+/// Returns the host with any surrounding IPv6 brackets stripped. Returns
+/// the original input if it can't be parsed.
+///
+/// # Examples
+///
+/// ```ignore
+/// assert_eq!(extract_host("http://192.168.1.42:11434/v1"), "192.168.1.42");
+/// assert_eq!(extract_host("[fd00::1]:11434"), "fd00::1");
+/// assert_eq!(extract_host("localhost"), "localhost");
+/// ```
 pub fn extract_host(input: &str) -> &str {
     // Strip any scheme.
     let after_scheme = input
@@ -148,7 +205,11 @@ pub fn extract_host(input: &str) -> &str {
     no_path
 }
 
-/// Validate a URL-or-host input by extracting the host and delegating.
+/// Validate a URL-or-host input by extracting the host with
+/// [`extract_host`] and delegating to [`validate_local_endpoint`].
+///
+/// Convenience function for Tauri commands that receive full URLs
+/// (e.g. `"http://192.168.1.42:11434/v1"`) from the settings UI.
 pub fn validate_url(
     input: &str,
     allow_public: bool,

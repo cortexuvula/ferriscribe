@@ -1,32 +1,63 @@
+//! Recording and processing-status types.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
 
 /// A recorded consultation with optional transcript and generated documents.
+///
+/// This is the central domain entity — every other subsystem (STT, SOAP
+/// generation, referral, letter, chat) reads from and writes to fields
+/// on this struct. Stored in the `recordings` table via the `db` crate.
+///
+/// The `metadata` field is a freeform JSON blob that holds both
+/// freeform `context` (string) and structured `patient_context`
+/// ([`PatientContext`](super::agent::PatientContext) shape). New metadata
+/// keys are non-breaking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recording {
+    /// Unique identifier (UUIDv4, assigned at creation).
     pub id: Uuid,
+    /// Original filename of the audio file.
     pub filename: String,
+    /// Transcribed text (populated after STT).
     pub transcript: Option<String>,
+    /// Generated SOAP note (populated after AI generation).
     pub soap_note: Option<String>,
+    /// Generated referral letter.
     pub referral: Option<String>,
+    /// Generated patient letter.
     pub letter: Option<String>,
+    /// Interactive chat transcript.
     pub chat: Option<String>,
+    /// Patient name (if known).
     pub patient_name: Option<String>,
+    /// Path to the audio file on disk.
     pub audio_path: PathBuf,
+    /// Duration of the audio in seconds.
     pub duration_seconds: Option<f64>,
+    /// Size of the audio file in bytes.
     pub file_size_bytes: Option<u64>,
+    /// Which STT provider produced the transcript.
     pub stt_provider: Option<String>,
+    /// Which AI provider produced the SOAP note.
     pub ai_provider: Option<String>,
+    /// User-assigned tags for filtering.
     pub tags: Vec<String>,
+    /// Processing lifecycle state.
     pub status: ProcessingStatus,
+    /// When the recording was created.
     pub created_at: DateTime<Utc>,
+    /// Freeform JSON metadata (see module docs for known keys).
     pub metadata: serde_json::Value,
 }
 
 impl Recording {
-    /// Create a new recording in the Pending state.
+    /// Create a new recording in the [`Pending`](ProcessingStatus::Pending) state.
+    ///
+    /// Generates a new UUIDv4 and sets `created_at` to now. All optional
+    /// fields (transcript, soap_note, etc.) start as `None`.
     pub fn new(filename: impl Into<String>, audio_path: PathBuf) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -49,41 +80,57 @@ impl Recording {
         }
     }
 
-    /// Returns true if processing has completed successfully.
+    /// Returns `true` if processing has completed successfully.
     pub fn is_processed(&self) -> bool {
         matches!(self.status, ProcessingStatus::Completed { .. })
     }
 
-    /// Returns true if a transcript is present.
+    /// Returns `true` if a transcript is present.
     pub fn has_transcript(&self) -> bool {
         self.transcript.is_some()
     }
 
-    /// Returns true if a SOAP note is present.
+    /// Returns `true` if a SOAP note is present.
     pub fn has_soap_note(&self) -> bool {
         self.soap_note.is_some()
     }
 }
 
 /// Processing lifecycle of a recording.
+///
+/// Tagged with `status` for JSON serialization so the frontend can
+/// dispatch on state. Transitions: `Pending` → `Processing` →
+/// `Completed` or `Failed`. Failed tasks with `retry_count < 3`
+/// may be retried.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ProcessingStatus {
+    /// Waiting to be processed.
     Pending,
+    /// Currently being processed.
     Processing {
+        /// When processing started.
         started_at: DateTime<Utc>,
     },
+    /// Processing completed successfully.
     Completed {
+        /// When processing finished.
         completed_at: DateTime<Utc>,
     },
+    /// Processing failed (may be retried if `retry_count < 3`).
     Failed {
+        /// Description of the failure.
         error: String,
+        /// Number of times this task has been retried.
         retry_count: u32,
     },
 }
 
 impl ProcessingStatus {
-    /// Returns true if no further automatic transitions are expected.
+    /// Returns `true` if no further automatic transitions are expected.
+    ///
+    /// `Completed` is always terminal. `Failed` is terminal once
+    /// `retry_count >= 3`.
     pub fn is_terminal(&self) -> bool {
         match self {
             ProcessingStatus::Completed { .. } => true,
@@ -92,7 +139,7 @@ impl ProcessingStatus {
         }
     }
 
-    /// Returns true if the task can be retried (failed fewer than 3 times).
+    /// Returns `true` if the task can be retried (failed fewer than 3 times).
     pub fn can_retry(&self) -> bool {
         match self {
             ProcessingStatus::Failed { retry_count, .. } => *retry_count < 3,
@@ -100,7 +147,7 @@ impl ProcessingStatus {
         }
     }
 
-    /// A human-readable label for the status.
+    /// A human-readable label for the status (e.g. `"Pending"`, `"Failed"`).
     pub fn status_label(&self) -> &'static str {
         match self {
             ProcessingStatus::Pending => "Pending",
@@ -112,18 +159,33 @@ impl ProcessingStatus {
 }
 
 /// Lightweight summary of a recording suitable for list views.
+///
+/// Avoids loading full transcript/SOAP content. Use
+/// `RecordingSummary::from(&recording)` to derive from a full
+/// [`Recording`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingSummary {
+    /// Recording UUID.
     pub id: Uuid,
+    /// Original filename.
     pub filename: String,
+    /// Patient name (if known).
     pub patient_name: Option<String>,
+    /// Current processing state.
     pub status: ProcessingStatus,
+    /// Audio duration in seconds.
     pub duration_seconds: Option<f64>,
+    /// When the recording was created.
     pub created_at: DateTime<Utc>,
+    /// User-assigned tags.
     pub tags: Vec<String>,
+    /// Whether a transcript exists (without loading it).
     pub has_transcript: bool,
+    /// Whether a SOAP note exists (without loading it).
     pub has_soap_note: bool,
+    /// Whether a referral letter exists (without loading it).
     pub has_referral: bool,
+    /// Whether a patient letter exists (without loading it).
     pub has_letter: bool,
 }
 

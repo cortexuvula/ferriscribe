@@ -1,3 +1,5 @@
+//! Speech-to-text provider trait.
+
 use async_trait::async_trait;
 use futures_core::Stream;
 use tokio_util::sync::CancellationToken;
@@ -6,9 +8,21 @@ use crate::error::AppResult;
 use crate::types::{AudioData, AudioStream, SttConfig, Transcript, TranscriptChunk};
 
 /// Abstraction over any speech-to-text provider.
+///
+/// Implemented by `stt-providers` (local whisper-rs and remote Whisper
+/// server). The `audio` and `processing` crates depend only on this
+/// trait for provider-agnostic transcription.
+///
+/// # Cancellation
+///
+/// The `transcribe` method accepts a [`CancellationToken`]. When fired,
+/// the provider should return [`AppError::Cancelled`](crate::error::AppError::Cancelled)
+/// as promptly as possible. Remote providers cancel in-flight HTTP via
+/// `tokio::select!`; local providers check the token before/after the
+/// blocking model invocation but cannot interrupt it mid-pass.
 #[async_trait]
 pub trait SttProvider: Send + Sync {
-    /// The canonical name of this provider (e.g. "groq").
+    /// The canonical name of this provider (e.g. `"whisper-local"`, `"whisper-remote"`).
     fn name(&self) -> &str;
 
     /// Returns `true` if this provider supports streaming transcription.
@@ -19,11 +33,12 @@ pub trait SttProvider: Send + Sync {
 
     /// Transcribe a complete audio buffer and return the full transcript.
     ///
-    /// `cancel`: when the token fires, the provider should return `AppError::Cancelled`
-    /// as promptly as possible. Implementations differ in how interruptible they are:
-    /// remote providers cancel in-flight HTTP via `tokio::select!`; local providers
-    /// check the token before/after the blocking model invocation but cannot
-    /// interrupt it mid-pass.
+    /// # Errors
+    ///
+    /// - [`AppError::SttProvider`](crate::error::AppError::SttProvider) on API failure.
+    /// - [`AppError::Cancelled`](crate::error::AppError::Cancelled) if the token fires.
+    /// - [`AppError::EndpointOffline`](crate::error::AppError::EndpointOffline) if
+    ///   a remote endpoint is unreachable.
     async fn transcribe(
         &self,
         audio: AudioData,
@@ -32,6 +47,9 @@ pub trait SttProvider: Send + Sync {
     ) -> AppResult<Transcript>;
 
     /// Transcribe a live audio stream, yielding chunks as they are recognized.
+    ///
+    /// Only available if [`supports_streaming`](SttProvider::supports_streaming)
+    /// returns `true`.
     async fn transcribe_stream(
         &self,
         stream: AudioStream,

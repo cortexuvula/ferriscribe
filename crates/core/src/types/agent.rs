@@ -1,3 +1,5 @@
+//! Agent and tool types for the autonomous agent subsystem.
+
 use serde::{Deserialize, Serialize};
 
 use super::ai::{Message, UsageInfo};
@@ -5,22 +7,33 @@ use super::rag::RagResult;
 use super::recording::Recording;
 
 /// Definition of a tool that an agent can call.
+///
+/// Corresponds to the JSON schema sent to the AI model so it knows what
+/// tools are available and what arguments they accept.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDef {
+    /// Unique tool name (must match [`Tool::definition`](crate::traits::Tool::definition)).
     pub name: String,
+    /// Human-readable description for the model's prompt.
     pub description: String,
+    /// JSON Schema describing the tool's arguments.
     pub parameters: serde_json::Value,
 }
 
 /// The output of a tool invocation.
+///
+/// Produced by [`Tool::execute`](crate::traits::Tool::execute) and fed
+/// back to the model as a [`MessageContent::ToolResult`](super::ai::MessageContent::ToolResult).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
+    /// The tool's output text.
     pub content: String,
+    /// If `true`, the tool encountered an error and `content` describes it.
     pub is_error: bool,
 }
 
 impl ToolOutput {
-    /// Construct a successful output.
+    /// Construct a successful (non-error) output.
     pub fn success(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
@@ -28,7 +41,7 @@ impl ToolOutput {
         }
     }
 
-    /// Construct an error output.
+    /// Construct an error output (`is_error = true`).
     pub fn error(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
@@ -38,12 +51,21 @@ impl ToolOutput {
 }
 
 /// The runtime context passed to an agent when processing a request.
+///
+/// Assembled by the agent orchestrator from the current conversation,
+/// patient data, RAG results, and optional recording. Passed to
+/// [`Agent::execute`](crate::traits::Agent::execute).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentContext {
+    /// The user's most recent message.
     pub user_message: String,
+    /// Prior conversation messages for context.
     pub conversation_history: Vec<Message>,
+    /// Patient-specific grounding data (medications, conditions, etc.).
     pub patient_context: Option<PatientContext>,
+    /// Relevant chunks retrieved from the RAG system.
     pub rag_context: Vec<RagResult>,
+    /// The recording being discussed, if any.
     pub recording: Option<Recording>,
 }
 
@@ -52,46 +74,80 @@ pub struct AgentContext {
 /// Frontend payloads from the SOAP generation flow may omit `patient_name`
 /// and `prior_soap_notes` (those fields aren't surfaced in the UI today);
 /// `#[serde(default)]` keeps deserialization forgiving.
+///
+/// # PHI note
+///
+/// These fields contain protected health information. Never log them
+/// via `tracing::*` macros or `println!`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatientContext {
+    /// Patient's name (optional — not always surfaced in the UI).
     #[serde(default)]
     pub patient_name: Option<String>,
+    /// Prior SOAP note texts for longitudinal context.
     #[serde(default)]
     pub prior_soap_notes: Vec<String>,
+    /// Current medications.
     #[serde(default)]
     pub medications: Vec<String>,
+    /// Known medical conditions.
     #[serde(default)]
     pub conditions: Vec<String>,
+    /// Known allergies.
     #[serde(default)]
     pub allergies: Vec<String>,
 }
 
 /// The final response from an agent run.
+///
+/// Includes the text output, a record of all tool calls made during the
+/// run, token usage, and the number of agent loop iterations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResponse {
+    /// The agent's final text response.
     pub content: String,
+    /// Record of every tool call made during the run.
     pub tool_calls_made: Vec<AgentToolCallRecord>,
+    /// Cumulative token usage across all iterations.
     pub usage: UsageInfo,
+    /// Number of agent loop iterations (including tool-call rounds).
     pub iterations: u32,
 }
 
 /// A record of a single tool invocation during an agent run.
+///
+/// Captured for debugging and audit trails. Stored alongside the agent
+/// response so the full chain-of-thought is reconstructable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentToolCallRecord {
+    /// The tool that was called.
     pub tool_name: String,
+    /// The JSON arguments passed to the tool.
     pub arguments: serde_json::Value,
+    /// The tool's output.
     pub result: ToolOutput,
+    /// Wall-clock duration of the tool execution in milliseconds.
     pub duration_ms: u64,
 }
 
 /// Runtime settings for a specific agent.
+///
+/// Stored inside [`AppConfig::agent_settings`](super::settings::AppConfig::agent_settings)
+/// keyed by agent name. Each agent can have its own model, temperature,
+/// and system prompt override.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSettings {
+    /// Whether this agent is enabled.
     pub enabled: bool,
+    /// AI provider to use (e.g. `"lmstudio"`, `"ollama"`).
     pub provider: String,
+    /// Model identifier.
     pub model: String,
+    /// Sampling temperature (lower = more deterministic).
     pub temperature: f32,
+    /// Maximum tokens to generate per response.
     pub max_tokens: u32,
+    /// Optional system prompt override (agent default if `None`).
     pub system_prompt: Option<String>,
 }
 

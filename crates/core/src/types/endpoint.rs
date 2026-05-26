@@ -1,10 +1,12 @@
 //! `RemoteEndpoint` — LAN/Tailscale connection resolver with optional bearer auth.
 
-/// Build the host:port portion of an HTTP URL, bracketing IPv6 literals as
-/// required by RFC 3986. Without this, `http://fe80::1:8080` parses as host
-/// `fe80` with three nested ports — reqwest then emits a "Builder error"
-/// rather than a useful message. Hostnames and IPv4 literals pass through
-/// unchanged.
+/// Build an HTTP URL from a host and port, bracketing IPv6 literals as
+/// required by RFC 3986.
+///
+/// Without this, `http://fe80::1:8080` parses as host `fe80` with three
+/// nested ports — reqwest then emits a "Builder error" rather than a
+/// useful message. Hostnames and IPv4 literals pass through unchanged.
+/// Already-bracketed hosts are not double-bracketed.
 pub fn http_url(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') {
         format!("http://[{host}]:{port}")
@@ -14,8 +16,15 @@ pub fn http_url(host: &str, port: u16) -> String {
 }
 
 /// A remote endpoint that may be reachable on either a LAN address or a
-/// Tailscale address. The resolver probes LAN first with a short connect
-/// timeout, then falls back to Tailscale.
+/// Tailscale address.
+///
+/// The resolver ([`resolve_base_url`](RemoteEndpoint::resolve_base_url))
+/// probes the LAN address first with a 500 ms connect timeout, then
+/// falls back to the Tailscale address with a 2 s timeout. Used by the
+/// `sharing` crate for connecting to remote FerriScribe instances.
+///
+/// The custom `Debug` impl redacts the bearer token so it can never
+/// appear in `tracing::debug!(?endpoint, …)` output.
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RemoteEndpoint {
     /// LAN IP or hostname (no scheme, no port).
@@ -30,6 +39,7 @@ pub struct RemoteEndpoint {
 
 /// Manual `Debug` impl that redacts the bearer token so it can never appear
 /// in `tracing::debug!(?endpoint, …)` output or any other log sink.
+/// This is a PHI/security requirement — bearer tokens must not leak to logs.
 impl std::fmt::Debug for RemoteEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteEndpoint")
@@ -42,10 +52,11 @@ impl std::fmt::Debug for RemoteEndpoint {
 }
 
 impl RemoteEndpoint {
-    /// Probe the LAN address with a 500 ms connect timeout, fall back to
-    /// Tailscale (2 s timeout). Returns the URL prefix (e.g.
-    /// `"http://192.168.1.42:11435"`) for the first reachable address, or
-    /// `None` if neither is reachable.
+    /// Probe the LAN address with a 500 ms connect timeout, then fall
+    /// back to the Tailscale address (2 s timeout).
+    ///
+    /// Returns the URL prefix (e.g. `"http://192.168.1.42:11435"`) for
+    /// the first reachable address, or `None` if neither is reachable.
     pub async fn resolve_base_url(&self) -> Option<String> {
         if let Some(lan) = &self.lan {
             if Self::can_connect(lan, self.port, std::time::Duration::from_millis(500)).await {
