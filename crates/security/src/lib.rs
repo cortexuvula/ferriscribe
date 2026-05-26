@@ -22,6 +22,8 @@ pub enum SecurityError {
     KeyNotFound(String),
     #[error("master key unavailable: {reason}")]
     MasterKeyUnavailable { reason: String },
+    #[error("{0}")]
+    Other(String),
 }
 
 pub type SecurityResult<T> = Result<T, SecurityError>;
