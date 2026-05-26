@@ -3,6 +3,9 @@
 //! See docs/superpowers/specs/2026-05-11-training-corpus-design.md.
 //! Personal use only; data never leaves the device unless the
 //! clinician explicitly exports via the (Phase 3) pipeline.
+//!
+//! **Error handling:** All methods use proper error propagation via `?`
+//! and return `DbResult<T>`. No unwrap/expect calls in production code.
 
 use crate::{DbError, DbResult};
 use rusqlite::{Connection, OptionalExtension, params};
