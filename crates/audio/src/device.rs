@@ -37,7 +37,7 @@ const PREFERRED_RATES: &[u32] = &[16_000, 22_050, 44_100, 48_000];
 /// Returns `(supported_rates, supported_channels)` for a device.
 ///
 /// Tries input configs first, falls back to output configs. Rates are filtered
-/// to [`PREFERRED_RATES`] (16k, 22.05k, 44.1k, 48k) and both lists are
+/// to `PREFERRED_RATES` (16k, 22.05k, 44.1k, 48k) and both lists are
 /// deduplicated and sorted.
 pub fn supported_configs(device: &cpal::Device) -> (Vec<u32>, Vec<u16>) {
     // Try input configs first, then output configs.

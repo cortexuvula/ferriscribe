@@ -67,11 +67,11 @@ struct AppState {
 /// `Err`) then spawn the serving task.
 ///
 /// Returns the `JoinHandle` of the background serve task. The proxy runs
-/// until the handle is aborted (typically by [`SharingService::stop`]).
+/// until the handle is aborted (typically by [`SharingService::stop`](crate::SharingService::stop)).
 ///
 /// # Errors
 ///
-/// Returns [`SharingError::AuthProxy`] if the TCP bind fails or the reqwest
+/// Returns [`SharingError::AuthProxy`](crate::SharingError::AuthProxy) if the TCP bind fails or the reqwest
 /// client cannot be constructed.
 pub async fn spawn_auth_proxy(
     config: ProxyConfig,

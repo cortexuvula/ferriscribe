@@ -20,9 +20,9 @@ use super::wire::{
 /// HTTP communication. It handles:
 ///
 /// - Converting core [`CompletionRequest`] into the OpenAI wire format
-///   ([`ChatRequest`]) via [`build_request`](Self::build_request).
-/// - Parsing OpenAI wire responses ([`ChatResponse`]) back into core
-///   [`CompletionResponse`] via [`parse_response`](Self::parse_response).
+///   (`ChatRequest`) via `build_request`.
+/// - Parsing OpenAI wire responses (`ChatResponse`) back into core
+///   [`CompletionResponse`] via `parse_response`.
 /// - Bearer-token authentication via the `Authorization` header.
 /// - Error classification: connectivity errors become `EndpointOffline`,
 ///   application-layer errors become `AiProvider(String)`.

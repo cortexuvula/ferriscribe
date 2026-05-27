@@ -2,7 +2,7 @@
 //!
 //! Each builder accepts an optional custom template override; placeholders
 //! (`{recipient_type}`, `{urgency}`, `{letter_type}`) are resolved by
-//! [`prompt_resolver::resolve_prompt`].
+//! [`prompt_resolver::resolve_prompt`](crate::prompt_resolver::resolve_prompt).
 //!
 //! All builders return a `(system_prompt, user_prompt)` tuple ready to be
 //! passed to an AI provider's completion API. The system prompt carries the

@@ -8,12 +8,12 @@
 //!
 //! # Submodules
 //!
-//! - [`wire`] — private serde types modeling the OpenAI request/response shape
+//! - `wire` — private serde types modeling the OpenAI request/response shape
 //!   (`ChatRequest`, `ChatResponse`, `ChatMessage`, `ApiToolCall`, etc.).
 //!   These are `pub(super)` and not part of the public API.
-//! - [`client`] — `OpenAiCompatibleClient` struct, constructors, message
+//! - `client` — `OpenAiCompatibleClient` struct, constructors, message
 //!   conversion, request building, and response parsing.
-//! - [`methods`] — the four public methods: `list_models`, `complete`,
+//! - `methods` — the four public methods: `list_models`, `complete`,
 //!   `complete_stream`, `complete_with_tools`.
 //!
 //! # Wire protocol coverage

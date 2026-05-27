@@ -109,7 +109,7 @@ impl GenerationsRepo {
     ///
     /// # Errors
     ///
-    /// Returns [`DbError::Sqlite`](crate::DbError::Sqlite) if the row is not
+    /// Returns [`DbError::Sqlite`] if the row is not
     /// found (query returns no rows).
     pub fn get_by_id(conn: &Connection, id: Uuid) -> DbResult<Generation> {
         conn.query_row(

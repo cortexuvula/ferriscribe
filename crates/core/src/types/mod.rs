@@ -6,17 +6,17 @@
 //!
 //! | Submodule | Contents |
 //! |---|---|
-//! | [`recording`] | [`Recording`](recording::Recording), [`ProcessingStatus`](recording::ProcessingStatus), [`RecordingSummary`](recording::RecordingSummary) |
+//! | [`recording`] | [`recording::Recording`], [`recording::ProcessingStatus`], [`recording::RecordingSummary`] |
 //! | [`processing`] | Queue tasks, batch processing, priority |
 //! | [`agent`] | Agent context, tools, patient context |
 //! | [`ai`] | Completion request/response, messages, streaming |
 //! | [`stt`] | Audio data, transcription config/results |
 //! | [`tts`] | TTS config, voice info |
 //! | [`rag`] | RAG results, search config, knowledge graph types |
-//! | [`settings`] | [`AppConfig`](settings::AppConfig) and related enums |
+//! | [`settings`] | [`settings::AppConfig`] and related enums |
 //! | [`vocabulary`] | Vocabulary entries and corrections |
-//! | [`endpoint`] | [`RemoteEndpoint`](endpoint::RemoteEndpoint) with LAN/Tailscale resolution |
-//! | [`letter_audience`] | [`LetterAudience`](letter_audience::LetterAudience) for generated letters |
+//! | [`endpoint`] | [`endpoint::RemoteEndpoint`] with LAN/Tailscale resolution |
+//! | [`letter_audience`] | [`letter_audience::LetterAudience`] for generated letters |
 
 pub mod recording;
 pub mod processing;

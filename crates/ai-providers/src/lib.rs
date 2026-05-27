@@ -18,9 +18,9 @@
 //! - [`ProviderRegistry`] — holds registered [`AiProvider`] instances keyed
 //!   by name, tracks the active provider. Used by `src-tauri` to switch
 //!   between Ollama and LM Studio at runtime.
-//! - [`ollama::OllamaProvider`] — wraps [`OpenAiCompatibleClient`] pointed at
+//! - [`ollama::OllamaProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed at
 //!   an Ollama server (default `http://localhost:11434/v1`).
-//! - [`lmstudio::LmStudioProvider`] — wraps [`OpenAiCompatibleClient`] pointed
+//! - [`lmstudio::LmStudioProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed
 //!   at an LM Studio server (default `http://localhost:1234/v1`).
 //! - [`openai_compat::OpenAiCompatibleClient`] — generic HTTP client for any
 //!   endpoint implementing the OpenAI chat-completions protocol.

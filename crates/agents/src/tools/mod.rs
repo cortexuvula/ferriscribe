@@ -1,6 +1,6 @@
 //! Tool implementations and the [`ToolRegistry`].
 //!
-//! Each tool implements the [`Tool`](medical_core::traits::Tool) trait from
+//! Each tool implements the [`Tool`] trait from
 //! `medical-core`, providing a JSON Schema [`ToolDef`] for the AI provider
 //! and an `execute()` method that processes the model's arguments.
 //!

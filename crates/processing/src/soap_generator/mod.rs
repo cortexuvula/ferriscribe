@@ -3,13 +3,13 @@
 //! The system prompt uses a default template with placeholder tokens
 //! (`{icd_label}`, `{icd_instruction}`, `{template_guidance}`). A user-supplied
 //! `custom_prompt` overrides the default template; placeholders in either are
-//! resolved at generation time via [`prompt_resolver::resolve_prompt`].
+//! resolved at generation time via [`prompt_resolver::resolve_prompt`](crate::prompt_resolver::resolve_prompt).
 //!
 //! # Module layout
 //!
-//! - [`prompt_template`] — the built-in default prompt and [`build_soap_prompt`].
-//! - [`user_prompt`] — [`build_user_prompt`], plus the `sanitize_prompt` helper.
-//! - [`postprocess`] — markdown cleanup and section formatting on AI output.
+//! - `prompt_template` — the built-in default prompt and [`build_soap_prompt`].
+//! - `user_prompt` — [`build_user_prompt`], plus the `sanitize_prompt` helper.
+//! - `postprocess` — markdown cleanup and section formatting on AI output.
 //!
 //! # Critical Constraint: Anti-Fabrication
 //!

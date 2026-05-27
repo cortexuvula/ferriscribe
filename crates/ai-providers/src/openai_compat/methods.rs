@@ -144,7 +144,7 @@ impl OpenAiCompatibleClient {
     /// Posts a `ChatRequest` with `stream: true` and `stream_options.include_usage: true`
     /// to `{base_url}/chat/completions`. The response body is parsed as SSE
     /// via [`parse_sse_response`]. Each SSE data line is deserialized into a
-    /// [`ChatResponse`] and mapped to one or more [`StreamChunk`] items:
+    /// `ChatResponse` and mapped to one or more [`StreamChunk`] items:
     ///
     /// - `delta.content` → `StreamChunk::Delta { text }`
     /// - `delta.tool_calls` → `StreamChunk::ToolCallDelta { id, name, arguments_delta }`

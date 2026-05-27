@@ -43,7 +43,7 @@ fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
 ///
 /// # Errors
 ///
-/// Returns [`DbError::Pool`](crate::DbError::Pool) if the pool cannot be built.
+/// Returns [`DbError::Pool`] if the pool cannot be built.
 pub fn create_pool(db_path: &Path, db_key: Option<[u8; 32]>) -> DbResult<DbPool> {
     let manager = SqliteConnectionManager::file(db_path)
         .with_init(move |conn| apply_init(conn, db_key.as_ref()));
@@ -71,7 +71,7 @@ fn apply_init(conn: &Connection, db_key: Option<&[u8; 32]>) -> rusqlite::Result<
 ///
 /// # Errors
 ///
-/// Returns [`DbError::Pool`](crate::DbError::Pool) if the pool cannot be built.
+/// Returns [`DbError::Pool`] if the pool cannot be built.
 pub fn create_memory_pool() -> DbResult<DbPool> {
     let manager = SqliteConnectionManager::memory().with_init(|conn| apply_pragmas(conn));
     let pool = Pool::builder()

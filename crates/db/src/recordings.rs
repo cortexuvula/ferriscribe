@@ -22,7 +22,7 @@ impl RecordingsRepo {
     ///
     /// # Errors
     ///
-    /// Returns [`DbError::Sqlite`](crate::DbError::Sqlite) on constraint
+    /// Returns [`DbError::Sqlite`] on constraint
     /// violation (e.g. duplicate ID) or serialisation failure.
     pub fn insert(conn: &Connection, recording: &Recording) -> DbResult<()> {
         let status_json =

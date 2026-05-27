@@ -93,7 +93,7 @@ impl VocabularyRepo {
     ///
     /// # Errors
     ///
-    /// Returns [`DbError::Sqlite`](crate::DbError::Sqlite) on unique
+    /// Returns [`DbError::Sqlite`] on unique
     /// constraint violation (duplicate `find_text`).
     pub fn insert(conn: &Connection, entry: &VocabularyEntry) -> DbResult<()> {
         conn.execute(

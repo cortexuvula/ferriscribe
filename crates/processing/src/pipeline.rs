@@ -114,7 +114,7 @@ async fn send_event(tx: &ProgressSender, event: ProcessingEvent) {
 ///
 /// # Errors
 ///
-/// Returns [`ProcessingError::Cancelled`] if the progress channel is closed
+/// Returns [`ProcessingError::Cancelled`](crate::ProcessingError::Cancelled) if the progress channel is closed
 /// mid-pipeline (though currently channel-closed sends are swallowed silently
 /// via `let _ = tx.send(...).await`).
 ///

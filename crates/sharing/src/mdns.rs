@@ -68,7 +68,7 @@ pub struct ServerPorts {
 /// mDNS service advertiser.
 ///
 /// Registers a `_ferriscribe._tcp.local.` service record with TXT properties
-/// encoding the server's proxy ports and version. Drop or call [`stop`] to
+/// encoding the server's proxy ports and version. Drop or call [`MdnsAdvertiser::stop`](Self::stop) to
 /// unregister.
 pub struct MdnsAdvertiser {
     daemon: ServiceDaemon,

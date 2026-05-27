@@ -14,7 +14,7 @@
 //!
 //! # Feature flags
 //!
-//! - **`graph`** -- enables the [`graph`] module (CozoDB-backed knowledge
+//! - **`graph`** -- enables the `graph` module (CozoDB-backed knowledge
 //!   graph). Gated because CozoDB pulls in the Sled storage engine.
 //!
 //! # Thread safety
