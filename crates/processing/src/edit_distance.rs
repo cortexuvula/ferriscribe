@@ -5,11 +5,33 @@
 //! intuitive for clinicians than character delta. ~O(m·n) where m
 //! and n are token counts; for typical 200-800-word SOAPs that's a
 //! sub-millisecond computation.
+//!
+//! # Use Case
+//!
+//! After a physician edits an AI-generated SOAP note, the edit distance
+//! ratio indicates how much was changed. A low ratio (< 0.1) suggests the
+//! AI output was close; a high ratio (> 0.5) suggests significant
+//! hallucination or misalignment. This signal feeds the training-corpus
+//! quality filter.
 
-/// Word-level Levenshtein distance + ratio.
+/// Word-level Levenshtein distance and ratio.
 ///
-/// Returns `(distance, ratio)` where `ratio = distance / max(a_words, b_words)`,
-/// clamped to `[0.0, 1.0]`. Empty inputs return `(0, 0.0)`.
+/// Splits both inputs on whitespace, then computes the standard Levenshtein
+/// edit distance over the resulting token sequences using a two-row DP
+/// algorithm (O(min(m,n)) memory).
+///
+/// # Returns
+///
+/// `(distance, ratio)` where:
+/// - `distance` is the number of single-token insertions, deletions, and
+///   substitutions needed to transform `a` into `b`.
+/// - `ratio = distance / max(a_words, b_words)`, clamped to `[0.0, 1.0]`.
+///
+/// Empty inputs both return `(0, 0.0)`.
+///
+/// # Performance
+///
+/// For typical 200–800-word SOAP notes, computation is sub-millisecond.
 pub fn word_edit_distance(a: &str, b: &str) -> (usize, f64) {
     let a_words: Vec<&str> = a.split_whitespace().collect();
     let b_words: Vec<&str> = b.split_whitespace().collect();

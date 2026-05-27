@@ -1,5 +1,19 @@
 //! User-turn prompt assembly: sanitization + datetime + transcript + structured
 //! patient record + supplementary background.
+//!
+//! The user prompt is assembled in this order:
+//!
+//! 1. **Transcript** (primary source of truth) — never truncated here; the
+//!    command layer (`src-tauri/commands/generation.rs`) enforces the
+//!    authoritative upper bound (`MAX_TRANSCRIPT_CHARS`).
+//! 2. **Patient record** (structured, authoritative) — medications, allergies,
+//!    conditions from the physician-supplied `PatientContext`. Used for
+//!    historical Subjective fields only.
+//! 3. **Supplementary background** (freeform narrative) — truncated to
+//!    `MAX_CONTEXT_LENGTH` (8,000 chars) if exceeded.
+//!
+//! All inputs pass through `sanitize_prompt`, which strips prompt-injection
+//! patterns, null bytes, and normalises line endings — but does NOT truncate.
 
 use chrono::Local;
 use medical_core::types::PatientContext;
@@ -75,11 +89,28 @@ fn sanitize_prompt(text: &str) -> String {
 
 /// Build the user-turn prompt with datetime, context, and transcript.
 ///
-/// 1. Sanitise transcript and context (no truncation of transcript here —
+/// # Assembly order
+///
+/// 1. Sanitize transcript and context (no truncation of transcript here —
 ///    the command layer enforces the authoritative upper bound)
-/// 2. Truncate context to `MAX_CONTEXT_LENGTH` if needed
-/// 3. Prepend current date/time
-/// 4. Assemble parts
+/// 2. Truncate context to `MAX_CONTEXT_LENGTH` (8,000 chars) if needed
+/// 3. Prepend current date/time to the transcript
+/// 4. Assemble parts: transcript → patient record → supplementary background
+///
+/// # Patient record block
+///
+/// When `patient_context` is provided with at least one non-empty list
+/// (medications, allergies, or conditions), a "Patient record" block is
+/// inserted between the transcript and supplementary background. This block
+/// is marked as "authoritative facts — use these to populate historical
+/// Subjective fields" with an explicit no-alter-Assessment-or-Plan rule.
+///
+/// # Gotcha: no truncation of transcript
+///
+/// `sanitize_prompt` does NOT truncate. A previous version silently truncated
+/// the transcript to 10K chars inside `sanitize_prompt`, causing the model to
+/// hallucinate the missing Assessment and Plan. Truncation responsibility now
+/// lives at the command layer (`MAX_TRANSCRIPT_CHARS` in `src-tauri`).
 pub fn build_user_prompt(
     transcript: &str,
     context: Option<&str>,

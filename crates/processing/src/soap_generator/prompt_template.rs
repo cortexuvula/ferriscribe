@@ -1,5 +1,14 @@
 //! The built-in default SOAP system prompt and the [`build_soap_prompt`]
 //! entry point that resolves placeholders against [`SoapPromptConfig`].
+//!
+//! The default prompt is ~280 lines and contains:
+//! - A RULES block with the core anti-fabrication constraint (transcript is
+//!   the sole source of truth)
+//! - A FORBIDDEN INFERENCES block naming ten categories of common hallucinations
+//! - Two few-shot examples (sparse injury visit + lab-review visit) demonstrating
+//!   disciplined extraction
+//! - An OUTPUT FORMAT section specifying the section-by-section template
+//! - A 10-point SELF-CHECK checklist (placed last for LLM recency compliance)
 
 use std::collections::HashMap;
 
@@ -71,8 +80,32 @@ fn template_guidance_text(template: &SoapTemplate) -> &'static str {
 
 /// The built-in default SOAP system prompt.
 ///
-/// Contains three placeholder tokens: `{template_guidance}`, `{icd_label}`,
-/// and `{icd_instruction}`, resolved by `build_soap_prompt`.
+/// Contains three placeholder tokens resolved by [`build_soap_prompt`]:
+/// - `{template_guidance}` — template-variant-specific instruction
+/// - `{icd_label}` — ICD code header line (e.g., "ICD-10 Code: [specific code...]")
+/// - `{icd_instruction}` — ICD code instruction text (within OUTPUT FORMAT)
+///
+/// # Anti-fabrication structure
+///
+/// The prompt is structured as a precision instrument with layered fabrication
+/// guards:
+///
+/// 1. **RULES** — core constraints (transcript as sole source, no fabrication,
+///    first-person voice, "the patient" never names)
+/// 2. **FORBIDDEN INFERENCES** — ten named categories of common hallucinations
+/// 3. **EXAMPLE 1** — sparse injury visit demonstrating disciplined extraction
+/// 4. **EXAMPLE 2** — lab-review visit (no history, no exam, no PMH discussion)
+/// 5. **OUTPUT FORMAT** — section-by-section template
+/// 6. **FORMATTING RULES** — plain-text formatting constraints
+/// 7. **SELF-CHECK** — 10-point categorical checklist (placed last for recency)
+///
+/// # Background context rule
+///
+/// Background-supplied patient context (Patient record block, supplementary
+/// notes) populates **historical Subjective fields only** — it must never
+/// alter today's Objective findings, Assessment, Differential Diagnosis, or
+/// Plan. This rule is stated explicitly in RULES #4 and the Patient record
+/// instruction line.
 pub fn default_soap_prompt() -> &'static str {
     r#"You are a physician creating a SOAP note from a patient consultation transcript.
 
@@ -287,7 +320,22 @@ SELF-CHECK BEFORE OUTPUT — for every line you produced, locate the transcript 
 Vital signs, exam findings, medication dosages, follow-up timing, and red-flag warnings are the most common fabrications. If a number, dose, or interval was not stated in the transcript, do not invent one. Clinical reasoning in the Assessment must reflect what was discussed during the visit. A short accurate note beats a long partially-fabricated one. Length is not a virtue."#
 }
 
-/// Build the SOAP system prompt: select template (custom or default), then resolve placeholders.
+/// Build the SOAP system prompt: select template (custom or default), then
+/// resolve placeholders.
+///
+/// # Template Selection
+///
+/// If `config.custom_prompt` is `Some` and non-empty, it replaces the default
+/// template entirely. Placeholders (`{icd_label}`, `{icd_instruction}`,
+/// `{template_guidance}`) are still resolved in custom templates.
+///
+/// # Placeholder Resolution
+///
+/// | Placeholder | Source |
+/// |---|---|
+/// | `{template_guidance}` | Derived from `config.template` (e.g., FollowUp → "changes since last visit") |
+/// | `{icd_label}` | Derived from `config.icd_version` ("ICD-9", "ICD-10", or "both") |
+/// | `{icd_instruction}` | Same derivation as `{icd_label}` — the inline instruction text |
 pub fn build_soap_prompt(config: &SoapPromptConfig) -> String {
     let template = config
         .custom_prompt

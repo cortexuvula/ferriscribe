@@ -2,7 +2,23 @@
 //!
 //! Each builder accepts an optional custom template override; placeholders
 //! (`{recipient_type}`, `{urgency}`, `{letter_type}`) are resolved by
-//! `prompt_resolver::resolve_prompt`.
+//! [`prompt_resolver::resolve_prompt`].
+//!
+//! All builders return a `(system_prompt, user_prompt)` tuple ready to be
+//! passed to an AI provider's completion API. The system prompt carries the
+//! role and formatting instructions; the user prompt carries the SOAP note
+//! content and any contextual parameters.
+//!
+//! # Letter Audience Resolution
+//!
+//! `build_letter_prompt` supports three resolution paths, in precedence order:
+//!
+//! 1. Audience with `user_template` — uses the audience's `system_prompt` and
+//!    resolves `{letter_type}`, `{time_date}`, `{soap_note}` in the user template.
+//! 2. Audience without `user_template` — uses the audience's `system_prompt`
+//!    and a default user template referencing the audience name.
+//! 3. No audience (legacy) — uses `custom_template` if provided, otherwise the
+//!    default letter prompt.
 
 use std::collections::HashMap;
 
@@ -18,11 +34,17 @@ use crate::prompt_resolver::resolve_prompt;
 ///
 /// Carries only the fields needed for prompt construction so that callers don't
 /// need to pass the full DB entity (with id, timestamps, etc.) into the prompt
-/// builder.
+/// builder. See [`build_letter_prompt`] for the resolution order when this
+/// type is provided.
 #[derive(Debug, Clone)]
 pub struct LetterAudienceContext {
+    /// Display name of the audience (e.g., "Insurance Company", "Employer").
     pub name: String,
+    /// System prompt for this audience (role and tone instructions).
     pub system_prompt: String,
+    /// Optional user-template override with `{letter_type}`, `{time_date}`,
+    /// `{soap_note}` placeholders. When `None`, a default user template
+    /// referencing `name` is used.
     pub user_template: Option<String>,
 }
 
@@ -34,6 +56,10 @@ fn format_now_for_prompt() -> String {
 // Default templates
 // ---------------------------------------------------------------------------
 
+/// Returns the built-in default referral letter system prompt template.
+///
+/// Contains `{recipient_type}` and `{urgency}` placeholders that are resolved
+/// by [`build_referral_prompt`].
 pub fn default_referral_prompt() -> &'static str {
     "You are a medical scribe assistant specialising in professional referral letters. \
      Write a formal referral letter addressed to a {recipient_type}. \
@@ -43,6 +69,10 @@ pub fn default_referral_prompt() -> &'static str {
      Format the letter professionally with greeting, body, and closing."
 }
 
+/// Returns the built-in default patient letter system prompt template.
+///
+/// Contains a `{letter_type}` placeholder that is resolved by
+/// [`build_letter_prompt`] (legacy path only — when no audience is provided).
 pub fn default_letter_prompt() -> &'static str {
     "You are a medical scribe assistant helping to write patient-friendly correspondence. \
      Generate a {letter_type} letter for the patient. \
@@ -51,6 +81,10 @@ pub fn default_letter_prompt() -> &'static str {
      Be empathetic and professional."
 }
 
+/// Returns the built-in default synopsis system prompt template.
+///
+/// The synopsis template has no placeholders. It instructs the model to
+/// produce a concise (≤200 word) clinical summary of the SOAP note.
 pub fn default_synopsis_prompt() -> &'static str {
     "You are a medical scribe assistant. Summarise the provided SOAP note in a \
      concise synopsis of no more than 200 words. \
@@ -64,6 +98,14 @@ pub fn default_synopsis_prompt() -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Build `(system_prompt, user_prompt)` for generating a referral letter.
+///
+/// # Template Resolution
+///
+/// If `custom_template` is provided and non-empty, it is used in place of
+/// [`default_referral_prompt`]. The `{recipient_type}` and `{urgency}`
+/// placeholders are resolved via [`resolve_prompt`].
+///
+/// The user prompt includes the current date/time and the full SOAP note.
 pub fn build_referral_prompt(
     soap_note: &str,
     recipient_type: &str,
@@ -100,6 +142,7 @@ pub fn build_referral_prompt(
 /// Build `(system_prompt, user_prompt)` for generating patient correspondence.
 ///
 /// # Resolution order
+///
 /// 1. If `audience` is provided AND has `user_template`, use the audience's
 ///    `system_prompt` and `user_template` (with `{letter_type}`, `{soap_note}`,
 ///    `{time_date}` placeholders resolved).
@@ -107,6 +150,9 @@ pub fn build_referral_prompt(
 ///    `system_prompt` and the default user template with the audience name.
 /// 3. If `audience` is `None`, fall back to legacy behaviour: use
 ///    `custom_template` if provided, otherwise the default letter prompt.
+///
+/// **Note:** when an audience is provided, `custom_template` is ignored —
+/// audience-specific prompts take precedence.
 pub fn build_letter_prompt(
     soap_note: &str,
     letter_type: &str,
@@ -179,6 +225,12 @@ fn resolve_audience_user_template(
 // ---------------------------------------------------------------------------
 
 /// Build `(system_prompt, user_prompt)` for generating a brief SOAP synopsis.
+///
+/// If `custom_template` is provided and non-empty, it replaces
+/// [`default_synopsis_prompt`]. The synopsis template has no placeholders.
+///
+/// The user prompt includes the current date/time and the full SOAP note,
+/// with an instruction to summarise in under 200 words.
 pub fn build_synopsis_prompt(
     soap_note: &str,
     custom_template: Option<&str>,

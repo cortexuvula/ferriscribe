@@ -1,5 +1,17 @@
 //! Post-processing pipeline applied to AI output: strip markdown markers and
 //! ensure section headers are separated by blank lines.
+//!
+//! Two-stage cleanup:
+//!
+//! 1. **`clean_text`** — strips code blocks, inline code, markdown headings
+//!    (`##`), bold/italic markers (`**`, `*`, `__`, `_`), and citation markers
+//!    (`[1]`, `[2]`).
+//! 2. **`format_soap_paragraphs`** — ensures each SOAP section header
+//!    (Subjective, Objective, Assessment, Plan, etc.) appears on its own line
+//!    preceded by a blank line, splits concatenated bullet points, and handles
+//!    headers that appear mid-line.
+//!
+//! The combined pipeline is exposed via [`postprocess_soap`].
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -112,6 +124,14 @@ fn format_soap_paragraphs(text: &str) -> String {
 }
 
 /// Full post-processing pipeline: clean markdown, then format paragraphs.
+///
+/// Applies `clean_text` (strip code blocks, bold/italic markers, citation
+/// markers, markdown headings) followed by `format_soap_paragraphs` (ensure
+/// blank lines before section headers, split mid-line headers, split
+/// concatenated bullets).
+///
+/// This is the final transformation step before the generated SOAP note is
+/// persisted and displayed to the user.
 pub fn postprocess_soap(raw: &str) -> String {
     let cleaned = clean_text(raw);
     format_soap_paragraphs(&cleaned)

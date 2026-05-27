@@ -1,4 +1,15 @@
-//! Batch processing job tracker.
+//! Batch processing job tracker for multi-recording runs.
+//!
+//! Tracks progress counts, completion status, and derived [`BatchState`]
+//! across a set of recordings processed with the same [`PipelineConfig`].
+//! Callers invoke [`BatchJob::record_success`] / [`BatchJob::record_failure`]
+//! after each recording and poll [`BatchJob::is_done`] /
+//! [`BatchJob::progress_percent`] for UI progress reporting.
+//!
+//! Note: there is no `PartiallyCompleted` variant in `BatchState` — mixed
+//! outcomes (some succeeded, some failed) are reported as `Failed`. Callers
+//! must inspect `completed_count` vs `failed_count` to distinguish total
+//! from partial failure.
 
 use chrono::{DateTime, Utc};
 use medical_core::types::processing::BatchState;
@@ -12,6 +23,19 @@ use crate::pipeline::PipelineConfig;
 // ---------------------------------------------------------------------------
 
 /// Tracks the state of a multi-recording batch processing job.
+///
+/// Created in the `Queued` state via [`BatchJob::new`]. As each recording
+/// completes (success or failure), the caller invokes [`record_success`] or
+/// [`record_failure`], which update counts and recompute [`status`].
+///
+/// The batch transitions to `Running` on the first recorded outcome, then to
+/// `Completed` (all succeeded), `Failed` (any failures), once [`is_done`]
+/// returns true.
+///
+/// [`record_success`]: BatchJob::record_success
+/// [`record_failure`]: BatchJob::record_failure
+/// [`status`]: BatchJob::status
+/// [`is_done`]: BatchJob::is_done
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchJob {
     pub id: Uuid,

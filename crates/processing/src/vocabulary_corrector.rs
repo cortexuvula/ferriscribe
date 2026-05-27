@@ -1,3 +1,20 @@
+//! Word-boundary-aware vocabulary correction for STT output.
+//!
+//! Applies a prioritised list of find-and-replace rules to raw transcribed
+//! text, correcting common medical abbreviations and misrecognised terms
+//! (e.g., "htn" → "hypertension", "dm type 2" → "diabetes mellitus type 2").
+//!
+//! # Correction semantics
+//!
+//! - Entries are sorted by priority (descending), then by match length
+//!   (descending) so higher-priority and longer-match entries take precedence.
+//! - Each entry is matched at word boundaries (`\b...\b`) via regex.
+//! - Case sensitivity is per-entry.
+//! - Compiled regex patterns are cached per `(find_text, case_sensitive)` pair.
+//! - Disabled entries (`enabled = false`) are silently skipped.
+//! - Multiple occurrences of the same find_text in the input are all replaced
+//!   and counted.
+
 use std::collections::HashMap;
 
 use regex::Regex;
@@ -7,6 +24,21 @@ use medical_core::types::vocabulary::{
     AppliedCorrection, CorrectionResult, VocabularyEntry,
 };
 
+/// Apply vocabulary corrections to raw STT text.
+///
+/// Returns a [`CorrectionResult`] containing the corrected text, the list of
+/// corrections applied (with per-entry counts), and the total replacement count.
+///
+/// # Behaviour
+///
+/// - Empty text or empty entries → returns the input unchanged.
+/// - Entries are sorted by priority (desc) then match length (desc) before
+///   application, so "dm type 2" matches before "dm" at the same priority.
+/// - Matching uses word boundaries (`\b...\b`) — "washington" does not match
+///   an entry for "washing".
+/// - Regex patterns are compiled once per `(find_text, case_sensitive)` pair
+///   and cached for the duration of this call.
+/// - Entries with `enabled = false` are skipped.
 pub fn apply_corrections(text: &str, entries: &[VocabularyEntry]) -> CorrectionResult {
     if text.is_empty() || entries.is_empty() {
         return CorrectionResult {

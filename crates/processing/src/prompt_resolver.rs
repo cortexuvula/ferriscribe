@@ -2,13 +2,37 @@
 //!
 //! Replaces `{key}` tokens in a template with values from a placeholder map.
 //! Unknown tokens pass through unchanged so typos remain visible to the user.
+//!
+//! # Gotcha
+//!
+//! Iteration order over the placeholder `HashMap` is non-deterministic. If a
+//! substituted value itself contains `{other_key}` matching another entry in
+//! the map, the final output depends on iteration order. Values must not
+//! contain cross-referencing placeholder tokens.
 
 use std::collections::HashMap;
 
 /// Substitute `{key}` tokens in `template` with values from `placeholders`.
 ///
+/// Each `{key}` in the template is replaced with the corresponding value from
+/// the map. Unknown tokens (keys not present in the map) pass through unchanged,
+/// which makes typos in user-editable custom templates visible rather than
+/// silently swallowed.
+///
+/// # Gotcha
+///
 /// Values must not contain `{...}` substrings matching other keys in the map —
 /// iteration order is non-deterministic, so such collisions yield unstable output.
+///
+/// # Examples
+///
+/// ```ignore
+/// let mut map = HashMap::new();
+/// map.insert("recipient_type", "Cardiologist".into());
+/// map.insert("urgency", "routine".into());
+/// let result = resolve_prompt("Refer to {recipient_type} ({urgency})", &map);
+/// assert_eq!(result, "Refer to Cardiologist (routine)");
+/// ```
 pub fn resolve_prompt(template: &str, placeholders: &HashMap<&str, String>) -> String {
     let mut out = template.to_string();
     for (key, value) in placeholders {

@@ -1,4 +1,13 @@
 //! Recording processing pipeline with step-level progress reporting.
+//!
+//! The pipeline runs a configurable sequence of steps for a single recording:
+//! transcription (always), optional SOAP/referral/letter generation, data
+//! extraction (always), and optional RAG indexing. Each step emits three
+//! progress events (`TaskQueued → TaskStarted → TaskCompleted`) over an
+//! `mpsc` channel so the frontend can show granular progress.
+//!
+//! Steps are sequential — concurrency across recordings lives in the caller
+//! (typically `src-tauri` spawning multiple pipeline tasks).
 
 use medical_core::types::processing::{ProcessingEvent, TaskType};
 use serde::{Deserialize, Serialize};
@@ -12,6 +21,12 @@ use crate::ProcessingResult;
 // ---------------------------------------------------------------------------
 
 /// Controls which optional steps are executed during pipeline processing.
+///
+/// The pipeline always runs transcription (Step 1) and data extraction
+/// (Step 5). The remaining steps — SOAP generation, referral generation,
+/// letter generation, and RAG indexing — are toggled by this config.
+///
+/// Default: SOAP on, referral off, letter off, RAG on.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
     /// Generate a SOAP note (default: true).
@@ -40,6 +55,10 @@ impl Default for PipelineConfig {
 // ---------------------------------------------------------------------------
 
 /// An individual step within the processing pipeline.
+///
+/// Steps are emitted in order by [`run_pipeline`]. The pipeline always runs
+/// `Transcribing` and `ExtractingData`; the generation and indexing steps
+/// are governed by [`PipelineConfig`]. Every run terminates with `Complete`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PipelineStep {
     Transcribing,
@@ -88,8 +107,21 @@ async fn send_event(tx: &ProgressSender, event: ProcessingEvent) {
 
 /// Run the processing pipeline for a single recording.
 ///
-/// Progress events are sent through `progress`. Returns the list of steps that
-/// were executed (always ends with [`PipelineStep::Complete`]).
+/// Executes steps in order according to `config`, emitting three progress
+/// events per step (`TaskQueued → TaskStarted → TaskCompleted`) through
+/// `progress`. Returns the list of steps that were executed, always ending
+/// with [`PipelineStep::Complete`].
+///
+/// # Errors
+///
+/// Returns [`ProcessingError::Cancelled`] if the progress channel is closed
+/// mid-pipeline (though currently channel-closed sends are swallowed silently
+/// via `let _ = tx.send(...).await`).
+///
+/// # Concurrency
+///
+/// This function is sequential. To process multiple recordings concurrently,
+/// the caller (typically `src-tauri`) spawns multiple pipeline tasks.
 pub async fn run_pipeline(
     recording_id: Uuid,
     config: &PipelineConfig,
