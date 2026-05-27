@@ -90,6 +90,12 @@ impl IngestionPipeline {
     }
 
     /// Delete all indexed data for a document from the vector store.
+    ///
+    /// Removes every chunk (and its embedding) that was stored under
+    /// `doc_id`. Knowledge-graph entities extracted from the document are
+    /// **not** removed, because entities are deduplicated across documents
+    /// via deterministic UUIDs and may still be referenced by other
+    /// documents.
     pub async fn delete_document(&self, doc_id: Uuid) -> AppResult<()> {
         self.vector_store
             .delete_document(&doc_id)

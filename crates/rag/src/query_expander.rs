@@ -8,6 +8,8 @@ pub struct QueryExpander {
 }
 
 impl QueryExpander {
+    /// Create a new `QueryExpander` pre-loaded with the default medical
+    /// abbreviation and synonym dictionaries.
     pub fn new() -> Self {
         Self {
             abbreviations: default_abbreviations(),
