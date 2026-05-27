@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { recordings, selectRecording } from '../stores/recordings.svelte';
+  import { pipeline } from '../stores/pipeline.svelte';
   import { toasts } from '../stores/toasts.svelte';
   import SearchBar from '../components/SearchBar.svelte';
   import RecordingCard from '../components/RecordingCard.svelte';
@@ -39,6 +40,11 @@
       showDeleteAll = false;
     }
   }
+
+  function retryTranscription(id: string) {
+    pipeline.retry(id);
+    toasts.success('Retrying transcription...');
+  }
 </script>
 
 <div class="recordings-tab">
@@ -76,6 +82,7 @@
           selected={recordings.selectedRecording?.id === rec.id}
           onClick={() => selectRecording(rec.id)}
           onDelete={() => requestDelete(rec.id, rec.patient_name || rec.filename)}
+          onRetry={() => retryTranscription(rec.id)}
         />
       {/each}
     {/if}

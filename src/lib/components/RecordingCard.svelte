@@ -7,9 +7,10 @@
     selected?: boolean;
     onClick?: () => void;
     onDelete?: (() => void) | null;
+    onRetry?: (() => void) | null;
   }
 
-  let { recording, selected = false, onClick = () => {}, onDelete = null }: Props = $props();
+  let { recording, selected = false, onClick = () => {}, onDelete = null, onRetry = null }: Props = $props();
 
   function statusIcon(status: RecordingSummary['status']): string {
     switch (status.status) {
@@ -69,6 +70,16 @@
       <span class="badge" title="Referral">R</span>
     {/if}
   </div>
+
+  {#if recording.status.status === 'failed' && onRetry}
+    <button
+      class="btn-retry"
+      title="Retry transcription"
+      onclick={(e: MouseEvent) => { e.stopPropagation(); onRetry!(); }}
+    >
+      ↻
+    </button>
+  {/if}
 
   {#if onDelete}
     <button
@@ -181,5 +192,26 @@
   .btn-delete:hover {
     color: var(--danger, #ef4444);
     background-color: rgba(239, 68, 68, 0.1);
+  }
+
+  .btn-retry {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    background: transparent;
+    border: 1px solid var(--accent);
+    flex-shrink: 0;
+    transition: color 0.15s ease, background-color 0.15s ease;
+  }
+
+  .btn-retry:hover {
+    color: white;
+    background-color: var(--accent);
   }
 </style>
