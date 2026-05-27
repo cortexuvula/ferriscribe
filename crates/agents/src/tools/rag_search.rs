@@ -143,10 +143,9 @@ impl Tool for RagSearchTool {
             .map_err(|e| medical_core::error::AppError::Rag(format!("BM25 search: {e}")))?;
 
         info!(
-            "RAG search for '{}': {} vector results, {} BM25 results",
-            query,
-            vector_results.len(),
-            bm25_results.len()
+            vector_count = vector_results.len(),
+            bm25_count = bm25_results.len(),
+            "RAG search completed"
         );
 
         // 4. Fuse results with Reciprocal Rank Fusion (k=60)
