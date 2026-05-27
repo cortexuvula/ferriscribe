@@ -221,16 +221,19 @@ pub async fn transcribe_recording_inner(
         "Transcription complete"
     );
 
-    // If diarization was requested but the provider reports it didn't run
-    // (models missing, diarization failed, etc.), emit a warning event so
-    // the frontend can alert the user that speaker labels are absent.
+    // If diarization was requested but the provider didn't actually run it
+    // (models missing or not installed), emit a warning event so the frontend
+    // can alert the user that speaker labels are absent. We check
+    // `diarization_attempted` rather than `diarization` because the latter is
+    // false when diarization ran but found no speakers (single-speaker
+    // recording) — that's not a failure and must not trigger the warning.
     if diarize_requested {
-        let diarized = transcript
+        let attempted = transcript
             .metadata
-            .get("diarization")
+            .get("diarization_attempted")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        if !diarized {
+        if !attempted {
             let _ = app.emit("diarization-warning", &recording_id);
         }
     }

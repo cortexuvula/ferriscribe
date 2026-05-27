@@ -125,13 +125,17 @@ impl SttProvider for LocalSttProvider {
             return Err(AppError::Cancelled);
         }
 
-        // Stage 3: Speaker diarization (optional, currently stubbed)
-        let speaker_turns = if config.diarize && self.supports_diarization() {
+        // Stage 3: Speaker diarization (optional)
+        // Track whether diarization was actually attempted (models present and
+        // diarize requested) vs. skipped. An empty speaker_turns after a
+        // successful run just means a single speaker was detected — that's not
+        // a failure and must not trigger a "models missing" warning.
+        let (speaker_turns, diarization_attempted) = if config.diarize && self.supports_diarization() {
             let seg_path = self.segmentation_model_path.clone();
             let emb_path = self.embedding_model_path.clone();
             let audio_i16 = audio_prep::f32_to_i16(&audio_16k);
 
-            match tokio::task::spawn_blocking(move || {
+            let turns = match tokio::task::spawn_blocking(move || {
                 let diarizer = SpeakerDiarizer::new(seg_path, emb_path);
                 diarizer.diarize(&audio_i16, 16000)
             })
@@ -146,12 +150,13 @@ impl SttProvider for LocalSttProvider {
                     warn!(error = %e, "Diarization task panicked — proceeding without speaker labels");
                     Vec::new()
                 }
-            }
+            };
+            (turns, true)
         } else {
             if config.diarize && !self.supports_diarization() {
                 warn!("Diarization requested but models not found — skipping");
             }
-            Vec::new()
+            (Vec::new(), false)
         };
 
         // Stage 4: Merge whisper segments with speaker turns
@@ -181,6 +186,11 @@ impl SttProvider for LocalSttProvider {
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown"),
                 "diarization": !speaker_turns.is_empty(),
+                // True when the diarization pipeline was actually invoked
+                // (models present, diarize requested). A false value here
+                // means diarization was skipped — models missing or not
+                // requested — which is what the frontend warning checks.
+                "diarization_attempted": diarization_attempted,
             }),
         })
     }
