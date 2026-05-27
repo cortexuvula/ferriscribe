@@ -197,6 +197,7 @@ pub async fn transcribe_recording_inner(
         }
     };
     let token = cancel.clone().unwrap_or_default();
+    let diarize_requested = config.diarize;
     let transcript = match stt.transcribe(audio, config, token).await {
         Ok(t) => t,
         Err(e) => {
@@ -219,6 +220,20 @@ pub async fn transcribe_recording_inner(
         segments = transcript.segments.len(),
         "Transcription complete"
     );
+
+    // If diarization was requested but the provider reports it didn't run
+    // (models missing, diarization failed, etc.), emit a warning event so
+    // the frontend can alert the user that speaker labels are absent.
+    if diarize_requested {
+        let diarized = transcript
+            .metadata
+            .get("diarization")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !diarized {
+            let _ = app.emit("diarization-warning", &recording_id);
+        }
+    }
 
     // Build speaker-attributed text when diarization segments are available.
     let display_text = format_transcript_with_speakers(&transcript);
@@ -374,6 +389,30 @@ pub async fn transcribe_recording_inner(
         completed_at: Utc::now(),
     };
 
+    // Store structured segment data (with speaker labels and timestamps) in
+    // the recording's metadata JSON so the frontend can render a rich speaker
+    // display without re-parsing the formatted text. Preserves any existing
+    // metadata keys (context, patient_context, etc.).
+    let segments_json: serde_json::Value = serde_json::Value::Array(
+        transcript
+            .segments
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "speaker": s.speaker,
+                    "text": s.text,
+                    "start": s.start,
+                    "end": s.end,
+                })
+            })
+            .collect(),
+    );
+    if let Some(obj) = recording.metadata.as_object_mut() {
+        obj.insert("transcript_segments".into(), segments_json);
+    } else {
+        recording.metadata = serde_json::json!({ "transcript_segments": segments_json });
+    }
+
     let recording_for_failure = recording.clone();
     let join_result = tokio::task::spawn_blocking({
         let db = Arc::clone(&state.db);
@@ -452,58 +491,154 @@ pub async fn transcribe_recording_inner(
 ///   Speaker 1: Hello, how are you?
 ///   Speaker 2: I'm not feeling well.
 ///
-/// Falls back to the raw text when no speaker segments are present.
+/// Segments without speaker labels (e.g. from gaps between diarization turns)
+/// are included in the output — appended to the preceding speaker's paragraph
+/// when one exists, or emitted without a label if no speaker has been seen yet.
+///
+/// Falls back to the raw text when no speaker segments are present at all.
 fn format_transcript_with_speakers(transcript: &medical_core::types::stt::Transcript) -> String {
-    let segments_with_speakers: Vec<_> = transcript
-        .segments
-        .iter()
-        .filter(|s| s.speaker.is_some())
-        .collect();
-
-    if segments_with_speakers.is_empty() {
+    let any_speakers = transcript.segments.iter().any(|s| s.speaker.is_some());
+    if !any_speakers {
         return transcript.text.clone();
     }
 
     // Group consecutive segments by speaker into paragraphs.
     // Speaker labels arrive pre-formatted from the merge module ("Speaker 1", "Speaker 2").
+    // Segments without a speaker label are folded into the current speaker's paragraph
+    // so that no text is silently dropped (the previous implementation filtered these
+    // out, causing truncated transcripts when diarization only partially assigned).
     let mut result = String::new();
     let mut current_speaker: Option<&str> = None;
     let mut current_words: Vec<&str> = Vec::new();
 
-    for seg in &segments_with_speakers {
-        let label = seg.speaker.as_deref().unwrap_or("Unknown");
+    for seg in &transcript.segments {
+        let label = seg.speaker.as_deref();
 
-        if current_speaker != Some(label) {
-            // Flush the previous speaker's words.
-            if !current_words.is_empty() {
-                if let Some(prev) = current_speaker {
-                    if !result.is_empty() {
-                        result.push_str("\n\n");
-                    }
-                    result.push_str(prev);
-                    result.push_str(": ");
-                    result.push_str(&current_words.join(" "));
-                }
-                current_words.clear();
-            }
-            current_speaker = Some(label);
+        if label.is_some() && label != current_speaker {
+            // New speaker — flush the previous group first.
+            flush_speaker_group(&mut result, current_speaker, &current_words);
+            current_words.clear();
+            current_speaker = label;
         }
 
         current_words.push(seg.text.trim());
     }
 
-    // Flush the last speaker's words.
-    if !current_words.is_empty()
-        && let Some(prev) = current_speaker {
-            if !result.is_empty() {
-                result.push_str("\n\n");
-            }
-            result.push_str(prev);
-            result.push_str(": ");
-            result.push_str(&current_words.join(" "));
-        }
+    // Flush the last group.
+    flush_speaker_group(&mut result, current_speaker, &current_words);
 
     result
+}
+
+/// Write a completed speaker group to the result string.
+///
+/// If `speaker` is `Some`, prefixes with "Speaker N: ". Otherwise the words
+/// are appended without a label (for segments that precede any speaker turn).
+fn flush_speaker_group(result: &mut String, speaker: Option<&str>, words: &[&str]) {
+    if words.is_empty() {
+        return;
+    }
+    if !result.is_empty() {
+        result.push_str("\n\n");
+    }
+    if let Some(label) = speaker {
+        result.push_str(label);
+        result.push_str(": ");
+    }
+    result.push_str(&words.join(" "));
+}
+
+#[cfg(test)]
+mod format_tests {
+    use medical_core::types::stt::{Transcript, TranscriptSegment};
+
+    fn make_transcript(segments: Vec<TranscriptSegment>) -> Transcript {
+        let text = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+        Transcript {
+            text,
+            segments,
+            language: None,
+            duration_seconds: None,
+            provider: "test".into(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    fn seg(text: &str, speaker: Option<&str>) -> TranscriptSegment {
+        TranscriptSegment {
+            text: text.into(),
+            start: 0.0,
+            end: 1.0,
+            speaker: speaker.map(Into::into),
+            confidence: None,
+        }
+    }
+
+    #[test]
+    fn no_speakers_returns_raw_text() {
+        let t = make_transcript(vec![seg("Hello", None), seg("World", None)]);
+        assert_eq!(super::format_transcript_with_speakers(&t), "Hello World");
+    }
+
+    #[test]
+    fn all_labeled_groups_by_speaker() {
+        let t = make_transcript(vec![
+            seg("Hi", Some("Speaker 1")),
+            seg("there", Some("Speaker 1")),
+            seg("Hello", Some("Speaker 2")),
+        ]);
+        let result = super::format_transcript_with_speakers(&t);
+        assert_eq!(result, "Speaker 1: Hi there\n\nSpeaker 2: Hello");
+    }
+
+    #[test]
+    fn unlabeled_segments_included_not_dropped() {
+        // Regression: the old code filtered out unlabeled segments, truncating
+        // the transcript when diarization only partially assigned speakers.
+        let t = make_transcript(vec![
+            seg("Doctor speaking", Some("Speaker 1")),
+            seg("mm-hmm", None),  // unlabeled — must NOT be dropped
+            seg("I see", Some("Speaker 2")),
+        ]);
+        let result = super::format_transcript_with_speakers(&t);
+        assert!(
+            result.contains("mm-hmm"),
+            "unlabeled segment must appear in output; got: {result}"
+        );
+        assert!(result.contains("Speaker 1:"));
+        assert!(result.contains("Speaker 2:"));
+    }
+
+    #[test]
+    fn unlabeled_before_first_speaker_emitted_without_label() {
+        let t = make_transcript(vec![
+            seg("Background noise", None),
+            seg("Hello", Some("Speaker 1")),
+        ]);
+        let result = super::format_transcript_with_speakers(&t);
+        assert!(
+            result.starts_with("Background noise"),
+            "unlabeled prefix must appear; got: {result}"
+        );
+        assert!(result.contains("Speaker 1: Hello"));
+    }
+
+    #[test]
+    fn unlabeled_after_speaker_folded_into_that_speaker() {
+        let t = make_transcript(vec![
+            seg("Take this", Some("Speaker 1")),
+            seg("okay", None),  // should fold into Speaker 1
+            seg("Thanks", Some("Speaker 2")),
+        ]);
+        let result = super::format_transcript_with_speakers(&t);
+        assert_eq!(result, "Speaker 1: Take this okay\n\nSpeaker 2: Thanks");
+    }
+
+    #[test]
+    fn empty_segments_handled() {
+        let t = make_transcript(vec![]);
+        assert_eq!(super::format_transcript_with_speakers(&t), "");
+    }
 }
 
 /// Integration tests for the pre-flight gate added by Task 8.

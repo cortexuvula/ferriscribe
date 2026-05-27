@@ -96,6 +96,10 @@
       {/if}
     </p>
 
+    {#if pipeline.state.current.warning}
+      <p class="pipeline-warning">{pipeline.state.current.warning}</p>
+    {/if}
+
     {#if ['transcribing', 'generating_soap'].includes(pipeline.state.current.stage)}
       <div class="post-actions">
         <button class="btn-secondary" onclick={onCancel}>Cancel</button>
@@ -182,6 +186,15 @@
     font-size: 13px;
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
+    margin-bottom: 8px;
+  }
+
+  .pipeline-warning {
+    font-size: 13px;
+    color: var(--warning, #d97706);
+    background-color: rgba(217, 119, 6, 0.1);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
     margin-bottom: 8px;
   }
 
