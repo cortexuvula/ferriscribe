@@ -1,3 +1,8 @@
+//! Audio playback via rodio.
+//!
+//! Provides a [`Player`] struct that wraps a rodio `Sink` and `OutputStream`,
+//! exposing play/pause/stop/volume controls for decoded audio files.
+
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;

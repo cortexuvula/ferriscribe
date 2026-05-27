@@ -1,15 +1,29 @@
+//! Audio device enumeration and selection.
+//!
+//! Discovers system input (microphone) and output (speaker) devices via cpal,
+//! reports their supported sample rates and channel counts, and provides
+//! lookup by name or system-default.
+
 use cpal::traits::{DeviceTrait, HostTrait};
 use serde::{Deserialize, Serialize};
 
 use crate::{AudioError, AudioResult};
 
 /// Describes an audio device discovered on the system.
+///
+/// Produced by [`list_input_devices`] and [`list_output_devices`]. Serializable
+/// so the frontend can display device lists via Tauri commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioDevice {
+    /// Human-readable device name as reported by the OS.
     pub name: String,
+    /// `true` if the device can capture audio (microphone / line-in).
     pub is_input: bool,
+    /// `true` if this is the system's default device for its direction.
     pub is_default: bool,
+    /// Supported sample rates filtered to common values (16k, 22.05k, 44.1k, 48k).
     pub sample_rates: Vec<u32>,
+    /// Supported channel counts (e.g., `[1, 2]` for mono + stereo).
     pub channels: Vec<u16>,
 }
 
@@ -20,8 +34,11 @@ const PREFERRED_RATES: &[u32] = &[16_000, 22_050, 44_100, 48_000];
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Returns (supported_rates, supported_channels) for a device.
-/// Tries input configs first, falls back to output configs.
+/// Returns `(supported_rates, supported_channels)` for a device.
+///
+/// Tries input configs first, falls back to output configs. Rates are filtered
+/// to [`PREFERRED_RATES`] (16k, 22.05k, 44.1k, 48k) and both lists are
+/// deduplicated and sorted.
 pub fn supported_configs(device: &cpal::Device) -> (Vec<u32>, Vec<u16>) {
     // Try input configs first, then output configs.
     let ranges: Vec<cpal::SupportedStreamConfigRange> = device

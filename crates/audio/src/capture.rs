@@ -1,3 +1,9 @@
+//! Real-time microphone capture via cpal.
+//!
+//! Opens an input stream on a selected audio device, pushes samples through a
+//! lock-free ring buffer into a drain thread that writes a 32-bit float WAV
+//! file and emits downsampled waveform snapshots for UI visualization.
+
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;

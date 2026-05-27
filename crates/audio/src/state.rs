@@ -1,3 +1,9 @@
+//! Recording session state machine.
+//!
+//! Tracks the lifecycle of a recording session through `Idle → Recording →
+//! Paused → Stopped` transitions, accumulating elapsed time across pause/resume
+//! cycles. Invalid transitions return [`AudioError::InvalidTransition`].
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

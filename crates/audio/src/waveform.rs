@@ -1,3 +1,9 @@
+//! Audio signal analysis utilities.
+//!
+//! Provides functions for computing RMS level, peak amplitude, decibel
+//! conversion, and peak normalization of f32 sample buffers. Used by the
+//! capture pipeline and frontend for VU metering and waveform display.
+
 /// Compute the Root Mean Square of the sample buffer.
 ///
 /// Returns `0.0` for an empty slice.
