@@ -73,45 +73,52 @@
     onCopy={() => onCopy('referral')}
     onSpeedRead={() => onSpeedRead('referral')}
   />
-  <div class="letter-controls">
-    <label class="field-label" for="letter-audience">Audience</label>
-    <select
-      id="letter-audience"
-      class="letter-select"
-      value={selectedAudienceId ?? ''}
-      onchange={(e) => onAudienceChange(e.currentTarget.value || null)}
-    >
-      {#each audiences as audience}
-        <option value={audience.id}>{audience.name}</option>
-      {/each}
-    </select>
-
-    <label class="field-label" for="letter-type">Letter purpose</label>
-    <input
-      id="letter-type"
-      type="text"
-      class="letter-input"
-      placeholder="e.g. follow-up, pre-authorization"
-      value={letterType}
-      oninput={(e) => onLetterTypeChange(e.currentTarget.value)}
+  <div class="letter-card">
+    <div class="letter-card-header">
+      <div class="letter-card-fields">
+        <div class="letter-field">
+          <label class="field-label" for="letter-audience">Audience</label>
+          <select
+            id="letter-audience"
+            class="letter-select"
+            value={selectedAudienceId ?? ''}
+            onchange={(e) => onAudienceChange(e.currentTarget.value || null)}
+          >
+            {#each audiences as audience}
+              <option value={audience.id}>{audience.name}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="letter-field">
+          <label class="field-label" for="letter-type">Purpose</label>
+          <input
+            id="letter-type"
+            type="text"
+            class="letter-input"
+            placeholder="e.g. follow-up, pre-authorization"
+            value={letterType}
+            oninput={(e) => onLetterTypeChange(e.currentTarget.value)}
+          />
+        </div>
+      </div>
+    </div>
+    <GenerateItem
+      title="Letter"
+      description={selectedAudienceId
+        ? (() => {
+            const a = audiences.find((x) => x.id === selectedAudienceId);
+            return a ? `Letter for ${a.name}` : 'Letter';
+          })()
+        : 'Letter'}
+      generating={generationState.generating === 'letter'}
+      anyGenerating={generationState.generating !== null}
+      done={!!recording?.letter}
+      copyStatus={copyStatus['letter']}
+      onGenerate={() => onGenerate('letter')}
+      onCopy={() => onCopy('letter')}
+      onSpeedRead={() => onSpeedRead('letter')}
     />
   </div>
-  <GenerateItem
-    title="Letter"
-    description={selectedAudienceId
-      ? (() => {
-          const a = audiences.find((x) => x.id === selectedAudienceId);
-          return a ? `Letter for ${a.name}` : 'Letter';
-        })()
-      : 'Letter'}
-    generating={generationState.generating === 'letter'}
-    anyGenerating={generationState.generating !== null}
-    done={!!recording?.letter}
-    copyStatus={copyStatus['letter']}
-    onGenerate={() => onGenerate('letter')}
-    onCopy={() => onCopy('letter')}
-    onSpeedRead={() => onSpeedRead('letter')}
-  />
 </div>
 
 <style>
@@ -160,14 +167,36 @@
     gap: 12px;
   }
 
-  .letter-controls {
+  .letter-card {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 10px 14px;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background-color: var(--bg-card);
+    overflow: hidden;
+  }
+
+  .letter-card-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border-light);
+  }
+
+  .letter-card-fields {
+    display: flex;
+    gap: 12px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .letter-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+    min-width: 0;
   }
 
   .field-label {
@@ -176,14 +205,12 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    margin-top: 4px;
-    margin-bottom: -4px;
   }
 
   .letter-select,
   .letter-input {
     width: 100%;
-    height: 34px;
+    height: 32px;
     padding: 0 10px;
     font-size: 13px;
     font-family: inherit;
@@ -208,5 +235,10 @@
   .letter-input:focus {
     outline: none;
     border-color: var(--accent);
+  }
+
+  .letter-card > :global(.generate-item) {
+    border: none;
+    border-radius: 0;
   }
 </style>
