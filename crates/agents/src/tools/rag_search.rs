@@ -1,3 +1,11 @@
+//! RAG (retrieval-augmented generation) knowledge-base search tool.
+//!
+//! Bridges the `medical-rag` crate into the agent tool system. When
+//! constructed with [`RagSearchTool::with_rag()`], performs real hybrid
+//! search: embed query → vector similarity + BM25 keyword search →
+//! reciprocal rank fusion → top-k results. When constructed with
+//! [`RagSearchTool::new()`], returns a stub "not yet connected" message.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

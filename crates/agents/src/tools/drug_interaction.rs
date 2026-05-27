@@ -1,3 +1,9 @@
+//! Drug-drug interaction lookup tool.
+//!
+//! Checks all pairs in a medication list against a hardcoded table of known
+//! interactions. Each interaction has a severity level (CONTRAINDICATED,
+//! MAJOR, MODERATE) and a clinical guidance description.
+
 use async_trait::async_trait;
 use medical_core::{
     error::AppResult,
@@ -7,9 +13,17 @@ use medical_core::{
 use serde_json::json;
 
 /// Tool for looking up drug-drug interactions.
+///
+/// Registered as `lookup_drug_interactions`. Accepts a list of medication
+/// names, checks all pairs against a hardcoded interaction table (8 known
+/// pairs), and returns any matches with severity and clinical guidance.
 pub struct DrugInteractionTool;
 
 /// Known drug interaction pairs (normalized lowercase), severity, and description.
+///
+/// Each entry is `(drug_a_pattern, drug_b_pattern, severity, description)`.
+/// Matching uses bidirectional substring containment so "ibuprofen nsaid"
+/// matches the pattern "nsaid".
 const KNOWN_INTERACTIONS: &[(&str, &str, &str, &str)] = &[
     (
         "warfarin", "aspirin",
@@ -53,10 +67,14 @@ const KNOWN_INTERACTIONS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 
+/// Lowercase and trim a drug name for comparison.
 fn normalize(s: &str) -> String {
     s.to_lowercase().trim().to_string()
 }
 
+/// Bidirectional substring match: returns true if either string contains the other.
+///
+/// This allows "ibuprofen nsaid" to match the pattern "nsaid" and vice versa.
 fn drugs_match(drug: &str, pattern: &str) -> bool {
     let drug_lower = normalize(drug);
     let pattern_lower = normalize(pattern);

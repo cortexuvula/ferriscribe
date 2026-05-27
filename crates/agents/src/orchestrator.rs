@@ -1,3 +1,11 @@
+//! Agent orchestration engine.
+//!
+//! The [`AgentOrchestrator`] drives the multi-step reasoning loop: it builds
+//! a message list from the [`AgentContext`], then iteratively calls the AI
+//! provider with tool definitions, executes any tool calls the provider
+//! requests, and feeds results back until the provider produces a final
+//! text-only response (or the iteration limit is hit).
+
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
@@ -15,16 +23,35 @@ use medical_core::{
 use crate::tools::ToolRegistry;
 
 /// Maximum number of tool-use iterations before aborting.
+///
+/// If the model keeps requesting tool calls without producing a final text
+/// response after this many rounds, the orchestrator returns
+/// [`AppError::Agent`] with a "max iterations" message.
 const MAX_ITERATIONS: u32 = 10;
 
 /// Drives an [`Agent`] through a reasoning + tool-use loop, delegating
 /// AI completions to an [`AiProvider`] and tool execution to a [`ToolRegistry`].
+///
+/// # Lifecycle
+///
+/// 1. Construct with a [`ToolRegistry`] (typically [`ToolRegistry::with_defaults()`]).
+/// 2. Call [`execute()`](Self::execute) for each user turn, passing the agent,
+///    context, provider, model name, temperature, and a cancellation token.
+/// 3. The orchestrator returns an [`AgentResponse`] containing the final text,
+///    all tool-call records, cumulative token usage, and iteration count.
+///
+/// The orchestrator is stateless across calls — all per-turn state lives in
+/// local variables inside `execute()`.
 pub struct AgentOrchestrator {
     tool_registry: ToolRegistry,
 }
 
 impl AgentOrchestrator {
     /// Create a new orchestrator with the given tool registry.
+    ///
+    /// The registry determines which tools are available during execution.
+    /// Use [`ToolRegistry::with_defaults()`] to get all five built-in tools,
+    /// or [`ToolRegistry::new()`] for an empty registry you populate yourself.
     pub fn new(tool_registry: ToolRegistry) -> Self {
         Self { tool_registry }
     }
@@ -35,6 +62,22 @@ impl AgentOrchestrator {
     /// 1. Call provider with tool definitions
     /// 2. If the provider requests tool calls, execute them and append results
     /// 3. If no tool calls remain, return the final response
+    ///
+    /// # Arguments
+    ///
+    /// * `agent` — the agent whose system prompt and tool set define this run
+    /// * `context` — user message, conversation history, patient/RAG context
+    /// * `provider` — the AI provider that handles completion with tool calling
+    /// * `model` — model identifier forwarded on every `CompletionRequest`
+    /// * `temperature` — sampling temperature forwarded on every request
+    /// * `cancel` — token checked at the top of each iteration and after tool
+    ///   execution; cancelling aborts the run with [`AppError::Cancelled`]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Cancelled`] if the token is cancelled,
+    /// [`AppError::Agent`] if `MAX_ITERATIONS` is exceeded, or the underlying
+    /// provider error if a completion call fails.
     ///
     /// `model` is the model identifier to pass into every `CompletionRequest`.
     /// `temperature` is the sampling temperature forwarded on every request.
@@ -181,6 +224,13 @@ impl AgentOrchestrator {
 }
 
 /// Build the initial message list from the agent context.
+///
+/// Assembles messages in this order:
+/// 1. Conversation history (verbatim)
+/// 2. Patient context as a `System` message (medications, conditions, allergies,
+///    prior SOAP note count) — only if present
+/// 3. RAG context as a `System` message with scored excerpts — only if non-empty
+/// 4. The current user message as a `User` message
 fn build_messages(context: &AgentContext) -> Vec<Message> {
     let mut messages: Vec<Message> = Vec::new();
 

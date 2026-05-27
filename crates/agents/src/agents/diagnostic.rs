@@ -7,6 +7,10 @@ use medical_core::{
 use serde_json::json;
 
 /// Agent specializing in differential diagnosis and ICD code assignment.
+///
+/// Has access to ICD code search and vitals extraction. Its system prompt
+/// covers prioritised differential lists, confidence percentages, red-flag
+/// identification, and workup suggestions.
 pub struct DiagnosticAgent;
 
 #[async_trait]

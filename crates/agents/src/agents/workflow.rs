@@ -7,6 +7,11 @@ use medical_core::{
 use serde_json::json;
 
 /// Agent providing step-by-step clinical workflow guidance and procedure checklists.
+///
+/// Has access to the checklist generation tool. Its system prompt covers
+/// evidence-based care pathways, pre/post-procedure checklists, documentation
+/// requirements, and setting-specific workflow adaptation (inpatient,
+/// outpatient, emergency).
 pub struct WorkflowAgent;
 
 #[async_trait]

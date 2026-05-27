@@ -1,3 +1,10 @@
+//! Vital-sign extraction tool.
+//!
+//! Extracts blood pressure, heart rate, temperature, respiratory rate, and
+//! oxygen saturation from free-form clinical text using compiled regex
+//! patterns. Each extracted value is range-validated against physiologically
+//! plausible bounds before being returned.
+
 use async_trait::async_trait;
 use medical_core::{
     error::AppResult,
@@ -8,35 +15,35 @@ use regex::Regex;
 use serde_json::json;
 use std::sync::LazyLock;
 
-// Blood pressure: e.g. "BP 120/80", "blood pressure: 120/80 mmHg"
+/// Regex for labelled blood pressure: "BP 120/80", "blood pressure: 120/80 mmHg".
 static BP_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)(?:bp|blood\s*pressure)[:\s]*(\d{2,3})\s*/\s*(\d{2,3})\s*(?:mmhg)?"
     ).unwrap()
 });
-// Plain blood pressure pattern: "120/80"
+/// Regex for plain "120/80" patterns that may be blood pressure (fallback).
 static BP_PLAIN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(\d{2,3})/(\d{2,3})\b").unwrap()
 });
-// Heart rate: e.g. "HR 72 bpm", "heart rate: 72", "pulse 72"
+/// Regex for heart rate: "HR 72 bpm", "heart rate: 72", "pulse 72".
 static HR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)(?:hr|heart\s*rate|pulse)[:\s]*(\d{2,3})\s*(?:bpm)?"
     ).unwrap()
 });
-// Temperature: e.g. "Temp 98.6°F", "T 37.2C", "temperature: 98.6"
+/// Regex for temperature: "Temp 98.6°F", "T 37.2C", "temperature: 98.6".
 static TEMP_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)(?:temp(?:erature)?|t)[:\s]*(\d{2,3}(?:\.\d)?)\s*(?:°?\s*([fcFC]))?"
     ).unwrap()
 });
-// Respiratory rate: e.g. "RR 16", "respiratory rate: 18 breaths/min"
+/// Regex for respiratory rate: "RR 16", "respiratory rate: 18 breaths/min".
 static RR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)(?:rr|resp(?:iratory)?\s*rate?)[:\s]*(\d{1,2})\s*(?:breaths?/min)?"
     ).unwrap()
 });
-// SpO2 / Oxygen saturation: e.g. "SpO2 98%", "O2 sat 97%", "sats 99"
+/// Regex for SpO2 / oxygen saturation: "SpO2 98%", "O2 sat 97%", "sats 99".
 static SPO2_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)(?:spo2|o2\s*sat(?:uration)?|sats?)[:\s]*(\d{2,3})\s*%?"
@@ -44,6 +51,11 @@ static SPO2_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Tool for extracting vital signs from clinical text using regex patterns.
+///
+/// Registered as `extract_vitals`. Parses blood pressure (systolic/diastolic),
+/// heart rate, temperature (F/C), respiratory rate, and SpO2 from free-form
+/// text. Each value is range-validated (e.g. systolic 60–250, HR 20–300)
+/// to filter out false-positive regex matches.
 pub struct VitalsExtractorTool;
 
 #[async_trait]

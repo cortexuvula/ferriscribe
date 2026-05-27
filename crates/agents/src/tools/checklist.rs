@@ -1,3 +1,10 @@
+//! Clinical checklist generation tool.
+//!
+//! Generates numbered, step-by-step checklists for common clinical encounter
+//! types. Recognises "new patient" and "follow-up" keywords to select a
+//! specialised template; all other procedures fall back to a general
+//! clinical checklist.
+
 use async_trait::async_trait;
 use medical_core::{
     error::AppResult,
@@ -7,8 +14,16 @@ use medical_core::{
 use serde_json::json;
 
 /// Tool for generating procedure-specific clinical checklists.
+///
+/// Registered as `generate_checklist`. Returns a numbered JSON checklist
+/// for the given procedure or encounter type. Three templates are available:
+///
+/// - **New Patient Visit** (15 steps) — triggered by "new patient", "new pt", "intake"
+/// - **Follow-Up Visit** (13 steps) — triggered by "follow", "f/u", "followup"
+/// - **General Clinical Checklist** (8 steps) — fallback for all other inputs
 pub struct ChecklistTool;
 
+/// 15-step checklist for a new patient intake visit.
 fn new_patient_checklist() -> Vec<&'static str> {
     vec![
         "Verify patient identity (name, DOB, MRN)",
@@ -29,6 +44,7 @@ fn new_patient_checklist() -> Vec<&'static str> {
     ]
 }
 
+/// 13-step checklist for a follow-up visit.
 fn follow_up_checklist() -> Vec<&'static str> {
     vec![
         "Verify patient identity and confirm reason for follow-up",
@@ -47,6 +63,7 @@ fn follow_up_checklist() -> Vec<&'static str> {
     ]
 }
 
+/// 8-step general clinical checklist (fallback for unrecognised procedures).
 fn general_checklist() -> Vec<&'static str> {
     vec![
         "Identify the clinical goal and relevant patient information",

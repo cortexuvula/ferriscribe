@@ -1,3 +1,9 @@
+//! ICD-10 code lookup tool.
+//!
+//! Provides substring search over a hardcoded list of common ICD-10 codes.
+//! Matching is case-insensitive and checks the code, description, and a set
+//! of keyword synonyms for each entry.
+
 use async_trait::async_trait;
 use medical_core::{
     error::AppResult,
@@ -7,9 +13,15 @@ use medical_core::{
 use serde_json::json;
 
 /// Tool for looking up ICD diagnostic codes.
+///
+/// Registered as `search_icd_codes`. Searches a hardcoded table of common
+/// ICD-10 codes by matching the query against the code, description, and
+/// keyword synonyms. Returns matching entries as JSON.
 pub struct IcdLookupTool;
 
 /// Hardcoded list of common ICD-10 codes.
+///
+/// Each entry is `(code, description, keyword_synonyms)`.
 const ICD10_CODES: &[(&str, &str, &str)] = &[
     ("I10", "Essential (primary) hypertension", "hypertension high blood pressure"),
     ("E11", "Type 2 diabetes mellitus", "diabetes type 2 blood sugar glucose"),

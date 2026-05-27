@@ -7,6 +7,10 @@ use medical_core::{
 use serde_json::json;
 
 /// Agent specializing in medication safety, drug interactions, and dosage validation.
+///
+/// Has access to the drug-interaction lookup tool and ICD code search.
+/// Its system prompt covers severity ratings, Beers Criteria for elderly
+/// patients, therapeutic duplication checks, and dosage validation.
 pub struct MedicationAgent;
 
 #[async_trait]

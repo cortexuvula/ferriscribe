@@ -7,6 +7,10 @@ use medical_core::{
 use serde_json::json;
 
 /// Agent specializing in extracting structured clinical data from unstructured text.
+///
+/// Has access to the vitals extraction tool. Its system prompt covers
+/// vital-sign parsing, lab-result structuring, medication-list compilation,
+/// diagnosis extraction with ICD-10 codes, and allergy documentation.
 pub struct DataExtractionAgent;
 
 #[async_trait]

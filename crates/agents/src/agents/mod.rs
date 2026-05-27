@@ -1,3 +1,21 @@
+//! Agent implementations for clinical AI chat.
+//!
+//! Each agent specialises in a clinical domain and declares which tools it
+//! may invoke. All agents share the same execution path — they are driven by
+//! [`AgentOrchestrator`](crate::orchestrator::AgentOrchestrator), **not** by
+//! calling their `execute()` method directly.
+//!
+//! | Agent | Tools | Purpose |
+//! |---|---|---|
+//! | [`ChatAgent`] | All 5 | General-purpose conversational assistant |
+//! | [`MedicationAgent`] | drug interactions, ICD lookup | Drug safety and pharmacotherapy |
+//! | [`DiagnosticAgent`] | ICD lookup, vitals extraction | Differential diagnosis and ICD-10 coding |
+//! | [`ComplianceAgent`] | checklist | SOAP note auditing and compliance |
+//! | [`DataExtractionAgent`] | vitals extraction | Structured data from unstructured text |
+//! | [`WorkflowAgent`] | checklist | Step-by-step clinical workflow guidance |
+//! | [`ReferralAgent`] | ICD lookup | Referral letter generation |
+//! | [`SynopsisAgent`] | _(none)_ | Concise SOAP note summaries (<200 words) |
+
 pub mod medication;
 pub mod diagnostic;
 pub mod compliance;
@@ -19,6 +37,9 @@ pub use chat::ChatAgent;
 use medical_core::traits::Agent;
 
 /// Returns all 8 medical agents as boxed trait objects.
+///
+/// Useful for registering the full agent catalogue with a dispatcher or
+/// for iterating over agents in tests and UI code.
 pub fn all_agents() -> Vec<Box<dyn Agent>> {
     vec![
         Box::new(MedicationAgent),

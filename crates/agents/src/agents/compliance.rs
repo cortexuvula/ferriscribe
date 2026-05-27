@@ -7,6 +7,10 @@ use medical_core::{
 use serde_json::json;
 
 /// Agent specializing in clinical documentation compliance and SOAP note auditing.
+///
+/// Has access to the checklist generation tool. Its system prompt covers
+/// SOAP documentation standards, ICD-10 code verification, E/M guideline
+/// compliance, and claim-denial risk identification.
 pub struct ComplianceAgent;
 
 #[async_trait]

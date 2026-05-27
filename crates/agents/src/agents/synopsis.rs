@@ -6,6 +6,11 @@ use medical_core::{
 };
 
 /// Agent specializing in generating concise SOAP note summaries.
+///
+/// Has **no tools** — it works purely from the text provided in the context.
+/// Its system prompt mandates output under 200 words, structured as
+/// Subjective / Objective / Assessment / Plan, with standard medical
+/// abbreviations for maximum information density.
 pub struct SynopsisAgent;
 
 #[async_trait]

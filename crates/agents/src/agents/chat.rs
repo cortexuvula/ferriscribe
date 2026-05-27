@@ -7,6 +7,11 @@ use medical_core::{
 use serde_json::json;
 
 /// General-purpose conversational medical AI agent with access to all tools.
+///
+/// The `ChatAgent` declares all five built-in tools (ICD lookup, drug
+/// interactions, vitals extraction, knowledge-base search, and checklist
+/// generation), making it the most capable agent for ad-hoc clinical
+/// questions. Use it as the default agent for the chat UI.
 pub struct ChatAgent;
 
 #[async_trait]

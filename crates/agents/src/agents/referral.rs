@@ -7,6 +7,11 @@ use medical_core::{
 use serde_json::json;
 
 /// Agent specializing in generating professional medical referral letters.
+///
+/// Has access to ICD code search for including accurate diagnostic codes in
+/// referral documentation. Its system prompt covers specialty matching,
+/// referral-letter composition, urgency-level assignment, and payer
+/// authorisation requirements.
 pub struct ReferralAgent;
 
 #[async_trait]
