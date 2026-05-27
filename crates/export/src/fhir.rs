@@ -1,3 +1,19 @@
+//! FHIR R4 document export.
+//!
+//! Produces [FHIR R4](https://hl7.org/fhir/R4/) **document Bundles** as
+//! pretty-printed JSON. A Bundle always includes `Patient`, `Practitioner`, and
+//! `Encounter` resources, plus `DocumentReference` resources for the SOAP note
+//! (LOINC 11506-3) and transcript (LOINC 11488-4) when present.
+//!
+//! Document text is base64-encoded (RFC 4648, standard alphabet with padding)
+//! inside [`Attachment.data`][att] fields, as required by the FHIR spec.
+//!
+//! [att]: https://hl7.org/fhir/R4/datatypes.html#Attachment
+//!
+//! > **Note:** the crate produces structurally valid FHIR JSON but does *not*
+//! > run a FHIR conformance validator. Resource IDs are random UUIDs and are
+//! > not stable across repeated exports of the same recording.
+
 use base64::Engine;
 use chrono::Utc;
 use medical_core::types::recording::Recording;
@@ -9,58 +25,97 @@ use crate::{ExportError, ExportResult};
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
-/// A FHIR R4 Bundle document.
+/// A FHIR R4 [`Bundle`](https://hl7.org/fhir/R4/bundle.html) of type
+/// `"document"`.
+///
+/// Serialises to / deserialises from standard FHIR JSON with `resourceType`,
+/// `id`, `type`, `timestamp`, and `entry` fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FhirBundle {
+    /// Always `"Bundle"`.
     #[serde(rename = "resourceType")]
     pub resource_type: String,
+    /// UUID assigned at export time.
     pub id: String,
+    /// Always `"document"` for this exporter.
     #[serde(rename = "type")]
     pub bundle_type: String,
+    /// RFC 3339 timestamp of when the bundle was generated.
     pub timestamp: String,
+    /// Ordered list of resources in the bundle.
     pub entry: Vec<BundleEntry>,
 }
 
-/// A single entry inside a FHIR Bundle.
+/// A single [`entry`](https://hl7.org/fhir/R4/bundle-definitions.html#Bundle.entry)
+/// inside a FHIR Bundle, wrapping an arbitrary FHIR resource as a JSON value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleEntry {
+    /// The FHIR resource (Patient, Practitioner, Encounter, DocumentReference, …).
     pub resource: Value,
 }
 
-/// Optional patient demographic information for the bundle.
+/// Optional patient demographics merged into the `Patient` resource.
+///
+/// Any `None` field is omitted from the FHIR output. `name` falls back to
+/// [`Recording::patient_name`] if not supplied.
 #[derive(Debug, Clone, Default)]
 pub struct PatientInfo {
+    /// Patient display name (falls back to `Recording.patient_name`).
     pub name: Option<String>,
+    /// Date of birth in `YYYY-MM-DD` format.
     pub birth_date: Option<String>,
+    /// Administrative gender (`male`, `female`, `other`, `unknown`).
     pub gender: Option<String>,
+    /// External patient identifier (e.g. MRN).
     pub identifier: Option<String>,
 }
 
-/// Optional practitioner information for the bundle.
+/// Optional practitioner metadata merged into the `Practitioner` resource.
+///
+/// Any `None` field is omitted from the FHIR output.
 #[derive(Debug, Clone, Default)]
 pub struct PractitionerInfo {
+    /// Practitioner display name.
     pub name: Option<String>,
+    /// External practitioner identifier (e.g. NPI).
     pub identifier: Option<String>,
+    /// Clinical specialty, emitted as a `qualification`.
     pub specialty: Option<String>,
 }
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
-/// Base64-encodes a UTF-8 string using the standard alphabet.
+/// Base64-encodes a UTF-8 string using the standard alphabet (RFC 4648, with
+/// padding) — the encoding required by FHIR `Attachment.data`.
 pub fn base64_encode(text: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
 }
 
 // ── Exporter ─────────────────────────────────────────────────────────────────
 
+/// Stateless FHIR R4 exporter.
+///
+/// All methods are associated functions — construction is unnecessary.
+///
+/// # Errors
+///
+/// Returns [`ExportError::Fhir`] if JSON serialisation fails (should not happen
+/// in practice since inputs are always serialisable primitives).
 pub struct FhirExporter;
 
 impl FhirExporter {
-    /// Builds a full FHIR R4 Bundle from a recording.
+    /// Builds a full FHIR R4 document Bundle from a recording.
     ///
-    /// The bundle always contains Patient, Practitioner, and Encounter resources.
-    /// If the recording has a SOAP note a DocumentReference (LOINC 11506-3) is added.
-    /// If the recording has a transcript a DocumentReference (LOINC 11488-4) is added.
+    /// The bundle always contains `Patient`, `Practitioner`, and `Encounter`
+    /// resources. Conditional resources:
+    ///
+    /// - **`DocumentReference` (LOINC 11506-3)** — added when
+    ///   `recording.soap_note` is present ("Progress note").
+    /// - **`DocumentReference` (LOINC 11488-4)** — added when
+    ///   `recording.transcript` is present ("Consultation note").
+    ///
+    /// Resource IDs are freshly generated UUIDs; the encounter period starts
+    /// at `recording.created_at`.
     pub fn export_bundle(
         recording: &Recording,
         patient: PatientInfo,
@@ -174,7 +229,12 @@ impl FhirExporter {
             .map_err(|e| ExportError::Fhir(format!("JSON serialization failed: {e}")))
     }
 
-    /// Exports a standalone FHIR DocumentReference for the recording.
+    /// Exports a standalone FHIR `DocumentReference` (not wrapped in a Bundle).
+    ///
+    /// Uses the SOAP note if present, otherwise falls back to the transcript.
+    /// The LOINC code is hard-coded to `11506-3` ("Progress note").
+    ///
+    /// This is useful for simpler integrations that do not need a full Bundle.
     pub fn export_document_reference(recording: &Recording, title: &str) -> ExportResult<Vec<u8>> {
         let content = recording
             .soap_note

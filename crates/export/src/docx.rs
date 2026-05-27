@@ -1,3 +1,10 @@
+//! DOCX (Office Open XML) document export using
+//! [docx-rs](https://docs.rs/docx-rs/0.4).
+//!
+//! Produces `.docx` files (which are ZIP archives — magic bytes `PK`) with a
+//! simple hard-coded layout: title, date, and body. SOAP section headers are
+//! rendered in bold.
+
 use std::io::Cursor;
 
 use docx_rs::*;
@@ -7,10 +14,26 @@ use crate::{ExportError, ExportResult};
 
 // ── Exporter ─────────────────────────────────────────────────────────────────
 
+/// Stateless DOCX exporter.
+///
+/// All methods are associated functions — construction is unnecessary.
+///
+/// # Errors
+///
+/// Returns [`ExportError::Docx`] when the recording is missing the required
+/// content (e.g. no SOAP note for [`export_soap`](Self::export_soap)) or when
+/// `docx-rs` fails during packing.
 pub struct DocxExporter;
 
 impl DocxExporter {
     /// Exports the SOAP note from a recording as a DOCX document.
+    ///
+    /// The SOAP text is rendered with bold section headers (`S:`, `O:`, `A:`,
+    /// `P:`) and the recording date right-aligned beneath the title.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Docx`] if `recording.soap_note` is `None`.
     pub fn export_soap(recording: &Recording) -> ExportResult<Vec<u8>> {
         let soap = recording.soap_note.as_deref().ok_or_else(|| {
             ExportError::Docx("Recording has no SOAP note".to_string())
@@ -20,6 +43,10 @@ impl DocxExporter {
     }
 
     /// Exports the referral letter from a recording as a DOCX document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Docx`] if `recording.referral` is `None`.
     pub fn export_referral(recording: &Recording) -> ExportResult<Vec<u8>> {
         let referral = recording.referral.as_deref().ok_or_else(|| {
             ExportError::Docx("Recording has no referral letter".to_string())
@@ -28,7 +55,11 @@ impl DocxExporter {
         render_document("Referral Letter", referral, &date)
     }
 
-    /// Exports the general letter from a recording as a DOCX document.
+    /// Exports the general patient letter from a recording as a DOCX document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Docx`] if `recording.letter` is `None`.
     pub fn export_letter(recording: &Recording) -> ExportResult<Vec<u8>> {
         let letter = recording.letter.as_deref().ok_or_else(|| {
             ExportError::Docx("Recording has no letter".to_string())
@@ -43,13 +74,21 @@ impl DocxExporter {
 /// SOAP section header prefixes that should be rendered in bold.
 const SOAP_HEADERS: &[&str] = &["S:", "O:", "A:", "P:"];
 
-/// Renders a DOCX with a title, date, and body.
+/// Renders a DOCX document with a title, date, and line-by-line body.
 ///
-/// Layout:
-///   - Title: centred, bold, size 32 (half-points)
-///   - Date: right-aligned, gray (#888888), size 20
-///   - Body: SOAP section headers (S:/O:/A:/P:) in bold size 24,
-///     regular lines at size 22
+/// # Layout
+///
+/// - **Title**: centred, bold, size 32 half-points (16 pt).
+/// - **Date**: right-aligned, gray `#888888`, size 20 half-points (10 pt).
+/// - **Body**: one paragraph per line. Lines starting with `S:`, `O:`, `A:`,
+///   or `P:` are bold at size 24 (12 pt); all others are size 22 (11 pt).
+///
+/// The resulting `Docx` is packed into a byte buffer via
+/// [`Docx::build().pack(...)`](docx_rs::Docx).
+///
+/// # Errors
+///
+/// Returns [`ExportError::Docx`] if the DOCX cannot be packed to bytes.
 pub fn render_document(title: &str, body: &str, date: &str) -> ExportResult<Vec<u8>> {
     let mut docx = Docx::new();
 

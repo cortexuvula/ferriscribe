@@ -1,3 +1,8 @@
+//! PDF document export using [printpdf](https://docs.rs/printpdf/0.7).
+//!
+//! Generates A4 PDFs with built-in Helvetica fonts (Latin-1 only). Long SOAP
+//! notes overflow onto additional pages automatically.
+
 use medical_core::types::recording::Recording;
 use printpdf::*;
 
@@ -5,10 +10,26 @@ use crate::{ExportError, ExportResult};
 
 // ── Exporter ─────────────────────────────────────────────────────────────────
 
+/// Stateless PDF exporter.
+///
+/// All methods are associated functions — construct is unnecessary.
+///
+/// # Errors
+///
+/// Returns [`ExportError::Pdf`] when the recording is missing the required
+/// content (e.g. no SOAP note for [`export_soap`](Self::export_soap)) or when
+/// `printpdf` fails during font loading or serialisation.
 pub struct PdfExporter;
 
 impl PdfExporter {
     /// Exports the SOAP note from a recording as a PDF document.
+    ///
+    /// The SOAP text is rendered with bold section headers (`S:`, `O:`, `A:`,
+    /// `P:`) and the recording date as a subtitle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Pdf`] if `recording.soap_note` is `None`.
     pub fn export_soap(recording: &Recording) -> ExportResult<Vec<u8>> {
         let soap = recording.soap_note.as_deref().ok_or_else(|| {
             ExportError::Pdf("Recording has no SOAP note".to_string())
@@ -18,6 +39,10 @@ impl PdfExporter {
     }
 
     /// Exports the referral letter from a recording as a PDF document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Pdf`] if `recording.referral` is `None`.
     pub fn export_referral(recording: &Recording) -> ExportResult<Vec<u8>> {
         let referral = recording.referral.as_deref().ok_or_else(|| {
             ExportError::Pdf("Recording has no referral letter".to_string())
@@ -26,7 +51,11 @@ impl PdfExporter {
         render_document("Referral Letter", referral, &date)
     }
 
-    /// Exports the general letter from a recording as a PDF document.
+    /// Exports the general patient letter from a recording as a PDF document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Pdf`] if `recording.letter` is `None`.
     pub fn export_letter(recording: &Recording) -> ExportResult<Vec<u8>> {
         let letter = recording.letter.as_deref().ok_or_else(|| {
             ExportError::Pdf("Recording has no letter".to_string())
@@ -41,12 +70,22 @@ impl PdfExporter {
 /// SOAP section header prefixes that should be rendered in bold.
 const SOAP_HEADERS: &[&str] = &["S:", "O:", "A:", "P:"];
 
-/// Renders a PDF with an A4 page.
+/// Renders an A4 PDF with a title, date subtitle, and line-by-line body.
 ///
-/// Layout:
-///   - Title (16pt, HelveticaBold) at top
-///   - Date (10pt, Helvetica) below the title
-///   - Body lines rendered with SOAP section headers (S:/O:/A:/P:) in bold
+/// # Layout
+///
+/// - **Title**: 16 pt Helvetica-Bold, left-aligned.
+/// - **Date**: 10 pt Helvetica, left-aligned below the title.
+/// - **Body**: one paragraph per line. Lines starting with `S:`, `O:`, `A:`,
+///   or `P:` are rendered in 11 pt Helvetica-Bold; all others in 10 pt
+///   Helvetica.
+/// - When the y-cursor falls below the 10 mm bottom margin a new A4 page is
+///   appended and rendering continues from the top.
+///
+/// # Errors
+///
+/// Returns [`ExportError::Pdf`] if the built-in fonts cannot be loaded or the
+/// document cannot be serialised.
 pub fn render_document(title: &str, body: &str, date: &str) -> ExportResult<Vec<u8>> {
     const A4_WIDTH: f32 = 210.0;
     const A4_HEIGHT: f32 = 297.0;
