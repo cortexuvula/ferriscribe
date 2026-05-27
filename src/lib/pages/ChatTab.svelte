@@ -1,10 +1,14 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import { chat, isStreaming } from '../stores/chat.svelte.ts';
   import ChatMessage from '../components/ChatMessage.svelte';
 
   let input = $state('');
   let messagesEl: HTMLDivElement | undefined = $state();
+
+  onDestroy(() => {
+    chat.cancel();
+  });
 
   async function scrollToBottom() {
     await tick();

@@ -17,6 +17,12 @@ export const isStreaming = new StreamingStore();
 class ChatStore {
   messages = $state<ChatMessage[]>([]);
 
+  // Active stream cleanup handles — set during sendMessage, cleared by cancel/cleanup.
+  private _tokenUnlisten: UnlistenFn | null = null;
+  private _doneUnlisten: UnlistenFn | null = null;
+  private _errorUnlisten: UnlistenFn | null = null;
+  private _safetyTimeout: ReturnType<typeof setTimeout> | null = null;
+
   addUserMessage(content: string) {
     const msg: ChatMessage = {
       id: generateId(),
@@ -65,28 +71,35 @@ class ChatStore {
     isStreaming.value = false;
   }
 
+  /** Tear down an active stream: unlisten events, clear timeout, reset flag. */
+  cancel() {
+    if (this._safetyTimeout) clearTimeout(this._safetyTimeout);
+    this._safetyTimeout = null;
+    this._tokenUnlisten?.();
+    this._tokenUnlisten = null;
+    this._doneUnlisten?.();
+    this._doneUnlisten = null;
+    this._errorUnlisten?.();
+    this._errorUnlisten = null;
+    this.stopStreaming();
+  }
+
   async sendMessage(content: string) {
+    this.cancel();
     this.addUserMessage(content);
     this.startStreaming();
 
-    let tokenUnlisten: UnlistenFn | null = null;
-    let doneUnlisten: UnlistenFn | null = null;
-    let errorUnlisten: UnlistenFn | null = null;
     let cleaned = false;
 
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
-      if (safetyTimeout) clearTimeout(safetyTimeout);
-      tokenUnlisten?.();
-      doneUnlisten?.();
-      errorUnlisten?.();
-      this.stopStreaming();
+      this.cancel();
     };
 
     // Safety timeout: if chat-done/chat-error never fire (backend crash,
     // stream silently ends), clean up after 5 minutes so chat isn't stuck.
-    let safetyTimeout: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    this._safetyTimeout = setTimeout(() => {
       if (!cleaned) {
         this.appendToLast('\n\n(Stream timed out — no response received)');
         cleanup();
@@ -94,21 +107,21 @@ class ChatStore {
     }, 5 * 60 * 1000);
 
     try {
-      tokenUnlisten = await listen<string>('chat-token', (event) => {
+      this._tokenUnlisten = await listen<string>('chat-token', (event) => {
         this.appendToLast(event.payload);
         // Reset safety timeout on each token — the stream is still alive.
-        if (safetyTimeout) clearTimeout(safetyTimeout);
-        safetyTimeout = setTimeout(() => {
+        if (this._safetyTimeout) clearTimeout(this._safetyTimeout);
+        this._safetyTimeout = setTimeout(() => {
           if (!cleaned) {
             this.appendToLast('\n\n(Stream timed out)');
             cleanup();
           }
         }, 5 * 60 * 1000);
       });
-      doneUnlisten = await listen('chat-done', () => {
+      this._doneUnlisten = await listen('chat-done', () => {
         cleanup();
       });
-      errorUnlisten = await listen<{ message: string } | string>('chat-error', (event) => {
+      this._errorUnlisten = await listen<{ message: string } | string>('chat-error', (event) => {
         this.appendToLast(`\n\nError: ${formatError(event.payload)}`);
         cleanup();
       });
@@ -136,6 +149,7 @@ class ChatStore {
   }
 
   clear() {
+    this.cancel();
     this.messages = [];
     isStreaming.value = false;
   }
