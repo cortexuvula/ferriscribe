@@ -168,6 +168,7 @@ pub async fn transcribe_recording_inner(
     let config = SttConfig {
         language,
         diarize: diarize.unwrap_or(true),
+        num_speakers: app_config.max_speakers,
         ..SttConfig::default()
     };
 

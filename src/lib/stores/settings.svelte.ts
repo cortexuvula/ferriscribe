@@ -28,6 +28,7 @@ const defaults: AppConfig = {
   ollama_port: 11434,
   vocabulary_enabled: true,
   medical_dict_enabled: true,
+  max_speakers: 3,
   custom_context_templates: [],
   custom_soap_prompt: null,
   custom_referral_prompt: null,

@@ -108,7 +108,9 @@ impl SpeakerDiarizer {
     ///
     /// 1. **VAD** — pyannote segmentation model detects speech regions in 10s windows
     /// 2. **Embeddings** — WeSpeaker CAM++ extracts per-segment speaker vectors
-    /// 3. **Clustering** — greedy cosine-similarity clustering (threshold 0.5)
+    /// 3. **Clustering** — greedy cosine-similarity clustering with centroid updates
+    ///    and post-clustering merge (threshold 0.75). If `max_speakers` is set,
+    ///    the most-similar clusters are merged until the count is at or below the limit.
     ///
     /// Returns `Ok(vec![])` if no speech is detected. Returns `Err` if models
     /// fail to load or inference panics.
@@ -116,6 +118,7 @@ impl SpeakerDiarizer {
         &self,
         samples_i16: &[i16],
         sample_rate: u32,
+        max_speakers: Option<u32>,
     ) -> AppResult<Vec<SpeakerTurn>> {
         info!(
             samples = samples_i16.len(),
@@ -146,7 +149,7 @@ impl SpeakerDiarizer {
         debug!(embeddings = embeddings.len(), "Extracted speaker embeddings");
 
         // Stage 3: Cluster embeddings into speakers
-        let speaker_ids = cluster_speakers(&embeddings, 0.5);
+        let speaker_ids = cluster_speakers(&embeddings, 0.5, max_speakers);
 
         // Build speaker turns
         let turns: Vec<SpeakerTurn> = segments
@@ -341,14 +344,27 @@ impl SpeakerDiarizer {
 
 /// Stage 3: Cluster speaker embeddings using cosine similarity.
 ///
-/// Greedy clustering: each embedding is compared against known speaker centroids.
-/// If the best match exceeds `threshold`, the segment is assigned to that speaker;
-/// otherwise a new speaker is created.
-fn cluster_speakers(embeddings: &[Vec<f32>], threshold: f32) -> Vec<usize> {
+/// Greedy clustering with centroid updates: each embedding is compared against
+/// known speaker centroids (running mean of all assigned segments). If the best
+/// match exceeds `threshold`, the segment is assigned and the centroid is
+/// updated; otherwise a new speaker is created.
+///
+/// After greedy clustering, similar centroids (cosine similarity > 0.75) are
+/// merged. If `max_speakers` is set, the most-similar centroids are iteratively
+/// merged until the count is at or below the limit.
+fn cluster_speakers(
+    embeddings: &[Vec<f32>],
+    threshold: f32,
+    max_speakers: Option<u32>,
+) -> Vec<usize> {
+    let merge_threshold: f32 = 0.75;
+
     let mut centroids: HashMap<usize, Array1<f32>> = HashMap::new();
+    let mut centroid_counts: HashMap<usize, usize> = HashMap::new();
     let mut next_id: usize = 0;
     let mut assignments = Vec::with_capacity(embeddings.len());
 
+    // Greedy clustering with centroid updates
     for (idx, emb) in embeddings.iter().enumerate() {
         let emb_arr = Array1::from_vec(emb.clone());
 
@@ -372,12 +388,22 @@ fn cluster_speakers(embeddings: &[Vec<f32>], threshold: f32) -> Vec<usize> {
 
         let assigned = match best_id {
             Some(id) => {
+                // Update centroid: running mean of all assigned embeddings
+                let count = centroid_counts.entry(id).or_insert(1);
+                let centroid = centroids.get_mut(&id).unwrap();
+                // new_centroid = (old_centroid * count + new_emb) / (count + 1)
+                let n = *count as f32;
+                for (c, &e) in centroid.iter_mut().zip(emb_arr.iter()) {
+                    *c = (*c * n + e) / (n + 1.0);
+                }
+                *count += 1;
                 debug!(segment = idx, speaker = id, similarity = format!("{:.4}", best_sim), "Assigned to existing speaker");
                 id
             }
             None => {
                 let id = next_id;
                 centroids.insert(id, emb_arr);
+                centroid_counts.insert(id, 1);
                 next_id += 1;
                 debug!(segment = idx, speaker = id, "Created new speaker");
                 id
@@ -387,7 +413,95 @@ fn cluster_speakers(embeddings: &[Vec<f32>], threshold: f32) -> Vec<usize> {
         assignments.push(assigned);
     }
 
+    // Post-clustering merge: merge centroids with cosine similarity > merge_threshold
+    merge_similar_centroids(&mut centroids, &mut assignments, merge_threshold);
+
+    // If max_speakers is set, merge the most-similar centroids until we're at or below the limit
+    if let Some(max) = max_speakers {
+        let max = max as usize;
+        let current_count = centroids.len();
+        if current_count > max {
+            merge_to_limit(&mut centroids, &mut assignments, max);
+        }
+    }
+
     assignments
+}
+
+/// Merge centroids with cosine similarity above `merge_threshold`.
+/// Reassigns affected segments to the surviving centroid.
+fn merge_similar_centroids(
+    centroids: &mut HashMap<usize, Array1<f32>>,
+    assignments: &mut [usize],
+    merge_threshold: f32,
+) {
+    loop {
+        let ids: Vec<usize> = centroids.keys().copied().collect();
+        let mut best_merge: Option<(usize, usize, f32)> = None; // (id_a, id_b, similarity)
+
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                let sim = cosine_similarity(&centroids[&ids[i]], &centroids[&ids[j]]);
+                if sim > merge_threshold {
+                    if best_merge.is_none() || sim > best_merge.unwrap().2 {
+                        best_merge = Some((ids[i], ids[j], sim));
+                    }
+                }
+            }
+        }
+
+        match best_merge {
+            Some((id_a, id_b, sim)) => {
+                debug!(
+                    speaker_a = id_a,
+                    speaker_b = id_b,
+                    similarity = format!("{:.4}", sim),
+                    "Merging similar speaker centroids"
+                );
+                // Merge id_b into id_a
+                centroids.remove(&id_b);
+                for a in assignments.iter_mut() {
+                    if *a == id_b {
+                        *a = id_a;
+                    }
+                }
+            }
+            None => break,
+        }
+    }
+}
+
+/// Iteratively merge the two most-similar centroids until count <= target.
+fn merge_to_limit(
+    centroids: &mut HashMap<usize, Array1<f32>>,
+    assignments: &mut [usize],
+    target: usize,
+) {
+    while centroids.len() > target {
+        let ids: Vec<usize> = centroids.keys().copied().collect();
+        let mut best_merge: Option<(usize, usize, f32)> = None;
+
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                let sim = cosine_similarity(&centroids[&ids[i]], &centroids[&ids[j]]);
+                if best_merge.is_none() || sim > best_merge.unwrap().2 {
+                    best_merge = Some((ids[i], ids[j], sim));
+                }
+            }
+        }
+
+        match best_merge {
+            Some((id_a, id_b, _sim)) => {
+                centroids.remove(&id_b);
+                for a in assignments.iter_mut() {
+                    if *a == id_b {
+                        *a = id_a;
+                    }
+                }
+            }
+            None => break,
+        }
+    }
 }
 
 fn cosine_similarity(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
@@ -424,7 +538,7 @@ mod tests {
     fn cluster_single_speaker() {
         let emb = vec![1.0, 0.0, 0.0];
         let embeddings = vec![emb.clone(), emb.clone(), emb.clone()];
-        let ids = cluster_speakers(&embeddings, 0.5);
+        let ids = cluster_speakers(&embeddings, 0.5, None);
         assert!(ids.iter().all(|&id| id == 0));
     }
 
@@ -438,10 +552,65 @@ mod tests {
             speaker_a.clone(),
             speaker_b.clone(),
         ];
-        let ids = cluster_speakers(&embeddings, 0.5);
+        let ids = cluster_speakers(&embeddings, 0.5, None);
         assert_eq!(ids[0], ids[2]); // same speaker
         assert_eq!(ids[1], ids[3]); // same speaker
         assert_ne!(ids[0], ids[1]); // different speakers
+    }
+
+    #[test]
+    fn cluster_centroid_updates_reduce_over_clustering() {
+        // Speaker A's voice shifts across segments (simulating emotion/distance changes).
+        // Without centroid updates, later segments would create new clusters.
+        // With centroid updates, the running mean keeps them grouped.
+        let a1 = vec![1.0, 0.1, 0.0];
+        let a2 = vec![0.9, 0.2, 0.1]; // similar to a1
+        let a3 = vec![0.8, 0.3, 0.15]; // drifting but still same speaker
+        let a4 = vec![0.75, 0.35, 0.2]; // further drift
+        let speaker_b = vec![0.0, 1.0, 0.0]; // clearly different speaker
+
+        let embeddings = vec![a1, speaker_b.clone(), a2, a3, a4, speaker_b];
+        let ids = cluster_speakers(&embeddings, 0.5, None);
+
+        // All A segments should be the same speaker
+        assert_eq!(ids[0], ids[2], "a1 and a2 should be same speaker");
+        assert_eq!(ids[0], ids[3], "a1 and a3 should be same speaker");
+        assert_eq!(ids[0], ids[4], "a1 and a4 should be same speaker");
+        // B segments should be the same speaker
+        assert_eq!(ids[1], ids[5], "b1 and b2 should be same speaker");
+        // A and B should be different
+        assert_ne!(ids[0], ids[1], "A and B should be different speakers");
+    }
+
+    #[test]
+    fn cluster_max_speakers_caps_output() {
+        // Create 4 distinct clusters, then cap at 2
+        let embeddings = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 1.0],
+        ];
+        let ids = cluster_speakers(&embeddings, 0.5, Some(2));
+        let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
+        assert!(unique.len() <= 2, "Expected at most 2 speakers, got {}", unique.len());
+    }
+
+    #[test]
+    fn cluster_merge_similar_centroids() {
+        // Two very similar embeddings that would normally be separate clusters
+        // (similarity just above threshold but below merge threshold)
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.95, 0.05, 0.0]; // very similar to a (cosine ~0.999)
+        let c = vec![0.0, 1.0, 0.0]; // orthogonal
+
+        let embeddings = vec![a, b, c];
+        let ids = cluster_speakers(&embeddings, 0.5, None);
+
+        // a and b should be merged (similarity > 0.75 merge threshold)
+        assert_eq!(ids[0], ids[1], "Similar embeddings should be merged");
+        // c should be separate
+        assert_ne!(ids[0], ids[2], "Dissimilar embedding should be separate");
     }
 
     #[test]
@@ -450,7 +619,7 @@ mod tests {
             PathBuf::from("/nonexistent/seg.onnx"),
             PathBuf::from("/nonexistent/emb.onnx"),
         );
-        let result = diarizer.diarize(&[0i16; 16000], 16000);
+        let result = diarizer.diarize(&[0i16; 16000], 16000, None);
         assert!(result.is_err());
     }
 

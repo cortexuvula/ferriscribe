@@ -183,6 +183,25 @@
   />
 
   <div class="form-group">
+    <label for="max-speakers" class="form-label">
+      Max speakers
+      <span class="badge-value">{settings.state.max_speakers ?? 'Auto'}</span>
+    </label>
+    <input
+      id="max-speakers"
+      type="range"
+      min={1}
+      max={8}
+      value={settings.state.max_speakers ?? 3}
+      oninput={(e: Event) => {
+        const value = parseInt((e.target as HTMLInputElement).value, 10);
+        settings.updateField('max_speakers', value);
+      }}
+    />
+    <span class="form-hint">Limits the number of speaker clusters. Set to the expected number of people in the conversation (typically 2–3).</span>
+  </div>
+
+  <div class="form-group">
     <label for="sample-rate" class="form-label">Sample Rate</label>
     <select
       id="sample-rate"
@@ -274,6 +293,17 @@
   .form-hint {
     font-size: 11px;
     color: var(--text-muted);
+  }
+
+  .badge-value {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    background-color: color-mix(in srgb, var(--accent) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: var(--radius-sm);
+    padding: 1px 6px;
+    margin-left: 4px;
   }
 
   .checkbox-label {

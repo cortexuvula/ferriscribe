@@ -350,6 +350,11 @@ pub struct AppConfig {
     pub vocabulary_enabled: bool,
     #[serde(default = "default_medical_dict_enabled")]
     pub medical_dict_enabled: bool,
+    // Diarization: cap the number of speaker clusters. When set, the greedy
+    // clustering algorithm merges the most-similar centroids until the count
+    // is at or below this value. `None` means no limit (auto-detect).
+    #[serde(default)]
+    pub max_speakers: Option<u32>,
     // RSVP speed-reader
     #[serde(default = "default_rsvp_wpm")]
     pub rsvp_wpm: u32,

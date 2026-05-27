@@ -134,10 +134,11 @@ impl SttProvider for LocalSttProvider {
             let seg_path = self.segmentation_model_path.clone();
             let emb_path = self.embedding_model_path.clone();
             let audio_i16 = audio_prep::f32_to_i16(&audio_16k);
+            let max_speakers = config.num_speakers;
 
             let turns = match tokio::task::spawn_blocking(move || {
                 let diarizer = SpeakerDiarizer::new(seg_path, emb_path);
-                diarizer.diarize(&audio_i16, 16000)
+                diarizer.diarize(&audio_i16, 16000, max_speakers)
             })
             .await
             {
