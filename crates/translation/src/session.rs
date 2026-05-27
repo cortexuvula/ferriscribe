@@ -1,3 +1,13 @@
+//! Translation session state.
+//!
+//! Tracks an active translation conversation between a healthcare provider
+//! and a patient. Each translated utterance is stored as a [`TranslationEntry`]
+//! with speaker identity, timestamps, and language direction.
+//!
+//! The session automatically infers translation direction from the speaker:
+//! - [`Speaker::Provider`] utterances flow `source_lang → target_lang`
+//! - [`Speaker::Patient`] utterances flow `target_lang → source_lang`
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -12,33 +22,58 @@ pub enum TranslationMode {
 }
 
 /// Identifies who spoke an utterance.
+///
+/// Used by [`TranslationSession::add_entry`] to determine translation direction:
+/// the provider speaks the session's source language, the patient speaks the
+/// target language.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Speaker {
+    /// The healthcare provider (clinician, nurse, etc.).
     Provider,
+    /// The patient (or their companion/interpreter).
     Patient,
 }
 
 /// A single translated utterance stored in session history.
+///
+/// Created by [`TranslationSession::add_entry`], which sets `source_lang` and
+/// `target_lang` automatically based on the [`Speaker`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranslationEntry {
+    /// The original (untranslated) text as spoken.
     pub original: String,
+    /// The translated text.
     pub translated: String,
+    /// Language of the original text (BCP-47 code, e.g. `"en"`, `"es"`).
     pub source_lang: String,
+    /// Language of the translated text (BCP-47 code).
     pub target_lang: String,
+    /// When the utterance was added to the session.
     pub timestamp: DateTime<Utc>,
+    /// Who spoke this utterance.
     pub speaker: Speaker,
 }
 
 /// An active translation session between a provider and a patient.
+///
+/// Tracks the language pair, translation mode, and a chronological history
+/// of translated utterances. Use [`add_entry`](Self::add_entry) to record
+/// each utterance — direction is inferred from the [`Speaker`].
+///
+/// Sessions are serializable (via serde), so they can be persisted or
+/// transmitted to the frontend for display.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranslationSession {
-    /// Primary language of the healthcare provider.
+    /// Primary language of the healthcare provider (BCP-47, e.g. `"en"`).
     pub source_lang: String,
-    /// Primary language of the patient.
+    /// Primary language of the patient (BCP-47, e.g. `"es"`).
     pub target_lang: String,
+    /// Chronological list of translated utterances in this session.
     pub history: Vec<TranslationEntry>,
+    /// Whether translation is bidirectional or one-way.
     pub mode: TranslationMode,
+    /// When the session was created.
     pub created_at: DateTime<Utc>,
 }
 

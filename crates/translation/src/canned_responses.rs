@@ -1,11 +1,31 @@
+//! Pre-built medical phrases with hardcoded translations.
+//!
+//! Provides a [`CannedResponseSet`] of common clinical phrases (greetings,
+//! pain assessment, medication history, discharge instructions) with
+//! pre-translated text in Spanish, French, German, and Chinese.
+//!
+//! Canned responses are the fast path: when the UI presents a known phrase,
+//! the app can look up the translation by id and target language — no AI
+//! round-trip required. For free-form text, use
+//! [`AiTranslationProvider`](crate::ai_translator::AiTranslationProvider)
+//! instead.
+
 use std::collections::HashMap;
 
 /// A single pre-built medical response with multilingual translations.
+///
+/// The canonical text is always English ([`text_en`](Self::text_en)); the
+/// [`translations`](Self::translations) map provides the same phrase in
+/// other languages, keyed by BCP-47 code.
 #[derive(Debug, Clone)]
 pub struct CannedResponse {
+    /// Unique identifier for this response (e.g. `"assessment_pain_location"`).
     pub id: String,
+    /// Category grouping (e.g. `"general"`, `"assessment"`, `"history"`, `"instructions"`).
     pub category: String,
+    /// The canonical English text.
     pub text_en: String,
+    /// Translations keyed by BCP-47 language code (e.g. `"es"`, `"fr"`, `"de"`, `"zh"`).
     pub translations: HashMap<String, String>,
 }
 
@@ -28,15 +48,27 @@ impl CannedResponse {
     }
 }
 
-/// A collection of canned medical responses.
+/// A collection of canned medical responses, searchable by id or category.
+///
+/// Use [`default_medical`](Self::default_medical) to get the built-in set,
+/// or construct a custom set by populating the [`responses`](Self::responses)
+/// field directly.
 #[derive(Debug, Clone, Default)]
 pub struct CannedResponseSet {
+    /// The underlying list of canned responses.
     pub responses: Vec<CannedResponse>,
 }
 
 impl CannedResponseSet {
-    /// Returns a default set of 7 pre-built medical responses with translations
-    /// in Spanish (es), French (fr), German (de), and Chinese (zh).
+    /// Returns the built-in set of 7 pre-built medical responses with
+    /// translations in Spanish (`es`), French (`fr`), German (`de`), and
+    /// Chinese (`zh`).
+    ///
+    /// The responses span four categories:
+    /// - **general** — greeting
+    /// - **assessment** — pain location, pain scale
+    /// - **history** — allergies, medications, symptom duration
+    /// - **instructions** — return-visit guidance
     pub fn default_medical() -> Self {
         let responses = vec![
             CannedResponse::new(
