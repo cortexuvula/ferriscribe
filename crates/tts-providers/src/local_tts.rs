@@ -179,6 +179,10 @@ pub struct LocalTtsProvider;
 
 #[cfg(not(feature = "local-tts"))]
 impl LocalTtsProvider {
+    /// Create a stub local TTS provider (feature `local-tts` is disabled).
+    ///
+    /// The returned provider does nothing — it exists only so that
+    /// downstream code can reference [`LocalTtsProvider`] unconditionally.
     pub fn new() -> Self {
         Self
     }
