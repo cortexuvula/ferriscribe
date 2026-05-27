@@ -10,10 +10,20 @@ use medical_core::types::recording::{ProcessingStatus, Recording, RecordingSumma
 
 use crate::{DbError, DbResult};
 
+/// Repository for the `recordings` table -- the central entity of the app.
+///
+/// All methods are associated functions that take a `&Connection`. The table
+/// stores audio metadata, transcripts, SOAP notes, referrals, letters, and
+/// a JSON `metadata` column (see crate-level docs for the dual-field design).
 pub struct RecordingsRepo;
 
 impl RecordingsRepo {
     /// Insert a new recording.  All JSON fields are serialised before storing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Sqlite`](crate::DbError::Sqlite) on constraint
+    /// violation (e.g. duplicate ID) or serialisation failure.
     pub fn insert(conn: &Connection, recording: &Recording) -> DbResult<()> {
         let status_json =
             serde_json::to_string(&recording.status).map_err(|e| DbError::Migration(e.to_string()))?;
@@ -54,7 +64,11 @@ impl RecordingsRepo {
         Ok(())
     }
 
-    /// Fetch a single recording by its UUID.  Returns `DbError::NotFound` if absent.
+    /// Fetch a single recording by its UUID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] if no recording with the given ID exists.
     pub fn get_by_id(conn: &Connection, id: &Uuid) -> DbResult<Recording> {
         let id_str = id.to_string();
         conn.query_row(
@@ -75,6 +89,9 @@ impl RecordingsRepo {
     }
 
     /// Return a page of lightweight summaries, newest first.
+    ///
+    /// Results are ordered by `created_at DESC`. Use `limit` and `offset` for
+    /// pagination.
     pub fn list_all(conn: &Connection, limit: u32, offset: u32) -> DbResult<Vec<RecordingSummary>> {
         let mut stmt = conn.prepare(
             "SELECT id, filename, transcript, soap_note, referral, letter, chat,
@@ -96,7 +113,11 @@ impl RecordingsRepo {
         Ok(recordings)
     }
 
-    /// Replace all mutable fields of an existing recording.  Returns `NotFound` if absent.
+    /// Replace all mutable fields of an existing recording.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] if the recording does not exist.
     pub fn update(conn: &Connection, recording: &Recording) -> DbResult<()> {
         let status_json =
             serde_json::to_string(&recording.status).map_err(|e| DbError::Migration(e.to_string()))?;
@@ -148,7 +169,11 @@ impl RecordingsRepo {
         Ok(())
     }
 
-    /// Delete a recording by ID.  Returns `NotFound` if absent.
+    /// Delete a recording by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] if the recording does not exist.
     pub fn delete(conn: &Connection, id: &Uuid) -> DbResult<()> {
         let rows = conn.execute(
             "DELETE FROM recordings WHERE id = ?1",
@@ -160,7 +185,8 @@ impl RecordingsRepo {
         Ok(())
     }
 
-    /// Delete all recordings. Returns the audio paths so callers can clean up files.
+    /// Delete all recordings. Returns the audio paths so callers can clean up
+    /// files on disk.
     pub fn delete_all(conn: &Connection) -> DbResult<Vec<PathBuf>> {
         let mut stmt = conn.prepare("SELECT audio_path FROM recordings")?;
         let paths: Vec<PathBuf> = stmt
@@ -176,6 +202,8 @@ impl RecordingsRepo {
     }
 
     /// Total number of recordings in the table.
+    ///
+    /// Useful for pagination UI without fetching full rows.
     pub fn count(conn: &Connection) -> DbResult<u32> {
         let n: i64 =
             conn.query_row("SELECT COUNT(*) FROM recordings", [], |r| r.get(0))?;
@@ -183,8 +211,10 @@ impl RecordingsRepo {
     }
 
     /// Flip any recordings stuck in `Processing` state to `Failed` with the
-    /// given reason.  Called at app startup so prior-session crashes or hard
-    /// quits don't leave recordings permanently spinning.
+    /// given reason.
+    ///
+    /// Called at app startup so prior-session crashes or hard quits don't
+    /// leave recordings permanently spinning.
     ///
     /// Returns the number of rows updated.
     pub fn fail_stuck_processing(conn: &Connection, reason: &str) -> DbResult<u32> {
@@ -205,9 +235,10 @@ impl RecordingsRepo {
         Ok(updated as u32)
     }
 
-    /// Fetch multiple recordings by id in a single query. Order is not
-    /// guaranteed; sort the result on the caller side if needed. Empty
-    /// `ids` returns an empty Vec without hitting the database.
+    /// Fetch multiple recordings by ID in a single query.
+    ///
+    /// Order is not guaranteed; sort the result on the caller side if needed.
+    /// An empty `ids` slice returns an empty `Vec` without hitting the database.
     pub fn get_many(conn: &Connection, ids: &[uuid::Uuid]) -> DbResult<Vec<Recording>> {
         if ids.is_empty() {
             return Ok(Vec::new());

@@ -81,8 +81,13 @@ impl GraphRepo {
     /// Open (or create) a CozoDB database backed by Sled at the given path.
     ///
     /// Uses the Sled embedded storage engine (pure Rust, no native sqlite3 link
-    /// conflict with rusqlite). Runs schema creation idempotently — if the
+    /// conflict with rusqlite). Runs schema creation idempotently -- if the
     /// relations already exist the errors are silently ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Graph`](crate::DbError::Graph) if CozoDB fails to
+    /// open or initialize.
     pub fn open(path: &Path) -> DbResult<Self> {
         let db = DbInstance::new("sled", path, "")
             .map_err(|e| DbError::Graph(format!("failed to open CozoDB: {e}")))?;
@@ -92,6 +97,11 @@ impl GraphRepo {
     }
 
     /// Open an in-memory CozoDB instance. Primarily useful for tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Graph`](crate::DbError::Graph) if CozoDB fails to
+    /// initialize.
     pub fn open_in_memory() -> DbResult<Self> {
         let db = DbInstance::new("mem", "", "")
             .map_err(|e| DbError::Graph(format!("failed to open in-memory CozoDB: {e}")))?;
@@ -114,6 +124,14 @@ impl GraphRepo {
     }
 
     /// Upsert an entity into the knowledge graph.
+    ///
+    /// Uses `:put` semantics so re-inserting the same `id` overwrites the
+    /// existing entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Graph`](crate::DbError::Graph) on CozoDB script
+    /// failure.
     pub fn insert_entity(&self, entity: &GraphEntity) -> DbResult<()> {
         let mut params = BTreeMap::new();
         params.insert(
@@ -146,6 +164,14 @@ impl GraphRepo {
     }
 
     /// Upsert a relation between two entities.
+    ///
+    /// The composite key `(from_id, to_id, relation_type)` allows multiple
+    /// relationship types between the same pair of entities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Graph`](crate::DbError::Graph) on CozoDB script
+    /// failure.
     pub fn insert_relation(&self, rel: &GraphRelation) -> DbResult<()> {
         let mut params = BTreeMap::new();
         params.insert(
@@ -181,6 +207,11 @@ impl GraphRepo {
     ///
     /// Returns up to `top_k` tuples of `(name, entity_type, relation_type)`.
     /// Searches in both directions (outgoing and incoming relations).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Graph`](crate::DbError::Graph) on CozoDB script
+    /// failure.
     pub fn query_related(
         &self,
         entity_name: &str,
@@ -236,9 +267,15 @@ impl GraphRepo {
         Ok(out)
     }
 
-    /// Search entities whose name contains the given substring (case-insensitive).
+    /// Search entities whose name contains the given substring
+    /// (case-insensitive).
     ///
     /// Returns up to `top_k` tuples of `(id, name, entity_type)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Graph`](crate::DbError::Graph) on CozoDB script
+    /// failure.
     pub fn search_by_name(
         &self,
         query: &str,

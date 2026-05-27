@@ -25,6 +25,11 @@ pub struct QueueTask {
     pub batch_id: Option<String>,
 }
 
+/// Repository for the `processing_queue` table.
+///
+/// Manages a priority queue of background tasks (transcription, SOAP
+/// generation, etc.) associated with recordings. Tasks flow through
+/// `pending` -> `processing` -> `completed`/`failed` states.
 pub struct ProcessingQueueRepo;
 
 impl ProcessingQueueRepo {
@@ -33,6 +38,9 @@ impl ProcessingQueueRepo {
     }
 
     /// Insert a new task into the processing queue and return its ID.
+    ///
+    /// The task starts in `pending` status. Use [`dequeue`](Self::dequeue)
+    /// to atomically claim the highest-priority task.
     pub fn enqueue(
         conn: &Connection,
         recording_id: &Uuid,
@@ -85,6 +93,10 @@ impl ProcessingQueueRepo {
     }
 
     /// Update the status of a task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] if no task with the given ID exists.
     pub fn update_status(
         conn: &Connection,
         task_id: &Uuid,
@@ -100,7 +112,8 @@ impl ProcessingQueueRepo {
         Ok(())
     }
 
-    /// Retrieve all tasks associated with a given recording.
+    /// Retrieve all tasks associated with a given recording, ordered by
+    /// `created_at ASC`.
     pub fn get_by_recording(
         conn: &Connection,
         recording_id: &Uuid,
@@ -121,7 +134,7 @@ impl ProcessingQueueRepo {
         Ok(tasks)
     }
 
-    /// Count tasks that are still pending.
+    /// Count tasks that are still in `pending` status.
     pub fn count_pending(conn: &Connection) -> DbResult<u64> {
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM processing_queue WHERE status = 'pending'",

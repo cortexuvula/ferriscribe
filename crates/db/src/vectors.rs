@@ -5,6 +5,8 @@ use rusqlite::{Connection, params};
 use crate::DbResult;
 
 /// A single document chunk with its embedding vector.
+///
+/// The `embedding` field is `None` when the chunk has not yet been embedded.
 #[derive(Debug, Clone)]
 pub struct DocumentChunk {
     pub id: String,
@@ -16,7 +18,9 @@ pub struct DocumentChunk {
     pub created_at: String,
 }
 
-/// Lightweight tuple returned by `get_all_embeddings`.
+/// Lightweight record returned by [`VectorsRepo::get_all_embeddings`].
+///
+/// Only includes chunks that have a non-NULL embedding.
 #[derive(Debug, Clone)]
 pub struct EmbeddingRecord {
     pub id: String,
@@ -25,7 +29,10 @@ pub struct EmbeddingRecord {
     pub embedding: Vec<f32>,
 }
 
-/// Result of an FTS5 full-text search.
+/// Result of an FTS5 full-text search via [`VectorsRepo::search_fts`].
+///
+/// Higher `rank` values indicate better matches (BM25 score negated so
+/// higher = better).
 #[derive(Debug, Clone)]
 pub struct FtsResult {
     pub id: String,
@@ -33,6 +40,11 @@ pub struct FtsResult {
     pub rank: f64,
 }
 
+/// Repository for the `document_chunks` table (RAG vector store).
+///
+/// Stores text chunks with optional `f32` embedding vectors serialized as
+/// `BLOB` via `bytemuck`. Also provides FTS5 full-text search through the
+/// companion `chunks_fts` virtual table.
 pub struct VectorsRepo;
 
 impl VectorsRepo {
@@ -47,6 +59,8 @@ impl VectorsRepo {
     /// Insert (or replace) a document chunk with an optional embedding.
     ///
     /// The `Vec<f32>` embedding is serialised to a `BLOB` using `bytemuck`.
+    /// Uses `INSERT OR REPLACE` so re-inserting the same `id` overwrites
+    /// the previous row.
     pub fn insert_chunk(
         conn: &Connection,
         id: &str,
@@ -74,7 +88,8 @@ impl VectorsRepo {
 
     /// Return every chunk that has a non-NULL embedding.
     ///
-    /// Each BLOB is deserialised back into `Vec<f32>` via `bytemuck`.
+    /// Each `BLOB` is deserialised back into `Vec<f32>` via `bytemuck`.
+    /// Chunks without embeddings are excluded.
     pub fn get_all_embeddings(conn: &Connection) -> DbResult<Vec<EmbeddingRecord>> {
         let mut stmt = conn.prepare(
             "SELECT id, document_id, content, embedding
@@ -104,7 +119,7 @@ impl VectorsRepo {
     }
 
     /// Retrieve all chunks belonging to a given document, ordered by
-    /// `chunk_index`.
+    /// `chunk_index ASC`.
     pub fn get_by_document(
         conn: &Connection,
         document_id: &str,
@@ -140,7 +155,7 @@ impl VectorsRepo {
         Ok(rows)
     }
 
-    /// Total number of rows in `document_chunks`.
+    /// Total number of rows in `document_chunks` (with or without embeddings).
     pub fn count(conn: &Connection) -> DbResult<u32> {
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM document_chunks",
@@ -152,9 +167,8 @@ impl VectorsRepo {
 
     /// Full-text search via the FTS5 index.
     ///
-    /// Returns up to `top_k` results ranked by BM25 relevance (lower
-    /// `rank` = better match in FTS5 convention; we negate so higher =
-    /// better for callers).
+    /// Returns up to `top_k` results ranked by BM25 relevance. The `rank`
+    /// field in [`FtsResult`] is negated so higher values = better matches.
     pub fn search_fts(
         conn: &Connection,
         query: &str,
@@ -186,8 +200,9 @@ impl VectorsRepo {
     // Delete operations
     // ------------------------------------------------------------------
 
-    /// Delete all chunks belonging to a document.  Returns the number of
-    /// rows removed.
+    /// Delete all chunks belonging to a document.
+    ///
+    /// Returns the number of rows removed (0 if the document had no chunks).
     pub fn delete_by_document(conn: &Connection, document_id: &str) -> DbResult<u32> {
         let deleted = conn.execute(
             "DELETE FROM document_chunks WHERE document_id = ?1",

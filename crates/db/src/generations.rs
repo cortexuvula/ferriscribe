@@ -12,6 +12,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// A full generation row from the `generations` table.
+///
+/// Captures the (transcript, AI draft, clinician final) triple for the
+/// training-corpus feature. The `corpus_status` field tracks whether the
+/// generation is a candidate for promotion, has been promoted, rejected,
+/// or excluded.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Generation {
     pub id: Uuid,
@@ -33,9 +39,11 @@ pub struct Generation {
     pub regeneration_seq: i64,
 }
 
-/// Inputs needed at row-insertion time. Some fields (final_text,
-/// edit_distance, etc.) are NULL at insert and get populated by
-/// later updates.
+/// Inputs needed at row-insertion time.
+///
+/// Some fields (`final_text`, `edit_distance`, etc.) are NULL at insert and
+/// get populated by later updates via [`GenerationsRepo::update_final_text`]
+/// and [`GenerationsRepo::set_edit_distance`].
 #[derive(Debug, Clone)]
 pub struct GenerationInsert<'a> {
     pub recording_id: Uuid,
@@ -48,12 +56,19 @@ pub struct GenerationInsert<'a> {
     pub draft_text: &'a str,
 }
 
+/// Repository for the `generations` table (training-corpus capture).
+///
+/// Records each AI generation event with its input transcript, draft output,
+/// and (later) the clinician's finalized text. The `regeneration_seq` column
+/// auto-increments per `(recording_id, output_type)` pair.
 pub struct GenerationsRepo;
 
 impl GenerationsRepo {
-    /// Insert a new generation row. Computes `regeneration_seq` by
-    /// finding the max for the same (recording_id, output_type) and
-    /// adding 1; if none exists, starts at 1.
+    /// Insert a new generation row.
+    ///
+    /// Computes `regeneration_seq` by finding the max for the same
+    /// `(recording_id, output_type)` and adding 1; starts at 1 if none
+    /// exists. Returns the fully populated row.
     pub fn record_generation(
         conn: &Connection,
         input: GenerationInsert<'_>,
@@ -90,6 +105,12 @@ impl GenerationsRepo {
         Self::get_by_id(conn, id)
     }
 
+    /// Fetch a single generation row by its UUID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Sqlite`](crate::DbError::Sqlite) if the row is not
+    /// found (query returns no rows).
     pub fn get_by_id(conn: &Connection, id: Uuid) -> DbResult<Generation> {
         conn.query_row(
             "SELECT id, recording_id, output_type, created_at, finalized_at,
@@ -137,10 +158,11 @@ impl GenerationsRepo {
         })
     }
 
-    /// Set `final_text` and `finalized_at` on the most recent
-    /// generation row for the given (recording_id, output_type).
-    /// Returns the updated row, or `Ok(None)` if no matching row
-    /// exists (capture was off when the SOAP was generated).
+    /// Set `final_text` and `finalized_at` on the most recent generation row
+    /// for the given `(recording_id, output_type)`.
+    ///
+    /// Returns the updated row, or `Ok(None)` if no matching row exists
+    /// (capture was off when the output was generated).
     pub fn update_final_text(
         conn: &Connection,
         recording_id: Uuid,
@@ -172,9 +194,11 @@ impl GenerationsRepo {
         Ok(Some(Self::get_by_id(conn, id)?))
     }
 
-    /// Update the cached edit-distance signals. Called by the
-    /// background task that computes word-level Levenshtein.
-    /// Safe to call repeatedly (idempotent).
+    /// Update the cached edit-distance signals.
+    ///
+    /// Called by the background task that computes word-level Levenshtein
+    /// distance between draft and final text. Safe to call repeatedly
+    /// (idempotent).
     pub fn set_edit_distance(
         conn: &Connection,
         id: Uuid,
@@ -190,11 +214,15 @@ impl GenerationsRepo {
         Ok(())
     }
 
-    /// List generations matching the given corpus_status, paginated
-    /// by created_at DESC. Returns `(rows, total_count)` so the UI
-    /// can show "N candidates" + "page X of Y" in one call.
+    /// List generations matching the given `corpus_status`, paginated by
+    /// `created_at DESC`.
     ///
-    /// `limit` is capped to 200 to avoid loading absurd batches.
+    /// Returns `(rows, total_count)` so the UI can show "N candidates" +
+    /// "page X of Y" in one call. `limit` is capped at 200 to avoid loading
+    /// excessively large batches.
+    ///
+    /// Candidate rows with NULL `final_text` are excluded (they represent
+    /// unfinished generations).
     pub fn list_by_status(
         conn: &Connection,
         status: &str,
@@ -231,8 +259,11 @@ impl GenerationsRepo {
         Ok((rows, total))
     }
 
-    /// Counts per status, for the summary header. Returns
-    /// `(candidates, promoted, rejected, excluded)`. Single query.
+    /// Counts per status, for the summary header.
+    ///
+    /// Returns `(candidates, promoted, rejected, excluded)` in a single query.
+    /// Candidate rows with NULL `final_text` are excluded from the candidate
+    /// count.
     pub fn count_by_status(conn: &Connection) -> DbResult<(u32, u32, u32, u32)> {
         let mut stmt = conn.prepare(
             "SELECT
@@ -253,11 +284,16 @@ impl GenerationsRepo {
         Ok((c, p, r, e))
     }
 
-    /// Change a single row's corpus_status. Updates corpus_curated_at
-    /// to now on every call (so unpromote → promote shows a fresh
-    /// curation time, intentionally).
+    /// Change a single row's `corpus_status`.
     ///
-    /// Validates the input status; returns DbError on invalid value.
+    /// Updates `corpus_curated_at` to now on every call. Validates the input
+    /// status; only `"candidate"`, `"promoted"`, `"rejected"`, and
+    /// `"excluded"` are accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Other`] on invalid status value or if the
+    /// generation ID is not found.
     pub fn set_corpus_status(
         conn: &Connection,
         id: Uuid,

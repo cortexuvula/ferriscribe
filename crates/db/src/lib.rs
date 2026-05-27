@@ -1,3 +1,28 @@
+//! SQLite database layer for the FerriScribe medical transcription app.
+//!
+//! This crate owns all persistent state: consultation recordings, application
+//! settings, vocabulary rules, vector embeddings for RAG, a CozoDB-backed
+//! medical knowledge graph, processing queues, generation history, letter
+//! audiences, a user dictionary, and an append-only audit log.
+//!
+//! # Architecture
+//!
+//! The top-level entry point is [`Database`], which wraps an `r2d2` connection
+//! pool and runs all pending migrations on open. Individual domain areas are
+//! exposed as stateless repository structs (e.g. [`recordings::RecordingsRepo`],
+//! [`settings::SettingsRepo`]) whose methods take a `&Connection`.
+//!
+//! # Feature flags
+//!
+//! - **`graph`** -- enables the [`graph`] module (CozoDB-backed knowledge
+//!   graph). Gated because CozoDB pulls in the Sled storage engine.
+//!
+//! # Thread safety
+//!
+//! `DbPool` is `Send + Sync`. Each `PooledConnection` is bound to the thread
+//! that checked it out. SQLite WAL mode allows concurrent readers with one
+//! writer; `busy_timeout=5000` mitigates transient write contention.
+
 pub mod pool;
 pub mod encryption;
 pub mod migrations;
@@ -30,26 +55,39 @@ pub use pool::{DbPool, PooledConnection};
 /// type (e.g. for helper signatures) without taking a direct dep on rusqlite.
 pub use rusqlite::Connection;
 
+/// Errors produced by database operations.
+///
+/// Every repository method returns [`DbResult<T>`] which is an alias for
+/// `Result<T, DbError>`.
 #[derive(Error, Debug)]
 pub enum DbError {
+    /// Wrapped `rusqlite::Error` from any SQLite operation.
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// Error checking out a connection from the `r2d2` pool.
     #[error("Pool error: {0}")]
     Pool(#[from] r2d2::Error),
+    /// A schema migration failed.
     #[error("Migration error: {0}")]
     Migration(String),
+    /// The requested row was not found.
     #[error("Not found: {0}")]
     NotFound(String),
+    /// A database constraint was violated (e.g. deleting a built-in row).
     #[error("Constraint violation: {0}")]
     Constraint(String),
+    /// An error from the CozoDB-backed knowledge graph.
     #[error("Graph error: {0}")]
     Graph(String),
+    /// A string could not be parsed as a valid UUID.
     #[error("UUID parse error in {1}: {0}")]
     UuidParse(String, String),
+    /// Catch-all for other database errors.
     #[error("{0}")]
     Other(String),
 }
 
+/// Convenience result type for database operations.
 pub type DbResult<T> = Result<T, DbError>;
 
 // ---------------------------------------------------------------------------
@@ -58,12 +96,23 @@ pub type DbResult<T> = Result<T, DbError>;
 
 /// Top-level handle that owns the connection pool and exposes a convenience
 /// API for the rest of the application.
+///
+/// Create one instance at app startup and share it across threads. All
+/// repository methods accept a `&Connection` obtained via [`Database::conn`].
 pub struct Database {
     pool: DbPool,
 }
 
 impl Database {
     /// Open (or create) a file-backed database, running all pending migrations.
+    ///
+    /// When `db_key` is `Some`, the file is opened as a SQLCipher-encrypted
+    /// database using the supplied 32-byte key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Pool`] if the connection pool cannot be created, or
+    /// [`DbError::Migration`] / [`DbError::Sqlite`] if any migration fails.
     pub fn open(db_path: &Path, db_key: Option<[u8; 32]>) -> DbResult<Self> {
         let pool = pool::create_pool(db_path, db_key)?;
         {
@@ -75,6 +124,13 @@ impl Database {
 
     /// Open an in-memory database and run all migrations.  Primarily useful in
     /// tests and for ephemeral workloads.
+    ///
+    /// The pool has `max_size=1` because each SQLite in-memory connection is a
+    /// separate database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Pool`] or [`DbError::Migration`] on failure.
     pub fn open_in_memory() -> DbResult<Self> {
         let pool = pool::create_memory_pool()?;
         {
@@ -85,6 +141,11 @@ impl Database {
     }
 
     /// Check out a pooled connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Pool`] if the pool is exhausted or a connection
+    /// cannot be established.
     pub fn conn(&self) -> DbResult<PooledConnection> {
         self.pool.get().map_err(DbError::Pool)
     }

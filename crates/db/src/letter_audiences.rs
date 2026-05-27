@@ -1,3 +1,10 @@
+//! CRUD operations for the `letter_audiences` table.
+//!
+//! Letter audiences define the target recipient type for generated letters
+//! (e.g. Patient, Insurance Company, Specialist). Each audience carries a
+//! system prompt and optional user template. Six built-in audiences are
+//! seeded by migration `m006` and cannot be deleted.
+
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
@@ -6,9 +13,14 @@ use medical_core::types::letter_audience::LetterAudience;
 
 use crate::{DbError, DbResult};
 
+/// Repository for letter audience definitions.
+///
+/// Built-in audiences (seeded by migration) are protected from deletion.
+/// Custom audiences can be freely created, updated, and removed.
 pub struct LetterAudiencesRepo;
 
 impl LetterAudiencesRepo {
+    /// List all audiences, built-ins first, then alphabetically by name.
     pub fn list_all(conn: &Connection) -> DbResult<Vec<LetterAudience>> {
         let mut stmt = conn.prepare(
             "SELECT id, name, system_prompt, user_template, is_builtin, created_at, updated_at
@@ -23,6 +35,11 @@ impl LetterAudiencesRepo {
         Ok(audiences)
     }
 
+    /// Fetch a single audience by its UUID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] if no audience with the given ID exists.
     pub fn get_by_id(conn: &Connection, id: &Uuid) -> DbResult<LetterAudience> {
         conn.query_row(
             "SELECT id, name, system_prompt, user_template, is_builtin, created_at, updated_at
@@ -38,6 +55,10 @@ impl LetterAudiencesRepo {
         })
     }
 
+    /// Insert or update an audience. Keyed on `id`.
+    ///
+    /// On conflict, updates name, system prompt, user template, and
+    /// `updated_at`. The `is_builtin` and `created_at` fields are preserved.
     pub fn upsert(conn: &Connection, audience: &LetterAudience) -> DbResult<()> {
         conn.execute(
             "INSERT INTO letter_audiences (id, name, system_prompt, user_template, is_builtin, created_at, updated_at)
@@ -60,6 +81,12 @@ impl LetterAudiencesRepo {
         Ok(())
     }
 
+    /// Delete a custom audience by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Constraint`] if the audience is built-in
+    /// (`is_builtin = 1`), or [`DbError::NotFound`] if it does not exist.
     pub fn delete(conn: &Connection, id: &Uuid) -> DbResult<()> {
         let rows = conn.execute(
             "DELETE FROM letter_audiences WHERE id = ?1 AND is_builtin = 0",

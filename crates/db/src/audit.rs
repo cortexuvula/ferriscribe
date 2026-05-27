@@ -16,10 +16,21 @@ pub struct AuditEntry {
     pub details: Option<String>,
 }
 
+/// Repository for the append-only `audit_log` table.
+///
+/// The audit log records immutable entries for tracking data mutations.
+/// SQLite triggers prevent UPDATE and DELETE operations on the table.
 pub struct AuditRepo;
 
 impl AuditRepo {
     /// Append a new audit entry and return the auto-generated row ID.
+    ///
+    /// # Parameters
+    ///
+    /// - `action` -- what happened (e.g. "create", "update", "delete").
+    /// - `actor` -- who did it (e.g. "user1", "system").
+    /// - `resource` -- what was affected (e.g. "recording/abc-123").
+    /// - `details` -- optional free-form detail (must not contain PHI).
     pub fn append(
         conn: &Connection,
         action: &str,
@@ -35,7 +46,7 @@ impl AuditRepo {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Return the `limit` most-recent audit entries (newest first).
+    /// Return the `limit` most-recent audit entries, newest first.
     pub fn list_recent(conn: &Connection, limit: u32) -> DbResult<Vec<AuditEntry>> {
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, action, actor, resource, details

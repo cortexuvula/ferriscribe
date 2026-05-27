@@ -1,3 +1,9 @@
+//! CRUD operations for the `vocabulary_entries` table.
+//!
+//! Vocabulary entries are find-and-replace rules applied to transcripts.
+//! Each entry maps `find_text` to `replacement`, with support for categories,
+//! case sensitivity, priority ordering, and enable/disable toggling.
+
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use uuid::Uuid;
@@ -6,9 +12,16 @@ use medical_core::types::vocabulary::{VocabularyCategory, VocabularyEntry};
 
 use crate::{DbError, DbResult};
 
+/// Repository for medical vocabulary substitution rules.
+///
+/// All methods are associated functions that take a `&Connection`. Entries
+/// are ordered by priority (descending) then by `find_text` length
+/// (descending, so longer matches take precedence).
 pub struct VocabularyRepo;
 
 impl VocabularyRepo {
+    /// List all vocabulary entries, ordered by priority DESC then
+    /// `find_text` length DESC.
     pub fn list_all(conn: &Connection) -> DbResult<Vec<VocabularyEntry>> {
         let mut stmt = conn.prepare(
             "SELECT id, find_text, replacement, category, case_sensitive, priority, enabled, created_at, updated_at
@@ -23,6 +36,8 @@ impl VocabularyRepo {
         Ok(entries)
     }
 
+    /// List only enabled vocabulary entries, ordered by priority DESC then
+    /// `find_text` length DESC.
     pub fn list_enabled(conn: &Connection) -> DbResult<Vec<VocabularyEntry>> {
         let mut stmt = conn.prepare(
             "SELECT id, find_text, replacement, category, case_sensitive, priority, enabled, created_at, updated_at
@@ -38,6 +53,7 @@ impl VocabularyRepo {
         Ok(entries)
     }
 
+    /// List entries belonging to a specific category.
     pub fn list_by_category(conn: &Connection, category: &VocabularyCategory) -> DbResult<Vec<VocabularyEntry>> {
         let mut stmt = conn.prepare(
             "SELECT id, find_text, replacement, category, case_sensitive, priority, enabled, created_at, updated_at
@@ -53,6 +69,11 @@ impl VocabularyRepo {
         Ok(entries)
     }
 
+    /// Fetch a single vocabulary entry by its UUID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] if no entry with the given ID exists.
     pub fn get_by_id(conn: &Connection, id: &Uuid) -> DbResult<VocabularyEntry> {
         conn.query_row(
             "SELECT id, find_text, replacement, category, case_sensitive, priority, enabled, created_at, updated_at
@@ -68,6 +89,12 @@ impl VocabularyRepo {
         })
     }
 
+    /// Insert a new vocabulary entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Sqlite`](crate::DbError::Sqlite) on unique
+    /// constraint violation (duplicate `find_text`).
     pub fn insert(conn: &Connection, entry: &VocabularyEntry) -> DbResult<()> {
         conn.execute(
             "INSERT INTO vocabulary_entries (id, find_text, replacement, category, case_sensitive, priority, enabled, created_at, updated_at)
@@ -87,6 +114,11 @@ impl VocabularyRepo {
         Ok(())
     }
 
+    /// Insert or update a vocabulary entry, keyed on `find_text`.
+    ///
+    /// If an entry with the same `find_text` already exists, its replacement,
+    /// category, case sensitivity, priority, enabled flag, and `updated_at`
+    /// are overwritten.
     pub fn upsert(conn: &Connection, entry: &VocabularyEntry) -> DbResult<()> {
         conn.execute(
             "INSERT INTO vocabulary_entries (id, find_text, replacement, category, case_sensitive, priority, enabled, created_at, updated_at)
@@ -113,6 +145,11 @@ impl VocabularyRepo {
         Ok(())
     }
 
+    /// Update all fields of an existing vocabulary entry by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] if no entry with the given ID exists.
     pub fn update(conn: &Connection, entry: &VocabularyEntry) -> DbResult<()> {
         let rows = conn.execute(
             "UPDATE vocabulary_entries SET find_text = ?1, replacement = ?2, category = ?3, case_sensitive = ?4, priority = ?5, enabled = ?6, updated_at = ?7
@@ -134,6 +171,11 @@ impl VocabularyRepo {
         Ok(())
     }
 
+    /// Delete a vocabulary entry by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] if the entry does not exist.
     pub fn delete(conn: &Connection, id: &Uuid) -> DbResult<()> {
         let rows = conn.execute(
             "DELETE FROM vocabulary_entries WHERE id = ?1",
@@ -145,11 +187,13 @@ impl VocabularyRepo {
         Ok(())
     }
 
+    /// Delete all vocabulary entries. Returns the number of rows removed.
     pub fn delete_all(conn: &Connection) -> DbResult<u32> {
         let rows = conn.execute("DELETE FROM vocabulary_entries", [])?;
         Ok(rows as u32)
     }
 
+    /// Return `(total, enabled)` counts for the vocabulary table.
     pub fn count(conn: &Connection) -> DbResult<(u32, u32)> {
         let total: u32 = conn.query_row(
             "SELECT COUNT(*) FROM vocabulary_entries",

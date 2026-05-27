@@ -9,7 +9,14 @@ use rusqlite::Connection;
 use crate::DbResult;
 
 /// Apply `PRAGMA key="x'<hex>'"` so SQLCipher can decrypt the DB.
-/// Must run before any other statement on the connection.
+///
+/// Must run before any other statement on the connection. The key is
+/// encoded as a hex blob literal (`x'...'`) so SQLCipher interprets it
+/// as 32 raw bytes.
+///
+/// # Errors
+///
+/// Returns a `rusqlite::Error` if the PRAGMA fails.
 pub fn apply_pragma_key(conn: &Connection, key: &[u8; 32]) -> rusqlite::Result<()> {
     let hex_key = hex::encode(key);
     // Use the x'...' blob literal form so the key is interpreted as 32 bytes
@@ -17,8 +24,15 @@ pub fn apply_pragma_key(conn: &Connection, key: &[u8; 32]) -> rusqlite::Result<(
     conn.execute_batch(&format!("PRAGMA key=\"x'{hex_key}'\";"))
 }
 
-/// Verify the key by running a trivial read. Returns Err if SQLCipher rejects
-/// the key (e.g., wrong key, file not encrypted, file corrupt).
+/// Verify the encryption key by running a trivial read.
+///
+/// Runs `SELECT count(*) FROM sqlite_master` which forces SQLCipher to
+/// decrypt page 1.
+///
+/// # Errors
+///
+/// Returns `Err` if SQLCipher rejects the key (wrong key, file not
+/// encrypted, or file corrupt).
 pub fn verify_key(conn: &Connection) -> rusqlite::Result<()> {
     // SELECT count(*) FROM sqlite_master is the canonical key-verification
     // probe — it forces SQLCipher to decrypt page 1.
@@ -26,8 +40,13 @@ pub fn verify_key(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// Detect whether the given DB file is plaintext (SQLite header) or
-/// encrypted (SQLCipher header). Plaintext returns Ok(true); encrypted
-/// returns Ok(false). Errors propagate.
+/// encrypted (SQLCipher header).
+///
+/// Plaintext returns `Ok(true)`; encrypted returns `Ok(false)`. A missing
+/// file also returns `Ok(false)` (the caller decides what to do).
+///
+/// Detection works by checking for the 16-byte SQLite magic string
+/// `"SQLite format 3\0"`.
 pub fn is_plaintext_db(db_path: &std::path::Path) -> DbResult<bool> {
     use std::io::Read;
     if !db_path.exists() {
@@ -49,7 +68,7 @@ pub fn is_plaintext_db(db_path: &std::path::Path) -> DbResult<bool> {
 
 use std::path::{Path, PathBuf};
 
-/// Outcome of a successful `migrate_plaintext_to_encrypted` call.
+/// Outcome of a successful [`migrate_plaintext_to_encrypted`] call.
 #[derive(Debug)]
 pub struct MigrationOutcome {
     /// Final path of the encrypted database (same as the input path on success).
@@ -58,17 +77,22 @@ pub struct MigrationOutcome {
     pub backup_deleted: bool,
 }
 
-/// Migrate a plaintext SQLite DB at `db_path` to an encrypted SQLCipher DB
-/// using `db_key`. Sequence:
+/// Migrate a plaintext SQLite DB to an encrypted SQLCipher DB.
 ///
+/// Sequence:
 /// 1. Backup `db_path` to `<db_path>.pre-encryption.bak`.
 /// 2. Open empty encrypted DB at `<db_path>.encrypting`.
-/// 3. Use sqlcipher_export() to copy all data from plaintext.
+/// 3. Use `sqlcipher_export()` to copy all data from plaintext.
 /// 4. Verify row counts table-by-table.
-/// 5. Atomic rename: encrypting → original; delete backup.
+/// 5. Atomic rename: encrypting -> original; delete backup.
 ///
 /// On any failure after step 1, the original is restored from the backup
 /// and the error is returned.
+///
+/// # Errors
+///
+/// Returns [`DbError::Other`](crate::DbError::Other) on any I/O or
+/// SQLCipher failure. The original file is restored from backup on failure.
 pub fn migrate_plaintext_to_encrypted(
     db_path: &Path,
     db_key: &[u8; 32],

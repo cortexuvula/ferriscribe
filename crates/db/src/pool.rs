@@ -9,9 +9,15 @@ use rusqlite::Connection;
 use crate::{DbError, DbResult};
 
 /// Shared connection pool type.
+///
+/// Wraps `r2d2::Pool<SqliteConnectionManager>`. File-backed pools use
+/// `max_size=8`; in-memory pools use `max_size=1`.
 pub type DbPool = Pool<SqliteConnectionManager>;
 
-/// A pooled connection checked out from `DbPool`.
+/// A pooled connection checked out from [`DbPool`].
+///
+/// Automatically returns to the pool when dropped. Bound to the thread that
+/// checked it out.
 pub type PooledConnection = r2d2::PooledConnection<SqliteConnectionManager>;
 
 fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -28,6 +34,16 @@ fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// When `db_key` is `Some`, the pool applies `PRAGMA key="x'<hex>'"` on every
 /// new connection before the standard pragmas, so the file is opened as a
 /// SQLCipher-encrypted database.
+///
+/// Standard pragmas applied to every connection:
+/// - `journal_mode=WAL`
+/// - `synchronous=NORMAL`
+/// - `foreign_keys=ON`
+/// - `busy_timeout=5000`
+///
+/// # Errors
+///
+/// Returns [`DbError::Pool`](crate::DbError::Pool) if the pool cannot be built.
 pub fn create_pool(db_path: &Path, db_key: Option<[u8; 32]>) -> DbResult<DbPool> {
     let manager = SqliteConnectionManager::file(db_path)
         .with_init(move |conn| apply_init(conn, db_key.as_ref()));
@@ -48,6 +64,14 @@ fn apply_init(conn: &Connection, db_key: Option<&[u8; 32]>) -> rusqlite::Result<
 }
 
 /// Create an in-memory connection pool (useful for tests).
+///
+/// Uses `max_size=1` because each SQLite in-memory connection is a separate
+/// database. Standard pragmas (WAL, foreign keys, busy timeout) are still
+/// applied.
+///
+/// # Errors
+///
+/// Returns [`DbError::Pool`](crate::DbError::Pool) if the pool cannot be built.
 pub fn create_memory_pool() -> DbResult<DbPool> {
     let manager = SqliteConnectionManager::memory().with_init(|conn| apply_pragmas(conn));
     let pool = Pool::builder()

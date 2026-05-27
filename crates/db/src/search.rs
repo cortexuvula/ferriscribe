@@ -7,6 +7,11 @@ use medical_core::types::recording::Recording;
 
 use crate::{recordings::RecordingsRepo, DbResult};
 
+/// Repository for full-text search over recordings via FTS5.
+///
+/// Uses the `recordings_fts` virtual table (kept in sync by SQLite triggers)
+/// to perform BM25-ranked queries across transcript, SOAP note, referral,
+/// letter, and patient name fields.
 pub struct SearchRepo;
 
 impl SearchRepo {
@@ -40,6 +45,9 @@ impl SearchRepo {
     }
 
     /// Like `search`, but resolves each matching UUID to a full `Recording`.
+    ///
+    /// Convenience wrapper that combines [`SearchRepo::search`] with
+    /// [`RecordingsRepo::get_many`](crate::recordings::RecordingsRepo::get_many).
     pub fn search_recordings(
         conn: &Connection,
         query: &str,

@@ -16,6 +16,11 @@ use rusqlite::Connection;
 use crate::DbResult;
 
 /// A single schema migration.
+///
+/// Each migration has a monotonically increasing `version` number, a
+/// human-readable `name`, and an `up` function that applies the schema
+/// changes. Migrations are applied in version order by
+/// [`MigrationEngine::migrate`].
 pub struct Migration {
     pub version: u32,
     pub name: &'static str,
@@ -23,6 +28,10 @@ pub struct Migration {
 }
 
 /// Returns the complete ordered list of all known migrations.
+///
+/// New migrations must be appended here with the next available version
+/// number. The returned slice is `'static` so it can be iterated without
+/// lifetime concerns.
 pub fn all_migrations() -> &'static [Migration] {
     &[
         Migration {
@@ -59,13 +68,25 @@ pub fn all_migrations() -> &'static [Migration] {
 }
 
 /// Manages applying pending migrations in order.
+///
+/// The engine records applied migration versions in the `schema_version`
+/// table, making re-runs idempotent. Call [`migrate`](Self::migrate) once
+/// at application startup.
 pub struct MigrationEngine;
 
 impl MigrationEngine {
     /// Ensure the `schema_version` table exists, then apply every migration
     /// whose version is greater than the currently recorded version.
     ///
-    /// Returns the number of newly applied migrations.
+    /// Returns the number of newly applied migrations (0 if already
+    /// up-to-date).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Sqlite`](crate::DbError::Sqlite) or
+    /// [`DbError::Migration`](crate::DbError::Migration) if any migration
+    /// fails. Partially applied migrations are **not** rolled back -- fix
+    /// the failing migration and re-run.
     pub fn migrate(conn: &Connection) -> DbResult<u32> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version (
@@ -92,8 +113,8 @@ impl MigrationEngine {
         Ok(applied)
     }
 
-    /// Returns the highest migration version that has been successfully applied,
-    /// or `0` if the database is empty / the table has no rows.
+    /// Returns the highest migration version that has been successfully
+    /// applied, or `0` if the database is empty / the table has no rows.
     pub fn current_version(conn: &Connection) -> DbResult<u32> {
         // If the schema_version table doesn't exist yet we return 0.
         let exists: bool = conn
