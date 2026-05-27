@@ -30,11 +30,16 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
 <div
   class="recording-card"
   class:selected
   onclick={onClick}
+  onkeydown={(e: KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onClick();
+    }
+  }}
   role="button"
   tabindex="0"
 >
@@ -96,6 +101,11 @@
 
   .recording-card.selected {
     background-color: var(--accent-light);
+  }
+
+  .recording-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   .card-status {
@@ -163,7 +173,8 @@
     transition: color 0.15s ease, background-color 0.15s ease;
   }
 
-  .recording-card:hover .btn-delete {
+  .recording-card:hover .btn-delete,
+  .recording-card:focus-within .btn-delete {
     display: inline-flex;
   }
 
