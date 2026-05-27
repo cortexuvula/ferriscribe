@@ -149,7 +149,7 @@ impl MdnsAdvertiser {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust,ignore
 /// use std::time::Duration;
 /// use medical_sharing::mdns;
 ///

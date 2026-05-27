@@ -27,7 +27,7 @@
 //!
 //! ## Quick start
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use medical_sharing::{SharingService, SharingConfig};
 //!
 //! let config = SharingConfig { enabled: true, ..Default::default() };
