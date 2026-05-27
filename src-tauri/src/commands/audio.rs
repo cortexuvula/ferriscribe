@@ -19,6 +19,10 @@ use super::resolve_recordings_dir;
 // 1. list_audio_devices
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// List available audio input devices.
+///
+/// Returns device metadata (name, channels, sample rate) for the audio
+/// device picker in the settings UI.
 #[tauri::command]
 pub fn list_audio_devices() -> AppResult<Vec<AudioDevice>> {
     list_input_devices().map_err(|e| AppError::Audio(e.to_string()))
@@ -28,6 +32,11 @@ pub fn list_audio_devices() -> AppResult<Vec<AudioDevice>> {
 // 2. start_recording
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Start an audio recording session.
+///
+/// Opens the configured audio device, creates a WAV file in the recordings
+/// directory, and begins capturing. Returns the new recording's UUID.
+/// Fails if a recording is already in progress.
 #[tauri::command]
 #[instrument(skip(app, state), name = "audio::start_recording")]
 pub async fn start_recording(
@@ -173,6 +182,11 @@ pub async fn start_recording(
 // 3. stop_recording
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Stop the active recording and finalize the WAV file.
+///
+/// Drains the audio buffer, closes the capture stream, and updates the
+/// recording's DB row with the final file size and duration. Returns the
+/// recording ID.
 #[tauri::command]
 #[instrument(skip(state), name = "audio::stop_recording")]
 pub async fn stop_recording(
@@ -338,6 +352,10 @@ pub async fn cancel_recording(
 // 5. pause_recording
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Pause the active recording (stop writing audio samples to disk).
+///
+/// The capture stream remains open but audio data is discarded until
+/// `resume_recording` is called.
 #[tauri::command]
 pub fn pause_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
     let handle_lock = state.capture_handle.lock()
@@ -357,6 +375,7 @@ pub fn pause_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
 // 6. resume_recording
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Resume a previously paused recording.
 #[tauri::command]
 pub fn resume_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
     let handle_lock = state.capture_handle.lock()
@@ -385,6 +404,11 @@ pub struct RecordingStateSnapshot {
     pub elapsed_secs: Option<f64>,
 }
 
+/// Get the current recording state for the frontend's boot recovery.
+///
+/// Returns whether a recording is active, its ID, and elapsed time so the
+/// frontend can recover from a webview reload that left an orphan capture
+/// running.
 #[tauri::command]
 pub async fn get_recording_state(
     state: tauri::State<'_, AppState>,
@@ -423,6 +447,10 @@ pub struct RecordingAudioLevels {
     pub is_silent: bool,
 }
 
+/// Analyze the audio levels of a finished recording.
+///
+/// Returns peak, RMS, and a silence flag. Used by the frontend to warn when
+/// a recording is too quiet (Whisper tends to hallucinate on silent audio).
 #[tauri::command]
 pub async fn check_recording_audio_levels(
     state: tauri::State<'_, AppState>,

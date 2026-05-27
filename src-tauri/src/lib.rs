@@ -1,3 +1,39 @@
+//! FerriScribe Tauri app shell.
+//!
+//! This is the binary crate that produces the FerriScribe desktop application.
+//! It wires together all 13 workspace crates behind Tauri commands that the
+//! Svelte frontend calls via `invoke()`.
+//!
+//! # Responsibilities
+//!
+//! - **Logging** — two-layer `tracing` setup (console + rolling daily file).
+//! - **Panic hook** — captures panics to the tracing log.
+//! - **State initialization** — `AppState::initialize()` opens the encrypted DB,
+//!   registers AI/STT providers, and sets up the RAG subsystem. On keychain
+//!   failure it returns `InitError::DatabaseRecoveryNeeded` so the app can boot
+//!   in recovery mode.
+//! - **Plugin registration** — deep-link (`ferriscribe://pair?...`), opener,
+//!   dialog, clipboard-manager.
+//! - **Command registration** — ~80 `#[tauri::command]` functions organized by
+//!   domain in the `commands` module.
+//! - **Office-server auto-resume** — if the user previously enabled sharing,
+//!   `start_sharing_inner` is spawned on startup.
+//!
+//! # Architecture
+//!
+//! ```text
+//! Svelte frontend
+//!   │ invoke('command_name', { ...args })
+//!   ▼
+//! commands::* (this crate)
+//!   │ delegates to
+//!   ▼
+//! workspace crates (medical-processing, medical-agents, etc.)
+//! ```
+//!
+//! See `state::AppState` for the managed state type and the `commands`
+//! module for the full command inventory.
+
 mod state;
 mod commands;
 pub mod corpus_export;

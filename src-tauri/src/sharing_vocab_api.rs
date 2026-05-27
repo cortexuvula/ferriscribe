@@ -52,14 +52,20 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+/// Internal Axum state shared across all vocab/template/dictionary route
+/// handlers. Holds the database and token store needed to validate bearer
+/// tokens and read/write data.
 #[derive(Clone)]
 struct ApiState {
     db: Arc<Database>,
     tokens: Arc<TokenStore>,
 }
 
-/// Bind on `127.0.0.1:port` and 0.0.0.0:port? — we listen on 0.0.0.0 because
-/// clients reach this from the LAN / Tailscale, just like the auth proxies.
+/// Spawn the vocab/templates/dictionary HTTP API server on `0.0.0.0:{port}`.
+///
+/// Returns a `JoinHandle` for the server task. The server runs until the
+/// handle is dropped (which happens when sharing is stopped). Bearer tokens
+/// are validated against the same `TokenStore` the auth proxy uses.
 pub async fn spawn(
     db: Arc<Database>,
     tokens: Arc<TokenStore>,

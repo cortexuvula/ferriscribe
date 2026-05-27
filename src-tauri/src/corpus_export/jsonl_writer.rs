@@ -1,11 +1,13 @@
 //! Writes the OpenAI chat-completion JSONL format.
 //!
 //! Each line is one JSON object:
+//! ```text
 //! {"messages":[
 //!   {"role":"system","content":"<prompt template name>"},
 //!   {"role":"user","content":"<redacted transcript>"},
 //!   {"role":"assistant","content":"<redacted final SOAP>"}
 //! ]}
+//! ```
 
 use serde::Serialize;
 use std::io::Write;

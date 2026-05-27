@@ -13,7 +13,10 @@ use uuid::Uuid;
 
 use crate::commands::sharing::PairedConnection;
 
-/// Minimal description of where to reach the office server's vocab API.
+/// HTTP client for the office server's `/v1/vocabulary` CRUD API.
+///
+/// Created via [`VocabRemote::from`] when a paired connection is present.
+/// All methods send bearer-authenticated requests and return `AppResult`.
 pub struct VocabRemote<'a> {
     pub conn: &'a PairedConnection,
     pub bearer: String,
@@ -21,9 +24,10 @@ pub struct VocabRemote<'a> {
 }
 
 impl<'a> VocabRemote<'a> {
-    /// Returns Some(...) when the paired connection has a vocab_port AND a
-    /// reachable address (LAN preferred, Tailscale fallback), and a bearer
-    /// is available. Otherwise None — caller falls back to local DB.
+    /// Create a `VocabRemote` if the paired connection has a vocab port AND a
+    /// reachable address (LAN preferred, Tailscale fallback) and a bearer is
+    /// available. Returns `None` when the office server predates the vocab-sync
+    /// feature -- callers fall back to local DB operations.
     pub fn from(
         conn: &'a PairedConnection,
         bearer: Option<String>,
@@ -44,6 +48,8 @@ impl<'a> VocabRemote<'a> {
         Some(http_url(host, port))
     }
 
+    /// List vocabulary entries from the office server, optionally filtered by
+    /// category.
     pub async fn list(&self, category: Option<&str>) -> AppResult<Vec<VocabularyEntry>> {
         let base = self
             .base_url()
@@ -65,6 +71,7 @@ impl<'a> VocabRemote<'a> {
             .map_err(|e| AppError::Other(format!("vocab list parse: {e}")))
     }
 
+    /// Get vocabulary counts as `(total, enabled)`.
     pub async fn count(&self) -> AppResult<(u32, u32)> {
         let base = self
             .base_url()
@@ -83,6 +90,7 @@ impl<'a> VocabRemote<'a> {
             .map_err(|e| AppError::Other(format!("vocab count parse: {e}")))
     }
 
+    /// Insert a new vocabulary entry on the office server.
     pub async fn insert(&self, body: &UpsertBody) -> AppResult<VocabularyEntry> {
         let base = self
             .base_url()
@@ -102,6 +110,7 @@ impl<'a> VocabRemote<'a> {
             .map_err(|e| AppError::Other(format!("vocab insert parse: {e}")))
     }
 
+    /// Replace an existing vocabulary entry by UUID.
     pub async fn update(&self, id: Uuid, body: &UpsertBody) -> AppResult<VocabularyEntry> {
         let base = self
             .base_url()
@@ -121,6 +130,7 @@ impl<'a> VocabRemote<'a> {
             .map_err(|e| AppError::Other(format!("vocab update parse: {e}")))
     }
 
+    /// Delete a single vocabulary entry by UUID.
     pub async fn delete(&self, id: Uuid) -> AppResult<()> {
         let base = self
             .base_url()
@@ -137,6 +147,7 @@ impl<'a> VocabRemote<'a> {
         Ok(())
     }
 
+    /// Delete all vocabulary entries on the office server.
     pub async fn delete_all(&self) -> AppResult<u32> {
         let base = self
             .base_url()

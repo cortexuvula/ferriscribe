@@ -4,6 +4,9 @@ use medical_db::settings::SettingsRepo;
 
 use crate::state::AppState;
 
+/// Load the current application settings from the database.
+///
+/// Returns the full `AppConfig` with all migrations applied.
 #[tauri::command]
 pub fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
     let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
@@ -13,6 +16,11 @@ pub fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
     Ok(config)
 }
 
+/// Persist updated application settings to the database.
+///
+/// Validates that configured AI/STT hosts are local (private/LAN addresses)
+/// unless `allow_public_endpoint` is explicitly enabled. Rejects public hosts
+/// like `api.openai.com` to enforce the local-only PHI constraint.
 #[tauri::command]
 pub fn save_settings(
     state: tauri::State<'_, AppState>,
@@ -105,6 +113,9 @@ mod tests {
     }
 }
 
+/// Retrieve a stored API key for the given provider from the OS keychain.
+///
+/// Returns `None` if no key is stored. The key value is never logged.
 #[tauri::command]
 pub fn get_api_key(
     state: tauri::State<'_, AppState>,
@@ -116,6 +127,9 @@ pub fn get_api_key(
         .map_err(|e| AppError::Security(e.to_string()))
 }
 
+/// Store an API key for the given provider in the OS keychain.
+///
+/// Overwrites any existing key for the same provider.
 #[tauri::command]
 pub fn set_api_key(
     state: tauri::State<'_, AppState>,
@@ -128,6 +142,7 @@ pub fn set_api_key(
         .map_err(|e| AppError::Security(e.to_string()))
 }
 
+/// List all provider names that have stored API keys.
 #[tauri::command]
 pub fn list_api_keys(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
     state

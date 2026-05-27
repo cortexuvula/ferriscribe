@@ -10,6 +10,10 @@ use uuid::Uuid;
 use crate::state::AppState;
 use super::resolve_recordings_dir;
 
+/// List recordings with optional pagination.
+///
+/// Returns up to `limit` (default 50) recordings starting at `offset` (default 0),
+/// ordered by creation date descending.
 #[tauri::command]
 pub fn list_recordings(
     state: tauri::State<'_, AppState>,
@@ -21,6 +25,9 @@ pub fn list_recordings(
         .map_err(|e| AppError::Database(e.to_string()))
 }
 
+/// Get a single recording by its UUID.
+///
+/// Returns the full `Recording` including transcript, SOAP note, and metadata.
 #[tauri::command]
 pub fn get_recording(
     state: tauri::State<'_, AppState>,
@@ -32,6 +39,9 @@ pub fn get_recording(
     RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))
 }
 
+/// Full-text search across recording transcripts and SOAP notes.
+///
+/// Returns up to `limit` (default 20) matching recordings.
 #[tauri::command]
 pub fn search_recordings(
     state: tauri::State<'_, AppState>,
@@ -43,6 +53,11 @@ pub fn search_recordings(
         .map_err(|e| AppError::Database(e.to_string()))
 }
 
+/// Delete a recording by UUID.
+///
+/// Removes the DB row, associated RAG vectors, and the WAV file from disk.
+/// The DB delete and vector cleanup are atomic (same transaction); the WAV
+/// file is removed only after the transaction commits.
 #[tauri::command]
 pub fn delete_recording(
     state: tauri::State<'_, AppState>,
@@ -96,6 +111,10 @@ fn delete_rag_vectors_best_effort(conn: &medical_db::Connection, recording_id: &
     }
 }
 
+/// Delete all recordings and their associated data.
+///
+/// Removes all recording rows, RAG vectors, and WAV files from disk.
+/// Returns the number of recordings deleted.
 #[tauri::command]
 pub fn delete_all_recordings(
     state: tauri::State<'_, AppState>,

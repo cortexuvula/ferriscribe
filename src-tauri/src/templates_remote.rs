@@ -13,6 +13,10 @@ use serde::Serialize;
 
 use crate::commands::sharing::PairedConnection;
 
+/// HTTP client for the office server's `/v1/context-templates` API.
+///
+/// Created via [`TemplatesRemote::from`] when a paired connection is present.
+/// All methods send bearer-authenticated requests and return `AppResult`.
 pub struct TemplatesRemote<'a> {
     pub conn: &'a PairedConnection,
     pub bearer: String,
@@ -20,6 +24,10 @@ pub struct TemplatesRemote<'a> {
 }
 
 impl<'a> TemplatesRemote<'a> {
+    /// Create a `TemplatesRemote` if the paired connection supports template
+    /// sync (has a vocab port and a bearer token). Returns `None` when the
+    /// office server predates the template sync feature or no bearer is
+    /// available -- callers fall back to local DB operations.
     pub fn from(
         conn: &'a PairedConnection,
         bearer: Option<String>,
@@ -40,6 +48,7 @@ impl<'a> TemplatesRemote<'a> {
         Some(http_url(host, port))
     }
 
+    /// List all context templates from the office server, sorted by name.
     pub async fn list(&self) -> AppResult<Vec<ContextTemplate>> {
         let base = self
             .base_url()
@@ -58,6 +67,7 @@ impl<'a> TemplatesRemote<'a> {
             .map_err(|e| AppError::Other(format!("templates list parse: {e}")))
     }
 
+    /// Create or update a context template by name.
     pub async fn upsert(&self, name: &str, body: &str) -> AppResult<ContextTemplate> {
         #[derive(Serialize)]
         struct B<'a> { name: &'a str, body: &'a str }
@@ -79,6 +89,7 @@ impl<'a> TemplatesRemote<'a> {
             .map_err(|e| AppError::Other(format!("templates upsert parse: {e}")))
     }
 
+    /// Rename a context template (atomic rename on the server).
     pub async fn rename(
         &self,
         old_name: &str,
@@ -104,6 +115,7 @@ impl<'a> TemplatesRemote<'a> {
             .map_err(|e| AppError::Other(format!("templates rename parse: {e}")))
     }
 
+    /// Delete a context template by name.
     pub async fn delete(&self, name: &str) -> AppResult<()> {
         #[derive(Serialize)]
         struct B<'a> { name: &'a str }

@@ -145,22 +145,66 @@ unsafe impl Send for SendCaptureHandle {}
 unsafe impl Sync for SendCaptureHandle {}
 
 /// Tracks the currently active recording session.
+///
+/// Stored in `AppState::current_recording` so commands can look up the WAV
+/// path and start time for the in-progress recording.
 pub struct CurrentRecording {
+    /// UUID of the recording row in the database.
     pub id: String,
+    /// Path to the WAV file being written.
     pub wav_path: PathBuf,
+    /// When the recording started (for elapsed-time display).
     pub started_at: Instant,
 }
 
 
+/// Application state managed by Tauri and injected into every command via
+/// `tauri::State<'_, AppState>`.
+///
+/// Created by [`AppState::initialize()`] during app startup in `lib.rs::run()`.
+/// Holds the database, AI/STT providers, audio capture handle, RAG subsystem,
+/// and the lazy-initialized sharing service. All fields are `Arc`-wrapped for
+/// cheap cloning into async tasks.
+///
+/// # Lifetime
+///
+/// `AppState` lives for the duration of the Tauri app. Commands borrow it via
+/// `tauri::State<'_, AppState>` which ties the borrow to the command's
+/// execution. Don't move it out or store it beyond the command's lifetime.
+///
+/// # Recovery mode
+///
+/// When `initialize()` returns `InitError::DatabaseRecoveryNeeded`, `AppState`
+/// is **not** registered with Tauri. Commands that depend on it will fail; the
+/// frontend renders a recovery dialog instead.
 pub struct AppState {
+    /// SQLite database (optionally SQLCipher-encrypted). Shared across all
+    /// commands and background tasks.
     pub db: Arc<Database>,
+    /// OS-keychain-backed API key store. Used for STT remote API keys and
+    /// other secrets that shouldn't live in the settings JSON.
     pub keys: Arc<KeyStorage>,
+    /// Root data directory (`~/{data}/rust-medical-assistant/`). Recordings,
+    /// models, and config subdirectories live under here.
     pub data_dir: PathBuf,
+    /// Whether an audio recording is currently in progress. Checked-and-set
+    /// atomically under the mutex to prevent concurrent recordings.
     pub recording_active: Arc<Mutex<bool>>,
+    /// Registry of AI providers (Ollama, LM Studio). Commands resolve the
+    /// active provider by name from this registry.
     pub ai_providers: Arc<Mutex<ProviderRegistry>>,
+    /// Active STT provider. `None` if STT initialization failed at startup.
+    /// The inner `Arc<dyn SttProvider>` is either a `LocalSttProvider`
+    /// (whisper.cpp) or `RemoteSttProvider` depending on user settings.
     pub stt_providers: Arc<Mutex<Option<Arc<dyn SttProvider + Send + Sync>>>>,
+    /// Agent orchestrator for chat and agent-driven commands. Holds the
+    /// tool registry (RAG search) and all agent definitions.
     pub orchestrator: Arc<AgentOrchestrator>,
+    /// Active audio capture stream. Wrapped in `SendCaptureHandle` to satisfy
+    /// `Send + Sync` bounds. Access serialized through the `std::sync::Mutex`.
     pub capture_handle: Arc<std::sync::Mutex<SendCaptureHandle>>,
+    /// Metadata about the currently active recording session (ID, WAV path,
+    /// start time). `None` when no recording is in progress.
     pub current_recording: Arc<std::sync::Mutex<Option<CurrentRecording>>>,
     /// Cancel tokens for in-flight pipelines, keyed by recording id. The
     /// pipeline inserts its own token on entry and removes it on exit;
@@ -168,12 +212,19 @@ pub struct AppState {
     /// poll points to bail out.
     pub pipeline_cancels: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>>,
     // RAG subsystem
+    /// Embedding generator for vector-store ingestion and similarity search.
     pub embedding_generator: Arc<EmbeddingGenerator>,
+    /// Vector store for semantic search over ingested documents.
     pub vector_store: Arc<VectorStore>,
+    /// BM25 index for keyword search over ingested documents.
     pub bm25_search: Arc<Bm25Search>,
-    /// Currently consumed only by IngestionPipeline; held here so future Tauri commands can issue direct graph queries.
+    /// Graph search over the knowledge graph. Currently consumed only by
+    /// `IngestionPipeline`; held here so future Tauri commands can issue
+    /// direct graph queries.
     #[allow(dead_code)]
     pub graph_search: Arc<GraphSearch>,
+    /// Document ingestion pipeline. Parses, chunks, embeds, and indexes
+    /// documents into the RAG subsystem.
     pub ingestion: Arc<IngestionPipeline>,
     /// Lazy-initialized sharing service. `None` until `start_sharing` is called.
     pub sharing: Arc<RwLock<Option<Arc<medical_sharing::SharingService>>>>,
@@ -403,6 +454,20 @@ pub fn init_stt_providers_with_config(
 }
 
 impl AppState {
+    /// Bootstrap all subsystems and return a ready-to-use `AppState`.
+    ///
+    /// Called once during app startup from `lib.rs::run()`. Opens the
+    /// (optionally SQLCipher-encrypted) database, registers AI and STT
+    /// providers, initializes the RAG subsystem, and wires up paired-endpoint
+    /// metadata if this machine has previously paired with an office server.
+    ///
+    /// # Errors
+    ///
+    /// - `InitError::DatabaseRecoveryNeeded` -- encrypted DB exists but the
+    ///   keychain entry is missing or inaccessible. The caller should boot in
+    ///   recovery mode without managing `AppState`.
+    /// - `InitError::Other` -- any other fatal error (DB corruption, I/O
+    ///   failure). The caller panics so the process exits with a clear message.
     pub fn initialize() -> Result<Self, InitError> {
         let data_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))

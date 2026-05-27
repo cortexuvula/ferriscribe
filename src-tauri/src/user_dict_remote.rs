@@ -11,6 +11,10 @@ use serde::Serialize;
 
 use crate::commands::sharing::PairedConnection;
 
+/// HTTP client for the office server's `/v1/user-dictionary` CRUD API.
+///
+/// Created via [`UserDictRemote::from`] when a paired connection is present.
+/// The dictionary API rides on the same port as the vocab API.
 pub struct UserDictRemote<'a> {
     pub conn: &'a PairedConnection,
     pub bearer: String,
@@ -37,6 +41,7 @@ impl<'a> UserDictRemote<'a> {
         Some(http_url(host, port))
     }
 
+    /// List all words in the user dictionary.
     pub async fn list(&self) -> AppResult<Vec<String>> {
         let base = self
             .base_url()
@@ -55,6 +60,7 @@ impl<'a> UserDictRemote<'a> {
             .map_err(|e| AppError::Other(format!("dict list parse: {e}")))
     }
 
+    /// Add a word to the user dictionary. Returns `true` if inserted.
     pub async fn add(&self, word: &str) -> AppResult<bool> {
         let base = self
             .base_url()
@@ -75,6 +81,7 @@ impl<'a> UserDictRemote<'a> {
             .map_err(|e| AppError::Other(format!("dict add parse: {e}")))
     }
 
+    /// Remove a word from the user dictionary. Returns `true` if deleted.
     pub async fn remove(&self, word: &str) -> AppResult<bool> {
         let base = self
             .base_url()

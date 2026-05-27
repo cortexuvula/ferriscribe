@@ -24,6 +24,10 @@ fn paired_vocab_target() -> Option<(crate::commands::sharing::PairedConnection, 
     Some((conn, bearer))
 }
 
+/// List vocabulary entries, optionally filtered by category.
+///
+/// When this machine is paired with an office server, routes through the
+/// server's HTTP API instead of the local SQLite repo.
 #[tauri::command]
 pub async fn list_vocabulary_entries(
     state: tauri::State<'_, AppState>,
@@ -52,6 +56,11 @@ pub async fn list_vocabulary_entries(
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
 }
 
+/// Add a new vocabulary correction entry.
+///
+/// When paired with an office server, the entry is created on the server
+/// (which becomes the canonical source of truth). Otherwise it's inserted
+/// into the local SQLite database.
 #[tauri::command]
 pub async fn add_vocabulary_entry(
     state: tauri::State<'_, AppState>,
@@ -101,6 +110,9 @@ pub async fn add_vocabulary_entry(
     Ok(entry)
 }
 
+/// Update an existing vocabulary entry by UUID.
+///
+/// When paired with an office server, routes through the server's HTTP API.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri IPC: each field is named on the JS side.
 pub async fn update_vocabulary_entry(
@@ -162,6 +174,7 @@ pub async fn update_vocabulary_entry(
     Ok(entry)
 }
 
+/// Delete a single vocabulary entry by UUID.
 #[tauri::command]
 pub async fn delete_vocabulary_entry(
     state: tauri::State<'_, AppState>,
@@ -183,6 +196,7 @@ pub async fn delete_vocabulary_entry(
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
 }
 
+/// Delete all vocabulary entries.
 #[tauri::command]
 pub async fn delete_all_vocabulary_entries(
     state: tauri::State<'_, AppState>,
@@ -201,6 +215,7 @@ pub async fn delete_all_vocabulary_entries(
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
 }
 
+/// Get vocabulary counts as `(total, enabled)`.
 #[tauri::command]
 pub async fn get_vocabulary_count(
     state: tauri::State<'_, AppState>,
@@ -219,6 +234,10 @@ pub async fn get_vocabulary_count(
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
 }
 
+/// Import vocabulary entries from a JSON file.
+///
+/// Accepts either a bare array or a `{ "corrections": [...] }` wrapper.
+/// Returns the number of entries imported.
 #[tauri::command]
 #[instrument(skip(state))]
 pub async fn import_vocabulary_json(
@@ -303,6 +322,10 @@ pub async fn import_vocabulary_json(
     Ok(count)
 }
 
+/// Export all vocabulary entries to a JSON file.
+///
+/// Writes a `{ "version": "1.0", "corrections": [...] }` document.
+/// Returns the number of entries exported.
 #[tauri::command]
 #[instrument(skip(state))]
 pub async fn export_vocabulary_json(
@@ -343,6 +366,10 @@ pub async fn export_vocabulary_json(
     Ok(count)
 }
 
+/// Apply all enabled vocabulary corrections to the given text.
+///
+/// Returns a `CorrectionResult` with the corrected text and per-entry
+/// substitution counts. Used by the frontend's "test correction" feature.
 #[tauri::command]
 pub async fn test_vocabulary_correction(
     state: tauri::State<'_, AppState>,
