@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import type { Recording } from '../types';
   import { recordings } from '../stores/recordings.svelte';
   import { copyToClipboard } from '../utils/clipboard';
@@ -33,7 +34,15 @@
 
   // Debounce timer
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let clearBadgeTimer: ReturnType<typeof setTimeout> | null = null;
+  let copyBadgeTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingValue: string | null = null;
+
+  onDestroy(() => {
+    if (saveTimer) clearTimeout(saveTimer);
+    if (clearBadgeTimer) clearTimeout(clearBadgeTimer);
+    if (copyBadgeTimer) clearTimeout(copyBadgeTimer);
+  });
 
   // Track which (recordingId, field) the current content belongs to.
   // When the user switches recordings or tabs we MUST NOT save the
@@ -87,7 +96,8 @@
         });
         saveStatus = 'saved';
         // Clear the "Saved" badge after 1.5 s.
-        setTimeout(() => {
+        clearBadgeTimer = setTimeout(() => {
+          clearBadgeTimer = null;
           if (saveStatus === 'saved') saveStatus = 'idle';
         }, 1500);
       } catch (e) {
@@ -104,7 +114,7 @@
     try {
       await copyToClipboard(content);
       copyStatus = 'copied';
-      setTimeout(() => { copyStatus = 'idle'; }, 2000);
+      copyBadgeTimer = setTimeout(() => { copyBadgeTimer = null; copyStatus = 'idle'; }, 2000);
     } catch (e) {
       console.error('Failed to copy:', e);
       copyStatus = 'idle';
