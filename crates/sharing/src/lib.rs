@@ -1,12 +1,43 @@
-//! medical-sharing — LAN/Tailscale "office server" sharing layer.
+//! # medical-sharing
 //!
-//! Exposes:
-//! - [`SharingService`] — orchestrates the sharing subsystems (auth proxy,
-//!   mDNS, pairing service, whisper-cpp supervisor) based on a [`SharingConfig`].
-//! - Per-module APIs for unit tests and Tauri command wiring.
+//! LAN and Tailscale sharing for FerriScribe -- run AI inference and
+//! speech-to-text on a powerful office server while clinicians connect from
+//! laptops over the local network.
 //!
-//! No PHI ever crosses these modules. Audio bytes pass through the auth
-//! proxy as opaque body bytes.
+//! ## Subsystems
+//!
+//! | Module | Role |
+//! |---|---|
+//! | [`orchestrator`] | [`SharingService`] -- top-level start/stop/status |
+//! | [`auth_proxy`] | Bearer-validated reverse proxy (Ollama, whisper, LM Studio) |
+//! | [`pairing`] | One-shot 6-digit enrollment codes |
+//! | [`token_store`] | SQLCipher-encrypted per-client token CRUD |
+//! | [`mdns`] | mDNS advertiser and browser (`_ferriscribe._tcp.local.`) |
+//! | [`qr`] | `ferriscribe://pair?...` URL codec |
+//! | [`service_installer`] | Persistent Ollama service (launchd / systemd / schtasks) |
+//! | [`whisper_supervisor`] | whisper-server binary download + process supervision |
+//! | [`tailscale`] | `tailscale status --json` parser |
+//! | [`suggested_label`] | Sanitised OS hostname for default client labels |
+//!
+//! ## PHI safety
+//!
+//! No patient data ever crosses these modules. Audio bytes pass through the
+//! auth proxy as opaque body bytes. Nothing in this crate writes transcripts,
+//! SOAP notes, medications, or allergies to logs or stdout.
+//!
+//! ## Quick start
+//!
+//! ```rust,no_run
+//! use medical_sharing::{SharingService, SharingConfig};
+//!
+//! let config = SharingConfig { enabled: true, ..Default::default() };
+//! let svc = SharingService::new(config)?;
+//! svc.start().await?;
+//! // ... server is now broadcasting mDNS, accepting pairing requests, and
+//! //     proxying authenticated STT/AI traffic.
+//! svc.stop().await?;
+//! # Ok::<(), medical_sharing::SharingError>(())
+//! ```
 
 pub mod auth_proxy;
 pub mod mdns;
@@ -21,6 +52,11 @@ pub mod whisper_supervisor;
 
 pub use orchestrator::{SharingConfig, SharingService, SharingStatus};
 
+/// Unified error type for all sharing subsystems.
+///
+/// Each variant wraps a subsystem-specific error message. The
+/// [`InvalidPath`](SharingError::InvalidPath) variant is used by the service
+/// installer when a filesystem path has no parent directory.
 #[derive(Debug, thiserror::Error)]
 pub enum SharingError {
     #[error("token store: {0}")]
@@ -41,6 +77,7 @@ pub enum SharingError {
     Io(#[from] std::io::Error),
 }
 
+/// Convenience alias for `Result<T, SharingError>`.
 pub type Result<T> = std::result::Result<T, SharingError>;
 
 #[cfg(test)]

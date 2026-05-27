@@ -1,5 +1,20 @@
-//! Pairing service — one-shot 6-digit enrollment codes that exchange for
+//! Pairing service -- one-shot 6-digit enrollment codes that exchange for
 //! long-lived per-client tokens.
+//!
+//! ## Flow
+//!
+//! 1. Server admin calls [`PairingState::issue_code`] to generate a
+//!    time-limited 6-digit code (displayed in the UI or encoded as a QR URL).
+//! 2. Client submits the code to `/pair/enroll` along with a human-readable
+//!    label (e.g. `"clinic-laptop"`).
+//! 3. [`PairingState::enroll`] validates the code (exact match, not expired,
+//!    not already consumed), then calls [`TokenStore::issue`] to generate a
+//!    long-lived bearer token.
+//! 4. The code is consumed (one-shot). The token is returned to the client
+//!    for all subsequent requests.
+//!
+//! Only one code is active at a time. Issuing a new code replaces the
+//! previous one.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,16 +24,22 @@ use tokio::sync::Mutex;
 
 use crate::token_store::{TokenStore, TokenStoreError};
 
+/// Errors that can occur during the pairing flow.
 #[derive(Debug, thiserror::Error)]
 pub enum PairingError {
+    /// The submitted code doesn't match the active code, or the code was
+    /// already consumed.
     #[error("invalid or already-used code")]
     InvalidCode,
+    /// The active code's TTL has elapsed.
     #[error("code expired")]
     Expired,
+    /// Underlying token store error.
     #[error("token store: {0}")]
     Store(#[from] TokenStoreError),
 }
 
+/// Convenience alias for `Result<T, PairingError>`.
 pub type Result<T> = std::result::Result<T, PairingError>;
 
 const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
@@ -29,6 +50,10 @@ struct ActiveCode {
     issued_at: Instant,
 }
 
+/// Manages the lifecycle of pairing codes and their exchange for tokens.
+///
+/// Thread-safe (internal `Mutex`); designed to be held behind an `Arc` and
+/// shared between the orchestrator and the pairing HTTP router.
 pub struct PairingState {
     store: Arc<TokenStore>,
     active: Mutex<Option<ActiveCode>>,
@@ -36,6 +61,9 @@ pub struct PairingState {
 }
 
 impl PairingState {
+    /// Create a new pairing state backed by the given token store.
+    ///
+    /// Uses a default TTL of 10 minutes for issued codes.
     pub fn new(store: Arc<TokenStore>) -> Self {
         Self {
             store,
@@ -44,6 +72,7 @@ impl PairingState {
         }
     }
 
+    /// Override the default code TTL (builder pattern).
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = ttl;
         self
@@ -86,6 +115,11 @@ impl PairingState {
     }
 }
 
+/// Generate a cryptographically random 6-digit zero-padded code (000000-999999).
+///
+/// Uses `rand::thread_rng()` for entropy. The output space is 1 million
+/// values -- sufficient for a one-shot, time-limited pairing code that a
+/// human types in.
 pub fn generate_code() -> String {
     let n: u32 = rand::thread_rng().gen_range(0..1_000_000);
     format!("{n:06}")

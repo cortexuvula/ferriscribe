@@ -1,8 +1,9 @@
-//! Orchestrator — the public face of the sharing layer.
+//! Orchestrator -- the public face of the sharing layer.
 //!
 //! Owns the auth proxy (Ollama route), auth proxy (whisper route), mDNS
-//! advertiser, pairing service, whisper-cpp supervisor. start() boots all
-//! enabled subsystems; stop() tears them down cleanly.
+//! advertiser, pairing service, and whisper-cpp supervisor. `start()` boots
+//! all enabled subsystems with synchronous port binding (so conflicts surface
+//! immediately); `stop()` tears them down cleanly.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,13 +18,24 @@ use crate::pairing::PairingState;
 use crate::token_store::TokenStore;
 use crate::whisper_supervisor::WhisperSupervisor;
 
+/// Top-level configuration for the sharing subsystem.
+///
+/// Created by `src-tauri` from persisted user settings and passed to
+/// [`SharingService::new`]. Sensitive fields (`token_store_key`,
+/// `whisper_internal_api_key`) are redacted in [`Debug`] output.
 #[derive(Clone)]
 pub struct SharingConfig {
+    /// Whether sharing is enabled. When `false`, `start()` is a no-op.
     pub enabled: bool,
+    /// Human-readable server name broadcast via mDNS and embedded in the QR URL.
     pub friendly_name: String,
+    /// Public listener port for the Ollama auth proxy (default 11435).
     pub ollama_proxy_port: u16,
+    /// Public listener port for the whisper auth proxy (default 8081).
     pub whisper_proxy_port: u16,
+    /// Listener port for the pairing HTTP service (default 11436).
     pub pairing_port: u16,
+    /// Loopback-only port where whisper-server listens (default 8080). Not exposed to the LAN.
     pub whisper_internal_port: u16,
     /// Local LM Studio listener port (typically 1234). `Some` when LM Studio
     /// is detected at config time; `None` skips wiring an LM Studio proxy.
@@ -36,11 +48,17 @@ pub struct SharingConfig {
     /// the sharing crate just records the port so it gets advertised via
     /// mDNS / QR alongside the rest.
     pub vocab_port: u16,
+    /// Filesystem path for the SQLCipher-encrypted token store database.
     pub token_store_path: PathBuf,
+    /// 32-byte SQLCipher encryption key. Derived by `medical-security` from the OS keychain.
     pub token_store_key: [u8; 32],
+    /// Directory for whisper-server binary downloads.
     pub binary_dir: PathBuf,
+    /// Path to the whisper.cpp model file (`.bin`).
     pub whisper_model_path: PathBuf,
+    /// Static API key injected into whisper-server requests as `Authorization: Bearer <key>`.
     pub whisper_internal_api_key: String,
+    /// Crate version string, broadcast in mDNS TXT records and `/info` responses.
     pub version: String,
 }
 
@@ -88,21 +106,41 @@ impl Default for SharingConfig {
     }
 }
 
+/// Snapshot of the sharing subsystem's health.
+///
+/// Returned by [`SharingService::status`] and serialized to the Svelte
+/// frontend via Tauri commands. All `*_ok` booleans are `true` only while the
+/// orchestrator is running.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SharingStatus {
+    /// `true` when `start()` has been called and `stop()` has not.
     pub enabled: bool,
+    /// `true` when the Ollama auth proxy is running.
     pub ollama_ok: bool,
+    /// `true` when the whisper auth proxy and supervisor are running.
     pub whisper_ok: bool,
     /// True only when LM Studio's local server was detected at Start sharing
     /// time and the auth proxy was wired up. False when LM Studio wasn't
-    /// running at config time — clients won't see LM Studio models in that
+    /// running at config time -- clients won't see LM Studio models in that
     /// case until the user Stops + Starts sharing with LM Studio running.
     pub lmstudio_ok: bool,
+    /// `true` when the mDNS advertiser is active.
     pub mdns_ok: bool,
+    /// `true` when the pairing HTTP service is running.
     pub pairing_ok: bool,
+    /// Number of non-revoked paired clients in the token store.
     pub paired_clients: u32,
 }
 
+/// Top-level orchestrator for all sharing subsystems.
+///
+/// Owns the token store, pairing state, whisper supervisor, mDNS advertiser,
+/// and auth proxy join handles. `start()` boots everything in dependency
+/// order (bind listeners first so port conflicts surface immediately);
+/// `stop()` tears down in reverse order.
+///
+/// Designed to be held behind an `Arc` and shared across Tauri command
+/// handlers. All methods are `&self` (interior mutability via `Mutex`).
 pub struct SharingService {
     config: SharingConfig,
     store: Arc<TokenStore>,
@@ -114,6 +152,10 @@ pub struct SharingService {
 }
 
 impl SharingService {
+    /// Create a new sharing service from the given config.
+    ///
+    /// Opens (or creates) the token store database on disk. Does not start
+    /// any listeners -- call [`start`](Self::start) for that.
     pub fn new(config: SharingConfig) -> Result<Self, SharingError> {
         let store = Arc::new(
             TokenStore::open(&config.token_store_path, &config.token_store_key)
@@ -136,10 +178,24 @@ impl SharingService {
         })
     }
 
+    /// Clone the [`PairingState`] handle (for issuing/validating codes from
+    /// Tauri commands).
     pub fn pairing_state(&self) -> Arc<PairingState> { self.pairing.clone() }
+
+    /// Clone the [`TokenStore`] handle (for listing/revoking clients from
+    /// Tauri commands).
     pub fn token_store(&self) -> Arc<TokenStore> { self.store.clone() }
+
+    /// Borrow the active config.
     pub fn config(&self) -> &SharingConfig { &self.config }
 
+    /// Start all sharing subsystems.
+    ///
+    /// Binds listeners synchronously so port conflicts return as `Err`
+    /// immediately. On partial failure, already-spawned tasks are aborted
+    /// before the error is returned.
+    ///
+    /// Idempotent: calling `start()` when already running is a no-op.
     pub async fn start(&self) -> Result<(), SharingError> {
         let mut running = self.running.lock().await;
         if *running { return Ok(()); }
@@ -272,6 +328,11 @@ impl SharingService {
         Ok(())
     }
 
+    /// Stop all sharing subsystems.
+    ///
+    /// Unregisters mDNS, kills the whisper-server child, and aborts all
+    /// proxy/pairing join handles. Idempotent: calling `stop()` when already
+    /// stopped is a no-op.
     pub async fn stop(&self) -> Result<(), SharingError> {
         let mut running = self.running.lock().await;
         if !*running { return Ok(()); }
@@ -286,6 +347,10 @@ impl SharingService {
         Ok(())
     }
 
+    /// Snapshot the current health of all subsystems.
+    ///
+    /// Returns immediately without blocking on any subsystem. The
+    /// `paired_clients` count is read from the token store synchronously.
     pub async fn status(&self) -> SharingStatus {
         let running = *self.running.lock().await;
         let n = self

@@ -1,4 +1,17 @@
-//! mDNS advertiser + browser for `_ferriscribe._tcp.local.`.
+//! mDNS advertiser and browser for `_ferriscribe._tcp.local.`.
+//!
+//! ## Server side
+//!
+//! [`MdnsAdvertiser::start`] registers a service record with TXT properties
+//! for each proxy port (ollama, whisper, lmstudio, pairing, vocab) and the
+//! crate version. The advertiser uses `enable_addr_auto()` so the daemon
+//! picks the best interface address automatically.
+//!
+//! ## Client side
+//!
+//! [`browse`] spawns a background task that listens for `ServiceResolved`
+//! events and sends [`DiscoveredServer`] values through a channel until the
+//! timeout elapses.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -7,11 +20,18 @@ use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+/// mDNS service type used for FerriScribe server discovery.
 pub const SERVICE_TYPE: &str = "_ferriscribe._tcp.local.";
 
+/// A FerriScribe server discovered via mDNS or Tailscale probing.
+///
+/// Sent through the channel returned by [`browse`]. The frontend uses this
+/// to populate the "available servers" list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredServer {
+    /// Full mDNS instance name (e.g. `"Clinic Server._ferriscribe._tcp.local."`).
     pub instance_name: String,
+    /// Hostname (trailing dot stripped).
     pub host: String,
     /// Addresses learned via mDNS broadcast (LAN multicast).
     pub addresses: Vec<String>,
@@ -20,25 +40,48 @@ pub struct DiscoveredServer {
     /// of `RemoteEndpoint` instead of misclassifying them as LAN hosts.
     #[serde(default)]
     pub tailscale_addresses: Vec<String>,
+    /// Service ports advertised in TXT records.
     pub ports: ServerPorts,
+    /// Crate version string from the mDNS TXT record.
     pub version: String,
 }
 
+/// Service ports advertised by a FerriScribe server.
+///
+/// All fields are `Option` because a server may not have every subsystem
+/// enabled (e.g. no LM Studio detected). Used both in mDNS TXT records and
+/// in the `/info` HTTP endpoint.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerPorts {
+    /// Ollama auth proxy port.
     pub ollama: Option<u16>,
+    /// Whisper auth proxy port.
     pub whisper: Option<u16>,
+    /// LM Studio auth proxy port (absent when LM Studio wasn't detected).
     pub lmstudio: Option<u16>,
+    /// Pairing HTTP service port.
     pub pairing: Option<u16>,
+    /// Vocabulary CRUD HTTP API port.
     pub vocab: Option<u16>,
 }
 
+/// mDNS service advertiser.
+///
+/// Registers a `_ferriscribe._tcp.local.` service record with TXT properties
+/// encoding the server's proxy ports and version. Drop or call [`stop`] to
+/// unregister.
 pub struct MdnsAdvertiser {
     daemon: ServiceDaemon,
     fullname: String,
 }
 
 impl MdnsAdvertiser {
+    /// Start advertising a FerriScribe server on the local network.
+    ///
+    /// The `instance_name` appears in clients' discovery lists. Service ports
+    /// and version are published as TXT records. The advertised listener
+    /// port is `ports.pairing` (falling back to 11436) since that's the
+    /// endpoint clients need to contact first.
     pub fn start(
         instance_name: &str,
         ports: &ServerPorts,
@@ -90,12 +133,32 @@ impl MdnsAdvertiser {
         })
     }
 
+    /// Unregister the service and shut down the mDNS daemon.
     pub fn stop(self) {
         let _ = self.daemon.unregister(&self.fullname);
         let _ = self.daemon.shutdown();
     }
 }
 
+/// Browse for FerriScribe servers on the local network.
+///
+/// Spawns a background task that listens for mDNS `ServiceResolved` events
+/// and sends [`DiscoveredServer`] values through the returned channel. The
+/// background task exits after `timeout` elapses, at which point the
+/// channel closes and `recv()` returns `None`.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use std::time::Duration;
+/// use medical_sharing::mdns;
+///
+/// let mut rx = mdns::browse(Duration::from_secs(5))?;
+/// while let Some(server) = rx.recv().await {
+///     println!("found: {}", server.instance_name);
+/// }
+/// # Ok::<(), medical_sharing::SharingError>(())
+/// ```
 pub fn browse(timeout: Duration) -> crate::Result<mpsc::Receiver<DiscoveredServer>> {
     let daemon = ServiceDaemon::new()
         .map_err(|e| crate::SharingError::Mdns(e.to_string()))?;

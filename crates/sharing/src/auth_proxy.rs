@@ -1,5 +1,28 @@
-//! Auth proxy — bearer-validated reverse proxy. One instance fronts Ollama,
-//! a second fronts whisper.cpp.
+//! Auth proxy -- bearer-validated reverse proxy.
+//!
+//! One instance fronts Ollama (port 11435 -> 127.0.0.1:11434), a second
+//! fronts whisper.cpp (port 8081 -> 127.0.0.1:8080), and an optional third
+//! fronts LM Studio (port 1235 -> 127.0.0.1:1234).
+//!
+//! ## Request flow
+//!
+//! 1. Extract `Authorization: Bearer <token>` from the inbound request.
+//! 2. Hash the token and look it up in the [`TokenStore`]. Reject with
+//!    401 + `x-auth-reason` header on missing/invalid/revoked tokens.
+//! 3. Strip the client's `Authorization` header. If `inject_api_key` is
+//!    configured, replace it with a static backend key.
+//! 4. Forward the full request body (up to 256 MiB) to the backend.
+//! 5. Stream the response back to the client.
+//!
+//! ## `x-auth-reason` contract
+//!
+//! Downstream crates (`stt-providers`) inspect the `x-auth-reason` response
+//! header on 401 to distinguish failure modes:
+//!
+//! | Value | Meaning |
+//! |---|---|
+//! | `missing-bearer` | No `Authorization` header at all |
+//! | `unknown-token` | Token hash not found or already revoked |
 
 use std::sync::Arc;
 
@@ -15,13 +38,20 @@ use tracing::{debug, warn};
 
 use crate::token_store::TokenStore;
 
+/// Configuration for a single auth proxy instance.
+///
+/// Each proxy listens on one public port and forwards validated requests to
+/// one loopback-only backend (Ollama, whisper-server, or LM Studio).
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
+    /// Public listener port (e.g. 11435 for Ollama, 8081 for whisper).
     pub listen_port: u16,
+    /// Backend URL to forward requests to (e.g. `http://127.0.0.1:11434`).
     pub backend_url: String,
+    /// Path prefix prepended to the forwarded request path. Currently always `"/"`.
     pub path_prefix: String,
     /// If `Some`, the proxy strips the client bearer and replaces it with
-    /// this static `Authorization: Bearer …` header. Used to inject
+    /// this static `Authorization: Bearer ...` header. Used to inject
     /// whisper.cpp's shared `--api-key` value.
     pub inject_api_key: Option<String>,
 }
@@ -34,7 +64,15 @@ struct AppState {
 }
 
 /// Bind the listener synchronously (so port conflicts surface immediately as
-/// `Err`) then spawn the serving task. Returns the `JoinHandle` on success.
+/// `Err`) then spawn the serving task.
+///
+/// Returns the `JoinHandle` of the background serve task. The proxy runs
+/// until the handle is aborted (typically by [`SharingService::stop`]).
+///
+/// # Errors
+///
+/// Returns [`SharingError::AuthProxy`] if the TCP bind fails or the reqwest
+/// client cannot be constructed.
 pub async fn spawn_auth_proxy(
     config: ProxyConfig,
     store: Arc<TokenStore>,

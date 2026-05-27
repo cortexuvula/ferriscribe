@@ -57,22 +57,38 @@ fn platform_key() -> &'static str {
     }
 }
 
+/// Errors from the whisper-server supervisor.
 #[derive(Debug, thiserror::Error)]
 pub enum WhisperError {
+    /// No prebuilt binary is available for this OS/arch. The admin must build
+    /// whisper-server from source.
     #[error("platform unsupported")]
     UnsupportedPlatform,
+    /// HTTP download failed.
     #[error("download: {0}")]
     Download(String),
+    /// SHA-256 of the downloaded archive didn't match the manifest.
     #[error("hash mismatch (expected {expected}, got {got})")]
     HashMismatch { expected: String, got: String },
+    /// Filesystem I/O error during extraction or chmod.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Manifest parsing or archive extraction error.
     #[error("manifest: {0}")]
     Manifest(String),
 }
 
+/// Convenience alias for `Result<T, WhisperError>`.
 pub type Result<T> = std::result::Result<T, WhisperError>;
 
+/// Child process supervisor for whisper-server.
+///
+/// Manages the full lifecycle: binary download (with SHA-256 verification),
+/// process spawning, stderr forwarding, and crash recovery with exponential
+/// backoff (1s -> 60s cap).
+///
+/// The child always binds to `127.0.0.1` -- auth is enforced one layer up
+/// by the auth proxy.
 pub struct WhisperSupervisor {
     binary_dir: PathBuf,
     model_path: PathBuf,
@@ -88,6 +104,13 @@ pub struct WhisperSupervisor {
 }
 
 impl WhisperSupervisor {
+    /// Create a new supervisor.
+    ///
+    /// Does not download or spawn anything -- call [`start`](Self::start) for that.
+    ///
+    /// - `binary_dir`: where to cache the downloaded whisper-server binary.
+    /// - `model_path`: path to the `.bin` model file passed via `-m`.
+    /// - `port`: loopback port for whisper-server (`--port`).
     pub fn new(binary_dir: PathBuf, model_path: PathBuf, port: u16) -> Self {
         Self {
             binary_dir,
@@ -100,6 +123,11 @@ impl WhisperSupervisor {
         }
     }
 
+    /// Download (or reuse cached) whisper-server binary for the current platform.
+    ///
+    /// Checks the manifest version against a lock file to invalidate stale
+    /// caches. Returns [`WhisperError::UnsupportedPlatform`] when no prebuilt
+    /// binary exists for this OS/arch.
     pub async fn ensure_binary(&self) -> Result<PathBuf> {
         let manifest: Manifest =
             serde_json::from_str(MANIFEST).map_err(|e| WhisperError::Manifest(e.to_string()))?;
@@ -203,6 +231,8 @@ impl WhisperSupervisor {
         }
     }
 
+    /// Ensure the binary exists, spawn the child process, and start the
+    /// supervisor loop that restarts on crash.
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         let bin = self.ensure_binary().await?;
         let child = self.spawn_once_at(&bin).await?;
@@ -312,6 +342,11 @@ impl WhisperSupervisor {
         Ok(child)
     }
 
+    /// Kill the child process and stop the supervisor loop.
+    ///
+    /// Sets a stopped flag before notifying waiters, so the supervise loop
+    /// exits cleanly even if it's mid-backoff. As a safety net, also aborts
+    /// the supervisor task handle.
     pub async fn stop(&self) {
         // Set the flag BEFORE notifying so the supervise() loop sees it even
         // if it polls stop.notified() after the waiters snapshot is taken.

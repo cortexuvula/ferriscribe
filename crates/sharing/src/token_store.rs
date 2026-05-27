@@ -11,34 +11,58 @@ use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
+/// Errors that can occur during token store operations.
 #[derive(Debug, thiserror::Error)]
 pub enum TokenStoreError {
+    /// Underlying SQLite error.
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// Random number generator failure during token generation.
     #[error("entropy: {0}")]
     Entropy(String),
+    /// Internal mutex was poisoned (a thread panicked while holding the lock).
     #[error("lock poisoned")]
     LockPoisoned,
+    /// Attempted to set a client label to an empty or whitespace-only string.
     #[error("label cannot be empty")]
     EmptyLabel,
+    /// The client ID does not exist or has already been revoked.
     #[error("client not found or revoked")]
     NotFound,
 }
 
+/// Convenience alias for `Result<T, TokenStoreError>`.
 pub type Result<T> = std::result::Result<T, TokenStoreError>;
 
+/// The result of a successful [`TokenStore::issue`] call.
+///
+/// The raw `token` string is returned exactly once and is never persisted --
+/// only its SHA-256 hash is stored. The caller must deliver it to the client
+/// and cannot recover it later.
 #[derive(Debug, Clone)]
 pub struct IssuedToken {
+    /// Row ID in the `clients` table.
     pub id: i64,
+    /// The opaque bearer token (base64url-encoded 32 random bytes).
     pub token: String,
 }
 
+/// A single row from the `clients` table representing a paired device.
+///
+/// Returned by [`TokenStore::validate`] and [`TokenStore::list`]. Revoked
+/// rows are filtered out of both queries.
 #[derive(Debug, Clone)]
 pub struct ClientRow {
+    /// Primary key.
     pub id: i64,
+    /// Human-readable label (e.g. `"clinic-laptop"`). Max 80 Unicode chars.
     pub label: String,
+    /// When the token was issued.
     pub created_at: DateTime<Utc>,
+    /// Last time the token was used to authenticate a proxied request.
+    /// `None` if the token has never been used.
     pub last_seen_at: Option<DateTime<Utc>>,
+    /// When the token was revoked. `None` for active tokens.
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
@@ -58,6 +82,14 @@ impl std::fmt::Debug for TokenStore {
 }
 
 impl TokenStore {
+    /// Open (or create) a SQLCipher-encrypted token store at the given path.
+    ///
+    /// Creates the `clients` table and unique index on `token_hash` if they
+    /// don't already exist. The `key` is a 32-byte SQLCipher encryption key
+    /// typically derived from the OS keychain by `medical-security`.
+    ///
+    /// Note: opening with the wrong key may succeed lazily -- the first
+    /// query will fail instead.
     pub fn open<P: AsRef<Path>>(path: P, key: &[u8; 32]) -> Result<Self> {
         let conn = Connection::open(path.as_ref())?;
         let key_hex = hex::encode(key);
@@ -78,6 +110,15 @@ impl TokenStore {
         Ok(Self { conn: Mutex::new(conn) })
     }
 
+    /// Issue a new bearer token for a client with the given label.
+    ///
+    /// Generates 32 cryptographically random bytes, base64url-encodes them
+    /// (43 chars, no padding), and stores only the SHA-256 hash. The raw
+    /// token is returned exactly once via [`IssuedToken::token`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenStoreError::Entropy`] if the system RNG fails.
     pub fn issue(&self, label: &str) -> Result<IssuedToken> {
         let mut raw = [0u8; 32];
         rand::thread_rng()
@@ -98,6 +139,12 @@ impl TokenStore {
         Ok(IssuedToken { id, token })
     }
 
+    /// Validate a bearer token against the store.
+    ///
+    /// Hashes the presented token and looks it up by hash. Returns `Some(row)`
+    /// for active (non-revoked) tokens, `None` for unknown or revoked tokens.
+    /// Does **not** update `last_seen_at` -- call [`touch`](Self::touch)
+    /// separately after a successful validation.
     pub fn validate(&self, token: &str) -> Result<Option<ClientRow>> {
         let hash = Sha256::digest(token.as_bytes()).to_vec();
         let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
@@ -126,6 +173,10 @@ impl TokenStore {
         Ok(row)
     }
 
+    /// Update `last_seen_at` to the current timestamp for the given client ID.
+    ///
+    /// Called by the auth proxy after each successfully validated request so
+    /// the admin UI can show when a client was last active.
     pub fn touch(&self, id: i64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
@@ -136,6 +187,10 @@ impl TokenStore {
         Ok(())
     }
 
+    /// Revoke a client's token by setting `revoked_at`.
+    ///
+    /// Idempotent: revoking an already-revoked client is a silent no-op.
+    /// After revocation, the token immediately fails [`validate`](Self::validate).
     pub fn revoke(&self, id: i64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
@@ -167,6 +222,10 @@ impl TokenStore {
         Ok(())
     }
 
+    /// List all non-revoked clients ordered by ID ascending.
+    ///
+    /// Used by the admin UI to display paired devices. Revoked rows are
+    /// excluded. Each returned row has `revoked_at == None`.
     pub fn list(&self) -> Result<Vec<ClientRow>> {
         let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
         let mut stmt = conn.prepare(

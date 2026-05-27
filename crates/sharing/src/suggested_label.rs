@@ -1,10 +1,17 @@
 //! Sanitised OS hostname used as the default label a client sends to the
-//! office server at pair time. Never PHI — the OS hostname is set by the
-//! machine owner and is not patient data.
+//! office server at pair time.
+//!
+//! Never PHI -- the OS hostname is set by the machine owner and is not
+//! patient data. Used to pre-populate the "device name" field in the
+//! pairing UI so clinicians don't have to type one manually.
 
-/// Trim whitespace, strip a trailing `.local.` then `.local`, and fall
-/// back to `"laptop"` if nothing useful is left. Pure / synchronous so
-/// the unit tests target it directly.
+/// Sanitise a raw hostname string into a usable client label.
+///
+/// - Trims surrounding whitespace.
+/// - Strips a trailing `.local.` (mDNS-style) then `.local` (Bonjour-style).
+/// - Falls back to `"laptop"` if nothing useful remains.
+///
+/// Pure and synchronous for easy testing.
 pub fn sanitise(raw: &str) -> String {
     let mut s = raw.trim();
     if let Some(stripped) = s.strip_suffix(".local.") {
@@ -20,8 +27,11 @@ pub fn sanitise(raw: &str) -> String {
     }
 }
 
-/// Best-effort hostname-derived default label. Falls back to `"laptop"`
-/// if the OS hostname lookup fails or is unusable.
+/// Best-effort hostname-derived default client label.
+///
+/// Queries the OS hostname and sanitises it via [`sanitise`]. Falls back to
+/// `"laptop"` if the OS hostname lookup fails or produces an unusable value.
+/// Safe to call from async context (the hostname lookup is fast and non-blocking).
 pub fn suggested_client_label() -> String {
     match hostname::get() {
         Ok(os) => sanitise(&os.to_string_lossy()),

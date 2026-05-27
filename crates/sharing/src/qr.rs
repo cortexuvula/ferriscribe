@@ -1,31 +1,67 @@
 //! Encode and decode the `ferriscribe://pair?...` URL the QR carries.
+//!
+//! The URL is a custom-scheme deep link that the FerriScribe client app
+//! recognises. It encodes the server's hostname, LAN/Tailscale addresses,
+//! all proxy ports, and the 6-digit pairing code.
+//!
+//! ## URL format
+//!
+//! ```text
+//! ferriscribe://pair?code=042917&host=Clinic+Server&lan=192.168.1.42
+//!     &op=11435&wp=8081&pp=11436&ts=clinic.tail-abc.ts.net&vp=11437
+//! ```
+//!
+//! Query params use a `BTreeMap` for deterministic key ordering (easier
+//! visual diffing of QR payloads).
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Payload encoded in a `ferriscribe://pair?...` QR URL.
+///
+/// Contains everything a client needs to connect: server identity, network
+/// addresses (LAN and/or Tailscale), all service ports, and the pairing code.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairPayload {
+    /// Human-readable server name (shown in the client's server picker).
     pub host: String,
+    /// LAN IPv4 address (absent when the server is Tailscale-only).
     pub lan: Option<String>,
+    /// Tailscale DNS name (absent when the server is LAN-only).
     pub tailscale: Option<String>,
+    /// Service ports for all proxy endpoints.
     pub ports: PairPorts,
+    /// 6-digit pairing code.
     pub code: String,
 }
 
+/// Service ports carried in the QR payload.
+///
+/// `lmstudio` and `vocab` are optional because not every server runs those
+/// subsystems. A missing `vocab` port means "vocab sync unavailable" and
+/// clients fall back to local vocabulary.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairPorts {
+    /// Ollama auth proxy port (query param `op`).
     pub ollama: u16,
+    /// Whisper auth proxy port (query param `wp`).
     pub whisper: u16,
+    /// Pairing HTTP service port (query param `pp`).
     pub pairing: u16,
+    /// LM Studio auth proxy port (query param `lp`). Absent when LM Studio isn't running.
     pub lmstudio: Option<u16>,
-    /// Vocabulary CRUD HTTP API. None when the office server predates
-    /// the vocab-sync feature; clients should treat absence as "vocab
-    /// sync unavailable" and fall back to local vocab.
+    /// Vocabulary CRUD HTTP API port (query param `vp`). `None` when the
+    /// office server predates the vocab-sync feature; clients should treat
+    /// absence as "vocab sync unavailable" and fall back to local vocab.
     #[serde(default)]
     pub vocab: Option<u16>,
 }
 
+/// Encode a [`PairPayload`] into a `ferriscribe://pair?...` URL string.
+///
+/// Keys are emitted in sorted order (via `BTreeMap`) for deterministic
+/// output. Values are percent-encoded.
 pub fn encode(p: &PairPayload) -> String {
     let mut q: BTreeMap<&'static str, String> = BTreeMap::new();
     q.insert("host", p.host.clone());
@@ -44,16 +80,24 @@ pub fn encode(p: &PairPayload) -> String {
     format!("ferriscribe://pair?{}", qs.join("&"))
 }
 
+/// Errors that can occur when decoding a `ferriscribe://pair?...` URL.
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
+    /// The URL doesn't start with `ferriscribe://pair?`.
     #[error("not a ferriscribe pairing URL")]
     NotPairUrl,
+    /// A required query parameter is missing.
     #[error("missing field: {0}")]
     Missing(&'static str),
+    /// A port value couldn't be parsed as `u16`.
     #[error("bad number: {0}")]
     BadNumber(String),
 }
 
+/// Decode a `ferriscribe://pair?...` URL into a [`PairPayload`].
+///
+/// Inverse of [`encode`]. Unknown query parameters are silently ignored
+/// (forward-compatible with future fields).
 pub fn decode(url: &str) -> Result<PairPayload, DecodeError> {
     let rest = url.strip_prefix("ferriscribe://pair?").ok_or(DecodeError::NotPairUrl)?;
     let mut map = std::collections::HashMap::<String, String>::new();

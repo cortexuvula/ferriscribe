@@ -1,8 +1,20 @@
-//! Service installer — per-platform persistent Ollama service writers (launchd / systemd / scheduled task).
+//! Service installer -- per-platform persistent Ollama service writers.
 //!
 //! Writes a service unit that runs `ollama serve` with
-//! OLLAMA_HOST=127.0.0.1:11434 so Ollama remains loopback-only. The auth
+//! `OLLAMA_HOST=127.0.0.1:11434` so Ollama remains loopback-only. The auth
 //! proxy is what's exposed on the network.
+//!
+//! ## Platform support
+//!
+//! | Platform | Mechanism | File |
+//! |---|---|---|
+//! | macOS | launchd LaunchAgent | `~/Library/LaunchAgents/com.ferriscribe.ollama.plist` |
+//! | Linux | systemd user unit | `~/.config/systemd/user/ferriscribe-ollama.service` |
+//! | Windows | Scheduled Task | `FerriScribe Ollama` (via `schtasks`) |
+//!
+//! Installation is skipped when something is already listening on Ollama's
+//! default port (11434), to avoid conflicting with an externally managed
+//! Ollama (Homebrew, Ollama.app, manual `ollama serve`, etc.).
 
 use std::path::PathBuf;
 
@@ -84,10 +96,14 @@ fn ollama_port_in_use() -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
+/// Whether the persistent Ollama service unit is installed on this machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceState {
+    /// The service unit file exists (plist, systemd unit, or scheduled task).
     Installed,
+    /// The service unit file does not exist.
     Missing,
+    /// The current OS is not macOS, Linux, or Windows.
     UnknownPlatform,
 }
 
@@ -287,10 +303,17 @@ pub use linux::{install as install_persistent_ollama, state as ollama_service_st
 #[cfg(target_os = "windows")]
 pub use windows::{install as install_persistent_ollama, state as ollama_service_state};
 
+/// Install a persistent Ollama service (unsupported platform stub).
+///
+/// Always returns an error on platforms other than macOS, Linux, or Windows.
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn install_persistent_ollama() -> Result<(), SharingError> {
     Err(SharingError::ServiceInstaller("unsupported platform".into()))
 }
+
+/// Query the persistent Ollama service state (unsupported platform stub).
+///
+/// Always returns [`ServiceState::UnknownPlatform`] on unsupported OSes.
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn ollama_service_state() -> ServiceState { ServiceState::UnknownPlatform }
 
