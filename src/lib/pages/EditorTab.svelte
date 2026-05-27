@@ -3,8 +3,8 @@
   import type { Recording } from '../types';
   import { recordings } from '../stores/recordings.svelte';
   import { copyToClipboard } from '../utils/clipboard';
-  import TextEditor from '../components/TextEditor.svelte';
   import RichEditor from '../components/RichEditor.svelte';
+  import TranscriptView from '../components/TranscriptView.svelte';
   import { rsvp } from '../stores/rsvp.svelte';
   import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
@@ -26,6 +26,14 @@
     recordings.selectedRecording
       ? (recordings.selectedRecording[config.field] as string | null) ?? ''
       : null
+  );
+
+  // Structured transcript segments from recording metadata (stored by backend
+  // during transcription). Used by TranscriptView for rich speaker display.
+  const transcriptSegments = $derived(
+    recordings.selectedRecording?.metadata?.transcript_segments as
+      | Array<{ speaker: string | null; text: string; start: number; end: number }>
+      | undefined
   );
 
   let copyStatus = $state<'idle' | 'copying' | 'copied'>('idle');
@@ -190,7 +198,7 @@
     </div>
   {:else}
     {#if tabId === 'transcript'}
-      <TextEditor value={content} placeholder="No content…" onChange={onEditorChange} />
+      <TranscriptView value={content} segments={transcriptSegments} placeholder="No content…" onChange={onEditorChange} />
     {:else}
       <RichEditor value={content} placeholder="No content…" onChange={onEditorChange} />
     {/if}

@@ -12,6 +12,8 @@ export interface PipelineEntry {
   recordingId: string;
   stage: PipelineStage;
   error: string | null;
+  /** User-facing warning (e.g. diarization skipped). Null when no warning. */
+  warning: string | null;
   /** Wall-clock ms at pipeline launch — for the elapsed-time counter. */
   startedAt: number;
   /** Wall-clock ms when the stage reached `completed` or `failed`. Null while in-flight. */
@@ -32,6 +34,7 @@ class PipelineStore {
   });
 
   private progressUnlisten: UnlistenFn | null = null;
+  private diarizationWarningUnlisten: UnlistenFn | null = null;
 
   // Track pending 30s cleanup timers per recording-id so we can cancel them
   // if the pipeline is re-launched or removed before the timer fires. Without
@@ -75,6 +78,8 @@ class PipelineStore {
           recordingId: recording_id,
           stage: stage as PipelineStage,
           error: error ?? null,
+          // Carry forward any warning set by a prior event (e.g. diarization-warning).
+          warning: prior?.warning ?? null,
           // Preserve the launch timestamp across stage transitions. If we
           // missed the launch (e.g. HMR reloaded the store mid-pipeline),
           // fall back to now — ETA will be slightly off but usable.
@@ -115,6 +120,29 @@ class PipelineStore {
         }
       },
     );
+
+    // Listen for diarization-skipped warnings from the backend. When
+    // diarization was requested but models are missing or inference failed,
+    // the STT layer emits this event so the UI can inform the user that
+    // speaker labels are absent from the transcript.
+    this.diarizationWarningUnlisten = await listen<string>(
+      'diarization-warning',
+      (event) => {
+        const recordingId = event.payload;
+        const prior = this.state.active[recordingId];
+        if (!prior) return; // warning for an unknown recording — ignore
+        const warned: PipelineEntry = {
+          ...prior,
+          warning: 'Speaker identification unavailable — download models in Settings → Audio / STT',
+        };
+        const isCurrent = this.state.current?.recordingId === recordingId;
+        this.state = {
+          ...this.state,
+          current: isCurrent ? warned : this.state.current,
+          active: { ...this.state.active, [recordingId]: warned },
+        };
+      },
+    );
   }
 
   /** Launch the pipeline for a recording. Non-blocking — returns immediately. */
@@ -133,6 +161,7 @@ class PipelineStore {
       recordingId,
       stage: 'transcribing',
       error: null,
+      warning: null,
       startedAt,
       finishedAt: null,
     };
@@ -171,6 +200,7 @@ class PipelineStore {
         recordingId,
         stage: 'failed',
         error: message,
+        warning: null,
         startedAt: prior?.startedAt ?? startedAt,
         finishedAt: Date.now(),
       };
@@ -214,6 +244,7 @@ class PipelineStore {
 
   destroy() {
     this.progressUnlisten?.();
+    this.diarizationWarningUnlisten?.();
     // Cancel any outstanding cleanup timers so they don't fire against a
     // torn-down store.
     for (const handle of this.pendingCleanups.values()) {
