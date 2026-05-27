@@ -1,9 +1,14 @@
-//! LocalSttProvider — the single SttProvider implementation for local inference.
+//! `LocalSttProvider` — the single `SttProvider` implementation for local inference.
 //!
-//! Orchestrates the two-stage pipeline:
-//! 1. Whisper transcription (whisper-rs, Metal GPU)
-//! 2. Pyannote speaker diarization (currently stubbed)
-//! 3. Merge segments with speaker labels
+//! Orchestrates the full local pipeline:
+//! 1. Resample to 16 kHz mono via [`crate::audio_prep`]
+//! 2. Whisper transcription via [`crate::whisper::WhisperTranscriber`] (whisper-rs, Metal GPU on macOS)
+//! 3. Optional pyannote speaker diarization via [`crate::diarization::SpeakerDiarizer`]
+//! 4. Merge segments with speaker labels via [`crate::merge`]
+//!
+//! Both Whisper and diarization run inside `tokio::task::spawn_blocking` to avoid
+//! blocking the async runtime. Cancellation is checked before and after each
+//! blocking stage — whisper-rs does not support mid-inference interrupt callbacks.
 
 use std::path::PathBuf;
 
@@ -23,7 +28,19 @@ use crate::diarization::SpeakerDiarizer;
 use crate::merge;
 use crate::whisper::WhisperTranscriber;
 
-/// Local speech-to-text provider using whisper-rs + diarization.
+/// Local speech-to-text provider using whisper-rs + pyannote diarization.
+///
+/// Implements [`medical_core::traits::SttProvider`] by running Whisper locally
+/// via whisper-rs and optionally running pyannote speaker diarization on the
+/// same audio buffer. All blocking inference runs inside `spawn_blocking`.
+///
+/// # Model Paths
+///
+/// - `whisper_model_path` — path to a `ggml-*.bin` whisper.cpp model file
+/// - `segmentation_model_path` — path to `segmentation-3.0.onnx` (pyannote VAD)
+/// - `embedding_model_path` — path to `wespeaker_en_voxceleb_CAM++.onnx`
+///
+/// Diarization is silently skipped if either pyannote model is missing.
 pub struct LocalSttProvider {
     whisper_model_path: PathBuf,
     segmentation_model_path: PathBuf,
@@ -31,6 +48,10 @@ pub struct LocalSttProvider {
 }
 
 impl LocalSttProvider {
+    /// Create a new local STT provider with the given model paths.
+    ///
+    /// No models are loaded at construction time — Whisper and pyannote models
+    /// are loaded lazily inside `transcribe()` via `spawn_blocking`.
     pub fn new(
         whisper_model_path: PathBuf,
         segmentation_model_path: PathBuf,

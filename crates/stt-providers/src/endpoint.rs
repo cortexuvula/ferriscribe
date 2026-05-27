@@ -8,8 +8,13 @@ use medical_core::types::{http_url, RemoteEndpoint};
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Cached result of endpoint resolution.
+///
+/// Stored inside `RemoteSttProvider` behind a `Mutex`. The cache is invalidated
+/// when `set_endpoint()` is called or when `resolved_at` exceeds [`CACHE_TTL`].
 pub struct ResolvedCache {
+    /// The resolved base URL (e.g. `http://192.168.1.42:8080`).
     pub url: String,
+    /// When this URL was resolved. Compared against [`CACHE_TTL`] (30 seconds).
     pub resolved_at: Instant,
 }
 

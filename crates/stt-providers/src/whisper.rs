@@ -1,4 +1,9 @@
 //! Whisper transcription via whisper-rs.
+//!
+//! Wraps the whisper-rs FFI bindings to run local Whisper inference. Uses
+//! `BeamSearch { beam_size: 5 }` (not Greedy) to avoid whisper.cpp's
+//! hallucination-skip silently dropping content on medical terminology.
+//! Must run inside `spawn_blocking` — the C++ inference is CPU/GPU-bound.
 
 use std::path::PathBuf;
 
@@ -7,26 +12,53 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 use medical_core::error::{AppError, AppResult};
 
-/// A timestamped segment from whisper transcription.
+/// A timestamped text segment from local Whisper transcription.
+///
+/// Timestamps are in seconds (converted from whisper.cpp's centisecond output).
 #[derive(Debug, Clone)]
 pub struct WhisperSegment {
+    /// The transcribed text for this segment, trimmed of whitespace.
     pub text: String,
+    /// Segment start time in seconds.
     pub start: f64,
+    /// Segment end time in seconds.
     pub end: f64,
 }
 
 /// Wrapper around whisper-rs for local transcription.
+///
+/// Loads a ggml-format Whisper model and runs full-sequence inference.
+/// The model is loaded fresh on each `transcribe()` call — there is no
+/// persistent state between calls, which keeps memory usage predictable
+/// at the cost of model-load overhead (~1-2s for base, ~5s for large-v3-turbo).
 pub struct WhisperTranscriber {
     model_path: PathBuf,
 }
 
 impl WhisperTranscriber {
+    /// Create a transcriber that will load the model at `model_path`.
+    ///
+    /// The path must point to a ggml-format `.bin` file (e.g. `ggml-base.bin`).
+    /// No model loading happens at construction time.
     pub fn new(model_path: PathBuf) -> Self {
         Self { model_path }
     }
 
     /// Transcribe 16 kHz mono f32 audio.
-    /// Must be called on a blocking thread (or via `spawn_blocking`).
+    ///
+    /// Must be called inside `tokio::task::spawn_blocking` — the underlying
+    /// whisper.cpp inference is CPU/GPU-bound and would block the async runtime.
+    ///
+    /// # Decoding Strategy
+    ///
+    /// Uses `BeamSearch { beam_size: 5 }` with `patience: -1.0`. This avoids
+    /// whisper.cpp's hallucination-skip that triggers under Greedy decoding on
+    /// medical terminology, silently dropping content.
+    ///
+    /// # Parameters
+    ///
+    /// - `audio_16k_mono` — 16 kHz mono f32 PCM samples (preprocessed by [`crate::audio_prep`])
+    /// - `language` — optional 2-letter language code (e.g. `"en"`); `None` = auto-detect
     #[instrument(skip(self, audio_16k_mono), fields(provider = "whisper_local"))]
     pub fn transcribe(
         &self,

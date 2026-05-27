@@ -1,4 +1,10 @@
-//! Audio preprocessing: resample to 16 kHz mono for whisper and pyannote.
+//! Audio preprocessing: resample to 16 kHz mono for Whisper and pyannote.
+//!
+//! Both Whisper and pyannote expect 16 kHz mono audio. This module handles:
+//! - **Resampling** via rubato polyphase sinc interpolation (Blackman-Harris window)
+//! - **Downmixing** stereo/multi-channel to mono by averaging
+//! - **Format conversion** between f32 PCM and i16 PCM
+//! - **WAV encoding** for upload to remote Whisper servers
 
 use medical_core::types::AudioData;
 use rubato::{

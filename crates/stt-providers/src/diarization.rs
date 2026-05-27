@@ -1,9 +1,21 @@
 //! Speaker diarization using pyannote ONNX models via ort.
 //!
-//! Implements the pyannote pipeline directly:
-//! 1. Voice Activity Detection / segmentation (pyannote segmentation-3.0 ONNX)
-//! 2. Speaker embedding extraction (wespeaker CAM++ ONNX via knf-rs fbank features)
-//! 3. Cosine-similarity speaker clustering
+//! Implements the pyannote pipeline directly in Rust (no Python dependency):
+//!
+//! 1. **Voice Activity Detection / segmentation** — pyannote `segmentation-3.0` ONNX model
+//!    processes 10-second windows of 16 kHz i16 audio, outputting per-frame speech/non-speech
+//!    classifications. Contiguous speech frames are grouped into `SpeechSegment`s.
+//!
+//! 2. **Speaker embedding extraction** — WeSpeaker `CAM++` ONNX model converts each speech
+//!    segment's fbank features (80-dim Mel filterbank via knf-rs) into a fixed-size speaker
+//!    embedding vector.
+//!
+//! 3. **Cosine-similarity speaker clustering** — greedy clustering: each embedding is compared
+//!    against known speaker centroids. If the best cosine similarity exceeds 0.5, the segment
+//!    is assigned to that speaker; otherwise a new speaker cluster is created.
+//!
+//! All inference runs on CPU via the `ort` crate (ONNX Runtime bindings). The diarization
+//! pipeline runs inside `spawn_blocking` to avoid blocking the async runtime.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -17,10 +29,17 @@ use tracing::{debug, info};
 use medical_core::error::{AppError, AppResult};
 
 /// A speaker turn: a contiguous time range attributed to one speaker.
+///
+/// Speaker IDs are zero-based and assigned by the greedy clustering algorithm
+/// in [`SpeakerDiarizer::diarize()`]. The merge layer formats them as
+/// `"Speaker N"` (1-based) for display.
 #[derive(Debug, Clone)]
 pub struct SpeakerTurn {
+    /// Zero-based speaker cluster ID.
     pub speaker_id: usize,
+    /// Turn start time in seconds.
     pub start: f64,
+    /// Turn end time in seconds.
     pub end: f64,
 }
 
@@ -60,12 +79,21 @@ fn push_segment_if_valid(
 }
 
 /// Speaker diarization using pyannote ONNX models.
+///
+/// Runs the three-stage pipeline: VAD → embedding extraction → clustering.
+/// Models are loaded fresh on each `diarize()` call. Both ONNX sessions
+/// are configured with `intra_threads: 1` to avoid thread contention when
+/// running inside `spawn_blocking` alongside other blocking tasks.
 pub struct SpeakerDiarizer {
     segmentation_path: PathBuf,
     embedding_path: PathBuf,
 }
 
 impl SpeakerDiarizer {
+    /// Create a diarizer with paths to the pyannote segmentation and WeSpeaker
+    /// embedding ONNX models.
+    ///
+    /// No models are loaded at construction time — loading happens inside `diarize()`.
     pub fn new(segmentation_path: PathBuf, embedding_path: PathBuf) -> Self {
         Self {
             segmentation_path,
@@ -75,8 +103,15 @@ impl SpeakerDiarizer {
 
     /// Run speaker diarization on 16 kHz mono i16 audio.
     ///
-    /// Returns a list of speaker turns with start/end timestamps and speaker IDs.
-    /// If models are missing or inference fails, returns an error.
+    /// Returns a list of [`SpeakerTurn`]s with start/end timestamps and speaker IDs.
+    /// The three stages run sequentially:
+    ///
+    /// 1. **VAD** — pyannote segmentation model detects speech regions in 10s windows
+    /// 2. **Embeddings** — WeSpeaker CAM++ extracts per-segment speaker vectors
+    /// 3. **Clustering** — greedy cosine-similarity clustering (threshold 0.5)
+    ///
+    /// Returns `Ok(vec![])` if no speech is detected. Returns `Err` if models
+    /// fail to load or inference panics.
     pub fn diarize(
         &self,
         samples_i16: &[i16],

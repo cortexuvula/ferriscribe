@@ -9,7 +9,10 @@ use tokio_util::sync::CancellationToken;
 
 use medical_core::error::{AppError, AppResult, ServiceKind};
 
-/// Response structure from Whisper API verbose_json format.
+/// Response structure from Whisper API `verbose_json` format.
+///
+/// Contains timestamped segments, optional detected language, and optional
+/// full-text transcript. Server implementations may omit `language` or `text`.
 #[derive(Debug, Deserialize)]
 pub struct VerboseJson {
     #[serde(default)]
@@ -21,10 +24,15 @@ pub struct VerboseJson {
 }
 
 /// Individual segment from Whisper API response.
+///
+/// Timestamps are in seconds (f32 from the server, used as-is by the merge layer).
 #[derive(Debug, Deserialize)]
 pub struct VerboseSegment {
+    /// Segment start time in seconds.
     pub start: f32,
+    /// Segment end time in seconds.
     pub end: f32,
+    /// Transcribed text for this segment. May be `None` for silent segments.
     #[serde(default)]
     pub text: Option<String>,
 }

@@ -1,4 +1,9 @@
-//! Merge whisper segments with speaker turns by timestamp overlap.
+//! Merge Whisper text segments with speaker diarization turns by timestamp overlap.
+//!
+//! The merge algorithm assigns each Whisper segment to the speaker turn that
+//! covers the most of its time range. If no speaker turn overlaps by at least
+//! 10ms, the segment is left unlabeled. Speaker labels are formatted as
+//! `"Speaker N"` (1-based).
 
 use medical_core::types::TranscriptSegment;
 

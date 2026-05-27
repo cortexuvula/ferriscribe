@@ -1,9 +1,23 @@
-//! RemoteSttProvider — OpenAI-compatible Whisper server client.
+//! `RemoteSttProvider` — OpenAI-compatible Whisper server client.
 //!
-//! Sends a 16 kHz mono PCM WAV to `POST {base}/v1/audio/transcriptions` and
+//! Sends 16 kHz mono PCM WAV to `POST {base}/v1/audio/transcriptions` and
 //! parses `verbose_json` back into `TranscriptSegment[]`. Local pyannote
 //! diarization runs on the same audio buffer (paralleling `LocalSttProvider`)
 //! so speaker labels still work even when Whisper is remote.
+//!
+//! # Endpoint Resolution
+//!
+//! When a `RemoteEndpoint` is configured (LAN/Tailscale paired mode), the
+//! provider resolves the base URL via [`crate::endpoint::current_base_url()`]
+//! with a 30-second cache. Call [`RemoteSttProvider::set_endpoint()`] to
+//! switch endpoints at runtime — this also clears the URL cache and updates
+//! the bearer token.
+//!
+//! # Cancellation
+//!
+//! The HTTP POST runs under `tokio::select!` with `biased` ordering so
+//! cancellation is observed before the HTTP response on each poll. Dropping
+//! the request future tears down the reqwest TCP connection.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -32,6 +46,16 @@ use crate::whisper::WhisperSegment;
 const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(600);
 const TARGET_SAMPLE_RATE: u32 = 16_000;
 
+/// Remote STT provider that sends audio to an OpenAI-compatible Whisper server.
+///
+/// Implements [`medical_core::traits::SttProvider`] by POSTing WAV audio to
+/// `/v1/audio/transcriptions` and parsing the `verbose_json` response. Speaker
+/// diarization runs locally via pyannote, identical to `LocalSttProvider`.
+///
+/// # Thread Safety
+///
+/// Interior mutability via `RwLock` (endpoint, api_key) and `Mutex` (url_cache)
+/// allows `set_endpoint()` to update configuration without `&mut self`.
 pub struct RemoteSttProvider {
     client: Client,
     /// Fallback static base URL used when no `endpoint` is configured.
@@ -51,6 +75,12 @@ pub struct RemoteSttProvider {
 }
 
 impl RemoteSttProvider {
+    /// Create a new remote STT provider targeting `host:port`.
+    ///
+    /// Validates that `host` is a LAN/private address unless `allow_public` is true
+    /// (see [`medical_core::endpoint_policy::validate_local_endpoint`]). The HTTP
+    /// client is configured with a 10-second connect timeout and 600-second request
+    /// timeout to accommodate long audio files.
     pub fn new(
         host: &str,
         port: u16,

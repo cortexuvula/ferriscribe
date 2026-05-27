@@ -1,3 +1,20 @@
+//! Model metadata, download/delete, and path helpers.
+//!
+//! Manages the on-disk model catalog for Whisper (ggml `.bin` files) and
+//! pyannote (ONNX files). Models are stored under `{app_data_dir}/models/`
+//! with separate subdirectories for `whisper/` and `pyannote/`.
+//!
+//! # Downloads
+//!
+//! Downloads use a write-to-`.tmp`-then-rename strategy for crash safety:
+//! if the process is interrupted, the partial `.tmp` file is left behind
+//! but the target model path is never corrupted.
+//!
+//! # Model Catalog
+//!
+//! - **Whisper**: `base` (~148 MB), `small` (~488 MB), `medium` (~1.5 GB), `large-v3-turbo` (~1.6 GB)
+//! - **Pyannote**: `segmentation-3.0.onnx` (~6 MB), `wespeaker_en_voxceleb_CAM++.onnx` (~28 MB)
+
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use crate::SttError;
@@ -6,15 +23,23 @@ use crate::SttError;
 // WhisperModelId
 // ---------------------------------------------------------------------------
 
+/// Identifies a Whisper model variant by name.
+///
+/// Maps to ggml filenames: `Base` → `ggml-base.bin`, etc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WhisperModelId {
+    /// Whisper Base — fastest, lowest accuracy (~148 MB).
     Base,
+    /// Whisper Small — balanced speed and accuracy (~488 MB).
     Small,
+    /// Whisper Medium — high accuracy (~1.5 GB).
     Medium,
+    /// Whisper Large-v3-Turbo — best accuracy (~1.6 GB).
     LargeV3Turbo,
 }
 
 impl WhisperModelId {
+    /// Return the string identifier for this model (e.g. `"base"`, `"large-v3-turbo"`).
     pub fn as_str(&self) -> &'static str {
         match self {
             WhisperModelId::Base => "base",
@@ -24,6 +49,8 @@ impl WhisperModelId {
         }
     }
 
+    /// Parse a string identifier into a `WhisperModelId`. Returns `None` for
+    /// unrecognized strings.
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "base" => Some(WhisperModelId::Base),
@@ -39,13 +66,22 @@ impl WhisperModelId {
 // ModelInfo
 // ---------------------------------------------------------------------------
 
+/// Metadata about a downloadable model (Whisper or pyannote).
+///
+/// Used by the Settings UI to list available models with their download status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
+    /// Model identifier (e.g. `"base"`, `"pyannote-segmentation"`).
     pub id: String,
+    /// On-disk filename within the model subdirectory.
     pub filename: String,
+    /// Expected file size in bytes.
     pub size_bytes: u64,
+    /// URL to download the model from (Hugging Face or GitHub releases).
     pub download_url: String,
+    /// Human-readable description shown in the Settings UI.
     pub description: String,
+    /// Whether the model file already exists on disk.
     pub downloaded: bool,
 }
 
@@ -53,22 +89,27 @@ pub struct ModelInfo {
 // Path helpers
 // ---------------------------------------------------------------------------
 
+/// Return the root models directory: `{app_data_dir}/models`.
 pub fn models_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("models")
 }
 
+/// Return the Whisper models directory: `{app_data_dir}/models/whisper`.
 pub fn whisper_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("models").join("whisper")
 }
 
+/// Return the pyannote models directory: `{app_data_dir}/models/pyannote`.
 pub fn pyannote_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("models").join("pyannote")
 }
 
+/// Return the full path to a Whisper model file: `{whisper_dir}/{filename}`.
 pub fn whisper_model_path(app_data_dir: &Path, filename: &str) -> PathBuf {
     whisper_dir(app_data_dir).join(filename)
 }
 
+/// Return the full path to a pyannote model file: `{pyannote_dir}/{filename}`.
 pub fn pyannote_model_path(app_data_dir: &Path, filename: &str) -> PathBuf {
     pyannote_dir(app_data_dir).join(filename)
 }
@@ -77,6 +118,14 @@ pub fn pyannote_model_path(app_data_dir: &Path, filename: &str) -> PathBuf {
 // Filename mapping
 // ---------------------------------------------------------------------------
 
+/// Map a model ID string to its ggml filename. Returns `None` for unknown IDs.
+///
+/// | ID | Filename |
+/// |---|---|
+/// | `"base"` | `ggml-base.bin` |
+/// | `"small"` | `ggml-small.bin` |
+/// | `"medium"` | `ggml-medium.bin` |
+/// | `"large-v3-turbo"` | `ggml-large-v3-turbo.bin` |
 pub fn whisper_model_filename(model_id: &str) -> Option<&'static str> {
     match model_id {
         "base" => Some("ggml-base.bin"),
@@ -91,6 +140,10 @@ pub fn whisper_model_filename(model_id: &str) -> Option<&'static str> {
 // Available models
 // ---------------------------------------------------------------------------
 
+/// List all available Whisper models with their download status.
+///
+/// Checks each model's expected path under `app_data_dir` and sets `downloaded: true`
+/// if the file exists.
 pub fn available_whisper_models(app_data_dir: &Path) -> Vec<ModelInfo> {
     let models_raw = [
         (
@@ -139,6 +192,7 @@ pub fn available_whisper_models(app_data_dir: &Path) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// List all available pyannote models (segmentation + embedding) with download status.
 pub fn available_pyannote_models(app_data_dir: &Path) -> Vec<ModelInfo> {
     let models_raw = [
         (
@@ -177,6 +231,10 @@ pub fn available_pyannote_models(app_data_dir: &Path) -> Vec<ModelInfo> {
 // Check required models
 // ---------------------------------------------------------------------------
 
+/// Check which models are missing and return human-readable descriptions of each.
+///
+/// Checks the requested Whisper model plus both pyannote models (segmentation
+/// and embedding). Used by the Settings UI to show a "missing models" warning.
 pub fn check_required_models(app_data_dir: &Path, whisper_model_id: &str) -> Vec<String> {
     let mut missing = Vec::new();
 
@@ -210,6 +268,13 @@ pub fn check_required_models(app_data_dir: &Path, whisper_model_id: &str) -> Vec
 // Download / delete
 // ---------------------------------------------------------------------------
 
+/// Download a model file with progress reporting.
+///
+/// Downloads to a `.tmp` file first, then atomically renames to `dest_path`.
+/// This prevents partial downloads from corrupting an existing model file.
+///
+/// The `on_progress` callback receives `(downloaded_bytes, total_bytes)` and
+/// is called after each chunk is written to disk.
 pub async fn download_model<F>(
     url: &str,
     dest_path: &Path,
@@ -282,6 +347,9 @@ where
     Ok(())
 }
 
+/// Delete a downloaded model file from disk.
+///
+/// Returns `SttError::ModelNotFound` if the file doesn't exist.
 pub async fn delete_model(path: &Path) -> Result<(), SttError> {
     if !path.exists() {
         return Err(SttError::ModelNotFound(format!(
