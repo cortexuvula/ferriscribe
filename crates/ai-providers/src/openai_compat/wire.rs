@@ -1,8 +1,35 @@
 //! Private serde types for the OpenAI chat-completions wire protocol.
 //!
+//! These types model the JSON shapes exchanged with Ollama and LM Studio.
+//! They are `pub(super)` — not part of the crate's public API. Core types
+//! ([`CompletionRequest`], [`CompletionResponse`]) are converted to/from
+//! these wire types by [`OpenAiCompatibleClient`].
+//!
+//! # Type inventory
+//!
+//! **Request types (serialized):**
+//! - [`ChatRequest`] — top-level chat completion request body
+//! - [`ChatMessage`] — a single message in the conversation
+//! - [`StreamOptions`] — `include_usage: true` for streaming requests
+//! - [`ApiTool`] / [`ApiToolDef`] — tool definitions sent to the model
+//! - [`ApiToolCall`] / [`ApiFunction`] — tool call references in messages
+//!
+//! **Response types (deserialized):**
+//! - [`ChatResponse`] — top-level chat completion response
+//! - [`ChatChoice`] — a single completion choice (message or delta)
+//! - [`ChatResponseMessage`] — full message in non-streaming responses
+//! - [`ChatDelta`] — incremental delta in streaming responses
+//! - [`ApiToolCallDelta`] / [`ApiFunctionDelta`] — partial tool call deltas
+//! - [`ApiUsage`] — token usage statistics
+//! - [`ModelsListResponse`] / [`ApiModelEntry`] — model enumeration response
+//!
 //! Many fields are deserialized for completeness even when never read on our
 //! side (e.g. `ApiToolCallDelta::index`); the blanket `dead_code` allow keeps
 //! that explicit-schema discipline without forcing per-field annotations.
+//!
+//! [`CompletionRequest`]: medical_core::types::CompletionRequest
+//! [`CompletionResponse`]: medical_core::types::CompletionResponse
+//! [`OpenAiCompatibleClient`]: super::OpenAiCompatibleClient
 
 #![allow(dead_code)]
 

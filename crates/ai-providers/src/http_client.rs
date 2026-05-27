@@ -1,4 +1,21 @@
 //! Shared HTTP client infrastructure with retry and circuit-breaker support.
+//!
+//! This module provides the building blocks for resilient HTTP communication
+//! with local AI providers:
+//!
+//! - [`build_client`] / [`build_client_custom_auth`] — construct reqwest
+//!   clients with Bearer-token or custom-header authentication.
+//! - [`RetryConfig`] — exponential-backoff configuration with jitter,
+//!   constructible from user-facing [`AppConfig`] settings.
+//! - [`CircuitBreaker`] — simple failure-count circuit breaker.
+//! - [`send_with_retry`] — wraps any request factory with retry/backoff
+//!   logic, honoring `Retry-After` headers and classifying outcomes via
+//!   [`RetryDecision`].
+//! - [`classify_status`], [`classify_error`], [`classify`] — retry
+//!   classification helpers distinguishing transient (retryable) from
+//!   permanent (non-retryable) failures.
+//!
+//! [`AppConfig`]: medical_core::types::settings::AppConfig
 
 use std::time::{Duration, Instant};
 use reqwest::{Client, header};
@@ -124,6 +141,11 @@ pub struct CircuitBreaker {
 }
 
 impl CircuitBreaker {
+    /// Create a new circuit breaker with the given failure threshold and recovery timeout.
+    ///
+    /// The breaker starts in the closed (healthy) state. After `failure_threshold`
+    /// consecutive failures, it opens and rejects requests until `recovery_timeout`
+    /// has elapsed since the last failure.
     pub fn new(failure_threshold: u32, recovery_timeout: Duration) -> Self {
         Self {
             failure_count: 0,
@@ -134,6 +156,9 @@ impl CircuitBreaker {
     }
 
     /// Returns `true` when the breaker is open (circuit broken, reject requests).
+    ///
+    /// The breaker is open when `failure_count >= failure_threshold` **and**
+    /// less than `recovery_timeout` has elapsed since the last failure.
     pub fn is_open(&self) -> bool {
         if self.failure_count < self.failure_threshold {
             return false;
@@ -144,11 +169,13 @@ impl CircuitBreaker {
         }
     }
 
+    /// Record a successful request, resetting the failure count and closing the breaker.
     pub fn record_success(&mut self) {
         self.failure_count = 0;
         self.last_failure = None;
     }
 
+    /// Record a failed request, incrementing the failure count and potentially opening the breaker.
     pub fn record_failure(&mut self) {
         self.failure_count += 1;
         self.last_failure = Some(Instant::now());

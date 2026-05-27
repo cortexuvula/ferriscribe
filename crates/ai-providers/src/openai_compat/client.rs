@@ -14,17 +14,47 @@ use super::wire::{
 };
 
 /// A client for any endpoint implementing the OpenAI chat-completions protocol.
+///
+/// This is the workhorse of the `ai-providers` crate. Both [`OllamaProvider`]
+/// and [`LmStudioProvider`] delegate to an instance of this client for all
+/// HTTP communication. It handles:
+///
+/// - Converting core [`CompletionRequest`] into the OpenAI wire format
+///   ([`ChatRequest`]) via [`build_request`](Self::build_request).
+/// - Parsing OpenAI wire responses ([`ChatResponse`]) back into core
+///   [`CompletionResponse`] via [`parse_response`](Self::parse_response).
+/// - Bearer-token authentication via the `Authorization` header.
+/// - Error classification: connectivity errors become `EndpointOffline`,
+///   application-layer errors become `AiProvider(String)`.
+///
+/// The client is intentionally provider-agnostic — it works with any server
+/// that speaks the OpenAI chat-completions protocol (Ollama, LM Studio,
+/// vLLM, etc.), subject to the local-only constraint enforced at the
+/// provider level.
+///
+/// [`OllamaProvider`]: crate::ollama::OllamaProvider
+/// [`LmStudioProvider`]: crate::lmstudio::LmStudioProvider
 pub struct OpenAiCompatibleClient {
+    /// The underlying reqwest HTTP client with connection pooling.
     pub client: Client,
+    /// Base URL including the `/v1` suffix (e.g., `http://localhost:11434/v1`).
+    /// Updated dynamically by providers that support LAN/Tailscale resolution.
     pub base_url: String,
+    /// Retry policy controlling exponential backoff on transient failures.
     pub policy: RetryConfig,
     /// Optional bearer token sent as `Authorization: Bearer <token>`.
+    /// Updated when `set_endpoint()` is called on a provider.
     pub bearer: Option<String>,
     /// Human-readable provider name used in `EndpointOffline` errors (e.g. "Ollama").
+    /// Surfaced to the user in connection-error dialogs.
     pub provider_name: String,
 }
 
 impl OpenAiCompatibleClient {
+    /// Create a client without authentication or a provider name.
+    ///
+    /// Suitable for local providers that don't require auth tokens.
+    /// The `base_url` should include the `/v1` suffix.
     pub fn new(
         client: Client,
         base_url: impl Into<String>,
@@ -40,6 +70,9 @@ impl OpenAiCompatibleClient {
     }
 
     /// Create a client with an optional bearer token.
+    ///
+    /// The bearer is sent as `Authorization: Bearer <token>` on every request.
+    /// Pass `None` for unauthenticated local providers.
     pub fn new_with_bearer(
         client: Client,
         base_url: impl Into<String>,
@@ -55,7 +88,10 @@ impl OpenAiCompatibleClient {
         }
     }
 
-    /// Create a client with an optional bearer token and a provider name.
+    /// Create a client with an optional bearer token and a human-readable provider name.
+    ///
+    /// The `provider_name` appears in `EndpointOffline` error messages shown
+    /// to the user (e.g., "Ollama is not reachable at …").
     pub fn new_with_bearer_and_name(
         client: Client,
         base_url: impl Into<String>,

@@ -24,6 +24,14 @@ use super::wire::{
 
 impl OpenAiCompatibleClient {
     /// Fetch the list of model IDs from the `/models` endpoint.
+    ///
+    /// Calls `GET {base_url}/models` and extracts the `id` field from each
+    /// entry in the `data` array. The returned list is sorted alphabetically.
+    ///
+    /// # Errors
+    ///
+    /// - `EndpointOffline` if the server is unreachable.
+    /// - `AiProvider(String)` on HTTP errors or JSON parse failures.
     pub async fn list_models(&self) -> AppResult<Vec<String>> {
         let url = format!("{}/models", self.base_url);
         let response = crate::http_client::send_with_retry(&self.policy, || {
@@ -48,6 +56,24 @@ impl OpenAiCompatibleClient {
         Ok(ids)
     }
 
+    /// Send a non-streaming chat completion request and return the full response.
+    ///
+    /// Posts a `ChatRequest` to `{base_url}/chat/completions` with `stream: null`,
+    /// parses the JSON response into a [`CompletionResponse`], and extracts
+    /// content, usage, model name, and any tool calls.
+    ///
+    /// # Context window detection
+    ///
+    /// When the response has choices but empty content and `finish_reason: "length"`,
+    /// this method returns a descriptive error suggesting the model's context
+    /// window was exceeded. This heuristic catches cases where the prompt is
+    /// too long for the model to produce any output.
+    ///
+    /// # Errors
+    ///
+    /// - `EndpointOffline` if the server is unreachable after retries.
+    /// - `AiProvider(String)` on HTTP errors, JSON parse failures, or
+    ///   context-window-exceeded conditions.
     pub async fn complete(&self, request: &CompletionRequest) -> AppResult<CompletionResponse> {
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_request(request);
@@ -113,6 +139,23 @@ impl OpenAiCompatibleClient {
         Ok(self.parse_response(resp, &request.model))
     }
 
+    /// Send a streaming chat completion request and return an SSE-backed stream.
+    ///
+    /// Posts a `ChatRequest` with `stream: true` and `stream_options.include_usage: true`
+    /// to `{base_url}/chat/completions`. The response body is parsed as SSE
+    /// via [`parse_sse_response`]. Each SSE data line is deserialized into a
+    /// [`ChatResponse`] and mapped to one or more [`StreamChunk`] items:
+    ///
+    /// - `delta.content` → `StreamChunk::Delta { text }`
+    /// - `delta.tool_calls` → `StreamChunk::ToolCallDelta { id, name, arguments_delta }`
+    /// - `usage` (separate event) → `StreamChunk::Usage(...)` followed by `StreamChunk::Done`
+    ///
+    /// Malformed JSON lines are silently dropped (not propagated as errors).
+    ///
+    /// # Errors
+    ///
+    /// - `EndpointOffline` if the server is unreachable after retries.
+    /// - `AiProvider(String)` on non-2xx HTTP responses.
     pub async fn complete_stream(
         &self,
         request: &CompletionRequest,
@@ -196,6 +239,25 @@ impl OpenAiCompatibleClient {
         Ok(Box::pin(mapped))
     }
 
+    /// Send a chat completion request with tool definitions and return the response.
+    ///
+    /// Posts a `ChatRequest` with a `tools` array to `{base_url}/chat/completions`.
+    /// The response may contain text content, tool calls, or both. The agent
+    /// orchestrator uses this to implement the tool-calling loop: the model
+    /// can request tool invocations, the caller executes them, and the results
+    /// are fed back as `tool` role messages in a subsequent request.
+    ///
+    /// # Tool call format
+    ///
+    /// Tools are sent in the OpenAI `function` tool format:
+    /// ```json
+    /// { "type": "function", "function": { "name": "...", "description": "...", "parameters": {...} } }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - `EndpointOffline` if the server is unreachable after retries.
+    /// - `AiProvider(String)` on HTTP errors or JSON parse failures.
     pub async fn complete_with_tools(
         &self,
         request: &CompletionRequest,

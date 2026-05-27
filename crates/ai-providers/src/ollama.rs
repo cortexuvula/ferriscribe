@@ -1,4 +1,21 @@
-//! Ollama provider — wraps `OpenAiCompatibleClient` against a local server.
+//! Ollama provider — wraps [`OpenAiCompatibleClient`] against a local Ollama server.
+//!
+//! # Default configuration
+//!
+//! - Base URL: `http://localhost:11434/v1`
+//! - Fallback model: `llama3`
+//! - Provider name: `"ollama"`
+//!
+//! # Endpoint resolution
+//!
+//! When a [`RemoteEndpoint`] is configured (via [`new_with_endpoint`] or
+//! [`set_endpoint`]), the provider probes LAN then Tailscale addresses with
+//! a 30-second cache. This supports multi-network deployments where the
+//! Ollama server runs on a LAN machine but the clinician connects via
+//! Tailscale when working remotely.
+//!
+//! [`new_with_endpoint`]: OllamaProvider::new_with_endpoint
+//! [`set_endpoint`]: OllamaProvider::set_endpoint
 
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -31,6 +48,19 @@ const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Ollama provider implementing the [`AiProvider`] trait.
+///
+/// Wraps an [`OpenAiCompatibleClient`] pointed at an Ollama server. Supports
+/// optional [`RemoteEndpoint`] for LAN/Tailscale resolution, bearer-token
+/// authentication, and configurable retry policy.
+///
+/// # Thread safety
+///
+/// The inner client is wrapped in a `tokio::sync::Mutex` — concurrent
+/// requests are serialized. The endpoint and URL cache use `RwLock` for
+/// read-heavy access patterns.
+///
+/// [`AiProvider`]: medical_core::traits::AiProvider
 pub struct OllamaProvider {
     /// Static base_url used when no RemoteEndpoint is configured.
     static_base_url: String,

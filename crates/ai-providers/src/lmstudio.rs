@@ -1,4 +1,21 @@
-//! LM Studio provider — wraps `OpenAiCompatibleClient` against a local LM Studio server.
+//! LM Studio provider — wraps [`OpenAiCompatibleClient`] against a local LM Studio server.
+//!
+//! # Default configuration
+//!
+//! - Base URL: `http://localhost:1234/v1`
+//! - Fallback model: `default`
+//! - Provider name: `"LM Studio"`
+//!
+//! # Endpoint resolution
+//!
+//! When a [`RemoteEndpoint`] is configured (via [`new_with_endpoint`] or
+//! [`set_endpoint`]), the provider probes LAN then Tailscale addresses with
+//! a 30-second cache. This supports multi-network deployments where the
+//! LM Studio server runs on a LAN machine but the clinician connects via
+//! Tailscale when working remotely.
+//!
+//! [`new_with_endpoint`]: LmStudioProvider::new_with_endpoint
+//! [`set_endpoint`]: LmStudioProvider::set_endpoint
 
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -31,6 +48,19 @@ const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// LM Studio provider implementing the [`AiProvider`] trait.
+///
+/// Wraps an [`OpenAiCompatibleClient`] pointed at an LM Studio server. Supports
+/// optional [`RemoteEndpoint`] for LAN/Tailscale resolution, bearer-token
+/// authentication, and configurable retry policy.
+///
+/// # Thread safety
+///
+/// The inner client is wrapped in a `tokio::sync::Mutex` — concurrent
+/// requests are serialized. The endpoint and URL cache use `RwLock` for
+/// read-heavy access patterns.
+///
+/// [`AiProvider`]: medical_core::traits::AiProvider
 pub struct LmStudioProvider {
     /// Static base_url used when no RemoteEndpoint is configured.
     static_base_url: String,
