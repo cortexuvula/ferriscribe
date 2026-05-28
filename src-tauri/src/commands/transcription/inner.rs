@@ -16,6 +16,7 @@ use medical_db::settings::SettingsRepo;
 use medical_db::vocabulary::VocabularyRepo;
 use medical_processing::vocabulary_corrector;
 
+use crate::commands::resolve_recordings_dir;
 use crate::commands::unwrap_app_error_message;
 use crate::state::AppState;
 
@@ -80,7 +81,7 @@ pub async fn transcribe_recording_inner(
     // Step 3: Load the recording and mark as Processing — on a blocking thread.
     // Pre-flight passed, so it is now safe to advance the recording's status.
     let db = Arc::clone(&state.db);
-    let recording = tokio::task::spawn_blocking(move || {
+    let mut recording = tokio::task::spawn_blocking(move || {
         let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
         let mut recording = RecordingsRepo::get_by_id(&conn, &uuid)
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -95,14 +96,45 @@ pub async fn transcribe_recording_inner(
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
 
-    let wav_path = recording.audio_path.clone();
-
-    if !wav_path.exists() {
-        let err_msg = format!("WAV file not found: {}", wav_path.display());
-        return Err(AppError::Processing(
-            mark_recording_failed(&app, &state.db, recording, err_msg).await,
-        ));
-    }
+    let wav_path = if recording.audio_path.exists() {
+        recording.audio_path.clone()
+    } else {
+        // The stored path may be stale (user changed storage_path setting or
+        // moved files). Try the current recordings directory by filename.
+        if let Ok(dir) = resolve_recordings_dir(&state.db, &state.data_dir) {
+            if let Some(filename) = recording.audio_path.file_name() {
+                let candidate = dir.join(filename);
+                if candidate.exists() {
+                    tracing::info!(
+                        original = %recording.audio_path.display(),
+                        resolved = %candidate.display(),
+                        "Resolved stale audio_path to current recordings directory"
+                    );
+                    // Persist the corrected path so future retries work directly.
+                    recording.audio_path = candidate.clone();
+                    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+                    RecordingsRepo::update(&conn, &recording)
+                        .map_err(|e| AppError::Database(e.to_string()))?;
+                    candidate
+                } else {
+                    let err_msg = format!("WAV file not found: {}", recording.audio_path.display());
+                    return Err(AppError::Processing(
+                        mark_recording_failed(&app, &state.db, recording, err_msg).await,
+                    ));
+                }
+            } else {
+                let err_msg = format!("WAV file not found: {}", recording.audio_path.display());
+                return Err(AppError::Processing(
+                    mark_recording_failed(&app, &state.db, recording, err_msg).await,
+                ));
+            }
+        } else {
+            let err_msg = format!("WAV file not found: {}", recording.audio_path.display());
+            return Err(AppError::Processing(
+                mark_recording_failed(&app, &state.db, recording, err_msg).await,
+            ));
+        }
+    };
 
     // Load and decode the WAV file on a blocking thread (CPU-intensive for large files).
     let wav_path_clone = wav_path.clone();
