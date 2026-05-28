@@ -71,11 +71,11 @@
     {/if}
   </div>
 
-  {#if recording.status.status === 'failed' && onRetry}
+  {#if onRetry}
     <button
       class="btn-retry"
-      title="Retry transcription"
-      onclick={(e: MouseEvent) => { e.stopPropagation(); onRetry!(); }}
+      title="Re-transcribe"
+      onclick={(e: MouseEvent) => { e.stopPropagation(); onRetry(); }}
     >
       ↻
     </button>
@@ -195,7 +195,7 @@
   }
 
   .btn-retry {
-    display: inline-flex;
+    display: none;
     align-items: center;
     justify-content: center;
     width: 22px;
@@ -203,15 +203,19 @@
     border-radius: var(--radius-sm);
     font-size: 14px;
     font-weight: 600;
-    color: var(--accent);
+    color: var(--text-muted);
     background: transparent;
-    border: 1px solid var(--accent);
     flex-shrink: 0;
     transition: color 0.15s ease, background-color 0.15s ease;
   }
 
+  .recording-card:hover .btn-retry,
+  .recording-card:focus-within .btn-retry {
+    display: inline-flex;
+  }
+
   .btn-retry:hover {
-    color: white;
-    background-color: var(--accent);
+    color: var(--accent);
+    background-color: color-mix(in srgb, var(--accent) 10%, transparent);
   }
 </style>

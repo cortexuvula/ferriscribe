@@ -43,7 +43,7 @@
 
   function retryTranscription(id: string) {
     pipeline.retry(id);
-    toasts.success('Retrying transcription...');
+    toasts.success('Starting re-transcription…');
   }
 </script>
 
