@@ -223,7 +223,6 @@
   }
 
   .letter-select {
-    appearance: auto;
     cursor: pointer;
   }
 
