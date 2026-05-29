@@ -6,6 +6,7 @@
     anyGenerating: boolean;
     done: boolean;
     copyStatus: 'idle' | 'copying' | 'copied' | undefined;
+    icdCodes?: string[];
     onGenerate: () => void;
     onCopy: () => void;
     onSpeedRead?: () => void;
@@ -18,6 +19,7 @@
     anyGenerating,
     done,
     copyStatus,
+    icdCodes,
     onGenerate,
     onCopy,
     onSpeedRead,
@@ -62,6 +64,14 @@
           Regenerate
         </button>
       </div>
+      {#if icdCodes && icdCodes.length > 0}
+        <div class="icd-codes">
+          <span class="icd-label">ICD Codes:</span>
+          {#each icdCodes as code}
+            <span class="icd-code">{code}</span>
+          {/each}
+        </div>
+      {/if}
     {:else}
       <button
         class="btn-generate"
@@ -202,5 +212,32 @@
     color: var(--success, #22c55e);
     border-color: var(--success, #22c55e);
     background-color: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
+  }
+
+  .icd-codes {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+  }
+
+  .icd-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .icd-code {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: monospace;
+    color: var(--accent);
+    background-color: color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: var(--radius-sm);
   }
 </style>

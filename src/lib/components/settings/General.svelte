@@ -357,6 +357,23 @@
           </p>
         </span>
       </label>
+
+      <label class="form-row">
+        <input
+          type="checkbox"
+          checked={settings.state.capture_for_training ?? false}
+          onchange={(e) => settings.updateField('capture_for_training', (e.target as HTMLInputElement).checked)}
+        />
+        <span>
+          Capture generations for training corpus
+          <p class="hint">
+            Records every SOAP generation and your edited final version into a
+            local-device pool (encrypted whenever your database is encrypted).
+            Useful for fine-tuning a model on your own dictation style later.
+            Data stays on this device — nothing is sent anywhere.
+          </p>
+        </span>
+      </label>
     </div>
   </details>
 </section>

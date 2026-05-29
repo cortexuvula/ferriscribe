@@ -90,6 +90,11 @@ export function tokenize(text: string): Token[] {
 
 // Matches: "(ICD-10: X00.0)", "[ICD-9: 250.00]", " ICD-10: J45.909", etc.
 const ICD_RE = /\s*[\(\[]?\s*ICD-\d+:?\s*[A-Z]?[\d\.]+\s*[\)\]]?/giu;
+
+/** Extract all ICD codes from text, returning cleaned-up code strings. */
+export function extractIcdCodes(text: string): string[] {
+  return text.match(ICD_RE)?.map(s => s.replace(/^[\(\[\s]+|[\)\]\s]+$/g, '')) ?? [];
+}
 const NOT_DISCUSSED_LINE_RE = /^.*?:\s*Not discussed.*$/gimu;
 const LEADING_BULLET_RE = /^[-•*]\s+/gmu;
 
