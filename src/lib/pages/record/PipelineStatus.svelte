@@ -1,10 +1,12 @@
 <script lang="ts">
   import { pipeline, type PipelineStage } from '../../stores/pipeline.svelte';
+  import { extractIcdCodes } from '../../rsvp/engine';
 
   type CopyStatus = 'idle' | 'copying' | 'copied';
 
   interface Props {
     copyStatus?: CopyStatus;
+    soapNoteText?: string | null;
     onCancel: () => void;
     onRetry: () => void;
     onCopySoap: () => Promise<void> | void;
@@ -12,11 +14,17 @@
   }
   let {
     copyStatus = $bindable<CopyStatus>('idle'),
+    soapNoteText,
     onCancel,
     onRetry,
     onCopySoap,
     onSpeedRead,
   }: Props = $props();
+
+  // Extract ICD codes from the SOAP note text
+  const icdCodes = $derived(
+    soapNoteText ? extractIcdCodes(soapNoteText) : []
+  );
 
   function stageLabel(stage: PipelineStage): string {
     switch (stage) {
@@ -117,6 +125,15 @@
           {copyStatus === 'copying' ? 'Copying…' : copyStatus === 'copied' ? 'Copied!' : 'Copy SOAP Note'}
         </button>
       </div>
+
+      {#if icdCodes.length > 0}
+        <div class="icd-codes">
+          <span class="icd-label">ICD Codes:</span>
+          {#each icdCodes as code}
+            <span class="icd-code">{code}</span>
+          {/each}
+        </div>
+      {/if}
     {/if}
 
     {#if pipeline.state.current.stage === 'failed'}
@@ -270,5 +287,33 @@
     background-color: rgba(239, 68, 68, 0.1);
     color: var(--danger, #ef4444);
     font-size: 13px;
+  }
+
+  .icd-codes {
+    margin-top: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .icd-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .icd-code {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 8px;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: monospace;
+    color: var(--accent);
+    background-color: color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: var(--radius-sm);
   }
 </style>

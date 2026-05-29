@@ -96,6 +96,23 @@
   // Track the recording ID the current pipeline status refers to
   let pipelineRecordingId = $state<string | null>(null);
 
+  // SOAP note text for ICD code extraction — fetched when pipeline completes
+  let soapNoteText = $state<string | null>(null);
+
+  // Fetch SOAP note when pipeline completes
+  $effect(() => {
+    const current = pipeline.state.current;
+    if (current?.stage === 'completed' && pipelineRecordingId) {
+      getRecording(pipelineRecordingId).then((rec) => {
+        soapNoteText = rec?.soap_note ?? null;
+      }).catch(() => {
+        soapNoteText = null;
+      });
+    } else {
+      soapNoteText = null;
+    }
+  });
+
   // Silent-recording warning dialog state
   let silenceDialogOpen = $state(false);
   let silenceDialogRecordingId = $state<string | null>(null);
@@ -288,6 +305,7 @@
       {#if pipeline.state.current && pipelineRecordingId}
         <PipelineStatus
           bind:copyStatus
+          soapNoteText={soapNoteText}
           onCancel={handleCancelPipeline}
           onRetry={handleRetry}
           onCopySoap={handleCopySoap}
