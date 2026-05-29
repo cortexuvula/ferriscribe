@@ -38,6 +38,12 @@
     onAudienceChange,
     onLetterTypeChange,
   }: Props = $props();
+  $effect(() => {
+    if (recording?.soap_note) {
+      const codes = extractIcdCodes(recording.soap_note);
+      console.log('[GenerateControls] ICD codes extracted:', codes.length, 'codes found');
+    }
+  });
 </script>
 
 {#if generationState.error}

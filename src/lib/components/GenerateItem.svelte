@@ -97,6 +97,7 @@
 
   .item-info {
     flex: 1;
+    min-width: 0;
   }
 
   .item-title {
@@ -112,7 +113,8 @@
   }
 
   .item-action {
-    flex-shrink: 0;
+    flex-shrink: 1;
+    min-width: 0;
   }
 
   .btn-generate {
