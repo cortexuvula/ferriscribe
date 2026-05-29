@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { orpIndex } from './engine';
 import { baseDelayMs, delayMs, type Token } from './engine';
-import { tokenize } from './engine';
+import { tokenize, extractIcdCodes } from './engine';
 import { preprocessSoap } from './engine';
 import { detectSections, type Section } from './engine';
 
@@ -145,6 +145,52 @@ describe('preprocessSoap', () => {
   it('leaves clean text untouched', () => {
     const clean = 'Patient reports chest pain.';
     expect(preprocessSoap(clean)).toBe(clean);
+  });
+
+  it('strips ICD-9 Code: format from SOAP template output', () => {
+    const out = preprocessSoap('ICD-9 Code: V70.0\n\nSubjective:\n- Chief complaint: cough');
+    expect(out).not.toMatch(/ICD-9/);
+    expect(out).not.toMatch(/V70/);
+    expect(out).toContain('Subjective');
+  });
+
+  it('strips ICD-10 Code: format from SOAP template output', () => {
+    const out = preprocessSoap('ICD-10 Code: Z00.00\n\nSubjective:\n- Chief complaint: wellness');
+    expect(out).not.toMatch(/ICD-10/);
+    expect(out).not.toMatch(/Z00/);
+  });
+});
+
+describe('extractIcdCodes', () => {
+  it('extracts ICD-9 Code: format from SOAP template output', () => {
+    const codes = extractIcdCodes('ICD-9 Code: 401.9\n\nSubjective:\n- Chief complaint: headache');
+    expect(codes).toContain('ICD-9 Code: 401.9');
+  });
+
+  it('extracts ICD-10 Code: format from SOAP template output', () => {
+    const codes = extractIcdCodes('ICD-10 Code: I10\n\nSubjective:\n- Chief complaint: hypertension');
+    expect(codes).toContain('ICD-10 Code: I10');
+  });
+
+  it('extracts inline ICD codes in parentheses', () => {
+    const codes = extractIcdCodes('Hypertension (ICD-9: 401.9)');
+    expect(codes).toContain('ICD-9: 401.9');
+  });
+
+  it('extracts inline ICD-10 codes in brackets', () => {
+    const codes = extractIcdCodes('Diabetes [ICD-10: E11.9]');
+    expect(codes).toContain('ICD-10: E11.9');
+  });
+
+  it('extracts multiple codes', () => {
+    const text = 'ICD-9 Code: 401.9\nICD-10 Code: I10\n\nSubjective:\n- hypertension (ICD-9: 401.1)';
+    const codes = extractIcdCodes(text);
+    expect(codes.length).toBe(3);
+  });
+
+  it('returns empty array when no ICD codes present', () => {
+    const codes = extractIcdCodes('Subjective:\n- Chief complaint: cough');
+    expect(codes).toEqual([]);
   });
 });
 
