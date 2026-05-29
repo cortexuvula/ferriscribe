@@ -9,6 +9,7 @@
   import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { formatError } from '../types/errors';
+  import { extractIcdCodes } from '../rsvp/engine';
 
   let { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' } = $props();
 
@@ -26,6 +27,13 @@
     recordings.selectedRecording
       ? (recordings.selectedRecording[config.field] as string | null) ?? ''
       : null
+  );
+
+  // Extract ICD codes from SOAP note content (only relevant for soap tab)
+  const icdCodes = $derived(
+    tabId === 'soap' && content && typeof content === 'string'
+      ? extractIcdCodes(content)
+      : []
   );
 
   // Structured transcript segments from recording metadata (stored by backend
@@ -180,6 +188,14 @@
             Copy
           {/if}
         </button>
+        {#if icdCodes.length > 0}
+          <div class="icd-codes">
+            <span class="icd-label">ICD:</span>
+            {#each icdCodes as code}
+              <span class="icd-code">{code}</span>
+            {/each}
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
@@ -320,5 +336,35 @@
 
   strong {
     color: var(--text-secondary);
+  }
+
+  .icd-codes {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+    padding: 4px 8px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    border-radius: var(--radius-sm);
+    flex-wrap: wrap;
+  }
+
+  .icd-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .icd-code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--accent);
+    padding: 2px 6px;
+    background: var(--bg-primary);
+    border-radius: var(--radius-xs);
   }
 </style>
