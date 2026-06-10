@@ -5,7 +5,7 @@
   type PromptInfo = {
     key: DocType;
     label: string;
-    configField: 'custom_soap_prompt' | 'custom_referral_prompt' | 'custom_letter_prompt' | 'custom_synopsis_prompt';
+    configField: 'custom_soap_prompt' | 'custom_referral_prompt' | 'custom_letter_prompt' | 'custom_synopsis_prompt' | 'custom_peer_discussion_prompt';
     placeholders: { token: string; description: string }[];
   };
 
@@ -42,6 +42,16 @@
       label: 'Clinical Synopsis',
       configField: 'custom_synopsis_prompt',
       placeholders: [],
+    },
+    {
+      key: 'peer_discussion',
+      label: 'Peer Discussion',
+      configField: 'custom_peer_discussion_prompt',
+      placeholders: [
+        { token: '{physician_name}', description: 'Name of the physician being discussed with' },
+        { token: '{specialty}', description: 'Physician specialty' },
+        { token: '{reason}', description: 'Reason for the discussion' },
+      ],
     },
   ];
 
