@@ -66,7 +66,9 @@ pub fn default_referral_prompt() -> &'static str {
      The urgency of this referral is: {urgency}. \
      Use appropriate clinical language, include relevant history and findings from the SOAP \
      note, clearly state the reason for referral, and request the desired action. \
-     Format the letter professionally with greeting, body, and closing."
+     Format the letter professionally with greeting, body, and closing. \
+     Do not use markdown formatting. Write in plain text only. \
+     You may use uppercase headings (e.g., REASON FOR REFERRAL:) for structure."
 }
 
 /// Returns the built-in default patient letter system prompt template.
@@ -78,7 +80,9 @@ pub fn default_letter_prompt() -> &'static str {
      Generate a {letter_type} letter for the patient. \
      Use clear, plain language the patient can understand. \
      Avoid unexplained medical jargon. \
-     Be empathetic and professional."
+     Be empathetic and professional. \
+     Do not use markdown formatting. Write in plain text only. \
+     You may use uppercase headings for structure."
 }
 
 /// Returns the built-in default synopsis system prompt template.
