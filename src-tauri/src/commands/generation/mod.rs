@@ -10,6 +10,7 @@ use medical_core::error::AppError;
 
 mod helpers;
 pub mod letter;
+pub mod peer_discussion;
 pub mod referral;
 pub mod soap;
 pub mod synopsis;

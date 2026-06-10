@@ -159,6 +159,7 @@ pub fn get_default_prompt(doc_type: String) -> AppResult<String> {
     use medical_processing::document_generator::{
         default_letter_prompt, default_referral_prompt, default_synopsis_prompt,
     };
+    use medical_processing::peer_discussion::default_peer_discussion_prompt;
     use medical_processing::soap_generator::default_soap_prompt;
 
     match doc_type.as_str() {
@@ -166,6 +167,7 @@ pub fn get_default_prompt(doc_type: String) -> AppResult<String> {
         "referral" => Ok(default_referral_prompt().to_string()),
         "letter" => Ok(default_letter_prompt().to_string()),
         "synopsis" => Ok(default_synopsis_prompt().to_string()),
+        "peer_discussion" => Ok(default_peer_discussion_prompt().to_string()),
         _ => Err(AppError::Config(format!("Unknown doc_type: {}", doc_type))),
     }
 }

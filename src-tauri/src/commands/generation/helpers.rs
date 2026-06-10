@@ -26,6 +26,7 @@ pub(super) struct GenerationSettings {
     pub custom_referral_prompt: Option<String>,
     pub custom_letter_prompt: Option<String>,
     pub custom_synopsis_prompt: Option<String>,
+    pub custom_peer_discussion_prompt: Option<String>,
 }
 
 /// Load a recording, generation settings, and the full `AppConfig` from the DB
@@ -69,6 +70,7 @@ pub(super) async fn load_recording_and_settings(
             custom_referral_prompt: config.custom_referral_prompt.clone(),
             custom_letter_prompt: config.custom_letter_prompt.clone(),
             custom_synopsis_prompt: config.custom_synopsis_prompt.clone(),
+            custom_peer_discussion_prompt: config.custom_peer_discussion_prompt.clone(),
         };
 
         Ok::<_, AppError>((recording, settings, config))

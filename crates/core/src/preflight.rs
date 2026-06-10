@@ -159,6 +159,8 @@ pub enum CommandKind {
     GenerateLetter,
     /// Synopsis generation — probes the AI provider endpoint.
     GenerateSynopsis,
+    /// Peer discussion note generation — probes the AI provider endpoint.
+    GeneratePeerDiscussion,
     /// Interactive chat — probes the AI provider endpoint.
     Chat,
 }
@@ -187,6 +189,7 @@ pub async fn preflight_for_command(
             | CommandKind::GenerateReferral
             | CommandKind::GenerateLetter
             | CommandKind::GenerateSynopsis
+            | CommandKind::GeneratePeerDiscussion
             | CommandKind::Chat,
     );
     let stt_needed = matches!(kind, CommandKind::Transcribe);
