@@ -220,6 +220,68 @@ fn resolve_audience_user_template(
     out
 }
 
+/// Remove common markdown syntax from AI-generated text.
+///
+/// Converts headings to uppercase, replaces bullets with `•`, strips bold/italic
+/// markers, inline code backticks, link syntax, and horizontal rules. Intended
+/// as a safety net when prompts request plain text but the model produces markdown.
+pub fn strip_markdown(text: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static HEADING: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^#{1,6}\s+(.+)$").unwrap());
+    static BOLD: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
+    static ITALIC_STAR: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\*([^*]+)\*").unwrap());
+    static ITALIC_UNDER: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"_([^_]+)_").unwrap());
+    static INLINE_CODE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
+    static LINK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap());
+    static BULLET: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^(\s*)[*-]\s+").unwrap());
+    static HR: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^[-*_]{3,}\s*$").unwrap());
+
+    let mut out = text.to_string();
+
+    // Convert headings to uppercase lines
+    out = HEADING
+        .replace_all(&out, |caps: &regex::Captures| {
+            caps[1].to_uppercase()
+        })
+        .into_owned();
+
+    // Strip bold
+    out = BOLD.replace_all(&out, "$1").into_owned();
+
+    // Strip italic (star and underscore)
+    out = ITALIC_STAR.replace_all(&out, "$1").into_owned();
+    out = ITALIC_UNDER.replace_all(&out, "$1").into_owned();
+
+    // Strip inline code
+    out = INLINE_CODE.replace_all(&out, "$1").into_owned();
+
+    // Strip links (keep text)
+    out = LINK.replace_all(&out, "$1").into_owned();
+
+    // Replace bullets with bullet character
+    out = BULLET.replace_all(&out, "${1}• ").into_owned();
+
+    // Remove horizontal rules (line entirely)
+    out = HR.replace_all(&out, "").into_owned();
+
+    // Collapse runs of 3+ blank lines to 2
+    static MULTI_BLANK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+    out = MULTI_BLANK.replace_all(&out, "\n\n").into_owned();
+
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Synopsis
 // ---------------------------------------------------------------------------
@@ -396,5 +458,49 @@ mod tests {
         let soap = "S: foo";
         let (system, _user) = build_synopsis_prompt(soap, Some("CUSTOM SYNOPSIS"));
         assert!(system.starts_with("CUSTOM SYNOPSIS"));
+    }
+
+    #[test]
+    fn strip_markdown_removes_bold() {
+        assert_eq!(strip_markdown("**important**"), "important");
+    }
+
+    #[test]
+    fn strip_markdown_removes_italic() {
+        assert_eq!(strip_markdown("*emphasis*"), "emphasis");
+        assert_eq!(strip_markdown("_emphasis_"), "emphasis");
+    }
+
+    #[test]
+    fn strip_markdown_converts_heading_to_uppercase() {
+        assert_eq!(strip_markdown("## Reason for Referral"), "REASON FOR REFERRAL");
+    }
+
+    #[test]
+    fn strip_markdown_converts_bullets() {
+        assert_eq!(strip_markdown("- First item"), "• First item");
+        assert_eq!(strip_markdown("* First item"), "• First item");
+    }
+
+    #[test]
+    fn strip_markdown_removes_inline_code() {
+        assert_eq!(strip_markdown("use `metric` units"), "use metric units");
+    }
+
+    #[test]
+    fn strip_markdown_removes_links() {
+        assert_eq!(strip_markdown("[click here](http://example.com)"), "click here");
+    }
+
+    #[test]
+    fn strip_markdown_removes_horizontal_rules() {
+        let input = "Above\n\n---\n\nBelow";
+        assert_eq!(strip_markdown(input), "Above\n\nBelow");
+    }
+
+    #[test]
+    fn strip_markdown_preserves_plain_text() {
+        let input = "Dear Dr Smith,\n\nI am writing to refer the patient.\n\nSincerely,\nDr Jones";
+        assert_eq!(strip_markdown(input), input);
     }
 }
