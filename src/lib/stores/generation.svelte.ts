@@ -1,4 +1,4 @@
-export type GeneratingType = 'soap' | 'referral' | 'letter' | null;
+export type GeneratingType = 'soap' | 'referral' | 'letter' | 'peer_discussion' | null;
 
 interface GenerationState {
   /** Which document type is currently being generated, or null if idle. */
@@ -16,7 +16,7 @@ class GenerationStore {
     error: null,
   });
 
-  startGenerating(type: 'soap' | 'referral' | 'letter') {
+  startGenerating(type: 'soap' | 'referral' | 'letter' | 'peer_discussion') {
     this.state = { ...this.state, generating: type, error: null, progressStatus: null };
   }
 

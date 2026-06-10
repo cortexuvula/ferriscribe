@@ -47,6 +47,7 @@ class RecordingsStore {
           has_soap_note: r.soap_note !== null,
           has_referral: r.referral !== null,
           has_letter: r.letter !== null,
+          has_peer_discussion: r.peer_discussion !== null,
         }));
         this.list = summaries;
       }

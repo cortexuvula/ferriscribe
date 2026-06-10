@@ -46,3 +46,17 @@ export async function generateSynopsis(
 ): Promise<string> {
   return invokeWithOfflineHandling('generate_synopsis', { recordingId });
 }
+
+export async function generatePeerDiscussion(
+  recordingId: string,
+  physicianName: string,
+  specialty: string,
+  reason: string,
+): Promise<string> {
+  return invokeWithOfflineHandling('generate_peer_discussion', {
+    recordingId,
+    physicianName,
+    specialty,
+    reason,
+  });
+}

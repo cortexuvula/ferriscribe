@@ -25,6 +25,7 @@ export interface Recording {
   soap_note: string | null;
   referral: string | null;
   letter: string | null;
+  peer_discussion: string | null;
   chat: string | null;
   patient_name: string | null;
   audio_path: string;
@@ -56,6 +57,7 @@ export interface RecordingSummary {
   has_soap_note: boolean;
   has_referral: boolean;
   has_letter: boolean;
+  has_peer_discussion: boolean;
 }
 
 // ── Context Template ──────────────────────────────────────────────────────────
@@ -105,6 +107,7 @@ export interface AppConfig {
   custom_referral_prompt: string | null;
   custom_letter_prompt: string | null;
   custom_synopsis_prompt: string | null;
+  custom_peer_discussion_prompt: string | null;
   // RSVP speed-reader
   rsvp_wpm: number;
   rsvp_font_size: number;
