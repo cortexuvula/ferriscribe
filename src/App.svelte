@@ -234,6 +234,8 @@
       <EditorTab tabId="referral" />
     {:else if activeTab === 'letter'}
       <EditorTab tabId="letter" />
+    {:else if activeTab === 'peer_discussion'}
+      <EditorTab tabId="peer_discussion" />
     {/if}
   </main>
 

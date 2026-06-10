@@ -11,15 +11,16 @@
   import { formatError } from '../types/errors';
   import { extractIcdCodes } from '../rsvp/engine';
 
-  let { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' } = $props();
+  let { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' | 'peer_discussion' } = $props();
 
   type TabConfig = { field: keyof Recording; label: string };
 
   const tabConfigs: Record<string, TabConfig> = {
-    transcript: { field: 'transcript', label: 'Transcript' },
-    soap:       { field: 'soap_note', label: 'SOAP Note' },
-    referral:   { field: 'referral',  label: 'Referral Letter' },
-    letter:     { field: 'letter',    label: 'Patient Letter' },
+    transcript:       { field: 'transcript',       label: 'Transcript' },
+    soap:             { field: 'soap_note',         label: 'SOAP Note' },
+    referral:         { field: 'referral',          label: 'Referral Letter' },
+    letter:           { field: 'letter',            label: 'Patient Letter' },
+    peer_discussion:  { field: 'peer_discussion',   label: 'Peer Discussion' },
   };
 
   const config = $derived(tabConfigs[tabId]);

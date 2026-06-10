@@ -19,7 +19,8 @@
     { id: 'transcript', label: 'Transcript', icon: '📄' },
     { id: 'soap',       label: 'SOAP Note',  icon: '🏥' },
     { id: 'referral',   label: 'Referral',   icon: '📨' },
-    { id: 'letter',     label: 'Letter',     icon: '✉' },
+    { id: 'letter',         label: 'Letter',         icon: '✉' },
+    { id: 'peer_discussion', label: 'Peer Discussion', icon: '👥' },
   ];
 </script>
 
