@@ -267,15 +267,15 @@ pub fn strip_markdown(text: &str) -> String {
                 // Look for closing underscore
                 if let Some(close) = chars[i + 1..].iter().position(|&c| c == '_') {
                     let close_idx = i + 1 + close;
-                    let content: String = chars[i + 1..close_idx].iter().collect();
-                    if !content.is_empty()
-                        && !content.starts_with(char::is_whitespace)
-                        && !content.contains('\n')
+                    if close_idx > i + 1
+                        && !chars[i + 1].is_whitespace()
+                        && !chars[close_idx - 1].is_whitespace()
+                        && !chars[i + 1..close_idx].contains(&'\n')
                         && (close_idx + 1 >= len
                             || (!chars[close_idx + 1].is_alphanumeric()
                                 && chars[close_idx + 1] != '_'))
                     {
-                        result.push_str(&content);
+                        chars[i + 1..close_idx].iter().for_each(|c| result.push(*c));
                         i = close_idx + 1;
                         continue;
                     }
