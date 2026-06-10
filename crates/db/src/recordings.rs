@@ -33,13 +33,13 @@ impl RecordingsRepo {
 
         conn.execute(
             "INSERT INTO recordings (
-                id, filename, transcript, soap_note, referral, letter, chat,
+                id, filename, transcript, soap_note, referral, letter, peer_discussion, chat,
                 patient_name, audio_path, duration_seconds, file_size_bytes,
                 stt_provider, ai_provider, tags, processing_status, created_at, metadata
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15, ?16, ?17
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                ?9, ?10, ?11, ?12,
+                ?13, ?14, ?15, ?16, ?17, ?18
              )",
             rusqlite::params![
                 recording.id.to_string(),
@@ -48,6 +48,7 @@ impl RecordingsRepo {
                 recording.soap_note,
                 recording.referral,
                 recording.letter,
+                recording.peer_discussion,
                 recording.chat,
                 recording.patient_name,
                 recording.audio_path.to_string_lossy().as_ref(),
@@ -72,7 +73,7 @@ impl RecordingsRepo {
     pub fn get_by_id(conn: &Connection, id: &Uuid) -> DbResult<Recording> {
         let id_str = id.to_string();
         conn.query_row(
-            "SELECT id, filename, transcript, soap_note, referral, letter, chat,
+            "SELECT id, filename, transcript, soap_note, referral, letter, peer_discussion, chat,
                     patient_name, audio_path, duration_seconds, file_size_bytes,
                     stt_provider, ai_provider, tags, processing_status, created_at, metadata
              FROM recordings
@@ -94,7 +95,7 @@ impl RecordingsRepo {
     /// pagination.
     pub fn list_all(conn: &Connection, limit: u32, offset: u32) -> DbResult<Vec<RecordingSummary>> {
         let mut stmt = conn.prepare(
-            "SELECT id, filename, transcript, soap_note, referral, letter, chat,
+            "SELECT id, filename, transcript, soap_note, referral, letter, peer_discussion, chat,
                     patient_name, audio_path, duration_seconds, file_size_bytes,
                     stt_provider, ai_provider, tags, processing_status, created_at, metadata
              FROM recordings
@@ -132,23 +133,25 @@ impl RecordingsRepo {
                 soap_note = ?3,
                 referral = ?4,
                 letter = ?5,
-                chat = ?6,
-                patient_name = ?7,
-                audio_path = ?8,
-                duration_seconds = ?9,
-                file_size_bytes = ?10,
-                stt_provider = ?11,
-                ai_provider = ?12,
-                tags = ?13,
-                processing_status = ?14,
-                metadata = ?15
-             WHERE id = ?16",
+                peer_discussion = ?6,
+                chat = ?7,
+                patient_name = ?8,
+                audio_path = ?9,
+                duration_seconds = ?10,
+                file_size_bytes = ?11,
+                stt_provider = ?12,
+                ai_provider = ?13,
+                tags = ?14,
+                processing_status = ?15,
+                metadata = ?16
+             WHERE id = ?17",
             rusqlite::params![
                 recording.filename,
                 recording.transcript,
                 recording.soap_note,
                 recording.referral,
                 recording.letter,
+                recording.peer_discussion,
                 recording.chat,
                 recording.patient_name,
                 recording.audio_path.to_string_lossy().as_ref(),
@@ -245,7 +248,7 @@ impl RecordingsRepo {
         }
         let placeholders = vec!["?"; ids.len()].join(",");
         let sql = format!(
-            "SELECT id, filename, transcript, soap_note, referral, letter, chat, \
+            "SELECT id, filename, transcript, soap_note, referral, letter, peer_discussion, chat, \
                      patient_name, audio_path, duration_seconds, file_size_bytes, \
                      stt_provider, ai_provider, tags, processing_status, created_at, metadata \
              FROM recordings WHERE id IN ({placeholders})"
@@ -276,32 +279,33 @@ impl RecordingsRepo {
         let soap_note: Option<String> = row.get(3)?;
         let referral: Option<String> = row.get(4)?;
         let letter: Option<String> = row.get(5)?;
-        let chat: Option<String> = row.get(6)?;
-        let patient_name: Option<String> = row.get(7)?;
-        let audio_path_str: Option<String> = row.get(8)?;
-        let duration_seconds: Option<f64> = row.get(9)?;
-        let file_size_bytes: Option<i64> = row.get(10)?;
-        let stt_provider: Option<String> = row.get(11)?;
-        let ai_provider: Option<String> = row.get(12)?;
+        let peer_discussion: Option<String> = row.get(6)?;
+        let chat: Option<String> = row.get(7)?;
+        let patient_name: Option<String> = row.get(8)?;
+        let audio_path_str: Option<String> = row.get(9)?;
+        let duration_seconds: Option<f64> = row.get(10)?;
+        let file_size_bytes: Option<i64> = row.get(11)?;
+        let stt_provider: Option<String> = row.get(12)?;
+        let ai_provider: Option<String> = row.get(13)?;
 
-        let tags_json: Option<String> = row.get(13)?;
+        let tags_json: Option<String> = row.get(14)?;
         let tags: Vec<String> = tags_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
 
-        let status_json: Option<String> = row.get(14)?;
+        let status_json: Option<String> = row.get(15)?;
         let status: ProcessingStatus = status_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or(ProcessingStatus::Pending);
 
-        let created_at_str: String = row.get(15)?;
+        let created_at_str: String = row.get(16)?;
         let created_at: DateTime<Utc> = DateTime::parse_from_rfc3339(&created_at_str)
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now());
 
-        let metadata_str: Option<String> = row.get(16)?;
+        let metadata_str: Option<String> = row.get(17)?;
         let metadata: serde_json::Value = metadata_str
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
@@ -314,6 +318,7 @@ impl RecordingsRepo {
             soap_note,
             referral,
             letter,
+            peer_discussion,
             chat,
             patient_name,
             audio_path: PathBuf::from(audio_path_str.unwrap_or_default()),
