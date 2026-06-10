@@ -29,6 +29,8 @@ pub struct Recording {
     pub referral: Option<String>,
     /// Generated patient letter.
     pub letter: Option<String>,
+    /// Generated peer-to-peer discussion note.
+    pub peer_discussion: Option<String>,
     /// Interactive chat transcript.
     pub chat: Option<String>,
     /// Patient name (if known).
@@ -66,6 +68,7 @@ impl Recording {
             soap_note: None,
             referral: None,
             letter: None,
+            peer_discussion: None,
             chat: None,
             patient_name: None,
             audio_path,
@@ -187,6 +190,8 @@ pub struct RecordingSummary {
     pub has_referral: bool,
     /// Whether a patient letter exists (without loading it).
     pub has_letter: bool,
+    /// Whether a peer discussion note exists (without loading it).
+    pub has_peer_discussion: bool,
 }
 
 impl From<&Recording> for RecordingSummary {
@@ -203,6 +208,7 @@ impl From<&Recording> for RecordingSummary {
             has_soap_note: r.soap_note.is_some(),
             has_referral: r.referral.is_some(),
             has_letter: r.letter.is_some(),
+            has_peer_discussion: r.peer_discussion.is_some(),
         }
     }
 }
