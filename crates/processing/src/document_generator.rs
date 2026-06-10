@@ -220,6 +220,9 @@ fn resolve_audience_user_template(
     out
 }
 
+// NOTE: see also `postprocess::clean_text` which strips similar markdown patterns
+// for SOAP output. If consolidating in the future, extract shared helpers.
+
 /// Remove common markdown syntax from AI-generated text.
 ///
 /// Converts headings to uppercase, replaces bullets with `•`, strips bold/italic
@@ -236,7 +239,7 @@ pub fn strip_markdown(text: &str) -> String {
     static ITALIC_STAR: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\*([^*]+)\*").unwrap());
     static ITALIC_UNDER: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"_([^_]+)_").unwrap());
+        LazyLock::new(|| Regex::new(r"\b_([^_]+?)_\b").unwrap());
     static INLINE_CODE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
     static LINK: LazyLock<Regex> =
@@ -502,5 +505,10 @@ mod tests {
     fn strip_markdown_preserves_plain_text() {
         let input = "Dear Dr Smith,\n\nI am writing to refer the patient.\n\nSincerely,\nDr Jones";
         assert_eq!(strip_markdown(input), input);
+    }
+
+    #[test]
+    fn strip_markdown_preserves_underscores_in_identifiers() {
+        assert_eq!(strip_markdown("patient_id and some_variable"), "patient_id and some_variable");
     }
 }
