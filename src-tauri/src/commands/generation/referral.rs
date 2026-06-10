@@ -143,7 +143,7 @@ async fn generate_referral_inner(
             )),
         })?;
 
-    let referral_text = response.content;
+    let referral_text = medical_processing::document_generator::strip_markdown(&response.content);
     if referral_text.is_empty() {
         return Err(AppError::AiProvider(
             "AI returned an empty referral letter.".to_string(),
