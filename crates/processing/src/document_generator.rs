@@ -275,7 +275,7 @@ pub fn strip_markdown(text: &str) -> String {
                             || (!chars[close_idx + 1].is_alphanumeric()
                                 && chars[close_idx + 1] != '_'))
                     {
-                        chars[i + 1..close_idx].iter().for_each(|c| result.push(*c));
+                        result.extend(chars[i + 1..close_idx].iter());
                         i = close_idx + 1;
                         continue;
                     }
