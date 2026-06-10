@@ -256,31 +256,32 @@ pub fn strip_markdown(text: &str) -> String {
     // Strip italic underscore using manual scan (look-around not supported in Rust regex).
     // Only strip underscores that are not adjacent to word characters or other underscores.
     fn strip_italic_underscores(input: &str) -> String {
-        let bytes = input.as_bytes();
-        let len = bytes.len();
-        let mut result = String::with_capacity(len);
+        let chars: Vec<char> = input.chars().collect();
+        let len = chars.len();
+        let mut result = String::with_capacity(input.len());
         let mut i = 0;
         while i < len {
-            if bytes[i] == b'_'
-                && (i == 0 || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_'))
+            if chars[i] == '_'
+                && (i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_'))
             {
                 // Look for closing underscore
-                if let Some(close) = bytes[i + 1..].iter().position(|&b| b == b'_') {
+                if let Some(close) = chars[i + 1..].iter().position(|&c| c == '_') {
                     let close_idx = i + 1 + close;
-                    let content = &input[i + 1..close_idx];
+                    let content: String = chars[i + 1..close_idx].iter().collect();
                     if !content.is_empty()
+                        && !content.starts_with(char::is_whitespace)
                         && !content.contains('\n')
                         && (close_idx + 1 >= len
-                            || (!bytes[close_idx + 1].is_ascii_alphanumeric()
-                                && bytes[close_idx + 1] != b'_'))
+                            || (!chars[close_idx + 1].is_alphanumeric()
+                                && chars[close_idx + 1] != '_'))
                     {
-                        result.push_str(content);
+                        result.push_str(&content);
                         i = close_idx + 1;
                         continue;
                     }
                 }
             }
-            result.push(bytes[i] as char);
+            result.push(chars[i]);
             i += 1;
         }
         result
@@ -299,11 +300,10 @@ pub fn strip_markdown(text: &str) -> String {
     out = BOLD.replace_all(&out, "$1").into_owned();
 
     // Strip italic (star and underscore)
-    let out = ITALIC_STAR.replace_all(&out, "$1").into_owned();
-    let out = strip_italic_underscores(&out);
+    out = ITALIC_STAR.replace_all(&out, "$1").into_owned();
+    out = strip_italic_underscores(&out);
 
     // Strip inline code
-    let mut out = out;
     out = INLINE_CODE.replace_all(&out, "$1").into_owned();
 
     // Strip links (keep text)
