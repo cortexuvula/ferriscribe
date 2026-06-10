@@ -11,6 +11,7 @@ pub mod m004_generations;
 pub mod m005_user_dictionary;
 pub mod m006_letter_audiences;
 pub mod m007_processing_queue_indexes;
+pub mod m008_peer_discussion;
 
 use rusqlite::Connection;
 
@@ -69,6 +70,11 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 7,
             name: "processing_queue_indexes",
             up: m007_processing_queue_indexes::up,
+        },
+        Migration {
+            version: 8,
+            name: "peer_discussion",
+            up: m008_peer_discussion::up,
         },
     ]
 }
