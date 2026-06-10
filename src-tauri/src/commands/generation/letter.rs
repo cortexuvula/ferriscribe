@@ -155,7 +155,7 @@ async fn generate_letter_inner(
         })?;
 
     let letter_text = medical_processing::document_generator::strip_markdown(&response.content);
-    if letter_text.is_empty() {
+    if letter_text.trim().is_empty() {
         return Err(AppError::AiProvider(
             "AI returned an empty letter.".to_string(),
         ));

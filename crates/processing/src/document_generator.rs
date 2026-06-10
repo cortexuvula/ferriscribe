@@ -242,8 +242,6 @@ pub fn strip_markdown(text: &str) -> String {
         LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
     static ITALIC_STAR: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\*([^*]+)\*").unwrap());
-    static ITALIC_UNDER: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\b_([^_]+?)_\b").unwrap());
     static INLINE_CODE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
     static LINK: LazyLock<Regex> =
@@ -252,6 +250,41 @@ pub fn strip_markdown(text: &str) -> String {
         LazyLock::new(|| Regex::new(r"(?m)^(\s*)[*-]\s+").unwrap());
     static HR: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?m)^[-*_]{3,}\s*$").unwrap());
+    static MULTI_BLANK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+
+    // Strip italic underscore using manual scan (look-around not supported in Rust regex).
+    // Only strip underscores that are not adjacent to word characters or other underscores.
+    fn strip_italic_underscores(input: &str) -> String {
+        let bytes = input.as_bytes();
+        let len = bytes.len();
+        let mut result = String::with_capacity(len);
+        let mut i = 0;
+        while i < len {
+            if bytes[i] == b'_'
+                && (i == 0 || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_'))
+            {
+                // Look for closing underscore
+                if let Some(close) = bytes[i + 1..].iter().position(|&b| b == b'_') {
+                    let close_idx = i + 1 + close;
+                    let content = &input[i + 1..close_idx];
+                    if !content.is_empty()
+                        && !content.contains('\n')
+                        && (close_idx + 1 >= len
+                            || (!bytes[close_idx + 1].is_ascii_alphanumeric()
+                                && bytes[close_idx + 1] != b'_'))
+                    {
+                        result.push_str(content);
+                        i = close_idx + 1;
+                        continue;
+                    }
+                }
+            }
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        result
+    }
 
     let mut out = text.to_string();
 
@@ -266,10 +299,11 @@ pub fn strip_markdown(text: &str) -> String {
     out = BOLD.replace_all(&out, "$1").into_owned();
 
     // Strip italic (star and underscore)
-    out = ITALIC_STAR.replace_all(&out, "$1").into_owned();
-    out = ITALIC_UNDER.replace_all(&out, "$1").into_owned();
+    let out = ITALIC_STAR.replace_all(&out, "$1").into_owned();
+    let out = strip_italic_underscores(&out);
 
     // Strip inline code
+    let mut out = out;
     out = INLINE_CODE.replace_all(&out, "$1").into_owned();
 
     // Strip links (keep text)
@@ -282,8 +316,7 @@ pub fn strip_markdown(text: &str) -> String {
     out = HR.replace_all(&out, "").into_owned();
 
     // Collapse runs of 3+ blank lines to 2
-    static MULTI_BLANK: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+
     out = MULTI_BLANK.replace_all(&out, "\n\n").into_owned();
 
     out
@@ -502,6 +535,12 @@ mod tests {
     #[test]
     fn strip_markdown_removes_horizontal_rules() {
         let input = "Above\n\n---\n\nBelow";
+        assert_eq!(strip_markdown(input), "Above\n\nBelow");
+    }
+
+    #[test]
+    fn strip_markdown_removes_horizontal_rules_isolated() {
+        let input = "Above\n---\nBelow";
         assert_eq!(strip_markdown(input), "Above\n\nBelow");
     }
 
