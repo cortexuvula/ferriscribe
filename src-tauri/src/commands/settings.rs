@@ -153,7 +153,7 @@ pub fn list_api_keys(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>
 
 /// Return the built-in default system prompt for the given document type.
 ///
-/// `doc_type` must be one of: "soap", "referral", "letter", "synopsis".
+/// `doc_type` must be one of: "soap", "referral", "letter", "synopsis", "peer_discussion".
 #[tauri::command]
 pub fn get_default_prompt(doc_type: String) -> AppResult<String> {
     use medical_processing::document_generator::{

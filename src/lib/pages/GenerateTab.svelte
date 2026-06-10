@@ -1,6 +1,6 @@
 <script lang="ts">
   import { recordings, selectRecording } from '../stores/recordings.svelte';
-  import { generateSoap, generateReferral, generateLetter } from '../api/generation';
+  import { generateSoap, generateReferral, generateLetter, generatePeerDiscussion } from '../api/generation';
   import { generation } from '../stores/generation.svelte';
   import { copyWithStatus } from '../utils/clipboard';
   import { buildPatientContext } from '../utils/patient_context';
@@ -15,6 +15,9 @@
 
   let selectedAudienceId = $state<string | null>(null);
   let letterType = $state('follow-up');
+  let physicianName = $state('');
+  let specialty = $state('');
+  let discussionReason = $state('');
 
   $effect(() => {
     letterAudiences.list();
@@ -97,7 +100,7 @@
     }
   }
 
-  async function handleGenerate(type: 'soap' | 'referral' | 'letter') {
+  async function handleGenerate(type: 'soap' | 'referral' | 'letter' | 'peer_discussion') {
     if (!recordings.selectedRecording) return;
     const recordingId = recordings.selectedRecording.id;
     generation.startGenerating(type);
@@ -117,6 +120,8 @@
         await generateReferral(recordingId);
       } else if (type === 'letter') {
         await generateLetter(recordingId, letterType || undefined, selectedAudienceId ?? undefined);
+      } else if (type === 'peer_discussion') {
+        await generatePeerDiscussion(recordingId, physicianName, specialty, discussionReason);
       }
       await Promise.all([
         selectRecording(recordingId),
@@ -175,12 +180,18 @@
         {selectedAudienceId}
         {letterType}
         audiences={letterAudiences.audiences}
+        {physicianName}
+        {specialty}
+        {discussionReason}
         onGenerate={handleGenerate}
         onCopy={handleCopy}
         onSpeedRead={handleSpeedRead}
         onClearError={() => generation.clearError()}
         onAudienceChange={(id) => (selectedAudienceId = id)}
         onLetterTypeChange={(type) => (letterType = type)}
+        onPhysicianNameChange={(name) => (physicianName = name)}
+        onSpecialtyChange={(s) => (specialty = s)}
+        onDiscussionReasonChange={(reason) => (discussionReason = reason)}
       />
     </div>
   {/if}
