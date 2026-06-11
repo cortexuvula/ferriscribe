@@ -1,5 +1,5 @@
 //! User-turn prompt assembly: sanitization + datetime + transcript + structured
-//! patient record + supplementary background.
+//! patient record + additional clinical context.
 //!
 //! The user prompt is assembled in this order:
 //!
@@ -9,7 +9,7 @@
 //! 2. **Patient record** (structured, authoritative) — medications, allergies,
 //!    conditions from the physician-supplied `PatientContext`. Used for
 //!    historical Subjective fields only.
-//! 3. **Supplementary background** (freeform narrative) — truncated to
+//! 3. **Additional clinical context** (freeform narrative) — truncated to
 //!    `MAX_CONTEXT_LENGTH` (8,000 chars) if exceeded.
 //!
 //! All inputs pass through `sanitize_prompt`, which strips prompt-injection
@@ -97,13 +97,13 @@ fn sanitize_prompt(text: &str) -> String {
 ///    the command layer enforces the authoritative upper bound)
 /// 2. Truncate context to `MAX_CONTEXT_LENGTH` (8,000 chars) if needed
 /// 3. Prepend current date/time to the transcript
-/// 4. Assemble parts: transcript → patient record → supplementary background
+/// 4. Assemble parts: transcript → patient record → additional clinical context
 ///
 /// # Patient record block
 ///
 /// When `patient_context` is provided with at least one non-empty list
 /// (medications, allergies, or conditions), a "Patient record" block is
-/// inserted between the transcript and supplementary background. This block
+/// inserted between the transcript and additional clinical context. This block
 /// is marked as "authoritative facts — use these to populate historical
 /// Subjective fields" with an explicit no-alter-Assessment-or-Plan rule.
 ///
@@ -181,7 +181,9 @@ pub fn build_user_prompt(
         }
     }
 
-    // Supplementary background comes AFTER — it is freeform narrative only.
+    // Additional clinical context comes AFTER — may include prior visit notes,
+    // lab values, imaging results, or other clinical data that should inform
+    // the full SOAP note (not just historical Subjective fields).
     if let Some(ctx) = context {
         if !ctx.is_empty() {
             let mut clean_ctx = sanitize_prompt(ctx);
@@ -202,7 +204,11 @@ pub fn build_user_prompt(
                 clean_ctx.len(),
             );
             parts.push(format!(
-                "Supplementary background (use ONLY to add context to what was discussed in the transcript above — do NOT let this override or substitute for transcript content):\n{clean_ctx}"
+                "Additional clinical context (use as described below):\n\
+                 - Prior visit notes, lab values, imaging results, or other clinical data\n\
+                 - Use this to inform the full SOAP note: populate Subjective history fields, include lab/imaging results in Objective, and let it inform your Assessment\n\
+                 - The transcript remains the primary source for today's visit; when context and transcript conflict, prefer the transcript\n\n\
+                 {clean_ctx}"
             ));
         }
     }
@@ -260,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn patient_record_block_appears_after_transcript_and_before_supplementary_background() {
+    fn patient_record_block_appears_after_transcript_and_before_additional_context() {
         let pc = PatientContext {
             patient_name: None,
             prior_soap_notes: vec![],
@@ -270,19 +276,19 @@ mod tests {
         };
         let prompt = build_user_prompt(
             "TRANSCRIPT_BODY_MARKER",
-            Some("SUPPLEMENTARY_NOTES_MARKER"),
+            Some("ADDITIONAL_CONTEXT_MARKER"),
             Some(&pc),
         );
         let pos_transcript = prompt.find("TRANSCRIPT_BODY_MARKER").unwrap();
         let pos_record = prompt.find("Patient record").unwrap();
-        let pos_supp = prompt.find("Supplementary background").unwrap();
+        let pos_ctx = prompt.find("Additional clinical context").unwrap();
         assert!(
             pos_transcript < pos_record,
             "Patient record must come AFTER transcript"
         );
         assert!(
-            pos_record < pos_supp,
-            "Patient record must come BEFORE Supplementary background"
+            pos_record < pos_ctx,
+            "Patient record must come BEFORE Additional clinical context"
         );
     }
 
@@ -305,7 +311,7 @@ mod tests {
     #[test]
     fn user_prompt_with_context() {
         let prompt = build_user_prompt("patient transcript", Some("prior visit notes"), None);
-        assert!(prompt.contains("Supplementary background"));
+        assert!(prompt.contains("Additional clinical context"));
         assert!(prompt.contains("prior visit notes"));
         assert!(prompt.contains("patient transcript"));
         // Transcript must appear before context

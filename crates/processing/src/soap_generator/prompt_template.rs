@@ -101,11 +101,13 @@ fn template_guidance_text(template: &SoapTemplate) -> &'static str {
 ///
 /// # Background context rule
 ///
-/// Background-supplied patient context (Patient record block, supplementary
-/// notes) populates **historical Subjective fields only** — it must never
-/// alter today's Objective findings, Assessment, Differential Diagnosis, or
-/// Plan. This rule is stated explicitly in RULES #4 and the Patient record
-/// instruction line.
+/// Additional clinical context (Patient record block, prior visit notes,
+/// lab values, imaging results) enriches the SOAP note: it populates
+/// historical Subjective fields, includes lab/imaging results in the
+/// Objective section, and may inform the Assessment. The transcript
+/// remains the primary source for today's visit events — when context
+/// and transcript conflict, prefer the transcript. This rule is stated
+/// explicitly in RULES #4 and the Patient record instruction line.
 pub fn default_soap_prompt() -> &'static str {
     r#"You are a physician creating a SOAP note from a patient consultation transcript.
 
@@ -116,7 +118,7 @@ RULES:
 1. NEVER fabricate, infer, or assume clinical details not in the transcript. If something was not discussed, write "Not discussed."
 2. The transcript is the sole source of truth. Every clinical finding, symptom, medication, and diagnosis must be directly traceable to something said during the visit.
 3. Do NOT use medical knowledge to add details you did not mention during the visit.
-4. If supplementary background is provided, it is secondary. Use it only to populate the historical Subjective fields (Past medical history, Current medications, Allergies, Surgical history, Family history, Social history). Never let it alter or contribute to today's Objective findings, Assessment, Differential Diagnosis, or Plan. If background conflicts with transcript, prefer the transcript. A "Patient record" block — when present — is supplied as ground truth for medications, allergies, and known conditions; treat its entries as authoritative for those Subjective fields, but the same no-alter-Assessment-or-Plan rule still applies.
+4. If additional clinical context is provided (prior visit notes, lab values, imaging results), use it to enrich the SOAP note: populate historical Subjective fields (Past medical history, Current medications, Allergies, Surgical history, Family history, Social history), include lab/imaging results in the Objective section, and let it inform your Assessment. The transcript is the primary source for today's visit events — when context and transcript conflict, prefer the transcript. A "Patient record" block — when present — is supplied as ground truth for medications, allergies, and known conditions; treat its entries as authoritative for those Subjective fields.
 5. Say "the patient" — never use names.
 6. Replace "VML" with "Valley Medical Laboratories."
 7. Write the SOAP note in first person, as the attending physician. Use "I" for actions you took during the visit (e.g., "I ordered an X-ray", "I characterized this as muscle strain"). Do NOT refer to yourself as "the physician" or "the doctor" in the third person.
@@ -262,13 +264,13 @@ OUTPUT FORMAT — plain text only, no markdown:
 Subjective:
 - Chief complaint: [from transcript]
 - History of present illness: [from transcript]
-- Past medical history: [from transcript or explicit background; otherwise "Not discussed"]
-- Surgical history: [from transcript or explicit background; otherwise "Not discussed"]
+- Past medical history: [from transcript or additional clinical context; otherwise "Not discussed"]
+- Surgical history: [from transcript or additional clinical context; otherwise "Not discussed"]
 - Current medications:
-  - [each medication on its own line, drawn from transcript or explicit background; if none stated in either, write "Not discussed"]
-- Allergies: [from transcript or explicit background; otherwise "Not discussed"]
-- Family history: [from transcript or explicit background; otherwise "Not discussed"]
-- Social history: [from transcript or explicit background; otherwise "Not discussed"]
+  - [each medication on its own line, drawn from transcript or additional clinical context; if none stated in either, write "Not discussed"]
+- Allergies: [from transcript or additional clinical context; otherwise "Not discussed"]
+- Family history: [from transcript or additional clinical context; otherwise "Not discussed"]
+- Social history: [from transcript or additional clinical context; otherwise "Not discussed"]
 - Review of systems: [from transcript; otherwise "Not performed"]
 
 Objective:
@@ -276,11 +278,11 @@ Objective:
 - Vital signs: [from transcript; otherwise "Not recorded"]
 - General appearance: [from transcript; otherwise "Not discussed" — do NOT default to "appears well"]
 - Physical examination: [from transcript; otherwise "Not discussed"]
-- Laboratory results: [from transcript; otherwise "No new labs discussed"]
-- Imaging: [from transcript; otherwise "No imaging discussed"]
+- Laboratory results: [from transcript or additional clinical context; otherwise "No new labs discussed"]
+- Imaging: [from transcript or additional clinical context; otherwise "No imaging discussed"]
 
 Assessment:
-- [ONE cohesive paragraph using ONLY findings and reasoning that appear in the transcript, written in first person ("I assessed…", "I characterized…"). Inline mention of {icd_instruction} is permitted but not required (the canonical location is the ICD line above the Subjective block); if you inline a code, render it as plain text with no marker or qualifier. Do NOT restate past medical history, medications, family history, or social history in the Assessment unless you explicitly tied them to today's reasoning. If the visit is purely a lab review with no clinical examination, the Assessment should describe the lab findings and my stated interpretation — nothing more. Not broken into sub-items.]
+- [ONE cohesive paragraph using findings and reasoning from the transcript and additional clinical context, written in first person ("I assessed…", "I characterized…"). Inline mention of {icd_instruction} is permitted but not required (the canonical location is the ICD line above the Subjective block); if you inline a code, render it as plain text with no marker or qualifier. Do NOT restate past medical history, medications, family history, or social history in the Assessment unless you explicitly tied them to today's reasoning. If the visit is purely a lab review with no clinical examination, the Assessment should describe the lab findings and my stated interpretation — nothing more. Not broken into sub-items.]
 
 Differential Diagnosis:
 - [List at least three diagnoses, ranked by clinical likelihood given the chief complaint and findings. Render every item as plain text — do NOT append "(suggested)", "(possible)", "(provisional)", or any other marker, qualifier, or annotation, regardless of whether the item was physician-stated or model-inferred. On a paperwork-only / wellness / lab-only visit with no chief complaint, list three plausible items consistent with the encounter type or the labs reviewed, still as plain text.]
@@ -307,8 +309,8 @@ FORMATTING RULES:
 SELF-CHECK BEFORE OUTPUT — for every line you produced, locate the transcript quote that supports it. If you cannot, replace the content with "Not discussed" / "Not performed" / "Not recorded" / "Not specified" or remove the line. Then run this category checklist:
 
 1. Demographics check: any line stating age, sex, gender, race, or occupation must have a transcript quote. If absent, remove the detail.
-2. Past medical history check: every PMH item must have a transcript quote (or be drawn from explicitly provided background context). If neither, write "Not discussed."
-3. Medication check: drug name, dose, frequency, and route — every element must be stated in the transcript or supplied background. If only the drug was named, write the drug name with "dose not specified." Do not invent a canonical dose. Medications supplied via background but not mentioned in the transcript are still listed under Current medications.
+2. Past medical history check: every PMH item must have a transcript quote (or be drawn from explicitly provided additional clinical context). If neither, write "Not discussed."
+3. Medication check: drug name, dose, frequency, and route — every element must be stated in the transcript or supplied additional clinical context. If only the drug was named, write the drug name with "dose not specified." Do not invent a canonical dose. Medications supplied via additional clinical context but not mentioned in the transcript are still listed under Current medications.
 4. Referral check: any specific provider name must have a transcript quote. If only the specialty was discussed, name the specialty only. If no referral was discussed, do not include a referral line.
 5. Follow-up interval check: any duration ("in 3 months", "in 2 weeks") must have a transcript quote. If absent, write "Follow-up timing not specified."
 6. Red-flag check: any "seek urgent care for X" warning must have a transcript quote. If absent, remove the line.
@@ -697,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn current_medications_format_allows_supplementary_background() {
+    fn current_medications_format_allows_additional_clinical_context() {
         // Regression: physicians supply current medications via the
         // "Additional Context" panel when they aren't restated in the visit
         // transcript. The output-format spec for "Current medications" must
@@ -713,13 +715,13 @@ mod tests {
             .expect("Current medications section missing in OUTPUT FORMAT");
         let meds_block = &format_block[meds_idx..meds_idx + 400];
         assert!(
-            meds_block.contains("background"),
-            "Current medications output format must allow supplementary background as a source.\nBlock:\n{meds_block}"
+            meds_block.contains("additional clinical context"),
+            "Current medications output format must allow additional clinical context as a source.\nBlock:\n{meds_block}"
         );
     }
 
     #[test]
-    fn historical_subjective_fields_allow_supplementary_background() {
+    fn historical_subjective_fields_allow_additional_clinical_context() {
         // Allergies, family history, and social history are also historical
         // facts the physician may supply via background context. The format
         // must allow background sourcing for all of them, not just PMH.
@@ -734,8 +736,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{field} section missing in OUTPUT FORMAT"));
             let block = &format_block[idx..idx + 200];
             assert!(
-                block.contains("background"),
-                "{field} output format must allow supplementary background as a source.\nBlock:\n{block}"
+                block.contains("additional clinical context"),
+                "{field} output format must allow additional clinical context as a source.\nBlock:\n{block}"
             );
         }
     }
@@ -769,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn medication_self_check_allows_supplementary_background() {
+    fn medication_self_check_allows_additional_clinical_context() {
         // Self-check rule #3 previously required medication elements to be
         // "stated in the transcript", which contradicts Rule #4 and causes
         // the model to drop background-supplied medications.
@@ -779,8 +781,8 @@ mod tests {
             .expect("Medication self-check entry missing");
         let block = &prompt[idx..idx + 400];
         assert!(
-            block.contains("background"),
-            "Medication self-check must acknowledge supplied background as a valid source.\nBlock:\n{block}"
+            block.contains("additional clinical context"),
+            "Medication self-check must acknowledge supplied additional clinical context as a valid source.\nBlock:\n{block}"
         );
     }
 
@@ -792,10 +794,14 @@ mod tests {
             "system prompt must reference the Patient record block by name"
         );
         // The sentence must distinguish Patient record (authoritative) from
-        // Supplementary background, and reaffirm the no-alter-Plan rule.
+        // Additional clinical context, and reaffirm the transcript-precedence rule.
         assert!(
             prompt.contains("authoritative") || prompt.contains("ground truth"),
             "system prompt must mark Patient record entries as authoritative"
+        );
+        assert!(
+            prompt.contains("primary source") || prompt.contains("prefer the transcript"),
+            "system prompt must reaffirm transcript-precedence over additional clinical context"
         );
     }
 
