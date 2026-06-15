@@ -37,7 +37,10 @@ impl UpstreamTarget {
         let base = self.base_url.trim_end_matches('/');
         match self.kind {
             UpstreamKind::Ollama => format!("{base}/api/tags"),
-            UpstreamKind::Whisper | UpstreamKind::LmStudio => format!("{base}/v1/models"),
+            // whisper.cpp's whisper-server implements GET /health (returns
+            // {"status":"ok"}) — it does NOT implement /v1/models.
+            UpstreamKind::Whisper => format!("{base}/health"),
+            UpstreamKind::LmStudio => format!("{base}/v1/models"),
         }
     }
 }
@@ -111,11 +114,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_ready_whisper_hits_v1_models() {
+    async fn probe_ready_whisper_hits_health() {
+        // whisper.cpp's whisper-server does NOT implement /v1/models; its
+        // readiness endpoint is GET /health (returns {"status":"ok"}).
         let srv = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/v1/models"))
-            .respond_with(ResponseTemplate::new(200))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status":"ok"}"#))
             .mount(&srv)
             .await;
         let t = UpstreamTarget::new(UpstreamKind::Whisper, srv.uri());
