@@ -73,6 +73,8 @@ pub struct ServerPorts {
 pub struct MdnsAdvertiser {
     daemon: ServiceDaemon,
     fullname: String,
+    instance_name: String,
+    version: String,
 }
 
 impl MdnsAdvertiser {
@@ -130,7 +132,52 @@ impl MdnsAdvertiser {
         Ok(Self {
             daemon,
             fullname: format!("{instance_name}.{SERVICE_TYPE}"),
+            instance_name: instance_name.to_string(),
+            version: version.to_string(),
         })
+    }
+
+    /// Re-register with a new TXT record. Consumes and returns `self` so the
+    /// caller keeps the same advertiser identity without needing to rebind.
+    ///
+    /// Calls `unregister` on the old service then `register` on the new one.
+    /// Used by the ReadinessWatcher when the ready set of upstreams changes.
+    pub fn update_ports(self, ports: &ServerPorts) -> Self {
+        let _ = self.daemon.unregister(&self.fullname);
+        let host = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "localhost".to_string());
+        let host_with_dot = if host.ends_with(".local.") {
+            host
+        } else {
+            format!("{host}.local.")
+        };
+        let mut props: HashMap<String, String> = HashMap::new();
+        if let Some(p) = ports.ollama { props.insert("ollama".into(), p.to_string()); }
+        if let Some(p) = ports.whisper { props.insert("whisper".into(), p.to_string()); }
+        if let Some(p) = ports.lmstudio { props.insert("lmstudio".into(), p.to_string()); }
+        if let Some(p) = ports.pairing { props.insert("pairing".into(), p.to_string()); }
+        if let Some(p) = ports.vocab { props.insert("vocab".into(), p.to_string()); }
+        props.insert("version".into(), self.version.clone());
+        let advertise_port = ports.pairing.unwrap_or(11436);
+        let info = match ServiceInfo::new(
+            SERVICE_TYPE,
+            &self.instance_name,
+            &host_with_dot,
+            "",
+            advertise_port,
+            Some(props),
+        ) {
+            Ok(i) => i.enable_addr_auto(),
+            Err(e) => {
+                tracing::warn!(error = %e, "mdns update_ports: ServiceInfo build failed; keeping old registration");
+                return self;
+            }
+        };
+        if let Err(e) = self.daemon.register(info) {
+            tracing::warn!(error = %e, "mdns update_ports: register failed; keeping old registration");
+        }
+        self
     }
 
     /// Unregister the service and shut down the mDNS daemon.
@@ -237,5 +284,45 @@ mod tests {
         let d = found.expect("did not discover own advertisement");
         assert_eq!(d.ports.ollama, Some(11435));
         assert_eq!(d.ports.pairing, Some(11436));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_ports_reregisters_with_new_txt() {
+        if std::env::var("FERRISCRIBE_MDNS_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set FERRISCRIBE_MDNS_TEST=1 to run mDNS smoke test");
+            return;
+        }
+        let ports_v1 = ServerPorts {
+            ollama: Some(11435),
+            whisper: Some(8081),
+            lmstudio: None,
+            pairing: Some(11436),
+            vocab: Some(11437),
+        };
+        let ports_v2 = ServerPorts {
+            ollama: Some(11435),
+            whisper: Some(8081),
+            lmstudio: Some(1235), // LM Studio came online
+            pairing: Some(11436),
+            vocab: Some(11437),
+        };
+        let mut adv = MdnsAdvertiser::start("update-test", &ports_v1, "0.0.0.0").unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Re-register with v2 ports (adds lmstudio).
+        adv = adv.update_ports(&ports_v2);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let mut rx = browse(Duration::from_secs(3)).unwrap();
+        let mut found = None;
+        while let Some(d) = rx.recv().await {
+            if d.instance_name.contains("update-test") {
+                found = Some(d);
+                break;
+            }
+        }
+        adv.stop();
+        let d = found.expect("did not discover own advertisement after update");
+        assert_eq!(d.ports.lmstudio, Some(1235), "lmstudio port must appear after update_ports");
     }
 }
