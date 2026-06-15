@@ -5,8 +5,10 @@
 //! all enabled subsystems with synchronous port binding (so conflicts surface
 //! immediately); `stop()` tears them down cleanly.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -16,6 +18,7 @@ use crate::auth_proxy::{ProxyConfig, spawn_auth_proxy};
 use crate::mdns::{MdnsAdvertiser, ServerPorts};
 use crate::pairing::PairingState;
 use crate::token_store::TokenStore;
+use crate::upstream::UpstreamKind;
 use crate::whisper_supervisor::WhisperSupervisor;
 
 /// Top-level configuration for the sharing subsystem.
@@ -132,6 +135,24 @@ pub struct SharingStatus {
     pub paired_clients: u32,
 }
 
+/// Per-upstream readiness snapshot, read by `status()` and updated by the
+/// ReadinessWatcher and the start gate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProbeState {
+    /// Upstream is part of this server's config (e.g. LM Studio is always a
+    /// candidate in office mode). When false the upstream is ignored entirely.
+    pub configured: bool,
+    /// Auth proxy is currently listening for this upstream.
+    pub proxy_bound: bool,
+    /// Most recent probe succeeded.
+    pub last_probe_ok: bool,
+    /// When the most recent probe ran.
+    pub last_probe_at: Option<Instant>,
+}
+
+/// Readiness cache keyed by upstream kind.
+pub type ReadinessState = HashMap<UpstreamKind, ProbeState>;
+
 /// Top-level orchestrator for all sharing subsystems.
 ///
 /// Owns the token store, pairing state, whisper supervisor, mDNS advertiser,
@@ -149,6 +170,14 @@ pub struct SharingService {
     mdns: Mutex<Option<MdnsAdvertiser>>,
     handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     running: Mutex<bool>,
+    /// Per-upstream readiness cache. Drives honest `status()`.
+    readiness: tokio::sync::RwLock<ReadinessState>,
+    /// Live snapshot served by `GET :11436/info`. Behind `Arc` so it can be
+    /// cloned into the spawned pairing task (Tailscale discovery path).
+    info: Arc<tokio::sync::RwLock<InfoSnapshot>>,
+    /// Watch channel: a new `ReadinessState` is sent whenever the ready set
+    /// changes. The Tauri layer forwards changes to a frontend event.
+    readiness_tx: tokio::sync::watch::Sender<ReadinessState>,
 }
 
 impl SharingService {
@@ -167,6 +196,30 @@ impl SharingService {
             config.whisper_model_path.clone(),
             config.whisper_internal_port,
         ));
+        let mut readiness: ReadinessState = HashMap::new();
+        readiness.insert(UpstreamKind::Ollama, ProbeState {
+            configured: true, proxy_bound: false, last_probe_ok: false, last_probe_at: None,
+        });
+        readiness.insert(UpstreamKind::Whisper, ProbeState {
+            configured: true, proxy_bound: false, last_probe_ok: false, last_probe_at: None,
+        });
+        readiness.insert(UpstreamKind::LmStudio, ProbeState {
+            configured: config.lmstudio_proxy_port.is_some(),
+            proxy_bound: false, last_probe_ok: false, last_probe_at: None,
+        });
+        let info = InfoSnapshot {
+            host: config.friendly_name.clone(),
+            version: config.version.clone(),
+            ports: ServerPorts {
+                ollama: Some(config.ollama_proxy_port),
+                whisper: Some(config.whisper_proxy_port),
+                // LM Studio advertised only once ready (see watcher).
+                lmstudio: None,
+                pairing: Some(config.pairing_port),
+                vocab: Some(config.vocab_port),
+            },
+        };
+        let (readiness_tx, _rx) = tokio::sync::watch::channel(readiness.clone());
         Ok(Self {
             config,
             store,
@@ -175,6 +228,9 @@ impl SharingService {
             mdns: Mutex::new(None),
             handles: Mutex::new(Vec::new()),
             running: Mutex::new(false),
+            readiness: tokio::sync::RwLock::new(readiness),
+            info: Arc::new(tokio::sync::RwLock::new(info)),
+            readiness_tx,
         })
     }
 
@@ -188,6 +244,13 @@ impl SharingService {
 
     /// Borrow the active config.
     pub fn config(&self) -> &SharingConfig { &self.config }
+
+    /// Subscribe to readiness changes. A new `ReadinessState` is sent whenever
+    /// the ready set of upstreams changes (an upstream binds or goes down).
+    /// The Tauri layer forwards these to a frontend event.
+    pub fn readiness_changes(&self) -> tokio::sync::watch::Receiver<ReadinessState> {
+        self.readiness_tx.subscribe()
+    }
 
     /// Start all sharing subsystems.
     ///
@@ -358,14 +421,18 @@ impl SharingService {
             .list()
             .map(|v| v.len() as u32)
             .unwrap_or(0);
+        let r = self.readiness.read().await;
+        let get = |k: UpstreamKind| -> ProbeState {
+            *r.get(&k).unwrap_or(&ProbeState::default())
+        };
+        let ollama = get(UpstreamKind::Ollama);
+        let whisper = get(UpstreamKind::Whisper);
+        let lmstudio = get(UpstreamKind::LmStudio);
         SharingStatus {
             enabled: running,
-            ollama_ok: running,
-            whisper_ok: running,
-            // Reflect the wiring decision made at start_sharing time.
-            // `lmstudio_proxy_port` is Some iff lmstudio_running_port()
-            // detected a local LM Studio listener.
-            lmstudio_ok: running && self.config.lmstudio_proxy_port.is_some(),
+            ollama_ok: running && ollama.last_probe_ok,
+            whisper_ok: running && whisper.last_probe_ok,
+            lmstudio_ok: running && lmstudio.configured && lmstudio.last_probe_ok,
             mdns_ok: running,
             pairing_ok: running,
             paired_clients: n,
@@ -864,5 +931,32 @@ mod lifecycle_tests {
         let svc = SharingService::new(c).unwrap();
         svc.stop().await.expect("first stop should be Ok");
         svc.stop().await.expect("second stop should also be Ok");
+    }
+
+    #[tokio::test]
+    async fn status_reflects_readiness_cache_not_running_flag() {
+        let dir = tempdir().unwrap();
+        let mut c = cfg_with_tokens_at(dir.path().join("tokens.db"), [0u8; 32], "k");
+        // Mark LM Studio as a configured candidate (office mode default).
+        c.lmstudio_internal_port = Some(1234);
+        c.lmstudio_proxy_port = Some(1235);
+        let svc = SharingService::new(c).unwrap();
+
+        // Force the cache into a mixed state without calling start() (which
+        // needs real upstreams). Ollama ok, whisper ok, lmstudio not.
+        {
+            let mut r = svc.readiness.write().await;
+            r.get_mut(&UpstreamKind::Ollama).unwrap().last_probe_ok = true;
+            r.get_mut(&UpstreamKind::Whisper).unwrap().last_probe_ok = true;
+            r.get_mut(&UpstreamKind::LmStudio).unwrap().last_probe_ok = false;
+            // Simulate start() having run: running=true.
+            *svc.running.lock().await = true;
+        }
+
+        let s = svc.status().await;
+        assert!(s.enabled);
+        assert!(s.ollama_ok, "ollama reflects probe cache");
+        assert!(s.whisper_ok, "whisper reflects probe cache");
+        assert!(!s.lmstudio_ok, "lmstudio reflects probe cache (not running flag)");
     }
 }
