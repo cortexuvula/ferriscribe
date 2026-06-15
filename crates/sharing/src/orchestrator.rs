@@ -1251,11 +1251,12 @@ mod lifecycle_tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path};
 
-        // Stand up a mock whisper upstream returning 200 on /v1/models.
+        // Stand up a mock whisper upstream returning 200 on /health (the
+        // whisper.cpp server readiness endpoint — it has no /v1/models).
         let upstream = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/v1/models"))
-            .respond_with(ResponseTemplate::new(200))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"status":"ok"}"#))
             .mount(&upstream)
             .await;
         // The mock server's port IS the whisper_internal_port.
