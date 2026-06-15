@@ -305,10 +305,9 @@ impl SharingService {
         );
 
         let (ollama_ready, whisper_ready, lmstudio_ready) = {
-            let lmstudio_target = match self.config.lmstudio_internal_port {
-                Some(p) => Some(UpstreamTarget::new(UpstreamKind::LmStudio, format!("http://127.0.0.1:{p}"))),
-                None => None,
-            };
+            let lmstudio_target = self.config.lmstudio_internal_port.map(|p| {
+                UpstreamTarget::new(UpstreamKind::LmStudio, format!("http://127.0.0.1:{p}"))
+            });
             let ollama_fut = probe_with_backoff(&client, &ollama_target, deadline);
             let whisper_fut = probe_with_backoff(&client, &whisper_target, deadline);
             let lmstudio_fut = async {
