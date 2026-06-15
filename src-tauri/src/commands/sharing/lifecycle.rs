@@ -16,9 +16,10 @@ use super::{
 #[tauri::command]
 pub async fn start_sharing(
     state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
     friendly_name: String,
 ) -> AppResult<()> {
-    start_sharing_inner(&state, friendly_name.clone()).await?;
+    start_sharing_inner(&state, friendly_name.clone(), Some(app_handle)).await?;
     // Persist after a successful start so a crash mid-start doesn't leave a
     // stale config that would auto-resume into a half-built service.
     write_server_config(&ServerConfig { version: 1, friendly_name })?;
@@ -30,9 +31,14 @@ pub async fn start_sharing(
 /// the Tauri command dispatcher. Does NOT persist `sharing-server.json` —
 /// that's the caller's concern (auto-resume reads it; the Tauri command
 /// writes it).
+///
+/// `app_handle`, when `Some`, is used to emit `sharing-readiness-changed`
+/// events to the frontend when the ReadinessWatcher brings a late-arriving
+/// upstream online. The auto-resume path passes the handle too.
 pub async fn start_sharing_inner(
     state: &AppState,
     friendly_name: String,
+    app_handle: Option<tauri::AppHandle>,
 ) -> AppResult<()> {
     // Acquire the write lock BEFORE binding ports / spawning proxies so that a
     // concurrent stop_sharing cannot return Ok while we are mid-start and leave
@@ -41,7 +47,7 @@ pub async fn start_sharing_inner(
     if sharing_slot.is_some() {
         return Err(AppError::Other("sharing already running".into()));
     }
-    let cfg = build_sharing_config(state, friendly_name).await?;
+    let cfg = build_sharing_config(friendly_name).await?;
     let service = Arc::new(SharingService::new(cfg).map_err(|e| AppError::Other(e.to_string()))?);
     service.start().await.map_err(|e| AppError::Other(e.to_string()))?;
 
@@ -61,6 +67,28 @@ pub async fn start_sharing_inner(
             None
         }
     };
+
+    // Spawn the ReadinessWatcher (10s probe loop) and a tiny forwarder that
+    // turns watch-channel changes into a Tauri event the frontend listens to.
+    // Layering: SharingService is a library crate with no tauri dep, so the
+    // emit() happens here.
+    let watcher_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| AppError::Other(e.to_string()))?;
+    service.spawn_readiness_watcher(watcher_client);
+
+    if let Some(handle) = app_handle {
+        let mut rx = service.readiness_changes();
+        tauri::async_runtime::spawn(async move {
+            use tauri::Emitter;
+            // Skip the initial value; only emit on actual changes.
+            while rx.changed().await.is_ok() {
+                let _ = handle.emit("sharing-readiness-changed", ());
+            }
+        });
+    }
 
     *sharing_slot = Some(service);
     *state.vocab_api.write().await = vocab_handle;
@@ -212,7 +240,6 @@ pub async fn sharing_status(state: State<'_, AppState>) -> AppResult<SharingStat
 }
 
 async fn build_sharing_config(
-    state: &AppState,
     friendly_name: String,
 ) -> AppResult<SharingConfig> {
     use medical_security::keychain;
@@ -234,10 +261,9 @@ async fn build_sharing_config(
     rand::thread_rng()
         .try_fill_bytes(&mut whisper_api)
         .map_err(|e| AppError::Other(e.to_string()))?;
-    // Only wire up an LM Studio proxy when LM Studio's local server is
-    // actually running. If the user starts LM Studio after Start sharing,
-    // they'll need to Stop + Start sharing to wire up the proxy.
-    let lmstudio_internal = lmstudio_running_port(&state.http_client).await;
+    // LM Studio is always a candidate in office mode. The start() gate probes
+    // it once; the ReadinessWatcher brings it online later if it boots after
+    // the gate (the login-launch race we're fixing). No Stop+Start needed.
     Ok(SharingConfig {
         enabled: true,
         friendly_name,
@@ -245,8 +271,8 @@ async fn build_sharing_config(
         whisper_proxy_port: 8081,
         pairing_port: 11436,
         whisper_internal_port: 8080,
-        lmstudio_internal_port: lmstudio_internal,
-        lmstudio_proxy_port: lmstudio_internal.map(|_| 1235),
+        lmstudio_internal_port: Some(1234),
+        lmstudio_proxy_port: Some(1235),
         vocab_port: 11437,
         token_store_path: app_data.join("sharing.db"),
         token_store_key: key,
@@ -255,18 +281,4 @@ async fn build_sharing_config(
         whisper_internal_api_key: hex::encode(whisper_api),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
-}
-
-async fn lmstudio_running_port(client: &reqwest::Client) -> Option<u16> {
-    let resp = client
-        .get("http://127.0.0.1:1234/v1/models")
-        .timeout(std::time::Duration::from_millis(300))
-        .send()
-        .await
-        .ok()?;
-    if resp.status().is_success() {
-        Some(1234)
-    } else {
-        None
-    }
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { onMount, createEventDispatcher, tick } from 'svelte';
   import PairingQr from './PairingQr.svelte';
   import { renameClient } from '../../../api/sharing';
@@ -95,7 +96,19 @@
   onMount(() => {
     refresh().then(() => regenQr());
     pollHandle = setInterval(refresh, 5000);
-    return () => clearInterval(pollHandle);
+
+    // When the ReadinessWatcher brings a late-arriving upstream online (e.g.
+    // LM Studio finishing its boot after a login launch), invalidate the
+    // cache immediately and refresh, instead of waiting up to 5s for the poll.
+    let unlistenFn: (() => void) | undefined;
+    listen('sharing-readiness-changed', () => {
+      refresh();
+    }).then((un) => { unlistenFn = un; });
+
+    return () => {
+      clearInterval(pollHandle);
+      unlistenFn?.();
+    };
   });
 
   const checks: { key: keyof SharingStatus; label: string; offHint?: string }[] = [
@@ -104,7 +117,7 @@
     {
       key: 'lmstudio_ok',
       label: 'LM Studio',
-      offHint: 'LM Studio not running on this machine. Start its local server, then Stop and Start sharing.',
+      offHint: 'LM Studio is not running yet. It will appear automatically once its local server starts.',
     },
     { key: 'mdns_ok', label: 'mDNS' },
     { key: 'pairing_ok', label: 'Pairing' },

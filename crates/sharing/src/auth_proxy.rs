@@ -100,6 +100,42 @@ pub async fn spawn_auth_proxy(
     }))
 }
 
+/// Bind a TCP listener on `0.0.0.0:port` without spawning the proxy. The
+/// readiness gate uses this to claim the port early so a conflict surfaces
+/// before the upstream probe, then hands the listener to
+/// [`spawn_auth_proxy_on_listener`] once the upstream is ready.
+pub async fn bind_proxy_listener(port: u16) -> crate::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(("0.0.0.0", port))
+        .await
+        .map_err(|e| crate::SharingError::AuthProxy(format!("bind 0.0.0.0:{port}: {e}")))
+}
+
+/// Like [`spawn_auth_proxy`] but accepts a pre-bound listener. Used by the
+/// readiness gate, which binds the proxy only after the upstream becomes
+/// ready (long after `start()`).
+pub async fn spawn_auth_proxy_on_listener(
+    listener: tokio::net::TcpListener,
+    config: ProxyConfig,
+    store: Arc<TokenStore>,
+) -> crate::Result<tokio::task::JoinHandle<()>> {
+    let client = Client::builder()
+        .pool_max_idle_per_host(8)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // No overall timeout — Ollama generations and whisper transcriptions
+        // can be arbitrarily long; only the connection phase is bounded.
+        .build()
+        .map_err(|e| crate::SharingError::AuthProxy(e.to_string()))?;
+    let state = AppState { config: config.clone(), client, store };
+    let app = Router::new()
+        .fallback(handler)
+        .with_state(state);
+    Ok(tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            warn!("auth_proxy serve exited: {e}");
+        }
+    }))
+}
+
 async fn handler(State(state): State<AppState>, req: Request) -> Response {
     match handle_inner(state, req).await {
         Ok(resp) => resp,
