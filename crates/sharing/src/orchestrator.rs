@@ -15,12 +15,12 @@ use tokio::sync::Mutex;
 
 use crate::SharingError;
 use crate::auth_proxy::{
-    ProxyConfig, bind_proxy_listener, spawn_auth_proxy_on_listener,
+    ProxyConfig, bind_proxy_listener, spawn_auth_proxy, spawn_auth_proxy_on_listener,
 };
 use crate::mdns::{MdnsAdvertiser, ServerPorts};
 use crate::pairing::PairingState;
 use crate::token_store::TokenStore;
-use crate::upstream::{UpstreamKind, UpstreamTarget, probe_with_backoff};
+use crate::upstream::{UpstreamKind, UpstreamTarget, probe_ready, probe_with_backoff};
 use crate::whisper_supervisor::WhisperSupervisor;
 
 /// Top-level configuration for the sharing subsystem.
@@ -435,11 +435,171 @@ impl SharingService {
         info.ports.lmstudio = lmstudio_port;
     }
 
+    /// Spawn the long-lived ReadinessWatcher. Probes every 10s; on a change
+    /// in the ready set, binds newly-ready upstreams, re-advertises mDNS,
+    /// updates /info, and pushes the new ReadinessState on the watch channel.
+    /// The task notices `running` flip to false on its next tick and exits.
+    /// Aborted indirectly by `stop()` (which sets running=false).
+    pub fn spawn_readiness_watcher(self: &Arc<Self>, http_client: reqwest::Client) {
+        let svc = Arc::clone(self);
+        tokio::spawn(async move {
+            // First tick fires immediately; skip it so we don't probe twice
+            // right after the gate.
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if !*svc.running.lock().await { break; }
+                svc.bind_ready_upstreams_once(&http_client).await;
+            }
+        });
+    }
+
+    /// One pass of the watcher: probe every configured upstream that isn't
+    /// already bound, bind proxies for newly-ready ones, rebuild /info,
+    /// re-advertise mDNS, and push the new ReadinessState. Also refreshes
+    /// `last_probe_ok` for already-bound upstreams so `status()` stays honest.
+    ///
+    /// Called by the watcher loop (every 10s) and by tests. Does NOT unbind
+    /// proxies for upstreams that later fail (per the chosen "gate then
+    /// self-heal, no per-request retry" design) — a bound upstream that fails
+    /// keeps its proxy and 502s; `status()` reports `last_probe_ok=false`.
+    pub async fn bind_ready_upstreams_once(&self, client: &reqwest::Client) {
+        let targets: Vec<(UpstreamKind, UpstreamTarget)> = {
+            let r = self.readiness.read().await;
+            self.unbound_probe_targets(&r)
+        };
+        let mut changed = false;
+        for (kind, target) in targets {
+            let ready = probe_ready(client, &target).await;
+            if !ready { continue; }
+            let proxy_cfg = match self.proxy_config_for(kind, &target.base_url) {
+                Some(cfg) => cfg,
+                None => continue,
+            };
+            match spawn_auth_proxy(proxy_cfg, self.store.clone()).await {
+                Ok(h) => {
+                    self.handles.lock().await.push(h);
+                    let mut r = self.readiness.write().await;
+                    if let Some(e) = r.get_mut(&kind) {
+                        e.proxy_bound = true;
+                        e.last_probe_ok = true;
+                        e.last_probe_at = Some(Instant::now());
+                        tracing::info!(upstream = ?kind, "watcher: upstream became ready, proxy bound");
+                    }
+                    changed = true;
+                }
+                Err(e) => {
+                    tracing::warn!(upstream = ?kind, error = %e, "watcher: failed to bind proxy for ready upstream");
+                }
+            }
+        }
+
+        if changed {
+            self.rebuild_info_snapshot().await;
+            // Re-advertise mDNS with the new ports.
+            if let Some(m) = self.mdns.lock().await.take() {
+                let ports = self.info.read().await.ports.clone();
+                *self.mdns.lock().await = Some(m.update_ports(&ports));
+            }
+            let r = self.readiness.read().await.clone();
+            let _ = self.readiness_tx.send(r);
+        } else {
+            self.refresh_probe_health(client).await;
+        }
+    }
+
+    /// Build the list of (kind, target) pairs for configured-but-unbound
+    /// upstreams. Read-only; borrows the readiness cache.
+    fn unbound_probe_targets(&self, r: &ReadinessState) -> Vec<(UpstreamKind, UpstreamTarget)> {
+        let mut v = Vec::new();
+        for kind in [UpstreamKind::Ollama, UpstreamKind::Whisper, UpstreamKind::LmStudio] {
+            let st = *r.get(&kind).unwrap_or(&ProbeState::default());
+            if !st.configured || st.proxy_bound { continue; }
+            let base = match kind {
+                UpstreamKind::Ollama => "http://127.0.0.1:11434".to_string(),
+                UpstreamKind::Whisper => format!("http://127.0.0.1:{}", self.config.whisper_internal_port),
+                UpstreamKind::LmStudio => match self.config.lmstudio_internal_port {
+                    Some(p) => format!("http://127.0.0.1:{p}"),
+                    None => continue,
+                },
+            };
+            v.push((kind, UpstreamTarget::new(kind, base)));
+        }
+        v
+    }
+
+    /// Build the ProxyConfig for binding a given upstream's auth proxy, or
+    /// None if the upstream isn't configured (e.g. LM Studio has no ports).
+    fn proxy_config_for(&self, kind: UpstreamKind, backend_url: &str) -> Option<ProxyConfig> {
+        let proxy_port = match kind {
+            UpstreamKind::Ollama => self.config.ollama_proxy_port,
+            UpstreamKind::Whisper => self.config.whisper_proxy_port,
+            UpstreamKind::LmStudio => self.config.lmstudio_proxy_port?,
+        };
+        let inject_api_key = match kind {
+            UpstreamKind::Whisper => Some(self.config.whisper_internal_api_key.clone()),
+            _ => None,
+        };
+        Some(ProxyConfig {
+            listen_port: proxy_port,
+            backend_url: backend_url.to_string(),
+            path_prefix: "/".to_string(),
+            inject_api_key,
+        })
+    }
+
+    /// Refresh `last_probe_ok` for already-bound upstreams (status honesty).
+    /// Does not bind or unbind anything.
+    async fn refresh_probe_health(&self, client: &reqwest::Client) {
+        let kinds: Vec<(UpstreamKind, String)> = {
+            let r = self.readiness.read().await;
+            self.bound_probe_targets(&r)
+        };
+        let mut changed = false;
+        let now = Instant::now();
+        for (kind, base) in kinds {
+            let target = UpstreamTarget::new(kind, base);
+            let ok = probe_ready(client, &target).await;
+            let mut r = self.readiness.write().await;
+            if let Some(e) = r.get_mut(&kind) {
+                if e.last_probe_ok != ok { changed = true; }
+                e.last_probe_ok = ok;
+                e.last_probe_at = Some(now);
+            }
+        }
+        if changed {
+            let r = self.readiness.read().await.clone();
+            let _ = self.readiness_tx.send(r);
+        }
+    }
+
+    /// Build the list of (kind, base_url) pairs for bound upstreams, for
+    /// periodic health probing. Read-only; borrows the readiness cache.
+    fn bound_probe_targets(&self, r: &ReadinessState) -> Vec<(UpstreamKind, String)> {
+        let mut v = Vec::new();
+        for kind in [UpstreamKind::Ollama, UpstreamKind::Whisper, UpstreamKind::LmStudio] {
+            let st = *r.get(&kind).unwrap_or(&ProbeState::default());
+            if !st.configured { continue; }
+            let base = match kind {
+                UpstreamKind::Ollama => "http://127.0.0.1:11434".to_string(),
+                UpstreamKind::Whisper => format!("http://127.0.0.1:{}", self.config.whisper_internal_port),
+                UpstreamKind::LmStudio => match self.config.lmstudio_internal_port {
+                    Some(p) => format!("http://127.0.0.1:{p}"),
+                    None => continue,
+                },
+            };
+            v.push((kind, base));
+        }
+        v
+    }
+
     /// Stop all sharing subsystems.
     ///
     /// Unregisters mDNS, kills the whisper-server child, and aborts all
-    /// proxy/pairing join handles. Idempotent: calling `stop()` when already
-    /// stopped is a no-op.
+    /// proxy/pairing join handles. The ReadinessWatcher notices `running`
+    /// flipped to false on its next tick and exits. Idempotent: calling
+    /// `stop()` when already stopped is a no-op.
     pub async fn stop(&self) -> Result<(), SharingError> {
         let mut running = self.running.lock().await;
         if !*running { return Ok(()); }
@@ -1075,6 +1235,95 @@ mod lifecycle_tests {
         assert_eq!(info.ports.pairing, Some(pairing), "pairing always advertised");
 
         // Clean up so the spawned pairing task doesn't outlive the test.
+        let _ = svc.stop().await;
+    }
+
+    /// Watcher test: a configured-but-unbound whisper upstream (simulating
+    /// "came up after the gate") is brought online by one watcher pass. The
+    /// proxy binds, /info advertises whisper, and the watch channel fires.
+    ///
+    /// We test the watcher's bind path directly (no start_with_gate call) to
+    /// keep the assertion isolated from the gate's own binding — calling both
+    /// would race on the proxy port. The whisper upstream is a wiremock mock
+    /// on an ephemeral port (configurable via whisper_internal_port); ollama
+    /// and lmstudio are left unconfigured so only whisper is probed.
+    #[tokio::test]
+    async fn watcher_binds_late_upstream_and_re_advertises() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+
+        // Stand up a mock whisper upstream returning 200 on /v1/models.
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&upstream)
+            .await;
+        // The mock server's port IS the whisper_internal_port.
+        // wiremock's uri() looks like "http://127.0.0.1:12345".
+        let whisper_internal: u16 = upstream
+            .uri()
+            .rsplit(':')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("wiremock uri must end in :port");
+
+        let whisper_proxy = ephemeral_port().await;
+
+        let dir = tempdir().unwrap();
+        let c = SharingConfig {
+            enabled: true,
+            friendly_name: "watcher-test".into(),
+            ollama_proxy_port: ephemeral_port().await,
+            whisper_proxy_port: whisper_proxy,
+            pairing_port: ephemeral_port().await,
+            whisper_internal_port: whisper_internal,
+            lmstudio_internal_port: None,
+            lmstudio_proxy_port: None,
+            vocab_port: ephemeral_port().await,
+            token_store_path: dir.path().join("tokens.db"),
+            token_store_key: [0u8; 32],
+            binary_dir: PathBuf::from("/tmp"),
+            whisper_model_path: PathBuf::from("/tmp/model.bin"),
+            whisper_internal_api_key: "k".into(),
+            version: "9.9.9".into(),
+        };
+        let svc = Arc::new(SharingService::new(c).unwrap());
+        // Whisper starts configured-but-unbound in new(); simulate "running"
+        // so the watcher's loop guard would pass (not strictly needed for the
+        // one-shot call, but mirrors reality).
+        *svc.running.lock().await = true;
+
+        // Subscribe before the watcher pass so we can observe the change.
+        let mut rx = svc.readiness_changes();
+        let _ = rx.borrow_and_update(); // drain current state
+
+        // Run one watcher pass: it probes whisper_internal (the mock, up) →
+        // ready → binds the proxy, updates /info, fires the watch channel.
+        let probe_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap();
+        svc.bind_ready_upstreams_once(&probe_client).await;
+
+        // The watch channel must have delivered a new state with whisper bound.
+        let changed = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            rx.changed(),
+        ).await;
+        assert!(changed.is_ok(), "watch channel must fire when upstream binds");
+
+        let r = svc.readiness.read().await;
+        assert!(
+            r[&UpstreamKind::Whisper].proxy_bound,
+            "watcher must bind whisper proxy after upstream came up",
+        );
+
+        // /info must now advertise the whisper proxy port.
+        let info = svc.info.read().await;
+        assert_eq!(info.ports.whisper, Some(whisper_proxy), "/info must advertise whisper");
+
         let _ = svc.stop().await;
     }
 }
