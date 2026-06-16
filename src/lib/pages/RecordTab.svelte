@@ -21,6 +21,7 @@
   import { rsvp } from '../stores/rsvp.svelte';
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
+  import { generateSoap } from '../api/generation';
 
   type Props = {
     onopenSettings?: (target: 'models' | 'audio') => void;
@@ -226,6 +227,30 @@
     pipeline.retry(pipelineRecordingId, contextText || undefined, undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
   }
 
+  // Regenerate the SOAP note using the current Patient Context, without
+  // re-running transcription. Reuses the stored transcript; overwrites the
+  // existing SOAP note. Lets the clinician update patient context after the
+  // initial pipeline run and fold it into a fresh note.
+  let regenerating = $state(false);
+  async function handleRegenerateSoap() {
+    const rid = pipelineRecordingId;
+    if (!rid || regenerating) return;
+    regenerating = true;
+    try {
+      const ctx = contextText.trim() || undefined;
+      const pc = buildPatientContext(medicationsText, allergiesText, conditionsText);
+      await generateSoap(rid, undefined, ctx, pc);
+      // Re-fetch so soapNoteText (and the editor) reflect the new note.
+      const rec = await getRecording(rid);
+      soapNoteText = rec?.soap_note ?? null;
+      await recordings.load();
+    } catch (e) {
+      toasts.error(`Failed to regenerate SOAP note: ${formatError(e)}`);
+    } finally {
+      regenerating = false;
+    }
+  }
+
   function handleCancelPipeline() {
     if (!pipelineRecordingId) return;
     pipeline.cancel(pipelineRecordingId);
@@ -306,10 +331,12 @@
         <PipelineStatus
           bind:copyStatus
           soapNoteText={soapNoteText}
+          {regenerating}
           onCancel={handleCancelPipeline}
           onRetry={handleRetry}
           onCopySoap={handleCopySoap}
           onSpeedRead={handleSpeedRead}
+          onRegenerate={handleRegenerateSoap}
         />
       {:else}
         <RecordingStateCards
