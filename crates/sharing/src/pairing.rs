@@ -34,6 +34,10 @@ pub enum PairingError {
     /// The active code's TTL has elapsed.
     #[error("code expired")]
     Expired,
+    /// Too many failed enrollment attempts. The code is invalidated; the
+    /// admin must issue a new one. Prevents brute-force of the 6-digit code.
+    #[error("too many failed attempts; issue a new code")]
+    LockedOut,
     /// Underlying token store error.
     #[error("token store: {0}")]
     Store(#[from] TokenStoreError),
@@ -44,10 +48,17 @@ pub type Result<T> = std::result::Result<T, PairingError>;
 
 const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
 
+/// Maximum failed enrollment attempts before the code is locked out and must
+/// be re-issued. Caps brute-force of the 6-digit (1M) code space: at this
+/// threshold an attacker has a ~0.0005% chance of guessing before lockout.
+const MAX_FAILED_ATTEMPTS: u32 = 5;
+
 #[derive(Debug, Clone)]
 struct ActiveCode {
     code: String,
     issued_at: Instant,
+    /// Failed enrollment attempts since issue. Resets on `issue_code`.
+    failed_attempts: u32,
 }
 
 /// Manages the lifecycle of pairing codes and their exchange for tokens.
@@ -82,7 +93,11 @@ impl PairingState {
     pub async fn issue_code(&self) -> String {
         let code = generate_code();
         let mut guard = self.active.lock().await;
-        *guard = Some(ActiveCode { code: code.clone(), issued_at: Instant::now() });
+        *guard = Some(ActiveCode {
+            code: code.clone(),
+            issued_at: Instant::now(),
+            failed_attempts: 0,
+        });
         code
     }
 
@@ -99,14 +114,28 @@ impl PairingState {
     }
 
     /// Consume a code and issue a long-lived token. One-shot semantics.
+    ///
+    /// Tracks failed attempts and locks out after [`MAX_FAILED_ATTEMPTS`],
+    /// invalidating the code so an attacker on the LAN can't brute-force the
+    /// 6-digit space. The admin must issue a new code after a lockout.
     pub async fn enroll(&self, submitted: &str, label: &str) -> Result<String> {
         let mut guard = self.active.lock().await;
-        let active = guard.as_ref().ok_or(PairingError::InvalidCode)?.clone();
+        let active = guard.as_mut().ok_or(PairingError::InvalidCode)?;
         if active.issued_at.elapsed() > self.ttl {
             *guard = None;
             return Err(PairingError::Expired);
         }
         if active.code != submitted {
+            active.failed_attempts = active.failed_attempts.saturating_add(1);
+            if active.failed_attempts >= MAX_FAILED_ATTEMPTS {
+                // Lock out: invalidate the code entirely.
+                tracing::warn!(
+                    attempts = active.failed_attempts,
+                    "pairing locked out after too many failed attempts; code invalidated"
+                );
+                *guard = None;
+                return Err(PairingError::LockedOut);
+            }
             return Err(PairingError::InvalidCode);
         }
         let issued = self.store.issue(label).map_err(PairingError::from)?;
@@ -174,5 +203,60 @@ mod tests {
             first_digits.contains(&'9'),
             "1000 draws produced no leading-9 code — RNG distribution is suspect"
         );
+    }
+
+    /// Open a TokenStore in a tempdir for lockout tests.
+    fn fresh_pairing() -> PairingState {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.db");
+        // Leak the TempDir so it outlives the test — these are short unit tests.
+        std::mem::forget(dir);
+        let store = Arc::new(TokenStore::open(&path, &[7u8; 32]).expect("open store"));
+        PairingState::new(store)
+    }
+
+    #[tokio::test]
+    async fn enroll_locks_out_after_max_failed_attempts() {
+        let pairing = fresh_pairing();
+        let _code = pairing.issue_code().await;
+        // MAX_FAILED_ATTEMPTS - 1 wrong codes return InvalidCode...
+        for _ in 0..(MAX_FAILED_ATTEMPTS - 1) {
+            assert!(matches!(
+                pairing.enroll("000000", "attacker").await,
+                Err(PairingError::InvalidCode)
+            ));
+        }
+        // ...the MAX_FAILED_ATTEMPTS-th wrong code locks out and invalidates.
+        let last = pairing.enroll("000000", "attacker").await;
+        assert!(matches!(last, Err(PairingError::LockedOut)));
+        // Code is now invalidated — even the real code can't enroll.
+        let real = pairing.current_code().await;
+        assert!(real.is_none(), "code must be invalidated after lockout");
+    }
+
+    #[tokio::test]
+    async fn enroll_resets_attempt_count_on_new_code() {
+        let pairing = fresh_pairing();
+        let _code = pairing.issue_code().await;
+        // Burn (MAX_FAILED_ATTEMPTS - 1) attempts.
+        for _ in 0..(MAX_FAILED_ATTEMPTS - 1) {
+            let _ = pairing.enroll("000000", "attacker").await;
+        }
+        // Issue a new code — attempt count resets.
+        let code = pairing.issue_code().await;
+        // Now a correct enrollment succeeds despite the prior failures.
+        let token = pairing.enroll(&code, "client").await;
+        assert!(token.is_ok(), "new code must reset the attempt counter");
+    }
+
+    #[tokio::test]
+    async fn enroll_correct_code_within_limit_succeeds() {
+        let pairing = fresh_pairing();
+        let code = pairing.issue_code().await;
+        // A couple of wrong guesses, then the right one.
+        let _ = pairing.enroll("000000", "x").await;
+        let _ = pairing.enroll("111111", "x").await;
+        let token = pairing.enroll(&code, "client").await;
+        assert!(token.is_ok());
     }
 }
