@@ -187,22 +187,26 @@ impl WhisperSupervisor {
         binary_name: &str,
     ) -> Result<PathBuf> {
         tokio::fs::create_dir_all(&self.binary_dir).await?;
+        // Refuse to download and execute a binary without a SHA-256 to verify
+        // against. A compromised manifest or MITM on the download path would
+        // otherwise execute arbitrary code on the office server.
+        let expected = expected_sha256.ok_or_else(|| {
+            WhisperError::Download(format!(
+                "sha256 hash missing for binary {binary_name}; refusing to download without verification"
+            ))
+        })?;
         let bytes = reqwest::get(url)
             .await
             .map_err(|e| WhisperError::Download(e.to_string()))?
             .bytes()
             .await
             .map_err(|e| WhisperError::Download(e.to_string()))?;
-        if let Some(expected) = expected_sha256 {
-            let got = hex::encode(Sha256::digest(&bytes));
-            if got != expected {
-                return Err(WhisperError::HashMismatch {
-                    expected: expected.to_string(),
-                    got,
-                });
-            }
-        } else {
-            warn!("sha256 not set for binary {}; skipping verification", binary_name);
+        let got = hex::encode(Sha256::digest(&bytes));
+        if got != expected {
+            return Err(WhisperError::HashMismatch {
+                expected: expected.to_string(),
+                got,
+            });
         }
         Self::extract_archive(&bytes, archive, &self.binary_dir, binary_name)?;
         let bin_path = self.binary_dir.join(binary_name);
@@ -565,6 +569,37 @@ mod tests {
                 assert_eq!(got, hex::encode(Sha256::digest(&zip_bytes)));
             }
             other => panic!("expected Err(HashMismatch); got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn download_and_verify_rejects_missing_sha256() {
+        // A manifest entry must not be downloaded without a SHA-256 to verify
+        // against — executing an unverified binary is a code-execution risk.
+        let (supervisor, _dir) = fresh_supervisor();
+        let zip_bytes = build_zip_with("whisper-server", b"untrusted");
+
+        let server = MockServer::start().await;
+        Mock::given(http_method("GET"))
+            .and(http_path("/binary.zip"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(zip_bytes.clone()),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/binary.zip", server.uri());
+        let r = supervisor
+            .download_and_verify(&url, "zip", None, "whisper-server")
+            .await;
+        match r {
+            Err(WhisperError::Download(msg)) => {
+                assert!(
+                    msg.contains("sha256"),
+                    "expected sha256-related message, got: {msg}"
+                );
+            }
+            other => panic!("expected Err(Download) for missing sha256; got {other:?}"),
         }
     }
 }
