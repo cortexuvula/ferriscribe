@@ -130,7 +130,13 @@ pub fn migrate_plaintext_to_encrypted(
         // Step 4: verify by re-opening and comparing row counts.
         verify_row_counts(db_path, &encrypting_path, db_key)?;
 
-        // Step 5: atomic swap (replace original with encrypted).
+        // Step 5: atomic swap (replace original with encrypted). fsync first so
+        // that a crash between the rename and the backup deletion can't leave a
+        // truncated encrypted DB (ext4 delayed allocation can otherwise lose
+        // unwritten pages on power loss).
+        std::fs::File::open(&encrypting_path)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| crate::DbError::Other(format!("fsync encrypted DB: {e}")))?;
         std::fs::rename(&encrypting_path, db_path)
             .map_err(|e| crate::DbError::Other(format!("rename failed: {e}")))?;
         Ok(())
@@ -195,7 +201,25 @@ fn list_user_tables(conn: &Connection) -> DbResult<Vec<String>> {
         .map_err(|e| crate::DbError::Other(format!("list tables iter: {e}")))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| crate::DbError::Other(format!("list tables collect: {e}")))?;
-    Ok(names)
+    // Defensive: table names are interpolated into a double-quoted identifier
+    // in verify_row_counts. Reject any name that isn't a plain SQL identifier
+    // (starts with letter/underscore, alphanumeric+underscore only) so a
+    // hostile name containing a double-quote or backtick can't break out of
+    // the quoting. Real tables created by this app always match this pattern.
+    let valid = names.into_iter().filter(|n| is_safe_identifier(n)).collect();
+    Ok(valid)
+}
+
+/// True iff `name` is a plain SQL identifier: starts with ASCII letter or
+/// underscore, followed by ASCII letters/digits/underscores. Used to guard
+/// identifier interpolation against injection.
+fn is_safe_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn backup_path_for(db_path: &Path) -> PathBuf {

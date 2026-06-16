@@ -192,7 +192,7 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
     let mut req_builder = state
         .client
         .request(parts.method.clone(), &upstream_url)
-        .body(body_bytes.clone());
+        .body(body_bytes);
 
     for (k, v) in parts.headers.iter() {
         if k == reqwest::header::HOST || k == reqwest::header::AUTHORIZATION {
