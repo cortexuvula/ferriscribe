@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { contextTemplates } from '../stores/contextTemplates.svelte';
+
   interface Props {
     medicationsText: string;
     allergiesText: string;
@@ -37,6 +39,16 @@
     { label: 'Lab Results', text: 'Recent lab results:\n- \n- \n- \n\n' },
     { label: 'Referral Info', text: 'Referred by: \nReason for referral: \nRelevant history: \n\n' },
   ];
+
+  // Refresh saved templates when the panel is first expanded, so newly-created
+  // templates (from Settings or the Record tab) appear without a manual reload.
+  let lastLoadedExpanded = false;
+  $effect(() => {
+    if (expanded && !lastLoadedExpanded) {
+      contextTemplates.load();
+    }
+    lastLoadedExpanded = expanded;
+  });
 </script>
 
 <div class="context-panel" class:expanded>
@@ -91,6 +103,18 @@
             {tmpl.label}
           </button>
         {/each}
+        {#if contextTemplates.list.length > 0}
+          <span class="template-divider" aria-hidden="true"></span>
+          {#each contextTemplates.list as tmpl (tmpl.name)}
+            <button
+              class="template-chip saved"
+              title={tmpl.body}
+              onclick={() => onInsertTemplate(tmpl.body)}
+            >
+              {tmpl.name}
+            </button>
+          {/each}
+        {/if}
       </div>
       <textarea
         id="ctx-notes"
@@ -195,6 +219,23 @@
     background-color: var(--bg-hover);
     color: var(--text-primary);
     border-color: var(--accent);
+  }
+
+  .template-divider {
+    width: 1px;
+    align-self: stretch;
+    margin: 2px 2px;
+    background-color: var(--border);
+  }
+
+  .template-chip.saved {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    background-color: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+
+  .template-chip.saved:hover {
+    background-color: color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   .context-textarea {
