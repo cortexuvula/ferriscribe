@@ -7,18 +7,22 @@
   interface Props {
     copyStatus?: CopyStatus;
     soapNoteText?: string | null;
+    regenerating?: boolean;
     onCancel: () => void;
     onRetry: () => void;
     onCopySoap: () => Promise<void> | void;
     onSpeedRead: () => void;
+    onRegenerate: () => void;
   }
   let {
     copyStatus = $bindable<CopyStatus>('idle'),
     soapNoteText,
+    regenerating = false,
     onCancel,
     onRetry,
     onCopySoap,
     onSpeedRead,
+    onRegenerate,
   }: Props = $props();
 
   // Extract ICD codes from the SOAP note text
@@ -116,11 +120,20 @@
 
     {#if pipeline.state.current.stage === 'completed'}
       <div class="post-actions">
-        <button class="btn-secondary" onclick={onSpeedRead}>Speed Read</button>
+        <button class="btn-secondary" onclick={onSpeedRead} disabled={regenerating}>Speed Read</button>
+        <button
+          class="btn-secondary"
+          onclick={onRegenerate}
+          disabled={regenerating}
+          title="Regenerate the SOAP note using the current Patient Context (keeps the transcript)"
+        >
+          {#if regenerating}<span class="spinner"></span>{/if}
+          {regenerating ? 'Regenerating…' : 'Regenerate'}
+        </button>
         <button
           class="btn-primary"
           onclick={onCopySoap}
-          disabled={copyStatus !== 'idle'}
+          disabled={copyStatus !== 'idle' || regenerating}
         >
           {copyStatus === 'copying' ? 'Copying…' : copyStatus === 'copied' ? 'Copied!' : 'Copy SOAP Note'}
         </button>
