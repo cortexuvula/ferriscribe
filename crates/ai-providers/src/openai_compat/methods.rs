@@ -186,7 +186,14 @@ impl OpenAiCompatibleClient {
                     Err(e) => vec![Err(AppError::AiProvider(e))],
                     Ok(data) => {
                         match serde_json::from_str::<ChatResponse>(&data) {
-                            Err(_) => vec![],
+                            Err(e) => {
+                                // Log the failure (error + byte length only — never
+                                // the data itself, which may contain model output /
+                                // clinical text). Silent drops risk incomplete SOAP
+                                // notes without the clinician noticing.
+                                warn!(error = %e, data_len = data.len(), "dropping malformed SSE event");
+                                vec![]
+                            }
                             Ok(resp) => {
                                 let mut out = Vec::new();
                                 if let Some(choice) = resp.choices.first()
