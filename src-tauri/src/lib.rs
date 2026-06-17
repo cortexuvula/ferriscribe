@@ -205,6 +205,28 @@ pub fn run() {
                     }
                 });
             }
+
+            // Auto-stop sharing when the main window closes, so the
+            // whisper-server child process is killed instead of becoming an
+            // orphan zombie on app quit. Best-effort: failures are logged.
+            use tauri::Manager;
+            let close_handle = app.handle().clone();
+            if let Some(window) = app.get_webview_window("main") {
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { .. } = event {
+                        let handle = close_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = handle.state::<crate::state::AppState>();
+                            if let Err(e) =
+                                crate::commands::sharing::stop_sharing_inner(&state).await
+                            {
+                                tracing::warn!(error = %e, "auto-stop sharing on close failed");
+                            }
+                        });
+                    }
+                });
+            }
+
             Ok(())
         });
     }

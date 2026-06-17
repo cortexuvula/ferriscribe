@@ -237,16 +237,82 @@ impl WhisperSupervisor {
 
     /// Ensure the binary exists, spawn the child process, and start the
     /// supervisor loop that restarts on crash.
+    ///
+    /// Before spawning, probes the configured port: if a healthy
+    /// whisper-server is already listening (e.g. a leftover from a previous
+    /// app session), it is **reused** and no new process is spawned — this
+    /// prevents the zombie accumulation where each app launch stacked another
+    /// 2 GB whisper-server. If something unhealthy holds the port, it is
+    /// killed first.
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         let bin = self.ensure_binary().await?;
+
+        // Probe the port before spawning. Three outcomes:
+        //  1. Healthy whisper-server already up → reuse it, skip spawn.
+        //  2. Something unhealthy on the port → kill it, then spawn.
+        //  3. Nothing on the port → spawn as usual.
+        if self.is_port_healthy().await {
+            info!(port = self.port, "whisper-server already healthy on port; reusing, no spawn");
+            // We have no Child handle for a reused process, so we can't
+            // supervise/kill it later. That's acceptable: a reused instance
+            // is unmanaged and will be killed on next start's reclaim path
+            // if it becomes unhealthy. The supervisor loop is skipped.
+            //
+            // Mark stopped=true so a stale supervise() handle (if any)
+            // doesn't try to restart into a duplicate.
+            self.stopped.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+        // Something may be holding the port but not healthy. Kill any
+        // process bound to it so our spawn succeeds and we don't create
+        // yet another zombie.
+        self.reclaim_port().await;
+
         let child = self.spawn_once_at(&bin).await?;
         *self.child.lock().await = Some(child);
+        // Clear the stopped flag (it may have been set by a previous start()
+        // that reused an existing instance).
+        self.stopped.store(false, Ordering::Relaxed);
         let me = Arc::clone(self);
         let handle = tokio::spawn(async move {
             me.supervise().await;
         });
         *self.supervisor_handle.lock().await = Some(handle);
         Ok(())
+    }
+
+    /// True iff a healthy whisper-server answers GET /health on our port.
+    async fn is_port_healthy(&self) -> bool {
+        let url = format!("http://127.0.0.1:{}/health", self.port);
+        match reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            Ok(client) => client
+                .get(&url)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    /// Kill any process bound to our port. Best-effort; uses `lsof` on Unix
+    /// and `netstat`+`taskkill` on Windows. Logs the count of killed PIDs
+    /// (PHI-safe — no process details).
+    async fn reclaim_port(&self) {
+        let pids = pids_on_port(self.port).await;
+        if pids.is_empty() {
+            return;
+        }
+        info!(port = self.port, count = pids.len(), "reclaiming port from stale processes");
+        for pid in &pids {
+            let _ = kill_pid(*pid).await;
+        }
+        // Give the OS a moment to release the port after the kills.
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
     async fn supervise(self: Arc<Self>) {
@@ -405,6 +471,86 @@ fn extract_tar_gz(bytes: &[u8], out_dir: &Path, binary_name: &str) -> Result<()>
     Err(WhisperError::Manifest(format!(
         "binary {binary_name} not found in tar.gz"
     )))
+}
+
+/// Return PIDs of processes listening on `port`. Uses `lsof` on Unix,
+/// `netstat` on Windows. Best-effort — returns empty on any error.
+async fn pids_on_port(port: u16) -> Vec<u32> {
+    let output = if cfg!(target_os = "windows") {
+        tokio::process::Command::new("netstat")
+            .args(["-ano", "-p", "TCP"])
+            .output()
+            .await
+    } else {
+        tokio::process::Command::new("lsof")
+            .args(["-ti", &format!(":{port}"), "-sTCP:LISTEN"])
+            .output()
+            .await
+    };
+    let out = match output {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut pids = Vec::new();
+    if cfg!(target_os = "windows") {
+        // netstat -ano output lines look like:
+        //   TCP    127.0.0.1:8080     0.0.0.0:0     LISTENING    1234
+        for line in text.lines() {
+            if !line.contains(&format!(":{port}")) {
+                continue;
+            }
+            if let Some(pid) = line
+                .split_whitespace()
+                .last()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                pids.push(pid);
+            }
+        }
+    } else {
+        for line in text.lines() {
+            if let Ok(pid) = line.trim().parse::<u32>() {
+                pids.push(pid);
+            }
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// Kill a process by PID. Uses `kill` on Unix, `taskkill` on Windows.
+async fn kill_pid(pid: u32) -> std::io::Result<()> {
+    if cfg!(target_os = "windows") {
+        tokio::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output()
+            .await?;
+    } else {
+        tokio::process::Command::new("kill")
+            .arg(pid.to_string())
+            .output()
+            .await?;
+    }
+    Ok(())
+}
+
+impl Drop for WhisperSupervisor {
+    fn drop(&mut self) {
+        // Best-effort kill of the tracked child if stop() was never called
+        // (e.g. app crash, force-quit). We can't await in Drop, so use the
+        // synchronous start_kill (SIGKILL on Unix, TerminateProcess on
+        // Windows). This prevents orphaned whisper-server zombies.
+        // NOTE: this only kills the process WE spawned. A reused instance
+        // (from start()'s probe path) has no Child handle and is intentionally
+        // left running.
+        if let Ok(mut guard) = self.child.try_lock()
+            && let Some(child) = guard.as_mut()
+        {
+            let _ = child.start_kill();
+        }
+    }
 }
 
 #[cfg(test)]

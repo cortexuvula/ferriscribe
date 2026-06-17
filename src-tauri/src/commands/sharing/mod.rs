@@ -21,7 +21,7 @@ pub mod settings_helpers;
 // `start_sharing_inner` is a regular async function (not a Tauri command), so
 // re-exporting via `pub use` is fine — only `#[tauri::command]` items have the
 // macro-generated sibling symbols that don't survive a re-export.
-pub use lifecycle::start_sharing_inner;
+pub use lifecycle::{start_sharing_inner, stop_sharing_inner};
 
 #[derive(Debug, Serialize)]
 pub struct SharingStatusDto {

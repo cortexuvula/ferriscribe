@@ -165,6 +165,12 @@ pub async fn start_sharing_inner(
 
 #[tauri::command]
 pub async fn stop_sharing(state: State<'_, AppState>) -> AppResult<()> {
+    stop_sharing_inner(&state).await
+}
+
+/// Core stop logic, factored out so the app-close / window-close handler can
+/// call it without the Tauri command wrapper.
+pub async fn stop_sharing_inner(state: &AppState) -> AppResult<()> {
     // Clear the auto-resume marker first so an explicit Stop wins over an
     // unrelated startup race (e.g. user stops sharing immediately on launch
     // before the resume hook fires).
