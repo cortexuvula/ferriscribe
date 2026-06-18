@@ -85,6 +85,17 @@
           onRetry={() => retryTranscription(rec.id)}
         />
       {/each}
+      {#if recordings.hasMore}
+        <div class="load-more">
+          <button
+            class="btn-load-more"
+            onclick={() => recordings.loadMore()}
+            disabled={recordings.loadingMore}
+          >
+            {recordings.loadingMore ? 'Loading…' : 'Load more'}
+          </button>
+        </div>
+      {/if}
     {/if}
   </div>
 </div>
@@ -176,5 +187,34 @@
 
   .btn-delete-all:hover {
     background-color: rgba(239, 68, 68, 0.1);
+  }
+
+  .load-more {
+    display: flex;
+    justify-content: center;
+    padding: 16px 12px;
+  }
+
+  .btn-load-more {
+    padding: 8px 24px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background-color: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .btn-load-more:hover:not(:disabled) {
+    background-color: var(--bg-hover);
+    border-color: var(--accent);
+    color: var(--text-primary);
+  }
+
+  .btn-load-more:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 </style>
