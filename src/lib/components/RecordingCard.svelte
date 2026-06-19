@@ -69,6 +69,12 @@
     {#if recording.has_referral}
       <span class="badge" title="Referral">R</span>
     {/if}
+    {#if recording.has_letter}
+      <span class="badge" title="Letter">L</span>
+    {/if}
+    {#if recording.has_peer_discussion}
+      <span class="badge" title="Peer Discussion">PD</span>
+    {/if}
   </div>
 
   {#if onRetry}
@@ -159,8 +165,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 18px;
+    min-width: 18px;
     height: 18px;
+    padding: 0 3px;
     border-radius: var(--radius-sm);
     font-size: 10px;
     font-weight: 700;
