@@ -40,6 +40,39 @@
     { label: 'Referral Info', text: 'Referred by: \nReason for referral: \nRelevant history: \n\n' },
   ];
 
+  // Common chronic conditions for one-click add. Clicking a chip appends the
+  // condition as a new line in the conditions textarea (no-op if already
+  // present, matched case-insensitively against existing lines so the user
+  // can't accidentally double-add "Hypertension").
+  const COMMON_CONDITIONS = [
+    'Hypertension',
+    'Type 2 diabetes',
+    'Hyperlipidemia',
+    'Asthma',
+    'COPD',
+    'Hypothyroidism',
+    'Atrial fibrillation',
+    'Coronary artery disease',
+    'CKD (chronic kidney disease)',
+    'GERD',
+    'Anxiety',
+    'Depression',
+    'Osteoarthritis',
+    'Obesity',
+    'Sleep apnea',
+  ];
+
+  function addCondition(condition: string) {
+    const existing = conditionsText
+      .split('\n')
+      .map((l) => l.trim().toLowerCase())
+      .filter((l) => l.length > 0);
+    if (existing.includes(condition.toLowerCase())) return; // already listed
+    const next = conditionsText.trimEnd();
+    const sep = next.length > 0 && !next.endsWith('\n') ? '\n' : '';
+    onConditionsChange(next + sep + condition + '\n');
+  }
+
   // Refresh saved templates when the panel is first expanded, so newly-created
   // templates (from Settings or the Record tab) appear without a manual reload.
   let lastLoadedExpanded = false;
@@ -87,6 +120,18 @@
       ></textarea>
 
       <label class="field-label" for="ctx-conditions">Known conditions (one per line)</label>
+      <div class="condition-chips" role="group" aria-label="Common conditions quick-add">
+        {#each COMMON_CONDITIONS as condition}
+          <button
+            class="condition-chip"
+            type="button"
+            onclick={() => addCondition(condition)}
+            title={`Add "${condition}" to the list`}
+          >
+            {condition}
+          </button>
+        {/each}
+      </div>
       <textarea
         id="ctx-conditions"
         class="context-textarea structured"
@@ -201,6 +246,30 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
+  }
+
+  .condition-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-bottom: 2px;
+  }
+
+  .condition-chip {
+    padding: 3px 9px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--success, #22c55e);
+    background-color: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--success, #22c55e) 30%, transparent);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .condition-chip:hover {
+    background-color: color-mix(in srgb, var(--success, #22c55e) 20%, transparent);
+    border-color: var(--success, #22c55e);
   }
 
   .template-chip {
