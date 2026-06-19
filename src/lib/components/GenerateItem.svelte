@@ -2,6 +2,8 @@
   interface Props {
     title: string;
     description: string;
+    icon?: string;
+    useWhen?: string;
     generating: boolean;
     anyGenerating: boolean;
     done: boolean;
@@ -15,6 +17,8 @@
   let {
     title,
     description,
+    icon,
+    useWhen,
     generating,
     anyGenerating,
     done,
@@ -27,9 +31,11 @@
 </script>
 
 <div class="generate-item">
+  {#if icon}<span class="item-icon" aria-hidden="true">{icon}</span>{/if}
   <div class="item-info">
     <div class="item-title">{title}</div>
     <div class="item-desc">{description}</div>
+    {#if useWhen}<div class="item-use-when">Use when: {useWhen}</div>{/if}
   </div>
   <div class="item-action">
     {#if generating}
@@ -95,6 +101,14 @@
     border-radius: var(--radius-md);
   }
 
+  .item-icon {
+    font-size: 22px;
+    line-height: 1;
+    flex-shrink: 0;
+    width: 32px;
+    text-align: center;
+  }
+
   .item-info {
     flex: 1;
     min-width: 0;
@@ -110,6 +124,13 @@
   .item-desc {
     font-size: 12px;
     color: var(--text-muted);
+  }
+
+  .item-use-when {
+    font-size: 11px;
+    color: var(--accent);
+    margin-top: 3px;
+    opacity: 0.85;
   }
 
   .item-action {
