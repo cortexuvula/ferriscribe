@@ -63,125 +63,144 @@
   <div class="progress-banner">{generationState.progressStatus}</div>
 {/if}
 
-<div class="generate-buttons">
-  <GenerateItem
-    title="SOAP Note"
-    description="Structured clinical note (Subjective, Objective, Assessment, Plan)"
-    generating={generationState.generating === 'soap'}
-    anyGenerating={generationState.generating !== null}
-    done={!!recording?.soap_note}
-    copyStatus={copyStatus['soap']}
-    icdCodes={recording?.soap_note ? extractIcdCodes(recording.soap_note) : undefined}
-    onGenerate={() => onGenerate('soap')}
-    onCopy={() => onCopy('soap')}
-    onSpeedRead={() => onSpeedRead('soap')}
-  />
-  <GenerateItem
-    title="Referral Letter"
-    description="Specialist referral letter based on the consultation"
-    generating={generationState.generating === 'referral'}
-    anyGenerating={generationState.generating !== null}
-    done={!!recording?.referral}
-    copyStatus={copyStatus['referral']}
-    onGenerate={() => onGenerate('referral')}
-    onCopy={() => onCopy('referral')}
-    onSpeedRead={() => onSpeedRead('referral')}
-  />
-  <div class="letter-card">
-    <div class="letter-card-header">
-      <div class="letter-card-fields">
-        <div class="letter-field">
-          <label class="field-label" for="letter-audience">Audience</label>
-          <select
-            id="letter-audience"
-            class="letter-select"
-            value={selectedAudienceId ?? ''}
-            onchange={(e) => onAudienceChange(e.currentTarget.value || null)}
-          >
-            {#each audiences as audience}
-              <option value={audience.id}>{audience.name}</option>
-            {/each}
-          </select>
-        </div>
-        <div class="letter-field">
-          <label class="field-label" for="letter-type">Purpose</label>
-          <input
-            id="letter-type"
-            type="text"
-            class="letter-input"
-            placeholder="e.g. follow-up, pre-authorization"
-            value={letterType}
-            oninput={(e) => onLetterTypeChange(e.currentTarget.value)}
-          />
-        </div>
-      </div>
+<div class="generate-sections">
+  <div class="generate-group">
+    <h3 class="group-heading">Clinical Notes</h3>
+    <div class="generate-buttons">
+      <GenerateItem
+        title="SOAP Note"
+        icon="🏥"
+        useWhen="you need the standard visit note"
+        description="Structured clinical note (Subjective, Objective, Assessment, Plan)"
+        generating={generationState.generating === 'soap'}
+        anyGenerating={generationState.generating !== null}
+        done={!!recording?.soap_note}
+        copyStatus={copyStatus['soap']}
+        icdCodes={recording?.soap_note ? extractIcdCodes(recording.soap_note) : undefined}
+        onGenerate={() => onGenerate('soap')}
+        onCopy={() => onCopy('soap')}
+        onSpeedRead={() => onSpeedRead('soap')}
+      />
     </div>
-    <GenerateItem
-      title="Letter"
-      description={selectedAudienceId
-        ? (() => {
-            const a = audiences.find((x) => x.id === selectedAudienceId);
-            return a ? `Letter for ${a.name}` : 'Letter';
-          })()
-        : 'Letter'}
-      generating={generationState.generating === 'letter'}
-      anyGenerating={generationState.generating !== null}
-      done={!!recording?.letter}
-      copyStatus={copyStatus['letter']}
-      onGenerate={() => onGenerate('letter')}
-      onCopy={() => onCopy('letter')}
-      onSpeedRead={() => onSpeedRead('letter')}
-    />
   </div>
-  <div class="letter-card">
-    <div class="letter-card-header">
-      <div class="letter-card-fields">
-        <div class="letter-field">
-          <label class="field-label" for="pd-physician">Physician Name</label>
-          <input
-            id="pd-physician"
-            type="text"
-            class="letter-input"
-            placeholder="e.g. Dr. Jane Smith"
-            value={physicianName}
-            oninput={(e) => onPhysicianNameChange(e.currentTarget.value)}
-          />
+
+  <div class="generate-group">
+    <h3 class="group-heading">Outgoing Letters</h3>
+    <div class="generate-buttons">
+      <GenerateItem
+        title="Referral Letter"
+        icon="📨"
+        useWhen="sending the patient to another clinician"
+        description="Specialist referral letter based on the consultation"
+        generating={generationState.generating === 'referral'}
+        anyGenerating={generationState.generating !== null}
+        done={!!recording?.referral}
+        copyStatus={copyStatus['referral']}
+        onGenerate={() => onGenerate('referral')}
+        onCopy={() => onCopy('referral')}
+        onSpeedRead={() => onSpeedRead('referral')}
+      />
+      <div class="letter-card">
+        <div class="letter-card-header">
+          <div class="letter-card-fields">
+            <div class="letter-field">
+              <label class="field-label" for="letter-audience">Audience</label>
+              <select
+                id="letter-audience"
+                class="letter-select"
+                value={selectedAudienceId ?? ''}
+                onchange={(e) => onAudienceChange(e.currentTarget.value || null)}
+              >
+                {#each audiences as audience}
+                  <option value={audience.id}>{audience.name}</option>
+                {/each}
+              </select>
+            </div>
+            <div class="letter-field">
+              <label class="field-label" for="letter-type">Purpose</label>
+              <input
+                id="letter-type"
+                type="text"
+                class="letter-input"
+                placeholder="e.g. follow-up, pre-authorization"
+                value={letterType}
+                oninput={(e) => onLetterTypeChange(e.currentTarget.value)}
+              />
+            </div>
+          </div>
         </div>
-        <div class="letter-field">
-          <label class="field-label" for="pd-specialty">Specialty</label>
-          <input
-            id="pd-specialty"
-            type="text"
-            class="letter-input"
-            placeholder="e.g. Cardiology"
-            value={specialty}
-            oninput={(e) => onSpecialtyChange(e.currentTarget.value)}
-          />
+        <GenerateItem
+          title="Letter"
+          icon="✉️"
+          useWhen="writing to a patient, insurer, employer, or court"
+          description={selectedAudienceId
+            ? (() => {
+                const a = audiences.find((x) => x.id === selectedAudienceId);
+                return a ? `Letter for ${a.name}` : 'Letter';
+              })()
+            : 'Letter'}
+          generating={generationState.generating === 'letter'}
+          anyGenerating={generationState.generating !== null}
+          done={!!recording?.letter}
+          copyStatus={copyStatus['letter']}
+          onGenerate={() => onGenerate('letter')}
+          onCopy={() => onCopy('letter')}
+          onSpeedRead={() => onSpeedRead('letter')}
+        />
+      </div>
+      <div class="letter-card">
+        <div class="letter-card-header">
+          <div class="letter-card-fields">
+            <div class="letter-field">
+              <label class="field-label" for="pd-physician">Physician Name</label>
+              <input
+                id="pd-physician"
+                type="text"
+                class="letter-input"
+                placeholder="e.g. Dr. Jane Smith"
+                value={physicianName}
+                oninput={(e) => onPhysicianNameChange(e.currentTarget.value)}
+              />
+            </div>
+            <div class="letter-field">
+              <label class="field-label" for="pd-specialty">Specialty</label>
+              <input
+                id="pd-specialty"
+                type="text"
+                class="letter-input"
+                placeholder="e.g. Cardiology"
+                value={specialty}
+                oninput={(e) => onSpecialtyChange(e.currentTarget.value)}
+              />
+            </div>
+            <div class="letter-field">
+              <label class="field-label" for="pd-reason">Reason for Discussion</label>
+              <input
+                id="pd-reason"
+                type="text"
+                class="letter-input"
+                placeholder="e.g. Review of abnormal ECG findings"
+                value={discussionReason}
+                oninput={(e) => onDiscussionReasonChange(e.currentTarget.value)}
+              />
+            </div>
+          </div>
         </div>
-        <div class="letter-field">
-          <label class="field-label" for="pd-reason">Reason for Discussion</label>
-          <input
-            id="pd-reason"
-            type="text"
-            class="letter-input"
-            placeholder="e.g. Review of abnormal ECG findings"
-            value={discussionReason}
-            oninput={(e) => onDiscussionReasonChange(e.currentTarget.value)}
-          />
-        </div>
+        <GenerateItem
+          title="Peer Discussion"
+          icon="👥"
+          useWhen="documenting a curbside consult with another physician"
+          description="Physician-to-physician discussion note"
+          generating={generationState.generating === 'peer_discussion'}
+          anyGenerating={generationState.generating !== null}
+          done={!!recording?.peer_discussion}
+          copyStatus={copyStatus['peer_discussion']}
+          onGenerate={() => onGenerate('peer_discussion')}
+          onCopy={() => onCopy('peer_discussion')}
+          onSpeedRead={() => onSpeedRead('peer_discussion')}
+        />
       </div>
     </div>
-    <GenerateItem
-      title="Peer Discussion"
-      description="Physician-to-physician discussion note"
-      generating={generationState.generating === 'peer_discussion'}
-      anyGenerating={generationState.generating !== null}
-      done={!!recording?.peer_discussion}
-      copyStatus={copyStatus['peer_discussion']}
-      onGenerate={() => onGenerate('peer_discussion')}
-      onCopy={() => onCopy('peer_discussion')}
-      onSpeedRead={() => onSpeedRead('peer_discussion')}
-    />
   </div>
 </div>
 
@@ -223,6 +242,29 @@
     border-radius: var(--radius-md);
     font-size: 13px;
     color: var(--accent, #3b82f6);
+  }
+
+  .generate-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .generate-group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .group-heading {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    margin: 0 0 2px 0;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border-light);
   }
 
   .generate-buttons {
