@@ -46,6 +46,7 @@ const defaults: AppConfig = {
   rsvp_remembered_sections: [],
   capture_for_training: false,
   allow_public_endpoint: false,
+  onboarding_completed: false,
 };
 
 class SettingsStore {

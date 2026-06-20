@@ -7,12 +7,25 @@ use crate::state::AppState;
 /// Load the current application settings from the database.
 ///
 /// Returns the full `AppConfig` with all migrations applied.
+///
+/// **Onboarding auto-mark:** if an `app_config` row already existed in the DB
+/// but `onboarding_completed` is `false`, set it to `true` and persist. This
+/// means existing installs are silently marked onboarded on their next launch
+/// (they never see the first-run wizard); only truly fresh installs — where no
+/// config row existed before this load — see the wizard.
 #[tauri::command]
 pub fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
     let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let config_existed = SettingsRepo::exists(&conn, "app_config")
+        .map_err(|e| AppError::Database(e.to_string()))?;
     let mut config = SettingsRepo::load_config(&conn)
         .map_err(|e| AppError::Database(e.to_string()))?;
     config.migrate();
+    if config_existed && !config.onboarding_completed {
+        config.onboarding_completed = true;
+        SettingsRepo::save_config(&conn, &config)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+    }
     Ok(config)
 }
 
