@@ -8,25 +8,46 @@ use crate::state::AppState;
 ///
 /// Returns the full `AppConfig` with all migrations applied.
 ///
-/// **Onboarding auto-mark:** if an `app_config` row already existed in the DB
-/// but `onboarding_completed` is `false`, set it to `true` and persist. This
-/// means existing installs are silently marked onboarded on their next launch
-/// (they never see the first-run wizard); only truly fresh installs — where no
-/// config row existed before this load — see the wizard.
+/// **Onboarding auto-mark (existing installs):** a brand-new install has no
+/// `onboarding_started` sentinel and no `app_config`, so
+/// `onboarding_completed` stays `false` and the wizard shows. The wizard
+/// writes the `onboarding_started` sentinel the first time it saves config,
+/// so an interrupted wizard still reappears on next launch. An existing
+/// install that predates the wizard has an `app_config` row but no
+/// `onboarding_started` sentinel — treat that as already onboarded.
+///
+/// This avoids the earlier bug where the wizard saving `app_config` on step 2
+/// flipped `config_existed=true`, silently marking an interrupted wizard as
+/// complete on the next launch.
 #[tauri::command]
 pub fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
     let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let onboarding_started = SettingsRepo::exists(&conn, "onboarding_started")
+        .map_err(|e| AppError::Database(e.to_string()))?;
     let config_existed = SettingsRepo::exists(&conn, "app_config")
         .map_err(|e| AppError::Database(e.to_string()))?;
     let mut config = SettingsRepo::load_config(&conn)
         .map_err(|e| AppError::Database(e.to_string()))?;
     config.migrate();
-    if config_existed && !config.onboarding_completed {
+    if !config.onboarding_completed && config_existed && !onboarding_started {
+        // Pre-wizard existing install: mark onboarded, never show the wizard.
         config.onboarding_completed = true;
         SettingsRepo::save_config(&conn, &config)
             .map_err(|e| AppError::Database(e.to_string()))?;
     }
     Ok(config)
+}
+
+/// Mark onboarding as started. The onboarding wizard calls this the first time
+/// it saves any config, so that an interrupted wizard is NOT silently auto-
+/// marked complete on the next launch (see `get_settings`). The sentinel is
+/// idempotent — setting it again is a no-op.
+#[tauri::command]
+pub fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppResult<()> {
+    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    SettingsRepo::set(&conn, "onboarding_started", "1")
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    Ok(())
 }
 
 /// Persist updated application settings to the database.

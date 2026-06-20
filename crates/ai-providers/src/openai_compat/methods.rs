@@ -189,10 +189,15 @@ impl OpenAiCompatibleClient {
                             Err(e) => {
                                 // Log the failure (error + byte length only — never
                                 // the data itself, which may contain model output /
-                                // clinical text). Silent drops risk incomplete SOAP
-                                // notes without the clinician noticing.
-                                warn!(error = %e, data_len = data.len(), "dropping malformed SSE event");
-                                vec![]
+                                // clinical text). Propagate as a stream error so the
+                                // consumer knows the stream was truncated, rather than
+                                // silently dropping the chunk (which risked incomplete
+                                // SOAP notes with no indication).
+                                warn!(error = %e, data_len = data.len(), "malformed SSE event; propagating as stream error");
+                                vec![Err(AppError::AiProvider(format!(
+                                    "malformed SSE event ({} bytes): {e}",
+                                    data.len()
+                                )))]
                             }
                             Ok(resp) => {
                                 let mut out = Vec::new();

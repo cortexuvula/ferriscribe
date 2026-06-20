@@ -106,7 +106,9 @@ pub async fn add_vocabulary_entry(
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
-    info!(find = %entry.find_text, "Vocabulary entry added");
+    // PHI guard: do not log find_text/replacement — vocabulary entries may
+    // contain patient-specific medication/dosage text (AGENTS.md line 6).
+    info!("Vocabulary entry added");
     Ok(entry)
 }
 

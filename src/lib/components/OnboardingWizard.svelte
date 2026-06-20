@@ -6,6 +6,7 @@
   import StepPair from './onboarding/StepPair.svelte';
   import StepFolder from './onboarding/StepFolder.svelte';
   import { settings } from '../stores/settings.svelte';
+  import { setOnboardingStarted } from '../api/settings';
 
   /// Linear step index. The mode step (1) sets `mode`, which determines
   /// whether steps 2/3 render the local-path (Provider → Model) or the
@@ -31,6 +32,13 @@
   const totalSteps = $derived(stepLabels.length);
 
   function next() {
+    if (step === 0) {
+      // First transition past Welcome: stamp the onboarding_started sentinel so
+      // an interrupted wizard reappears on next launch rather than being
+      // silently auto-marked complete (see get_settings auto-mark logic).
+      // Fire-and-forget; idempotent.
+      void setOnboardingStarted();
+    }
     if (step < totalSteps - 1) step += 1;
   }
   function skip() {

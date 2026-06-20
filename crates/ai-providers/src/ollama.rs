@@ -167,15 +167,27 @@ impl OllamaProvider {
     /// Resolve the current base URL (without the `/v1` suffix applied here).
     /// If a RemoteEndpoint is configured, probe LAN then Tailscale with a 30s
     /// cache.  Falls back to the static URL when no endpoint is set.
+    ///
+    /// Lock ordering: `set_endpoint` takes `url_cache` then `endpoint` (write).
+    /// To avoid an AB-BA inversion, this method clones the endpoint out of the
+    /// read guard and drops the guard *before* acquiring the cache lock or
+    /// probing the network.
     async fn current_base_url(&self) -> AppResult<String> {
-        let ep_guard = self.endpoint.read().await;
-        if let Some(ep) = ep_guard.as_ref() {
-            let mut cache = self.url_cache.lock().await;
-            if let Some(c) = cache.as_ref() {
-                if c.resolved_at.elapsed() < CACHE_TTL {
+        let ep = {
+            let guard = self.endpoint.read().await;
+            guard.clone()
+        };
+        if let Some(ep) = ep {
+            // Fast path: cache hit under a short-lived lock, no probe.
+            {
+                let cache = self.url_cache.lock().await;
+                if let Some(c) = cache.as_ref()
+                    && c.resolved_at.elapsed() < CACHE_TTL
+                {
                     return Ok(c.url.clone());
                 }
             }
+            // Slow path: probe the network with no locks held.
             let resolved = ep
                 .resolve_base_url()
                 .await
@@ -199,7 +211,7 @@ impl OllamaProvider {
                     }
                 })?;
             let url = format!("{}/v1", resolved);
-            *cache = Some(ResolvedCache {
+            *self.url_cache.lock().await = Some(ResolvedCache {
                 url: url.clone(),
                 resolved_at: std::time::Instant::now(),
             });

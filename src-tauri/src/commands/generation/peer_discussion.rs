@@ -115,12 +115,12 @@ async fn generate_peer_discussion_inner(
         )));
     }
 
+    // PHI guard: physician_name/specialty are provider PHI — log only
+    // structural metadata (AGENTS.md line 6).
     info!(
         provider = %provider.name(),
         model = %settings.model,
         transcript_len = transcript.len(),
-        physician_name = physician_name,
-        specialty = specialty,
         "Generating peer discussion note"
     );
 

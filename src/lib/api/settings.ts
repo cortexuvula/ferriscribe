@@ -9,6 +9,13 @@ export async function saveSettings(config: AppConfig): Promise<void> {
   return invoke('save_settings', { config });
 }
 
+/// Mark onboarding as started. Called by the wizard the first time it saves any
+/// config, so an interrupted wizard reappears on next launch instead of being
+/// silently auto-marked complete. Idempotent.
+export async function setOnboardingStarted(): Promise<void> {
+  return invoke('set_onboarding_started');
+}
+
 export async function testLmStudioConnection(
   host: string,
   port: number,
