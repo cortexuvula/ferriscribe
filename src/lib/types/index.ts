@@ -122,6 +122,8 @@ export interface AppConfig {
   capture_for_training: boolean;
   // Security
   allow_public_endpoint: boolean;
+  // Onboarding
+  onboarding_completed: boolean;
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

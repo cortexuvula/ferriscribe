@@ -43,6 +43,19 @@ impl SettingsRepo {
         Ok(())
     }
 
+    /// True iff `key` is present in the settings table. Used by `get_settings`
+    /// to detect whether an `app_config` row already existed (i.e. this is an
+    /// existing install) vs. a fresh default — so existing users can be
+    /// auto-marked as onboarded without showing them the first-run wizard.
+    pub fn exists(conn: &Connection, key: &str) -> DbResult<bool> {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Deserialise the stored JSON blob (under the key `"app_config"`) into an
     /// `AppConfig`.  Falls back to `AppConfig::default()` when the key is
     /// absent or unparseable.
@@ -113,6 +126,19 @@ mod tests {
         SettingsRepo::delete(&conn, "temp").unwrap();
         let v = SettingsRepo::get(&conn, "temp").unwrap();
         assert!(v.is_none());
+    }
+
+    #[test]
+    fn exists_false_for_missing_key() {
+        let conn = migrated();
+        assert!(!SettingsRepo::exists(&conn, "app_config").unwrap());
+    }
+
+    #[test]
+    fn exists_true_after_set() {
+        let conn = migrated();
+        SettingsRepo::save_config(&conn, &AppConfig::default()).unwrap();
+        assert!(SettingsRepo::exists(&conn, "app_config").unwrap());
     }
 
     #[test]

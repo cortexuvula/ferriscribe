@@ -438,6 +438,13 @@ pub struct AppConfig {
     #[serde(default)]
     pub allow_public_endpoint: bool,
 
+    // Onboarding
+    /// `true` once the user has completed (or skipped through) the first-run
+    /// onboarding wizard. The wizard is shown only when this is `false` AND no
+    /// prior config existed (existing installs are auto-marked in `get_settings`).
+    #[serde(default)]
+    pub onboarding_completed: bool,
+
     // Training corpus
     /// When true, every successful SOAP generation is captured into the
     /// `generations` table for the training-corpus feature. Defaults to

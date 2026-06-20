@@ -13,6 +13,7 @@
   import StatusBadge from './lib/components/StatusBadge.svelte';
   import SettingsDialog from './lib/dialogs/SettingsDialog.svelte';
   import DatabaseRecoveryDialog from './lib/dialogs/DatabaseRecoveryDialog.svelte';
+  import OnboardingWizard from './lib/components/OnboardingWizard.svelte';
   import EndpointOfflineDialog from './lib/components/EndpointOfflineDialog.svelte';
   import { settingsNav } from './lib/stores/settingsNav.svelte.ts';
   import type { ServiceKind } from './lib/api/invokeWithOfflineHandling';
@@ -57,6 +58,12 @@
   // `RecoveryState` (Some(reason) on recovery, None on normal boot), so we
   // query it on mount instead of subscribing to a timing-race event.
   let recoveryReason = $state<string | null>(null);
+
+  // First-run onboarding gate. Derived from the settings store after load();
+  // the OnboardingWizard sets onboarding_completed=true on Done/Skip-all, which
+  // flips this reactive and reveals the app shell. Existing users never see it
+  // (the backend auto-marks onboarding_completed when a config already existed).
+  const onboardingComplete = $derived(settings.state.onboarding_completed);
 
   // Intercept settings tab — open modal instead of navigating
   $effect(() => {
@@ -204,6 +211,8 @@
 
 {#if recoveryReason}
   <DatabaseRecoveryDialog reason={recoveryReason} />
+{:else if !onboardingComplete}
+  <OnboardingWizard />
 {:else}
 <div class="app-shell">
   <aside class="app-sidebar">
