@@ -246,6 +246,7 @@ pub fn run() {
             commands::recordings_edit::save_recording_field,
             commands::settings::get_settings,
             commands::settings::save_settings,
+            commands::settings::set_onboarding_started,
             commands::settings::get_api_key,
             commands::settings::set_api_key,
             commands::settings::list_api_keys,

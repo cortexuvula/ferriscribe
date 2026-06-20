@@ -388,16 +388,38 @@ impl WhisperSupervisor {
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn()?;
-        // Forward stderr to tracing so dyld errors, port conflicts, and
+        // Forward stderr to tracing so dynd errors, port conflicts, and
         // model-load failures surface in the app log instead of vanishing
-        // into a silent crashloop. whisper-server's stderr carries init
-        // and request-routing diagnostics — not transcript content.
+        // into a silent crashloop. PHI guard: only allowlist known-safe
+        // diagnostic prefixes are logged; whisper-server processes PHI audio
+        // and depending on build/version could emit recognized text to stderr,
+        // so we must not forward arbitrary lines verbatim (AGENTS.md line 6).
         if let Some(stderr) = child.stderr.take() {
             let stderr_task = tokio::spawn(async move {
                 use tokio::io::{AsyncBufReadExt, BufReader};
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    info!("whisper-server: {line}");
+                    let lower = line.to_ascii_lowercase();
+                    // Safe diagnostic prefixes: model loading, system info,
+                    // network/listen state. Anything else (which could include
+                    // transcribed segments) is dropped silently.
+                    let safe = lower.starts_with("ggml")
+                        || lower.starts_with("whisper")
+                        || lower.starts_with("load")
+                        || lower.starts_with("system_info")
+                        || lower.starts_with("server")
+                        || lower.starts_with("listening")
+                        || lower.starts_with("port")
+                        || lower.contains("model loaded")
+                        || lower.contains("error")
+                        || lower.contains("warning")
+                        || lower.contains("init");
+                    if safe {
+                        info!("whisper-server: {line}");
+                    } else {
+                        // Non-diagnostic line; log only its length, never content.
+                        tracing::debug!(len = line.len(), "whisper-server stderr line (not logged)");
+                    }
                 }
             });
             tokio::spawn(async move {

@@ -42,14 +42,23 @@ pub async fn start_sharing_inner(
 ) -> AppResult<()> {
     // Acquire the write lock BEFORE binding ports / spawning proxies so that a
     // concurrent stop_sharing cannot return Ok while we are mid-start and leave
-    // the service running with no future cleanup path.
-    let mut sharing_slot = state.sharing.write().await;
-    if sharing_slot.is_some() {
-        return Err(AppError::Other("sharing already running".into()));
+    // the service running with no future cleanup path. We only hold the write
+    // lock briefly to check + assign — NOT across the multi-second start(),
+    // so sharing_status polling and stop() aren't frozen during startup.
+    {
+        let sharing_slot = state.sharing.read().await;
+        if sharing_slot.is_some() {
+            return Err(AppError::Other("sharing already running".into()));
+        }
     }
     let cfg = build_sharing_config(friendly_name).await?;
     let service = Arc::new(SharingService::new(cfg).map_err(|e| AppError::Other(e.to_string()))?);
-    service.start().await.map_err(|e| AppError::Other(e.to_string()))?;
+    // Bind ports + start whisper here, BEFORE taking the write lock. On error,
+    // stop the service so the whisper child isn't orphaned.
+    if let Err(e) = service.start().await {
+        let _ = service.stop().await;
+        return Err(AppError::Other(e.to_string()));
+    }
 
     // Spawn the vocab CRUD API on the configured port. Failures here are
     // logged but don't abort sharing — clients on older versions don't
@@ -90,7 +99,8 @@ pub async fn start_sharing_inner(
         });
     }
 
-    *sharing_slot = Some(service);
+    // Brief write lock: just the assignment. Everything above ran unlocked.
+    *state.sharing.write().await = Some(service.clone());
     *state.vocab_api.write().await = vocab_handle;
 
     // Wire up the persistent Ollama service the wizard promises ("FerriScribe
@@ -144,19 +154,28 @@ pub async fn start_sharing_inner(
     {
         let guard = state.ollama_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(local_ollama, allow_public).await?;
+            if let Err(e) = p.set_endpoint(local_ollama, allow_public).await {
+                let _ = service.stop().await;
+                return Err(e);
+            }
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(local_lmstudio, allow_public).await?;
+            if let Err(e) = p.set_endpoint(local_lmstudio, allow_public).await {
+                let _ = service.stop().await;
+                return Err(e);
+            }
         }
     }
     {
         let guard = state.remote_stt_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(local_whisper, allow_public).await?;
+            if let Err(e) = p.set_endpoint(local_whisper, allow_public).await {
+                let _ = service.stop().await;
+                return Err(e);
+            }
         }
     }
 

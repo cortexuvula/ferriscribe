@@ -172,6 +172,11 @@ pub struct SharingService {
     mdns: Mutex<Option<MdnsAdvertiser>>,
     handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     running: Mutex<bool>,
+    /// True only while `start_with_gate` is in progress. Held across the
+    /// multi-second gate + probe awaits so a concurrent `start()` call is a
+    /// no-op. Unlike `running`, this is NOT read by `status()`/the watcher, so
+    /// those don't freeze during startup.
+    starting: Mutex<bool>,
     /// Per-upstream readiness cache. Drives honest `status()`.
     readiness: tokio::sync::RwLock<ReadinessState>,
     /// Live snapshot served by `GET :11436/info`. Behind `Arc` so it can be
@@ -230,6 +235,7 @@ impl SharingService {
             mdns: Mutex::new(None),
             handles: Mutex::new(Vec::new()),
             running: Mutex::new(false),
+            starting: Mutex::new(false),
             readiness: tokio::sync::RwLock::new(readiness),
             info: Arc::new(tokio::sync::RwLock::new(info)),
             readiness_tx,
@@ -273,8 +279,27 @@ impl SharingService {
     ///
     /// Idempotent: calling when already running is a no-op.
     pub async fn start_with_gate(&self, gate: std::time::Duration) -> Result<(), SharingError> {
-        let mut running = self.running.lock().await;
-        if *running { return Ok(()); }
+        // Hold `starting` across the multi-second gate+probe so a concurrent
+        // start() is a no-op, but DON'T hold `running` — that would freeze
+        // status()/watcher for the duration of the gate.
+        {
+            let mut starting = self.starting.lock().await;
+            if *starting { return Ok(()); }
+            // Also bail if already fully running.
+            if *self.running.lock().await { return Ok(()); }
+            *starting = true;
+        }
+        // Guard RAII: clear `starting` on every exit path (Ok or Err).
+        struct StartingGuard<'a>(&'a Mutex<bool>);
+        impl Drop for StartingGuard<'_> {
+            fn drop(&mut self) {
+                // Best-effort; try_lock avoids deadlocking if a panic left a
+                // guard held, and the only failure mode is the flag staying
+                // true (which just blocks a redundant re-start).
+                if let Ok(mut g) = self.0.try_lock() { *g = false; }
+            }
+        }
+        let _guard = StartingGuard(&self.starting);
 
         // 1. Pre-bind all proxy listeners so port conflicts surface as Err now.
         //    We hold them until the gate decides which to keep.
@@ -285,7 +310,8 @@ impl SharingService {
             _ => None,
         };
 
-        // 2. Whisper child — always start (in-process, supervised).
+        // 2. Whisper child — always start (in-process, supervised). If any
+        //    later step fails after this, stop whisper so we don't orphan it.
         if let Err(e) = self.whisper.start().await {
             return Err(SharingError::WhisperSupervisor(e.to_string()));
         }
@@ -320,6 +346,85 @@ impl SharingService {
         };
 
         // 4. Bind proxies for ready upstreams; drop listeners for unready ones.
+        //    Any error here (after whisper started) must stop whisper so it
+        //    isn't orphaned. We use a helper closure to centralize cleanup.
+        let bind_result = self.bind_ready_proxies_after_gate(
+            ollama_listener, whisper_listener, lmstudio_listener,
+            ollama_ready, whisper_ready, lmstudio_ready,
+        ).await;
+        if let Err(e) = bind_result {
+            // Clean up the whisper child we started in step 2.
+            let _ = self.whisper.stop().await;
+            return Err(e);
+        }
+
+        // 5. Update readiness cache from gate results.
+        {
+            let mut r = self.readiness.write().await;
+            let now = Instant::now();
+            if let Some(e) = r.get_mut(&UpstreamKind::Ollama) {
+                e.last_probe_ok = ollama_ready; e.proxy_bound = ollama_ready; e.last_probe_at = Some(now);
+            }
+            if let Some(e) = r.get_mut(&UpstreamKind::Whisper) {
+                e.last_probe_ok = whisper_ready; e.proxy_bound = whisper_ready; e.last_probe_at = Some(now);
+            }
+            if let Some(e) = r.get_mut(&UpstreamKind::LmStudio) {
+                e.last_probe_ok = lmstudio_ready; e.proxy_bound = lmstudio_ready && self.config.lmstudio_proxy_port.is_some(); e.last_probe_at = Some(now);
+            }
+            let _ = self.readiness_tx.send(r.clone());
+        }
+
+        // 6. Build /info snapshot from the ready subset.
+        self.rebuild_info_snapshot().await;
+
+        // 7. mDNS — advertise the ready subset.
+        let mdns = match MdnsAdvertiser::start(
+            &self.config.friendly_name,
+            &self.info.read().await.ports,
+            &self.config.version,
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = self.whisper.stop().await;
+                return Err(e);
+            }
+        };
+        *self.mdns.lock().await = Some(mdns);
+
+        // 8. Pairing service (always up). Shares the live /info snapshot so
+        //    Tailscale discovery sees newly-ready upstreams.
+        let h3 = match spawn_pairing_service(
+            self.config.pairing_port,
+            self.pairing.clone(),
+            self.store.clone(),
+            self.info.clone(),
+        ).await {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = self.whisper.stop().await;
+                return Err(e);
+            }
+        };
+        self.handles.lock().await.push(h3);
+
+        // Flip running only at the very end (brief lock).
+        *self.running.lock().await = true;
+        Ok(())
+    }
+
+    /// Bind the auth proxies for upstreams that passed the gate, push their
+    /// handles, and return. Listeners for unready upstreams are dropped so
+    /// their ports free up. Centralized so the start() error path can clean
+    /// up whisper uniformly.
+    async fn bind_ready_proxies_after_gate(
+        &self,
+        ollama_listener: tokio::net::TcpListener,
+        whisper_listener: tokio::net::TcpListener,
+        lmstudio_listener: Option<tokio::net::TcpListener>,
+        ollama_ready: bool,
+        whisper_ready: bool,
+        lmstudio_ready: bool,
+    ) -> Result<(), SharingError> {
         let mut handles = self.handles.lock().await;
         if ollama_ready {
             let h = spawn_auth_proxy_on_listener(
@@ -351,7 +456,7 @@ impl SharingService {
         } else {
             drop(whisper_listener);
         }
-        let lmstudio_bound = if lmstudio_ready {
+        if lmstudio_ready {
             if let Some(listener) = lmstudio_listener {
                 if let (Some(internal), Some(proxy)) = (
                     self.config.lmstudio_internal_port,
@@ -368,52 +473,11 @@ impl SharingService {
                         self.store.clone(),
                     ).await?;
                     handles.push(h);
-                    true
-                } else { false }
-            } else { false }
+                }
+            }
         } else {
             drop(lmstudio_listener);
-            false
-        };
-
-        // 5. Update readiness cache from gate results.
-        {
-            let mut r = self.readiness.write().await;
-            let now = Instant::now();
-            if let Some(e) = r.get_mut(&UpstreamKind::Ollama) {
-                e.last_probe_ok = ollama_ready; e.proxy_bound = ollama_ready; e.last_probe_at = Some(now);
-            }
-            if let Some(e) = r.get_mut(&UpstreamKind::Whisper) {
-                e.last_probe_ok = whisper_ready; e.proxy_bound = whisper_ready; e.last_probe_at = Some(now);
-            }
-            if let Some(e) = r.get_mut(&UpstreamKind::LmStudio) {
-                e.last_probe_ok = lmstudio_ready; e.proxy_bound = lmstudio_bound; e.last_probe_at = Some(now);
-            }
-            let _ = self.readiness_tx.send(r.clone());
         }
-
-        // 6. Build /info snapshot from the ready subset.
-        self.rebuild_info_snapshot().await;
-
-        // 7. mDNS — advertise the ready subset.
-        let mdns = MdnsAdvertiser::start(
-            &self.config.friendly_name,
-            &self.info.read().await.ports,
-            &self.config.version,
-        )?;
-        *self.mdns.lock().await = Some(mdns);
-
-        // 8. Pairing service (always up). Shares the live /info snapshot so
-        //    Tailscale discovery sees newly-ready upstreams.
-        let h3 = spawn_pairing_service(
-            self.config.pairing_port,
-            self.pairing.clone(),
-            self.store.clone(),
-            self.info.clone(),
-        ).await?;
-        handles.push(h3);
-
-        *running = true;
         Ok(())
     }
 
@@ -600,8 +664,22 @@ impl SharingService {
     /// flipped to false on its next tick and exits. Idempotent: calling
     /// `stop()` when already stopped is a no-op.
     pub async fn stop(&self) -> Result<(), SharingError> {
+        // Take both guards so a concurrent start() (holding `starting`) can't
+        // flip `running` back on between our check and the teardown. Also
+        // clear `starting` so a stuck/abandoned start is recoverable.
         let mut running = self.running.lock().await;
-        if !*running { return Ok(()); }
+        let was_running = *running;
+        *running = false;
+        drop(running);
+        *self.starting.lock().await = false;
+        if !was_running {
+            // Even if not fully running, a half-started service may have
+            // spawned the whisper child; clean it up defensively.
+            if let Some(m) = self.mdns.lock().await.take() { m.stop(); }
+            self.whisper.stop().await;
+            for h in self.handles.lock().await.drain(..) { h.abort(); }
+            return Ok(());
+        }
         if let Some(m) = self.mdns.lock().await.take() {
             m.stop();
         }
@@ -609,7 +687,6 @@ impl SharingService {
         for h in self.handles.lock().await.drain(..) {
             h.abort();
         }
-        *running = false;
         Ok(())
     }
 

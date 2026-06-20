@@ -7,6 +7,27 @@ use medical_core::preflight::classify_reqwest_error;
 
 use crate::state::{self, AppState};
 
+/// Validate that `host` is a local/LAN endpoint per the endpoint policy,
+/// unless the user has opted into public endpoints via `allow_public_endpoint`.
+/// Called by every test/probe command before firing an outbound request, so a
+/// crafted frontend payload can't make the app contact an arbitrary public host
+/// (AGENTS.md: no hosted AI APIs, no telemetry).
+fn validate_probe_host(state: &AppState, host: &str) -> AppResult<()> {
+    let allow_public = {
+        let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+        medical_db::settings::SettingsRepo::load_config(&conn)
+            .map(|mut c| {
+                c.migrate();
+                c.allow_public_endpoint
+            })
+            .unwrap_or(false)
+    };
+    let effective = if host.is_empty() { "localhost" } else { host };
+    medical_core::endpoint_policy::validate_local_endpoint(effective, allow_public)
+        .map_err(|e| AppError::invalid_endpoint_for(e, "probe_host"))?;
+    Ok(())
+}
+
 /// Inner reachability check — exposed as a pure async fn so unit tests can
 /// call it without constructing `tauri::State`. The Tauri command is a thin
 /// wrapper around this.
@@ -75,6 +96,7 @@ async fn probe_endpoint_reachable_inner(
 /// explicit user-triggered "can list models?" checks).
 #[tauri::command]
 pub async fn probe_endpoint_reachable(
+    state: tauri::State<'_, AppState>,
     service: ServiceKind,
     provider_name: String,
     host: String,
@@ -82,6 +104,7 @@ pub async fn probe_endpoint_reachable(
     probe_path: String,
     api_key: Option<String>,
 ) -> AppResult<()> {
+    validate_probe_host(&state, &host)?;
     probe_endpoint_reachable_inner(service, provider_name, host, port, probe_path, api_key).await
 }
 
@@ -164,6 +187,7 @@ pub async fn test_lmstudio_connection(
     port: u16,
     api_key: Option<String>,
 ) -> AppResult<String> {
+    validate_probe_host(&state, &host)?;
     let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
     let url = format!("http://{}:{}/v1/models", effective_host, port);
 
@@ -243,6 +267,7 @@ pub async fn test_stt_remote_connection(
     port: u16,
     api_key: Option<String>,
 ) -> AppResult<String> {
+    validate_probe_host(&state, &host)?;
     let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
     let url = format!("http://{}:{}/v1/models", effective_host, port);
 
@@ -323,6 +348,7 @@ pub async fn test_ollama_connection(
     port: u16,
     api_key: Option<String>,
 ) -> AppResult<String> {
+    validate_probe_host(&state, &host)?;
     let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
     let url = format!("http://{}:{}/api/tags", effective_host, port);
 
