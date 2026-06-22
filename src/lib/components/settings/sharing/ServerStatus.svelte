@@ -17,15 +17,18 @@
     paired_clients: number;
   };
 
-  let qrPayload = '';
-  let clients: { id: number; label: string }[] = [];
-  let status: SharingStatus | null = null;
+  // These drive the template and are reassigned in async callbacks, so they
+  // MUST be $state in Svelte 5 runes mode — plain `let` reassignment isn't
+  // tracked and the UI wouldn't refresh on poll/event.
+  let qrPayload = $state('');
+  let clients = $state<{ id: number; label: string }[]>([]);
+  let status = $state<SharingStatus | null>(null);
   let pollHandle: ReturnType<typeof setInterval>;
 
-  let editingId: number | null = null;
-  let draftLabel = '';
-  let editError: string | null = null;
-  let editInputEl: HTMLInputElement | null = null;
+  let editingId = $state<number | null>(null);
+  let draftLabel = $state('');
+  let editError = $state<string | null>(null);
+  let editInputEl = $state<HTMLInputElement | null>(null);
 
   async function refresh() {
     status = await invoke<SharingStatus>('sharing_status');
@@ -100,12 +103,25 @@
     // When the ReadinessWatcher brings a late-arriving upstream online (e.g.
     // LM Studio finishing its boot after a login launch), invalidate the
     // cache immediately and refresh, instead of waiting up to 5s for the poll.
+    //
+    // Race guard: if the component unmounts before `listen()` resolves, the
+    // cleanup below runs with unlistenFn still undefined and the listener
+    // would leak (calling refresh() on a dead component forever). Track a
+    // `disposed` flag so a late resolution unregisters immediately.
+    let disposed = false;
     let unlistenFn: (() => void) | undefined;
     listen('sharing-readiness-changed', () => {
-      refresh();
-    }).then((un) => { unlistenFn = un; });
+      if (!disposed) refresh();
+    }).then((un) => {
+      if (disposed) {
+        un(); // already unmounted — unregister now
+      } else {
+        unlistenFn = un;
+      }
+    });
 
     return () => {
+      disposed = true;
       clearInterval(pollHandle);
       unlistenFn?.();
     };

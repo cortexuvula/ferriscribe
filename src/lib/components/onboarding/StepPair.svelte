@@ -18,7 +18,10 @@
   };
   type PairPorts = { ollama: number; whisper: number; pairing: number; lmstudio: number | null; vocab: number | null };
 
-  let discovered: Discovered[] = [];
+  // MUST be $state — rescan() reassigns it and the deduped $derived below
+  // tracks it. A plain `let` here made the discovered-server list permanently
+  // empty (the dedup effect only ran once at mount with the empty array).
+  let discovered = $state<Discovered[]>([]);
   let scanning = $state(false);
   let pasteUrl = $state('');
   let label = $state('');
@@ -32,9 +35,9 @@
   }
 
   // Dedupe by instance_name (mDNS fires per-interface) and merge addresses,
-  // recomputing whenever the raw discovered list changes.
-  let deduped = $state<Discovered[]>([]);
-  $effect(() => {
+  // recomputing whenever the raw discovered list changes. $derived (not
+  // $effect) so there's no chance of a stale write or feedback loop.
+  let deduped = $derived.by(() => {
     const seen = new Map<string, Discovered>();
     for (const d of discovered) {
       const ex = seen.get(d.instance_name);
@@ -46,7 +49,7 @@
         for (const a of d.tailscale_addresses ?? []) if (!tsList.includes(a)) tsList.push(a);
       }
     }
-    deduped = Array.from(seen.values());
+    return Array.from(seen.values());
   });
 
   function bestFrom(addresses: string[]): string | null {
