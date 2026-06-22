@@ -53,6 +53,15 @@
     await settings.updateField('storage_path', null);
   }
 
+  // Re-run the first-run onboarding wizard. Flipping onboarding_completed to
+  // false makes App.svelte's reactive gate unmount the app shell (and this
+  // settings modal) and render <OnboardingWizard> in its place. The wizard's
+  // Done button flips it back to true. The wizard pre-fills from current
+  // settings, so this is a no-risk way to reconfigure after a provider switch.
+  async function handleRerunSetup() {
+    await settings.updateField('onboarding_completed', false);
+  }
+
   async function loadVocabCount() {
     try {
       vocabCount = await getVocabularyCount();
@@ -240,6 +249,16 @@
       {/if}
     </div>
     <span class="form-hint">Choose where audio recordings are saved. New recordings will use this folder.</span>
+  </div>
+
+  <div class="form-group">
+    <span class="form-label">Setup Wizard</span>
+    <div class="storage-path-row">
+      <button class="btn-browse" onclick={handleRerunSetup}>
+        Re-run setup
+      </button>
+    </div>
+    <span class="form-hint">Walk through the first-run setup again to reconfigure your AI provider, transcription model, or office-server pairing.</span>
   </div>
 
   <h3 class="section-title" style="margin-top: 24px">Database Security</h3>
