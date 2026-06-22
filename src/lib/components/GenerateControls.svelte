@@ -81,6 +81,58 @@
         onCopy={() => onCopy('soap')}
         onSpeedRead={() => onSpeedRead('soap')}
       />
+      <div class="letter-card">
+        <div class="letter-card-header">
+          <div class="letter-card-fields">
+            <div class="letter-field">
+              <label class="field-label" for="pd-physician">Physician Name</label>
+              <input
+                id="pd-physician"
+                type="text"
+                class="letter-input"
+                placeholder="e.g. Dr. Jane Smith"
+                value={physicianName}
+                oninput={(e) => onPhysicianNameChange(e.currentTarget.value)}
+              />
+            </div>
+            <div class="letter-field">
+              <label class="field-label" for="pd-specialty">Specialty</label>
+              <input
+                id="pd-specialty"
+                type="text"
+                class="letter-input"
+                placeholder="e.g. Cardiology"
+                value={specialty}
+                oninput={(e) => onSpecialtyChange(e.currentTarget.value)}
+              />
+            </div>
+            <div class="letter-field">
+              <label class="field-label" for="pd-reason">Reason for Discussion</label>
+              <input
+                id="pd-reason"
+                type="text"
+                class="letter-input"
+                placeholder="e.g. Review of abnormal ECG findings"
+                value={discussionReason}
+                oninput={(e) => onDiscussionReasonChange(e.currentTarget.value)}
+              />
+            </div>
+          </div>
+        </div>
+        <GenerateItem
+          title="Peer Discussion"
+          icon="👥"
+          useWhen="documenting a curbside consult with another physician"
+          description="Physician-to-physician discussion note"
+          generating={generationState.generating === 'peer_discussion'}
+          anyGenerating={generationState.generating !== null}
+          done={!!recording?.peer_discussion}
+          copyStatus={copyStatus['peer_discussion']}
+          onGenerate={() => onGenerate('peer_discussion')}
+          onCopy={() => onCopy('peer_discussion')}
+          onSpeedRead={() => onSpeedRead('peer_discussion')}
+        />
+      </div>
     </div>
   </div>
 
@@ -146,58 +198,6 @@
           onGenerate={() => onGenerate('letter')}
           onCopy={() => onCopy('letter')}
           onSpeedRead={() => onSpeedRead('letter')}
-        />
-      </div>
-      <div class="letter-card">
-        <div class="letter-card-header">
-          <div class="letter-card-fields">
-            <div class="letter-field">
-              <label class="field-label" for="pd-physician">Physician Name</label>
-              <input
-                id="pd-physician"
-                type="text"
-                class="letter-input"
-                placeholder="e.g. Dr. Jane Smith"
-                value={physicianName}
-                oninput={(e) => onPhysicianNameChange(e.currentTarget.value)}
-              />
-            </div>
-            <div class="letter-field">
-              <label class="field-label" for="pd-specialty">Specialty</label>
-              <input
-                id="pd-specialty"
-                type="text"
-                class="letter-input"
-                placeholder="e.g. Cardiology"
-                value={specialty}
-                oninput={(e) => onSpecialtyChange(e.currentTarget.value)}
-              />
-            </div>
-            <div class="letter-field">
-              <label class="field-label" for="pd-reason">Reason for Discussion</label>
-              <input
-                id="pd-reason"
-                type="text"
-                class="letter-input"
-                placeholder="e.g. Review of abnormal ECG findings"
-                value={discussionReason}
-                oninput={(e) => onDiscussionReasonChange(e.currentTarget.value)}
-              />
-            </div>
-          </div>
-        </div>
-        <GenerateItem
-          title="Peer Discussion"
-          icon="👥"
-          useWhen="documenting a curbside consult with another physician"
-          description="Physician-to-physician discussion note"
-          generating={generationState.generating === 'peer_discussion'}
-          anyGenerating={generationState.generating !== null}
-          done={!!recording?.peer_discussion}
-          copyStatus={copyStatus['peer_discussion']}
-          onGenerate={() => onGenerate('peer_discussion')}
-          onCopy={() => onCopy('peer_discussion')}
-          onSpeedRead={() => onSpeedRead('peer_discussion')}
         />
       </div>
     </div>
