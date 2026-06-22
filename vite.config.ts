@@ -1,7 +1,12 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import type { Plugin } from 'vite';
+
+// Read the app version from package.json so the About pane shows it without
+// a separate Tauri invoke.
+const pkg = JSON.parse(readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf-8'));
 
 const host = process.env.TAURI_DEV_HOST;
 
@@ -57,5 +62,10 @@ export default defineConfig(async () => ({
       // 3. tell vite to ignore watching `src-tauri`
       ignored: ['**/src-tauri/**', '**/target/**'],
     },
+  },
+
+  // Expose the app version (from package.json) to the frontend for the About pane.
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
   },
 }));

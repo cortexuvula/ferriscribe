@@ -124,6 +124,8 @@ export interface AppConfig {
   allow_public_endpoint: boolean;
   // Onboarding
   onboarding_completed: boolean;
+  // Updates
+  auto_update_check: boolean;
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

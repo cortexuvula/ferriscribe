@@ -112,6 +112,10 @@ fn default_language() -> String {
     "en-US".into()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_sample_rate() -> u32 {
     44100
 }
@@ -444,6 +448,14 @@ pub struct AppConfig {
     /// prior config existed (existing installs are auto-marked in `get_settings`).
     #[serde(default)]
     pub onboarding_completed: bool,
+
+    // Updates
+    /// When true, the app checks GitHub Releases for updates on launch and
+    /// every 12h. The user consents to this in onboarding and can toggle it in
+    /// Settings → About. Default true (the recommended path). The check is an
+    /// anonymous GET for latest.json — no PHI transmitted.
+    #[serde(default = "default_true")]
+    pub auto_update_check: bool,
 
     // Training corpus
     /// When true, every successful SOAP generation is captured into the

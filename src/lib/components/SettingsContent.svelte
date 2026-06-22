@@ -6,6 +6,7 @@
   import Sharing from './settings/Sharing.svelte';
   import TrainingCorpus from './settings/TrainingCorpus.svelte';
   import LetterAudiences from './settings/LetterAudiences.svelte';
+  import About from './settings/About.svelte';
   import { settingsNav, type SettingsSection } from '../stores/settingsNav.svelte.ts';
 
   type Section = SettingsSection;
@@ -28,6 +29,7 @@
     { id: 'sharing', label: 'Sharing' },
     { id: 'training-corpus', label: 'Training Corpus' },
     { id: 'letter-audiences', label: 'Letter Audiences' },
+    { id: 'about', label: 'About' },
   ];
 </script>
 
@@ -65,6 +67,9 @@
 
     {:else if activeSection === 'letter-audiences'}
       <LetterAudiences />
+
+    {:else if activeSection === 'about'}
+      <About />
     {/if}
   </div>
 </div>

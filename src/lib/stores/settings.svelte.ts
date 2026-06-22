@@ -47,6 +47,7 @@ const defaults: AppConfig = {
   capture_for_training: false,
   allow_public_endpoint: false,
   onboarding_completed: false,
+  auto_update_check: true,
 };
 
 class SettingsStore {
