@@ -2,8 +2,12 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { settings } from '../../stores/settings.svelte';
 
-  interface Props { onDone: () => void; }
-  let { onDone }: Props = $props();
+  interface Props {
+    onDone: () => void;
+    finishing?: boolean;
+    finishError?: string | null;
+  }
+  let { onDone, finishing = false, finishError = null }: Props = $props();
 
   let storagePath = $state(settings.state.storage_path);
 
@@ -39,7 +43,12 @@
   </div>
 </div>
 
-<button class="btn-done" onclick={done}>Done — start using FerriScribe</button>
+{#if finishError}
+  <p class="finish-error">{finishError}</p>
+{/if}
+<button class="btn-done" onclick={done} disabled={finishing}>
+  {finishing ? 'Finishing…' : 'Done — start using FerriScribe'}
+</button>
 
 <style>
   h2 { font-size: 18px; font-weight: 600; margin: 0 0 4px; color: var(--text-primary); }
@@ -64,5 +73,7 @@
     border-radius: var(--radius-md, 8px); cursor: pointer;
     transition: background-color 0.15s ease;
   }
-  .btn-done:hover { background-color: var(--accent-hover, #2563eb); }
+  .btn-done:hover:not(:disabled) { background-color: var(--accent-hover, #2563eb); }
+  .btn-done:disabled { opacity: 0.6; cursor: not-allowed; }
+  .finish-error { font-size: 12px; color: var(--danger, #ef4444); margin: 0 0 8px; }
 </style>

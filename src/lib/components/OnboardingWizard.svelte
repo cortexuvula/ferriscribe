@@ -42,14 +42,33 @@
     if (step < totalSteps - 1) step += 1;
   }
   function skip() {
+    // Skipping the Mode step without choosing would leave step 2 with
+    // mode === null and no render branch matches → blank card, stuck.
+    // Default to local so the rest of the wizard renders; the user can
+    // still skip every subsequent step.
+    if (step === 1 && mode === null) {
+      mode = 'local';
+    }
     next();
   }
   function chooseMode(m: 'local' | 'server') {
     mode = m;
     next();
   }
+  let finishing = $state(false);
+  let finishError = $state<string | null>(null);
   async function finish() {
-    await settings.updateField('onboarding_completed', true);
+    if (finishing) return;
+    finishing = true;
+    finishError = null;
+    try {
+      await settings.updateField('onboarding_completed', true);
+    } catch (e) {
+      finishError = e instanceof Error ? e.message : String(e);
+      finishing = false; // allow retry
+    }
+    // On success, the reactive gate in App.svelte unmounts this component,
+    // so there's no `finishing = false` to set in the happy path.
   }
 </script>
 
@@ -77,7 +96,7 @@
       {:else if mode === 'server' && step === 2}
         <StepPair onNext={next} onSkip={skip} />
       {:else if (mode === 'local' && step === 4) || (mode === 'server' && step === 3)}
-        <StepFolder onDone={finish} />
+        <StepFolder onDone={finish} {finishing} {finishError} />
       {/if}
     </div>
   </div>
