@@ -85,8 +85,11 @@ pub async fn spawn_auth_proxy(
     let client = Client::builder()
         .pool_max_idle_per_host(8)
         .connect_timeout(std::time::Duration::from_secs(10))
-        // No overall timeout — Ollama generations and whisper transcriptions
-        // can be arbitrarily long; only the connection phase is bounded.
+        // Bounded overall timeout: a hung upstream (Ollama crash, whisper
+        // hang) would otherwise tie up the proxy connection indefinitely.
+        // 30 min covers the longest realistic encounter (a 60-min audio at
+        // ~3x realtime transcription = ~20 min, plus generation margin).
+        .timeout(std::time::Duration::from_secs(30 * 60))
         .build()
         .map_err(|e| crate::SharingError::AuthProxy(e.to_string()))?;
     let state = AppState { config: config.clone(), client, store };
@@ -121,8 +124,11 @@ pub async fn spawn_auth_proxy_on_listener(
     let client = Client::builder()
         .pool_max_idle_per_host(8)
         .connect_timeout(std::time::Duration::from_secs(10))
-        // No overall timeout — Ollama generations and whisper transcriptions
-        // can be arbitrarily long; only the connection phase is bounded.
+        // Bounded overall timeout: a hung upstream (Ollama crash, whisper
+        // hang) would otherwise tie up the proxy connection indefinitely.
+        // 30 min covers the longest realistic encounter (a 60-min audio at
+        // ~3x realtime transcription = ~20 min, plus generation margin).
+        .timeout(std::time::Duration::from_secs(30 * 60))
         .build()
         .map_err(|e| crate::SharingError::AuthProxy(e.to_string()))?;
     let state = AppState { config: config.clone(), client, store };

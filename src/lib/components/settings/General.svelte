@@ -11,6 +11,7 @@
   import { getVocabularyCount, importVocabularyJson, exportVocabularyJson } from '../../api/vocabulary';
   import { importContextTemplatesJson, exportContextTemplatesJson } from '../../api/contextTemplates';
   import { listUserDict } from '../../api/userDictionary';
+  import { reinitProviders } from '../../api/chat';
 
   let vocabDialogOpen = $state(false);
   let vocabCount = $state<[number, number]>([0, 0]);
@@ -365,7 +366,12 @@
         <input
           type="checkbox"
           checked={settings.state.allow_public_endpoint}
-          onchange={(e) => settings.updateField('allow_public_endpoint', (e.target as HTMLInputElement).checked)}
+          onchange={async (e) => {
+            await settings.updateField('allow_public_endpoint', (e.target as HTMLInputElement).checked);
+            // allow_public is captured at provider construction; reinit so the
+            // new policy takes effect immediately (not on next app launch).
+            try { await reinitProviders(); } catch (err) { console.error('Failed to reinit providers after allow_public change:', err); }
+          }}
         />
         <span>
           Allow public AI / STT endpoints
