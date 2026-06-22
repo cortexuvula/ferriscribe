@@ -33,13 +33,20 @@
     ],
     "macOS": {
       "entitlements": "./Entitlements.plist"
-    }
+    },
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "deep-link": {
       "desktop": {
         "schemes": ["ferriscribe"]
       }
+    },
+    "updater": {
+      "pubkey": "PENDING_KEY_GENERATION",
+      "endpoints": [
+        "https://github.com/cortexuvula/rustMedicalAssistant/releases/latest/download/latest.json"
+      ]
     }
   }
 }

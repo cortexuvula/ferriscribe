@@ -1,5 +1,6 @@
 <script lang="ts">
   import StepWelcome from './onboarding/StepWelcome.svelte';
+  import StepUpdates from './onboarding/StepUpdates.svelte';
   import StepMode from './onboarding/StepMode.svelte';
   import StepProvider from './onboarding/StepProvider.svelte';
   import StepModel from './onboarding/StepModel.svelte';
@@ -8,27 +9,22 @@
   import { settings } from '../stores/settings.svelte';
   import { setOnboardingStarted } from '../api/settings';
 
-  /// Linear step index. The mode step (1) sets `mode`, which determines
-  /// whether steps 2/3 render the local-path (Provider → Model) or the
-  /// server-path (Pair) bodies. Step 4 (Folder + Done) is shared.
+  /// Linear step index. The mode step (2) sets `mode`, which determines
+  /// whether steps 3/4 render the local-path (Provider → Model) or the
+  /// server-path (Pair) bodies. The last step (Folder + Done) is shared.
   ///   0 = Welcome
-  ///   1 = Mode (branch point)
-  ///   2 = Provider (local) / Pair (server)
-  ///   3 = Model (local) / Folder+Done (server — skips ahead)
-  ///   4 = Folder+Done (local)
+  ///   1 = Updates (consent)
+  ///   2 = Mode (branch point)
+  ///   3 = Provider (local) / Pair (server)
+  ///   4 = Model (local) / Folder+Done (server — skips ahead)
+  ///   5 = Folder+Done (local)
   type Mode = 'local' | 'server' | null;
   let step = $state(0);
   let mode = $state<Mode>(null);
 
-  // The server path is shorter (no provider/whisper steps), so its "done"
-  // step index differs from the local path's. Compute labels from the
-  // effective sequence so the progress indicator stays honest.
-  const localSteps = ['Welcome', 'Setup mode', 'AI provider', 'Whisper model', 'Recordings'];
-  const serverSteps = ['Welcome', 'Setup mode', 'Connect to server', 'Recordings'];
+  const localSteps = ['Welcome', 'Updates', 'Setup mode', 'AI provider', 'Whisper model', 'Recordings'];
+  const serverSteps = ['Welcome', 'Updates', 'Setup mode', 'Connect to server', 'Recordings'];
   const stepLabels = $derived(mode === 'server' ? serverSteps : localSteps);
-  // For the progress bar we show the current step's label; the welcome step
-  // and mode step are shared. We render dots for the *current path* once mode
-  // is chosen; before that (welcome) we show a single dot.
   const totalSteps = $derived(stepLabels.length);
 
   function next() {
@@ -42,11 +38,11 @@
     if (step < totalSteps - 1) step += 1;
   }
   function skip() {
-    // Skipping the Mode step without choosing would leave step 2 with
+    // Skipping the Mode step without choosing would leave the next step with
     // mode === null and no render branch matches → blank card, stuck.
     // Default to local so the rest of the wizard renders; the user can
     // still skip every subsequent step.
-    if (step === 1 && mode === null) {
+    if (step === 2 && mode === null) {
       mode = 'local';
     }
     next();
@@ -88,14 +84,16 @@
       {#if step === 0}
         <StepWelcome onContinue={next} />
       {:else if step === 1}
+        <StepUpdates onNext={next} onSkip={skip} />
+      {:else if step === 2}
         <StepMode onChoose={chooseMode} onSkip={skip} />
-      {:else if mode === 'local' && step === 2}
-        <StepProvider onNext={next} onSkip={skip} />
       {:else if mode === 'local' && step === 3}
+        <StepProvider onNext={next} onSkip={skip} />
+      {:else if mode === 'local' && step === 4}
         <StepModel onNext={next} onSkip={skip} />
-      {:else if mode === 'server' && step === 2}
+      {:else if mode === 'server' && step === 3}
         <StepPair onNext={next} onSkip={skip} />
-      {:else if (mode === 'local' && step === 4) || (mode === 'server' && step === 3)}
+      {:else if (mode === 'local' && step === 5) || (mode === 'server' && step === 4)}
         <StepFolder onDone={finish} {finishing} {finishError} />
       {/if}
     </div>

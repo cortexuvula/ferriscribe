@@ -4,12 +4,14 @@
   import { settings } from './lib/stores/settings.svelte';
   import { theme } from './lib/stores/theme.svelte.ts';
   import { generation } from './lib/stores/generation.svelte';
+  import { updater } from './lib/stores/updater.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onOpenUrl } from '@tauri-apps/plugin-deep-link';
 
   import Sidebar from './lib/components/Sidebar.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
+  import UpdateBanner from './lib/components/UpdateBanner.svelte';
   import StatusBadge from './lib/components/StatusBadge.svelte';
   import SettingsDialog from './lib/dialogs/SettingsDialog.svelte';
   import DatabaseRecoveryDialog from './lib/dialogs/DatabaseRecoveryDialog.svelte';
@@ -127,6 +129,10 @@
 
     await settings.load();
 
+    // Start the auto-update check (if the user has it enabled). The check is
+    // an anonymous GET to GitHub Releases — no PHI transmitted.
+    updater.startAutoCheck();
+
     onGlobalKeydown = (e: KeyboardEvent) => {
       const cmdOrCtrl = e.metaKey || e.ctrlKey;
       if (!(cmdOrCtrl && e.shiftKey && (e.key === 'r' || e.key === 'R'))) return;
@@ -206,6 +212,7 @@
     pipeline.destroy();
     pipelineCompleteUnlisten?.();
     pipelineFailedUnlisten?.();
+    updater.stopAutoCheck();
   });
 </script>
 
@@ -215,6 +222,8 @@
   <OnboardingWizard />
 {:else}
 <div class="app-shell">
+  <UpdateBanner />
+  <div class="app-shell-grid">
   <aside class="app-sidebar">
     <Sidebar bind:activeTab />
   </aside>
@@ -254,6 +263,7 @@
   </footer>
 
   <ToastContainer onNavigate={navigateToSoap} />
+  </div><!-- /.app-shell-grid -->
 </div>
 
 <SettingsDialog bind:open={settingsOpen} />
@@ -266,10 +276,21 @@
 
 <style>
   .app-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  .app-shell > :global(.update-banner) {
+    flex-shrink: 0;
+  }
+
+  .app-shell-grid {
     display: grid;
     grid-template-columns: var(--sidebar-width) 1fr;
     grid-template-rows: 1fr var(--statusbar-height);
-    height: 100vh;
+    flex: 1;
     overflow: hidden;
   }
 
