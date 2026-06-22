@@ -81,26 +81,17 @@ fn raw_machine_id() -> SecurityResult<String> {
     if let Ok(output) = Command::new("ioreg")
         .args(["-rd1", "-c", "IOPlatformExpertDevice"])
         .output()
+        && let Ok(text) = std::str::from_utf8(&output.stdout)
     {
-        if let Ok(text) = std::str::from_utf8(&output.stdout) {
-            for line in text.lines() {
-                if line.contains("IOPlatformUUID") {
-                    if let Some(start) = line.rfind('"') {
-                        // second quote is immediately after
-                        if let Some(end) = line[..start].rfind('"') {
-                            let uuid = &line[end + 1..start];
-                            if !uuid.is_empty() {
-                                return Ok(uuid.to_string());
-                            }
-                        }
-                        // simpler split approach
-                        let parts: Vec<&str> = line.split('"').collect();
-                        if parts.len() >= 4 {
-                            let uuid = parts[parts.len() - 2];
-                            if !uuid.is_empty() {
-                                return Ok(uuid.to_string());
-                            }
-                        }
+        for line in text.lines() {
+            if line.contains("IOPlatformUUID") {
+                // The line looks like: `... "IOPlatformUUID" = "XXXX-...-XXXX"`
+                // Split on double-quotes and take the last quoted value.
+                let parts: Vec<&str> = line.split('"').collect();
+                if parts.len() >= 4 {
+                    let uuid = parts[parts.len() - 2];
+                    if !uuid.is_empty() {
+                        return Ok(uuid.to_string());
                     }
                 }
             }

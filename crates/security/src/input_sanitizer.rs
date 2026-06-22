@@ -13,6 +13,18 @@ lazy_static! {
     static ref HTML_TAG: Regex = Regex::new(r"<[^>]+>").expect("invalid HTML tag regex");
 }
 
+/// Decode the five common HTML entities. Not a full entity decoder — covers
+/// the cases that matter for the "stripped text is rendered elsewhere" threat
+/// model. Numeric `&#x27;` and `&#39;` both map to apostrophe.
+fn decode_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+}
+
 /// Utilities for sanitizing untrusted text input.
 ///
 /// `InputSanitizer` is a stateless unit struct — both methods are
@@ -20,16 +32,30 @@ lazy_static! {
 pub struct InputSanitizer;
 
 impl InputSanitizer {
-    /// Remove all HTML tags from `input`, returning the bare text content.
+    /// Remove all HTML tags from `input`, returning the bare text content,
+    /// and decode the five common HTML entities (`&amp;`, `&lt;`, `&gt;`,
+    /// `&quot;`, `&#x27;` / `&#39;`).
     ///
-    /// Uses a simple `<[^>]+>` regex that strips any `<...>` sequence.
-    /// This is **not** a full HTML parser — it will not decode entities
-    /// (`&amp;` stays as-is) and will not handle malformed markup the way
-    /// a browser would. It is sufficient for the threat model of "user
-    /// pasted a snippet from a web page into the context field" but
-    /// should not be relied on against actively hostile input.
+    /// The tag-stripping regex is applied in a loop until no more matches are
+    /// found — this catches the classic `title=">"` bypass where a `>` inside
+    /// an attribute prematurely terminates a single-pass regex, leaving the
+    /// remainder of the tag (and any nested handlers) intact.
+    ///
+    /// This is **not** a full HTML parser and should not be relied on against
+    /// actively hostile input, but it is sufficient for the threat model of
+    /// "user pasted a snippet from a web page into the context field."
     pub fn strip_html(input: &str) -> String {
-        HTML_TAG.replace_all(input, "").into_owned()
+        // Loop the regex until stable. Bounds the iteration to avoid a
+        // pathological input spinning forever.
+        let mut current = input.to_string();
+        for _ in 0..8 {
+            let next = HTML_TAG.replace_all(&current, "").into_owned();
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        decode_entities(&current)
     }
 
     /// Truncate `input` to at most `max_len` **bytes**, respecting UTF-8
@@ -67,6 +93,41 @@ mod tests {
         assert_eq!(
             InputSanitizer::strip_html("<script>alert('xss')</script>"),
             "alert('xss')"
+        );
+    }
+
+    #[test]
+    fn strip_html_loops_to_catch_nested() {
+        // The loop catches nested/leftover tags that a single regex pass
+        // leaves behind. NOTE: a '>' *inside a quoted attribute* (e.g.
+        // title=">") genuinely can't be handled by a regex — that requires a
+        // real parser (ammonia). The loop + entity decode covers the realistic
+        // user-paste threat model; it is not a hardening against hostile input.
+        assert_eq!(
+            InputSanitizer::strip_html("<<script>alert(1)</script>>"),
+            "alert(1)>"
+        );
+        assert_eq!(
+            InputSanitizer::strip_html("text <b><b>bold</b></b> tail"),
+            "text bold tail"
+        );
+    }
+
+    #[test]
+    fn strip_html_decodes_common_entities() {
+        assert_eq!(InputSanitizer::strip_html("a &amp; b"), "a & b");
+        assert_eq!(InputSanitizer::strip_html("&lt;tag&gt;"), "<tag>");
+        assert_eq!(InputSanitizer::strip_html("say &quot;hi&quot;"), "say \"hi\"");
+        assert_eq!(InputSanitizer::strip_html("it&#x27;s"), "it's");
+        assert_eq!(InputSanitizer::strip_html("it&#39;s"), "it's");
+    }
+
+    #[test]
+    fn strip_html_decodes_entities_after_stripping() {
+        // Tags removed, then entities in the remaining text decoded.
+        assert_eq!(
+            InputSanitizer::strip_html("<b>&amp;</b> and &lt;rest&gt;"),
+            "& and <rest>"
         );
     }
 

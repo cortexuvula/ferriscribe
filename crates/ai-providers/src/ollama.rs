@@ -77,6 +77,11 @@ impl OllamaProvider {
     /// `bearer` is an optional bearer token for auth-proxied remote connections.
     /// `policy` controls retry behavior for inner HTTP calls.
     /// Returns `Err(AppError::AiProvider)` if the reqwest client can't be built.
+    ///
+    /// **`allow_public` is captured at construction, not stored.** If the user
+    /// changes `allow_public_endpoint` in settings, the provider keeps using
+    /// the policy it was built with until `reinit_providers` reconstructs it.
+    /// The frontend must call `reinit_providers` after changing that setting.
     pub fn new(
         host: Option<&str>,
         allow_public: bool,

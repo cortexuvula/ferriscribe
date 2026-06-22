@@ -10,12 +10,14 @@
 //!   (descending) so higher-priority and longer-match entries take precedence.
 //! - Each entry is matched at word boundaries (`\b...\b`) via regex.
 //! - Case sensitivity is per-entry.
-//! - Compiled regex patterns are cached per `(find_text, case_sensitive)` pair.
+//! - Compiled regex patterns are cached per `(find_text, case_sensitive)` pair
+//!   in a process-wide cache, so a stable vocabulary compiles once and reuses.
 //! - Disabled entries (`enabled = false`) are silently skipped.
 //! - Multiple occurrences of the same find_text in the input are all replaced
 //!   and counted.
 
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 use regex::Regex;
 use tracing::{debug, info};
@@ -23,6 +25,16 @@ use tracing::{debug, info};
 use medical_core::types::vocabulary::{
     AppliedCorrection, CorrectionResult, VocabularyEntry,
 };
+
+/// Persistent process-wide regex cache keyed by `(find_text, case_sensitive)`.
+/// Recompiling 100+ regexes on every transcription was a hot-path cost; this
+/// cache lets a stable vocabulary compile once and reuse across calls. The
+/// key is the find text + case-sensitivity, so editing an entry's find text
+/// compiles a new regex under a new key (the old one is benignly retained).
+/// Bounded to 1024 entries to avoid unbounded growth if entries churn.
+static REGEX_CACHE: LazyLock<Mutex<HashMap<(String, bool), Option<Regex>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const REGEX_CACHE_CAP: usize = 1024;
 
 /// Apply vocabulary corrections to raw STT text.
 ///
@@ -58,17 +70,29 @@ pub fn apply_corrections(text: &str, entries: &[VocabularyEntry]) -> CorrectionR
     let mut corrected = text.to_string();
     let mut applied = Vec::new();
     let mut total = 0u32;
-    let mut cache: HashMap<(String, bool), Option<Regex>> = HashMap::new();
 
-    for entry in sorted {
-        let key = (entry.find_text.clone(), entry.case_sensitive);
-        let pattern = cache.entry(key).or_insert_with(|| {
-            let escaped = regex::escape(&entry.find_text);
-            let pat = format!(r"\b{escaped}\b");
-            let flags = if entry.case_sensitive { "" } else { "(?i)" };
-            Regex::new(&format!("{flags}{pat}")).ok()
-        });
+    // Compile (or fetch from the process cache) each entry's regex. The cache
+    // is shared across calls so a stable vocabulary pays the compile cost once.
+    let mut compiled: Vec<(&VocabularyEntry, Option<Regex>)> = Vec::with_capacity(sorted.len());
+    {
+        let mut cache = REGEX_CACHE.lock().expect("regex cache poisoned");
+        for entry in &sorted {
+            let key = (entry.find_text.clone(), entry.case_sensitive);
+            let pattern = cache.entry(key).or_insert_with(|| {
+                let escaped = regex::escape(&entry.find_text);
+                let pat = format!(r"\b{escaped}\b");
+                let flags = if entry.case_sensitive { "" } else { "(?i)" };
+                Regex::new(&format!("{flags}{pat}")).ok()
+            });
+            compiled.push((entry, pattern.clone()));
+        }
+        // Bound growth: if the cache has far exceeded the working set, trim it.
+        if cache.len() > REGEX_CACHE_CAP {
+            cache.retain(|k, _| compiled.iter().any(|(e, _)| (e.find_text.clone(), e.case_sensitive) == *k));
+        }
+    }
 
+    for (entry, pattern) in compiled {
         if let Some(re) = pattern {
             let count = re.find_iter(&corrected).count();
             if count > 0 {
