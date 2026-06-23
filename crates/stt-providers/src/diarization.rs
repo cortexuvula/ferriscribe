@@ -425,6 +425,26 @@ fn cluster_speakers(
         }
     }
 
+    // Renumber surviving cluster IDs to 0, 1, 2, ... sequentially. Without
+    // this, merging can leave gaps (e.g. clusters 0 and 4 survive → speakers
+    // labeled "Speaker 1" and "Speaker 5", skipping 2/3/4). Sort the IDs so
+    // the lowest original ID becomes 0 (stable across runs).
+    let sorted_ids: Vec<usize> = {
+        let mut ids: Vec<usize> = centroids.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    };
+    let remap: HashMap<usize, usize> = sorted_ids
+        .iter()
+        .enumerate()
+        .map(|(new_id, &old_id)| (old_id, new_id))
+        .collect();
+    for a in assignments.iter_mut() {
+        if let Some(&new_id) = remap.get(a) {
+            *a = new_id;
+        }
+    }
+
     assignments
 }
 

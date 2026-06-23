@@ -33,6 +33,97 @@ pub(super) fn is_repeated_phrase_hallucination(text: &str) -> bool {
     segments.iter().all(|s| s == first)
 }
 
+/// Collapse whisper.cpp repetition loops within a transcript segment.
+///
+/// Whisper sometimes produces loops like "okay okay okay all right all right
+/// all right all right" within a single segment — a decoding pathology, not
+/// real speech. This function detects when the segment's tokens repeat a
+/// short sub-sequence (1-4 words) 3+ times and collapses the repetition to
+/// a single instance.
+///
+/// Conservative: only collapses when the *entire* segment is dominated by
+/// the repeated pattern (the repeated block covers > 60% of the segment).
+/// A real sentence that happens to repeat a word ("the patient said the
+/// patient said...") won't be touched because the surrounding words break
+/// the pattern.
+pub(super) fn collapse_repetition_loops(text: &str) -> String {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.len() < 6 {
+        return text.to_string(); // too short to have a meaningful loop
+    }
+
+    // Try pattern lengths 1..=4 words.
+    for pattern_len in 1..=4usize {
+        if let Some(collapsed) = try_collapse_pattern(&tokens, pattern_len) {
+            return collapsed;
+        }
+    }
+    text.to_string()
+}
+
+/// If the tokens consist of a repeating `pattern_len`-word block (3+ times),
+/// collapse to a single instance of that block.
+fn try_collapse_pattern(tokens: &[&str], pattern_len: usize) -> Option<String> {
+    if tokens.len() < pattern_len * 3 {
+        return None;
+    }
+    let pattern: Vec<&str> = tokens[..pattern_len].to_vec();
+    let pattern_lower: Vec<String> = pattern.iter().map(|t| t.to_lowercase()).collect();
+
+    // Count how many consecutive repetitions of the pattern exist from the start.
+    let mut reps = 1;
+    let mut i = pattern_len;
+    while i + pattern_len <= tokens.len() {
+        let chunk_lower: Vec<String> = tokens[i..i + pattern_len]
+            .iter()
+            .map(|t| t.to_lowercase())
+            .collect();
+        if chunk_lower == pattern_lower {
+            reps += 1;
+            i += pattern_len;
+        } else {
+            break;
+        }
+    }
+
+    if reps >= 3 && i == tokens.len() {
+        // The entire segment is the pattern repeated — collapse to one.
+        return Some(pattern.join(" "));
+    }
+
+    if reps >= 3 {
+        // The repeated block covers the start; check if the remaining tokens
+        // are short enough that the repetition dominates (> 60% of segment).
+        let repeated_count = reps * pattern_len;
+        if repeated_count as f64 / tokens.len() as f64 > 0.6 {
+            let remaining = tokens[i..].join(" ");
+            return Some(format!("{} {}", pattern.join(" "), remaining));
+        }
+    }
+
+    None
+}
+
+/// Apply repetition-loop collapse to each segment of a transcript, returning
+/// a new transcript text. Called after whisper transcription but before
+/// formatting/storage.
+pub(super) fn filter_segment_repetitions(
+    transcript: &mut medical_core::types::stt::Transcript,
+) {
+    for seg in &mut transcript.segments {
+        let original = &seg.text;
+        let collapsed = collapse_repetition_loops(original);
+        if collapsed != *original {
+            tracing::warn!(
+                original_len = original.len(),
+                collapsed_len = collapsed.len(),
+                "collapsed whisper repetition loop in segment"
+            );
+            seg.text = collapsed;
+        }
+    }
+}
+
 /// Write an orphaned transcript (one whose DB persistence failed despite
 /// successful transcription) to a file inside `app_data_dir/orphaned_transcripts/`.
 /// Returns the full path so the caller can log it for manual recovery.

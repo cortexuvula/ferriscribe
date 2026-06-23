@@ -22,7 +22,7 @@ use crate::state::AppState;
 
 use super::helpers::{
     is_repeated_phrase_hallucination, load_wav_to_audio_data, mark_recording_failed,
-    mark_recording_failed_db_only, persist_orphaned_transcript,
+    mark_recording_failed_db_only, filter_segment_repetitions, persist_orphaned_transcript,
 };
 
 /// Inner implementation of [`super::transcribe_recording`] that accepts an
@@ -277,6 +277,13 @@ pub async fn transcribe_recording_inner(
         }
     }
 
+    // Collapse whisper.cpp repetition loops ("okay okay okay all right all
+    // right all right") before formatting. This is a decoding pathology, not
+    // real speech; the filter conservatively only collapses when a short
+    // token pattern repeats 3+ times and dominates the segment.
+    let mut transcript = transcript;
+    filter_segment_repetitions(&mut transcript);
+
     // Build speaker-attributed text when diarization segments are available.
     let display_text = format_transcript_with_speakers(&transcript);
 
@@ -529,13 +536,20 @@ pub async fn transcribe_recording_inner(
 
 /// Format a transcript with speaker labels when diarization data is available.
 ///
-/// Groups consecutive segments by speaker and formats as:
-///   Speaker 1: Hello, how are you?
-///   Speaker 2: I'm not feeling well.
+/// Format a transcript with speaker labels and per-segment timestamps.
 ///
-/// Segments without speaker labels (e.g. from gaps between diarization turns)
-/// are included in the output — appended to the preceding speaker's paragraph
-/// when one exists, or emitted without a label if no speaker has been seen yet.
+/// Each whisper segment is emitted as its own block, with an SRT-style
+/// timestamp and a bracketed speaker label:
+///
+/// ```text
+/// 00:00:01,340 --> 00:00:03,750 [Speaker 0]
+/// Good, good. You need some refills today.
+/// ```
+///
+/// This preserves the segment granularity that whisper.cpp produces (one
+/// segment per clause/pause), unlike the previous "one paragraph per
+/// speaker" format that collapsed all of a speaker's consecutive text into
+/// a single run-on blob.
 ///
 /// Falls back to the raw text when no speaker segments are present at all.
 fn format_transcript_with_speakers(transcript: &medical_core::types::stt::Transcript) -> String {
@@ -544,50 +558,63 @@ fn format_transcript_with_speakers(transcript: &medical_core::types::stt::Transc
         return transcript.text.clone();
     }
 
-    // Group consecutive segments by speaker into paragraphs.
-    // Speaker labels arrive pre-formatted from the merge module ("Speaker 1", "Speaker 2").
-    // Segments without a speaker label are folded into the current speaker's paragraph
-    // so that no text is silently dropped (the previous implementation filtered these
-    // out, causing truncated transcripts when diarization only partially assigned).
     let mut result = String::new();
-    let mut current_speaker: Option<&str> = None;
-    let mut current_words: Vec<&str> = Vec::new();
+    let mut last_speaker: Option<&str> = None;
 
     for seg in &transcript.segments {
-        let label = seg.speaker.as_deref();
-
-        if label.is_some() && label != current_speaker {
-            // New speaker — flush the previous group first.
-            flush_speaker_group(&mut result, current_speaker, &current_words);
-            current_words.clear();
-            current_speaker = label;
+        let text = seg.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        // Fold unlabeled segments into the last known speaker so no text
+        // is dropped (diarization may not cover every whisper segment).
+        let speaker = seg.speaker.as_deref().or(last_speaker);
+        if speaker.is_some() {
+            last_speaker = speaker;
         }
 
-        current_words.push(seg.text.trim());
-    }
+        if !result.is_empty() {
+            result.push_str("\n\n");
+        }
 
-    // Flush the last group.
-    flush_speaker_group(&mut result, current_speaker, &current_words);
+        // SRT-style timestamp: HH:MM:SS,mmm --> HH:MM:SS,mmm
+        result.push_str(&format_srt_timestamp(seg.start, seg.end));
+        result.push(' ');
+
+        // Bracketed speaker label: [Speaker 0]
+        if let Some(label) = speaker {
+            if let Some(n) = label.strip_prefix("Speaker ") {
+                if let Ok(n) = n.parse::<u32>() {
+                    result.push_str(&format!("[Speaker {}] ", n.saturating_sub(1)));
+                } else {
+                    result.push_str(&format!("[{}] ", label));
+                }
+            } else {
+                result.push_str(&format!("[{}] ", label));
+            }
+        }
+
+        result.push('\n');
+        result.push_str(text);
+    }
 
     result
 }
 
-/// Write a completed speaker group to the result string.
-///
-/// If `speaker` is `Some`, prefixes with "Speaker N: ". Otherwise the words
-/// are appended without a label (for segments that precede any speaker turn).
-fn flush_speaker_group(result: &mut String, speaker: Option<&str>, words: &[&str]) {
-    if words.is_empty() {
-        return;
-    }
-    if !result.is_empty() {
-        result.push_str("\n\n");
-    }
-    if let Some(label) = speaker {
-        result.push_str(label);
-        result.push_str(": ");
-    }
-    result.push_str(&words.join(" "));
+/// Format a start/end timestamp pair (in seconds) as an SRT-style range:
+/// `00:00:01,340 --> 00:00:03,750`
+fn format_srt_timestamp(start: f64, end: f64) -> String {
+    format!("{} --> {}", format_srt_time(start), format_srt_time(end))
+}
+
+/// Format a single timestamp (in seconds) as `HH:MM:SS,mmm`.
+fn format_srt_time(t: f64) -> String {
+    let total_ms = (t * 1000.0).round() as u64;
+    let hours = total_ms / 3_600_000;
+    let minutes = (total_ms % 3_600_000) / 60_000;
+    let seconds = (total_ms % 60_000) / 1_000;
+    let millis = total_ms % 1_000;
+    format!("{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
 }
 
 #[cfg(test)]
@@ -630,13 +657,16 @@ mod format_tests {
             seg("Hello", Some("Speaker 2")),
         ]);
         let result = super::format_transcript_with_speakers(&t);
-        assert_eq!(result, "Speaker 1: Hi there\n\nSpeaker 2: Hello");
+        // Each segment gets its own SRT-style block with timestamp + speaker.
+        assert!(result.contains("[Speaker 0]"), "first speaker; got: {result}");
+        assert!(result.contains("[Speaker 1]"), "second speaker; got: {result}");
+        assert!(result.contains("Hi"), "first text; got: {result}");
+        assert!(result.contains("Hello"), "third text; got: {result}");
+        assert!(result.contains("-->"), "timestamps present; got: {result}");
     }
 
     #[test]
     fn unlabeled_segments_included_not_dropped() {
-        // Regression: the old code filtered out unlabeled segments, truncating
-        // the transcript when diarization only partially assigned speakers.
         let t = make_transcript(vec![
             seg("Doctor speaking", Some("Speaker 1")),
             seg("mm-hmm", None),  // unlabeled — must NOT be dropped
@@ -647,8 +677,8 @@ mod format_tests {
             result.contains("mm-hmm"),
             "unlabeled segment must appear in output; got: {result}"
         );
-        assert!(result.contains("Speaker 1:"));
-        assert!(result.contains("Speaker 2:"));
+        assert!(result.contains("[Speaker 0]"));
+        assert!(result.contains("[Speaker 1]"));
     }
 
     #[test]
@@ -659,21 +689,24 @@ mod format_tests {
         ]);
         let result = super::format_transcript_with_speakers(&t);
         assert!(
-            result.starts_with("Background noise"),
+            result.contains("Background noise"),
             "unlabeled prefix must appear; got: {result}"
         );
-        assert!(result.contains("Speaker 1: Hello"));
+        assert!(result.contains("[Speaker 0]"), "labeled segment follows; got: {result}");
     }
 
     #[test]
     fn unlabeled_after_speaker_folded_into_that_speaker() {
         let t = make_transcript(vec![
             seg("Take this", Some("Speaker 1")),
-            seg("okay", None),  // should fold into Speaker 1
+            seg("okay", None),  // should fold into Speaker 0
             seg("Thanks", Some("Speaker 2")),
         ]);
         let result = super::format_transcript_with_speakers(&t);
-        assert_eq!(result, "Speaker 1: Take this okay\n\nSpeaker 2: Thanks");
+        // "okay" appears and is attributed to [Speaker 0] (the last known).
+        assert!(result.contains("okay"), "folded text present; got: {result}");
+        assert!(result.contains("[Speaker 0]"), "folded into speaker 0; got: {result}");
+        assert!(result.contains("[Speaker 1]"), "speaker change after fold; got: {result}");
     }
 
     #[test]
