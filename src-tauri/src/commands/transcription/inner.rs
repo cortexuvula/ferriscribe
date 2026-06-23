@@ -197,8 +197,14 @@ pub async fn transcribe_recording_inner(
 
     // Build STT config from caller parameters.
     // Default diarize to true — medical recordings are typically conversations.
+    // Default language to the app's configured language (e.g. "en-US") when
+    // the caller doesn't specify one — whisper.cpp's auto-detect is unreliable
+    // on short clips and frequently misdetects as Chinese.
+    let effective_language = language
+        .or_else(|| Some(app_config.language.clone()))
+        .filter(|l| !l.is_empty());
     let config = SttConfig {
-        language,
+        language: effective_language,
         diarize: diarize.unwrap_or(true),
         num_speakers: app_config.max_speakers,
         ..SttConfig::default()
