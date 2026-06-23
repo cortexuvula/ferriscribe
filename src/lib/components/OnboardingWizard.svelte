@@ -1,6 +1,7 @@
 <script lang="ts">
   import StepWelcome from './onboarding/StepWelcome.svelte';
   import StepUpdates from './onboarding/StepUpdates.svelte';
+  import StepLanguage from './onboarding/StepLanguage.svelte';
   import StepMode from './onboarding/StepMode.svelte';
   import StepProvider from './onboarding/StepProvider.svelte';
   import StepModel from './onboarding/StepModel.svelte';
@@ -9,21 +10,19 @@
   import { settings } from '../stores/settings.svelte';
   import { setOnboardingStarted } from '../api/settings';
 
-  /// Linear step index. The mode step (2) sets `mode`, which determines
-  /// whether steps 3/4 render the local-path (Provider → Model) or the
-  /// server-path (Pair) bodies. The last step (Folder + Done) is shared.
   ///   0 = Welcome
   ///   1 = Updates (consent)
-  ///   2 = Mode (branch point)
-  ///   3 = Provider (local) / Pair (server)
-  ///   4 = Model (local) / Folder+Done (server — skips ahead)
-  ///   5 = Folder+Done (local)
+  ///   2 = Language
+  ///   3 = Mode (branch point)
+  ///   4 = Provider (local) / Pair (server)
+  ///   5 = Model (local) / Folder+Done (server — skips ahead)
+  ///   6 = Folder+Done (local)
   type Mode = 'local' | 'server' | null;
   let step = $state(0);
   let mode = $state<Mode>(null);
 
-  const localSteps = ['Welcome', 'Updates', 'Setup mode', 'AI provider', 'Whisper model', 'Recordings'];
-  const serverSteps = ['Welcome', 'Updates', 'Setup mode', 'Connect to server', 'Recordings'];
+  const localSteps = ['Welcome', 'Updates', 'Language', 'Setup mode', 'AI provider', 'Whisper model', 'Recordings'];
+  const serverSteps = ['Welcome', 'Updates', 'Language', 'Setup mode', 'Connect to server', 'Recordings'];
   const stepLabels = $derived(mode === 'server' ? serverSteps : localSteps);
   const totalSteps = $derived(stepLabels.length);
 
@@ -42,7 +41,7 @@
     // mode === null and no render branch matches → blank card, stuck.
     // Default to local so the rest of the wizard renders; the user can
     // still skip every subsequent step.
-    if (step === 2 && mode === null) {
+    if (step === 3 && mode === null) {
       mode = 'local';
     }
     next();
@@ -86,14 +85,16 @@
       {:else if step === 1}
         <StepUpdates onNext={next} onSkip={skip} />
       {:else if step === 2}
+        <StepLanguage onNext={next} onSkip={skip} />
+      {:else if step === 3}
         <StepMode onChoose={chooseMode} onSkip={skip} />
-      {:else if mode === 'local' && step === 3}
-        <StepProvider onNext={next} onSkip={skip} />
       {:else if mode === 'local' && step === 4}
+        <StepProvider onNext={next} onSkip={skip} />
+      {:else if mode === 'local' && step === 5}
         <StepModel onNext={next} onSkip={skip} />
-      {:else if mode === 'server' && step === 3}
+      {:else if mode === 'server' && step === 4}
         <StepPair onNext={next} onSkip={skip} />
-      {:else if (mode === 'local' && step === 5) || (mode === 'server' && step === 4)}
+      {:else if (mode === 'local' && step === 6) || (mode === 'server' && step === 5)}
         <StepFolder onDone={finish} {finishing} {finishError} />
       {/if}
     </div>
