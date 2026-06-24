@@ -5630,7 +5630,7 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.20.3"
+version = "0.20.4"
 dependencies = [
  "axum",
  "chrono",

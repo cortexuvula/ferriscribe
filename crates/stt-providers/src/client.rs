@@ -64,7 +64,14 @@ pub async fn post_audio(
         .text("response_format", "verbose_json");
 
     if let Some(lang) = language.filter(|l| !l.is_empty()) {
-        form = form.text("language", lang.to_string());
+        // whisper.cpp's HTTP server rejects BCP-47 tags with a region/script
+        // suffix (e.g. "en-US") — `whisper_lang_id` returns -1 and the server
+        // crashes, which surfaces upstream as a 502/EOF. Local whisper-rs
+        // tolerates these tags, so the bug only manifests in remote/office
+        // mode. Normalize to the 2-letter ISO-639-1 code that both paths
+        // accept. Fall back to the original string if the split yields nothing.
+        let normalized = lang.split(['-', '_']).next().unwrap_or(lang);
+        form = form.text("language", normalized.to_string());
     }
 
     // Build request with optional auth
@@ -208,6 +215,78 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "expected ok, got: {:?}", result);
+    }
+
+    /// Regression: whisper.cpp's HTTP server crashes on BCP-47 tags like
+    /// "en-US" (whisper_lang_id returns -1). We must normalize to the bare
+    /// 2-letter ISO-639-1 code before sending. We assert this with wiremock's
+    /// body-contains matcher on the raw multipart payload — the normalized
+    /// "language=en" field must be present and the raw "en-US" tag must not.
+    #[tokio::test]
+    async fn bcp47_language_normalized_to_iso_639_1_for_remote() {
+        use wiremock::matchers::body_string_contains;
+
+        let server = MockServer::start().await;
+        // Positive assertion: the multipart body contains the normalized
+        // language field. The trailing CRLF is part of the multipart framing
+        // so it discriminates "en\r\n" from "en-US\r\n".
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(body_string_contains(
+                "name=\"language\"\r\n\r\nen\r\n",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(verbose_body()))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let result = post_audio(
+            &client,
+            &server.uri(),
+            "whisper-1",
+            None,
+            vec![0u8; 100],
+            // The buggy code forwarded this verbatim; whisper.cpp then crashed.
+            Some("en-US"),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected request to match normalized 'language=en' field; \
+             wiremock did not see it — got: {result:?}",
+        );
+
+        // Negative assertion via a second server: if the buggy 'en-US' value
+        // were sent, this mock (which only matches the un-normalized tag)
+        // would fire. wiremock returns 404 by default, so a non-2xx response
+        // here is the success condition.
+        let neg_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/transcriptions"))
+            .and(body_string_contains(
+                "name=\"language\"\r\n\r\nen-US\r\n",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(verbose_body()))
+            .mount(&neg_server)
+            .await;
+
+        let neg_result = post_audio(
+            &client,
+            &neg_server.uri(),
+            "whisper-1",
+            None,
+            vec![0u8; 100],
+            Some("en-US"),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(
+            neg_result.is_err(),
+            "BCP-47 tag 'en-US' leaked through to the remote server (would crash whisper.cpp)",
+        );
     }
 
     #[tokio::test]
