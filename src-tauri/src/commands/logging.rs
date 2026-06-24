@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use medical_core::error::{AppError, AppResult};
+use medical_security::phi_redactor::PhiRedactor;
 
 /// Return the path to the log directory.
 #[tauri::command]
@@ -73,6 +74,18 @@ const FRONTEND_LOG_MESSAGE_MAX: usize = 1000;
 /// nested fields without unbounded growth.
 const FRONTEND_LOG_CONTEXT_MAX: usize = 2000;
 
+/// PHI guardrail for frontend-supplied log text. The frontend is trusted not
+/// to log patient content, but a bug like `invoke('frontend_log', { message:
+/// transcript })` would land up to 1 KB of patient text in the rotating log
+/// file (AGENTS.md line 6 forbids PHI in tracing::*). We run the static PHI
+/// pattern redactor (SSN/phone/email/DOB/MRN/address/ZIP) on both the message
+/// and the stringified context before emitting, so structured identifiers at
+/// least are replaced with placeholders even if the frontend misbehaves.
+/// Free-text names are NOT covered — that remains the frontend's responsibility.
+fn redact_phi(s: &str) -> String {
+    PhiRedactor::redact(s)
+}
+
 /// Truncate a string to at most `max` characters, appending an explicit
 /// marker so log readers can tell the entry was capped.
 fn truncate_for_log(s: &str, max: usize) -> String {
@@ -96,9 +109,11 @@ fn truncate_for_log(s: &str, max: usize) -> String {
 /// PHI flood cannot fill the log file.
 #[tauri::command]
 pub fn frontend_log(level: String, message: String, context: Option<serde_json::Value>) {
-    let message = truncate_for_log(&message, FRONTEND_LOG_MESSAGE_MAX);
+    // PHI scrubber runs BEFORE the length cap so a structured identifier
+    // sitting just past the 1 KB boundary still gets redacted in the head.
+    let message = truncate_for_log(&redact_phi(&message), FRONTEND_LOG_MESSAGE_MAX);
     let ctx = truncate_for_log(
-        &context.as_ref().map(|v| v.to_string()).unwrap_or_default(),
+        &redact_phi(&context.as_ref().map(|v| v.to_string()).unwrap_or_default()),
         FRONTEND_LOG_CONTEXT_MAX,
     );
 
@@ -151,5 +166,43 @@ mod tests {
         let out = truncate_for_log(&s, 10);
         assert_eq!(out.chars().take(10).collect::<String>(), "héllohéllo");
         assert!(out.contains("[truncated, 25 chars total]"));
+    }
+
+    #[test]
+    fn redact_phi_strips_phone_numbers() {
+        let input = "Call patient at (555) 123-4567 about results";
+        let out = redact_phi(input);
+        assert!(
+            !out.contains("555"),
+            "phone digits must be redacted; got: {out}"
+        );
+        assert!(
+            out.contains("[PHONE"),
+            "expected [PHONE… placeholder; got: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_phi_strips_keyword_prefixed_ssns() {
+        // The SSN pattern requires a keyword prefix (SSN:/Social Security/etc.)
+        // to avoid false positives — see phi_redactor.rs pattern order docs.
+        let input = "SSN: 123-45-6789 on file";
+        let out = redact_phi(input);
+        assert!(
+            !out.contains("6789"),
+            "SSN tail must be redacted; got: {out}"
+        );
+        assert!(
+            out.contains("[SSN]"),
+            "expected [SSN] placeholder; got: {out}"
+        );
+    }
+
+    #[test]
+    fn redact_phi_leaves_diagnostic_text_intact() {
+        // No keyword-prefixed identifiers → no redaction. Confirms the scrubber
+        // doesn't mangle ordinary frontend error messages.
+        let input = "Failed to load list (count=0)";
+        assert_eq!(redact_phi(input), input);
     }
 }
