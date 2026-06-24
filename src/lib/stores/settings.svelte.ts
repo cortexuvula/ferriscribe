@@ -58,6 +58,10 @@ class SettingsStore {
    *  real values arrive (e.g. onboarding wizard before onboarding_completed
    *  is known to be true). */
   loaded = $state(false);
+  /** Reactive error flag. Set when load() fails so App.svelte can render a
+   *  retryable error UI instead of a permanent blank screen. Cleared on a
+   *  successful reload. */
+  loadError = $state(false);
   private saveQueue: Promise<void> = Promise.resolve();
 
   /**
@@ -79,8 +83,13 @@ class SettingsStore {
       const config = await getSettings();
       this.state = config;
       this.loaded = true;
+      this.loadError = false;
     } catch (err) {
       console.error('Failed to load settings:', err);
+      // Mark the failure so the UI can surface a retryable error instead of
+      // rendering a permanent blank screen. `loaded` stays false — the real
+      // config never arrived, so gating on it still withholds the app shell.
+      this.loadError = true;
     }
   }
 

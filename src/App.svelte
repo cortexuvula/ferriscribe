@@ -71,6 +71,14 @@
   // wizard at returning users. Gate the whole wizard-vs-shell branch on the
   // store having loaded the real config so nothing renders prematurely.
   const settingsLoaded = $derived(settings.loaded);
+  // If settings.load() fails (backend IPC error, corrupted config), the store
+  // sets loadError=true. We surface a retryable error screen instead of a
+  // permanent blank — without this the user gets an unresponsive window.
+  const settingsLoadError = $derived(settings.loadError);
+
+  async function retrySettingsLoad() {
+    await settings.load();
+  }
 
   // Intercept settings tab — open modal instead of navigating
   $effect(() => {
@@ -223,6 +231,22 @@
 
 {#if recoveryReason}
   <DatabaseRecoveryDialog reason={recoveryReason} />
+{:else if settingsLoadError}
+  <div class="settings-load-error">
+    <div class="error-card">
+      <div class="error-icon" aria-hidden="true">⚙️</div>
+      <h1>Couldn't load your settings</h1>
+      <p>
+        FerriScribe couldn't read its configuration from disk. This can happen
+        after a forced shutdown or a permissions change.
+      </p>
+      <p class="error-hint">
+        Try again — if it keeps failing, restart FerriScribe. Your recordings
+        are safe.
+      </p>
+      <button onclick={retrySettingsLoad}>Try again</button>
+    </div>
+  </div>
 {:else if !settingsLoaded}
   <!-- Blank while the real settings haven't loaded yet. The store's default
        config has onboarding_completed=false; rendering on it before load()
@@ -350,5 +374,70 @@
     color: var(--text-muted);
     margin-left: auto;
     flex-shrink: 0;
+  }
+
+  /* Settings-load failure screen. Shown when settings.load() rejects so the
+     user sees a retryable error instead of a permanent blank window. Kept
+     lightweight and dependency-free — if this screen itself broke, there's
+     no fallback, so it uses only inline-friendly CSS vars. */
+  .settings-load-error {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--bg-primary, #1a1a1a);
+    color: var(--text-primary, #e5e5e5);
+    padding: 24px;
+  }
+
+  .settings-load-error .error-card {
+    max-width: 420px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .settings-load-error .error-icon {
+    font-size: 48px;
+    margin-bottom: 8px;
+  }
+
+  .settings-load-error h1 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0;
+  }
+
+  .settings-load-error p {
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-secondary, #a0a0a0);
+    margin: 0;
+  }
+
+  .settings-load-error .error-hint {
+    font-size: 12px;
+    color: var(--text-muted, #7a7a7a);
+    margin-top: 4px;
+  }
+
+  .settings-load-error button {
+    margin-top: 16px;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary, #e5e5e5);
+    background-color: var(--accent, #3b82f6);
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+  }
+
+  .settings-load-error button:hover {
+    opacity: 0.9;
   }
 </style>
