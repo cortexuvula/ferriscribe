@@ -408,8 +408,14 @@ mod tests {
     fn step_labels() {
         assert_eq!(PipelineStep::Transcribing.label(), "Transcribing");
         assert_eq!(PipelineStep::GeneratingSoap.label(), "Generating SOAP note");
-        assert_eq!(PipelineStep::GeneratingReferral.label(), "Generating referral letter");
-        assert_eq!(PipelineStep::GeneratingLetter.label(), "Generating patient letter");
+        assert_eq!(
+            PipelineStep::GeneratingReferral.label(),
+            "Generating referral letter"
+        );
+        assert_eq!(
+            PipelineStep::GeneratingLetter.label(),
+            "Generating patient letter"
+        );
         assert_eq!(PipelineStep::ExtractingData.label(), "Extracting data");
         assert_eq!(PipelineStep::IndexingRag.label(), "Indexing into RAG");
         assert_eq!(PipelineStep::Complete.label(), "Complete");

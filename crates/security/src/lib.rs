@@ -35,12 +35,12 @@
 //! one side without the other. See the README "Cross-Crate Contracts"
 //! section for the full list.
 
+pub mod audit_logger;
+pub mod input_sanitizer;
 pub mod key_storage;
 pub mod keychain;
 pub mod machine_id;
 pub mod phi_redactor;
-pub mod audit_logger;
-pub mod input_sanitizer;
 pub mod rate_limiter;
 
 use thiserror::Error;

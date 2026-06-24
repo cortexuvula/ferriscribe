@@ -32,12 +32,20 @@ impl<'a> UserDictRemote<'a> {
     ) -> Option<Self> {
         let bearer = bearer?;
         conn.ports.vocab?;
-        Some(Self { conn, bearer, client })
+        Some(Self {
+            conn,
+            bearer,
+            client,
+        })
     }
 
     fn base_url(&self) -> Option<String> {
         let port = self.conn.ports.vocab?;
-        let host = self.conn.lan.as_deref().or(self.conn.tailscale.as_deref())?;
+        let host = self
+            .conn
+            .lan
+            .as_deref()
+            .or(self.conn.tailscale.as_deref())?;
         Some(http_url(host, port))
     }
 
@@ -47,7 +55,8 @@ impl<'a> UserDictRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no dictionary address".into()))?;
         let url = format!("{base}/v1/user-dictionary");
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
@@ -66,8 +75,11 @@ impl<'a> UserDictRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no dictionary address".into()))?;
         let url = format!("{base}/v1/user-dictionary");
-        let body = AddBody { word: word.to_string() };
-        let resp = self.client
+        let body = AddBody {
+            word: word.to_string(),
+        };
+        let resp = self
+            .client
             .post(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
@@ -88,7 +100,8 @@ impl<'a> UserDictRemote<'a> {
             .ok_or_else(|| AppError::Other("paired server has no dictionary address".into()))?;
         let encoded = urlencoding::encode(word);
         let url = format!("{base}/v1/user-dictionary/{encoded}");
-        let resp = self.client
+        let resp = self
+            .client
             .delete(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)

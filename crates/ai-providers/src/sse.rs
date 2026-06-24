@@ -1,9 +1,9 @@
 //! Server-Sent Events stream parser for AI provider streaming responses.
 
-use std::pin::Pin;
 use eventsource_stream::Eventsource;
 use futures_core::Stream;
 use reqwest::Response;
+use std::pin::Pin;
 use tokio_stream::StreamExt;
 
 /// Parse a streaming HTTP response as Server-Sent Events (SSE), yielding
@@ -30,11 +30,11 @@ use tokio_stream::StreamExt;
 pub fn parse_sse_response(
     response: Response,
 ) -> Pin<Box<dyn Stream<Item = Result<String, String>> + Send>> {
-    let stream = response
-        .bytes_stream()
-        .eventsource()
-        .filter_map(|event_result| {
-            match event_result {
+    let stream =
+        response
+            .bytes_stream()
+            .eventsource()
+            .filter_map(|event_result| match event_result {
                 Err(e) => Some(Err(e.to_string())),
                 Ok(event) => {
                     let data = event.data;
@@ -44,8 +44,7 @@ pub fn parse_sse_response(
                         Some(Ok(data))
                     }
                 }
-            }
-        });
+            });
 
     Box::pin(stream)
 }

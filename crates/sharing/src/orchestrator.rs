@@ -204,16 +204,33 @@ impl SharingService {
             config.whisper_internal_port,
         ));
         let mut readiness: ReadinessState = HashMap::new();
-        readiness.insert(UpstreamKind::Ollama, ProbeState {
-            configured: true, proxy_bound: false, last_probe_ok: false, last_probe_at: None,
-        });
-        readiness.insert(UpstreamKind::Whisper, ProbeState {
-            configured: true, proxy_bound: false, last_probe_ok: false, last_probe_at: None,
-        });
-        readiness.insert(UpstreamKind::LmStudio, ProbeState {
-            configured: config.lmstudio_proxy_port.is_some(),
-            proxy_bound: false, last_probe_ok: false, last_probe_at: None,
-        });
+        readiness.insert(
+            UpstreamKind::Ollama,
+            ProbeState {
+                configured: true,
+                proxy_bound: false,
+                last_probe_ok: false,
+                last_probe_at: None,
+            },
+        );
+        readiness.insert(
+            UpstreamKind::Whisper,
+            ProbeState {
+                configured: true,
+                proxy_bound: false,
+                last_probe_ok: false,
+                last_probe_at: None,
+            },
+        );
+        readiness.insert(
+            UpstreamKind::LmStudio,
+            ProbeState {
+                configured: config.lmstudio_proxy_port.is_some(),
+                proxy_bound: false,
+                last_probe_ok: false,
+                last_probe_at: None,
+            },
+        );
         let info = InfoSnapshot {
             host: config.friendly_name.clone(),
             version: config.version.clone(),
@@ -244,14 +261,20 @@ impl SharingService {
 
     /// Clone the [`PairingState`] handle (for issuing/validating codes from
     /// Tauri commands).
-    pub fn pairing_state(&self) -> Arc<PairingState> { self.pairing.clone() }
+    pub fn pairing_state(&self) -> Arc<PairingState> {
+        self.pairing.clone()
+    }
 
     /// Clone the [`TokenStore`] handle (for listing/revoking clients from
     /// Tauri commands).
-    pub fn token_store(&self) -> Arc<TokenStore> { self.store.clone() }
+    pub fn token_store(&self) -> Arc<TokenStore> {
+        self.store.clone()
+    }
 
     /// Borrow the active config.
-    pub fn config(&self) -> &SharingConfig { &self.config }
+    pub fn config(&self) -> &SharingConfig {
+        &self.config
+    }
 
     /// Subscribe to readiness changes. A new `ReadinessState` is sent whenever
     /// the ready set of upstreams changes (an upstream binds or goes down).
@@ -264,7 +287,8 @@ impl SharingService {
     ///
     /// See [`start_with_gate`](Self::start_with_gate) for details.
     pub async fn start(&self) -> Result<(), SharingError> {
-        self.start_with_gate(std::time::Duration::from_secs(5)).await
+        self.start_with_gate(std::time::Duration::from_secs(5))
+            .await
     }
 
     /// Start sharing, gating each upstream's proxy binding behind a readiness
@@ -284,9 +308,13 @@ impl SharingService {
         // status()/watcher for the duration of the gate.
         {
             let mut starting = self.starting.lock().await;
-            if *starting { return Ok(()); }
+            if *starting {
+                return Ok(());
+            }
             // Also bail if already fully running.
-            if *self.running.lock().await { return Ok(()); }
+            if *self.running.lock().await {
+                return Ok(());
+            }
             *starting = true;
         }
         // Guard RAII: clear `starting` on every exit path (Ok or Err).
@@ -296,7 +324,9 @@ impl SharingService {
                 // Best-effort; try_lock avoids deadlocking if a panic left a
                 // guard held, and the only failure mode is the flag staying
                 // true (which just blocks a redundant re-start).
-                if let Ok(mut g) = self.0.try_lock() { *g = false; }
+                if let Ok(mut g) = self.0.try_lock() {
+                    *g = false;
+                }
             }
         }
         let _guard = StartingGuard(&self.starting);
@@ -305,7 +335,10 @@ impl SharingService {
         //    We hold them until the gate decides which to keep.
         let ollama_listener = bind_proxy_listener(self.config.ollama_proxy_port).await?;
         let whisper_listener = bind_proxy_listener(self.config.whisper_proxy_port).await?;
-        let lmstudio_listener = match (self.config.lmstudio_internal_port, self.config.lmstudio_proxy_port) {
+        let lmstudio_listener = match (
+            self.config.lmstudio_internal_port,
+            self.config.lmstudio_proxy_port,
+        ) {
             (Some(_), Some(proxy)) => Some(bind_proxy_listener(proxy).await?),
             _ => None,
         };
@@ -348,10 +381,16 @@ impl SharingService {
         // 4. Bind proxies for ready upstreams; drop listeners for unready ones.
         //    Any error here (after whisper started) must stop whisper so it
         //    isn't orphaned. We use a helper closure to centralize cleanup.
-        let bind_result = self.bind_ready_proxies_after_gate(
-            ollama_listener, whisper_listener, lmstudio_listener,
-            ollama_ready, whisper_ready, lmstudio_ready,
-        ).await;
+        let bind_result = self
+            .bind_ready_proxies_after_gate(
+                ollama_listener,
+                whisper_listener,
+                lmstudio_listener,
+                ollama_ready,
+                whisper_ready,
+                lmstudio_ready,
+            )
+            .await;
         if let Err(e) = bind_result {
             // Clean up the whisper child we started in step 2.
             let _ = self.whisper.stop().await;
@@ -363,13 +402,19 @@ impl SharingService {
             let mut r = self.readiness.write().await;
             let now = Instant::now();
             if let Some(e) = r.get_mut(&UpstreamKind::Ollama) {
-                e.last_probe_ok = ollama_ready; e.proxy_bound = ollama_ready; e.last_probe_at = Some(now);
+                e.last_probe_ok = ollama_ready;
+                e.proxy_bound = ollama_ready;
+                e.last_probe_at = Some(now);
             }
             if let Some(e) = r.get_mut(&UpstreamKind::Whisper) {
-                e.last_probe_ok = whisper_ready; e.proxy_bound = whisper_ready; e.last_probe_at = Some(now);
+                e.last_probe_ok = whisper_ready;
+                e.proxy_bound = whisper_ready;
+                e.last_probe_at = Some(now);
             }
             if let Some(e) = r.get_mut(&UpstreamKind::LmStudio) {
-                e.last_probe_ok = lmstudio_ready; e.proxy_bound = lmstudio_ready && self.config.lmstudio_proxy_port.is_some(); e.last_probe_at = Some(now);
+                e.last_probe_ok = lmstudio_ready;
+                e.proxy_bound = lmstudio_ready && self.config.lmstudio_proxy_port.is_some();
+                e.last_probe_at = Some(now);
             }
             let _ = self.readiness_tx.send(r.clone());
         }
@@ -398,7 +443,9 @@ impl SharingService {
             self.pairing.clone(),
             self.store.clone(),
             self.info.clone(),
-        ).await {
+        )
+        .await
+        {
             Ok(h) => h,
             Err(e) => {
                 let _ = self.whisper.stop().await;
@@ -436,7 +483,8 @@ impl SharingService {
                     inject_api_key: None,
                 },
                 self.store.clone(),
-            ).await?;
+            )
+            .await?;
             handles.push(h);
         } else {
             drop(ollama_listener);
@@ -451,29 +499,31 @@ impl SharingService {
                     inject_api_key: Some(self.config.whisper_internal_api_key.clone()),
                 },
                 self.store.clone(),
-            ).await?;
+            )
+            .await?;
             handles.push(h);
         } else {
             drop(whisper_listener);
         }
         if lmstudio_ready {
-            if let Some(listener) = lmstudio_listener {
-                if let (Some(internal), Some(proxy)) = (
+            if let Some(listener) = lmstudio_listener
+                && let (Some(internal), Some(proxy)) = (
                     self.config.lmstudio_internal_port,
                     self.config.lmstudio_proxy_port,
-                ) {
-                    let h = spawn_auth_proxy_on_listener(
-                        listener,
-                        ProxyConfig {
-                            listen_port: proxy,
-                            backend_url: format!("http://127.0.0.1:{internal}"),
-                            path_prefix: "/".to_string(),
-                            inject_api_key: None,
-                        },
-                        self.store.clone(),
-                    ).await?;
-                    handles.push(h);
-                }
+                )
+            {
+                let h = spawn_auth_proxy_on_listener(
+                    listener,
+                    ProxyConfig {
+                        listen_port: proxy,
+                        backend_url: format!("http://127.0.0.1:{internal}"),
+                        path_prefix: "/".to_string(),
+                        inject_api_key: None,
+                    },
+                    self.store.clone(),
+                )
+                .await?;
+                handles.push(h);
             }
         } else {
             drop(lmstudio_listener);
@@ -486,7 +536,8 @@ impl SharingService {
     /// set changes. LM Studio's port appears only when its proxy is bound.
     async fn rebuild_info_snapshot(&self) {
         let r = self.readiness.read().await;
-        let lmstudio_port = if r.get(&UpstreamKind::LmStudio)
+        let lmstudio_port = if r
+            .get(&UpstreamKind::LmStudio)
             .map(|s| s.proxy_bound)
             .unwrap_or(false)
         {
@@ -512,7 +563,9 @@ impl SharingService {
             interval.tick().await;
             loop {
                 interval.tick().await;
-                if !*svc.running.lock().await { break; }
+                if !*svc.running.lock().await {
+                    break;
+                }
                 svc.bind_ready_upstreams_once(&http_client).await;
             }
         });
@@ -535,7 +588,9 @@ impl SharingService {
         let mut changed = false;
         for (kind, target) in targets {
             let ready = probe_ready(client, &target).await;
-            if !ready { continue; }
+            if !ready {
+                continue;
+            }
             let proxy_cfg = match self.proxy_config_for(kind, &target.base_url) {
                 Some(cfg) => cfg,
                 None => continue,
@@ -576,12 +631,20 @@ impl SharingService {
     /// upstreams. Read-only; borrows the readiness cache.
     fn unbound_probe_targets(&self, r: &ReadinessState) -> Vec<(UpstreamKind, UpstreamTarget)> {
         let mut v = Vec::new();
-        for kind in [UpstreamKind::Ollama, UpstreamKind::Whisper, UpstreamKind::LmStudio] {
+        for kind in [
+            UpstreamKind::Ollama,
+            UpstreamKind::Whisper,
+            UpstreamKind::LmStudio,
+        ] {
             let st = *r.get(&kind).unwrap_or(&ProbeState::default());
-            if !st.configured || st.proxy_bound { continue; }
+            if !st.configured || st.proxy_bound {
+                continue;
+            }
             let base = match kind {
                 UpstreamKind::Ollama => "http://127.0.0.1:11434".to_string(),
-                UpstreamKind::Whisper => format!("http://127.0.0.1:{}", self.config.whisper_internal_port),
+                UpstreamKind::Whisper => {
+                    format!("http://127.0.0.1:{}", self.config.whisper_internal_port)
+                }
                 UpstreamKind::LmStudio => match self.config.lmstudio_internal_port {
                     Some(p) => format!("http://127.0.0.1:{p}"),
                     None => continue,
@@ -626,7 +689,9 @@ impl SharingService {
             let ok = probe_ready(client, &target).await;
             let mut r = self.readiness.write().await;
             if let Some(e) = r.get_mut(&kind) {
-                if e.last_probe_ok != ok { changed = true; }
+                if e.last_probe_ok != ok {
+                    changed = true;
+                }
                 e.last_probe_ok = ok;
                 e.last_probe_at = Some(now);
             }
@@ -641,12 +706,20 @@ impl SharingService {
     /// periodic health probing. Read-only; borrows the readiness cache.
     fn bound_probe_targets(&self, r: &ReadinessState) -> Vec<(UpstreamKind, String)> {
         let mut v = Vec::new();
-        for kind in [UpstreamKind::Ollama, UpstreamKind::Whisper, UpstreamKind::LmStudio] {
+        for kind in [
+            UpstreamKind::Ollama,
+            UpstreamKind::Whisper,
+            UpstreamKind::LmStudio,
+        ] {
             let st = *r.get(&kind).unwrap_or(&ProbeState::default());
-            if !st.configured { continue; }
+            if !st.configured {
+                continue;
+            }
             let base = match kind {
                 UpstreamKind::Ollama => "http://127.0.0.1:11434".to_string(),
-                UpstreamKind::Whisper => format!("http://127.0.0.1:{}", self.config.whisper_internal_port),
+                UpstreamKind::Whisper => {
+                    format!("http://127.0.0.1:{}", self.config.whisper_internal_port)
+                }
                 UpstreamKind::LmStudio => match self.config.lmstudio_internal_port {
                     Some(p) => format!("http://127.0.0.1:{p}"),
                     None => continue,
@@ -675,9 +748,13 @@ impl SharingService {
         if !was_running {
             // Even if not fully running, a half-started service may have
             // spawned the whisper child; clean it up defensively.
-            if let Some(m) = self.mdns.lock().await.take() { m.stop(); }
+            if let Some(m) = self.mdns.lock().await.take() {
+                m.stop();
+            }
             self.whisper.stop().await;
-            for h in self.handles.lock().await.drain(..) { h.abort(); }
+            for h in self.handles.lock().await.drain(..) {
+                h.abort();
+            }
             return Ok(());
         }
         if let Some(m) = self.mdns.lock().await.take() {
@@ -696,15 +773,9 @@ impl SharingService {
     /// `paired_clients` count is read from the token store synchronously.
     pub async fn status(&self) -> SharingStatus {
         let running = *self.running.lock().await;
-        let n = self
-            .store
-            .list()
-            .map(|v| v.len() as u32)
-            .unwrap_or(0);
+        let n = self.store.list().map(|v| v.len() as u32).unwrap_or(0);
         let r = self.readiness.read().await;
-        let get = |k: UpstreamKind| -> ProbeState {
-            *r.get(&k).unwrap_or(&ProbeState::default())
-        };
+        let get = |k: UpstreamKind| -> ProbeState { *r.get(&k).unwrap_or(&ProbeState::default()) };
         let ollama = get(UpstreamKind::Ollama);
         let whisper = get(UpstreamKind::Whisper);
         let lmstudio = get(UpstreamKind::LmStudio);
@@ -736,17 +807,30 @@ pub(crate) fn build_pairing_router(
     store: Arc<TokenStore>,
     info: Arc<tokio::sync::RwLock<InfoSnapshot>>,
 ) -> axum::Router {
-    use std::net::SocketAddr;
-    use axum::{Json, Router, extract::{ConnectInfo, State}, routing::{get, post}};
+    use axum::{
+        Json, Router,
+        extract::{ConnectInfo, State},
+        routing::{get, post},
+    };
     use serde::{Deserialize, Serialize};
+    use std::net::SocketAddr;
 
     #[derive(Clone)]
-    struct St { pairing: Arc<PairingState>, store: Arc<TokenStore>, info: Arc<tokio::sync::RwLock<InfoSnapshot>> }
+    struct St {
+        pairing: Arc<PairingState>,
+        store: Arc<TokenStore>,
+        info: Arc<tokio::sync::RwLock<InfoSnapshot>>,
+    }
 
     #[derive(Deserialize)]
-    struct EnrollReq { code: String, label: String }
+    struct EnrollReq {
+        code: String,
+        label: String,
+    }
     #[derive(Serialize)]
-    struct EnrollResp { token: String }
+    struct EnrollResp {
+        token: String,
+    }
 
     async fn enroll(
         State(st): State<St>,
@@ -761,7 +845,10 @@ pub(crate) fn build_pairing_router(
     }
 
     #[derive(Serialize)]
-    struct ClientView { id: i64, label: String }
+    struct ClientView {
+        id: i64,
+        label: String,
+    }
 
     /// Admin endpoint: list paired clients. Loopback-only.
     async fn list_clients(
@@ -776,7 +863,10 @@ pub(crate) fn build_pairing_router(
             .list()
             .unwrap_or_default()
             .into_iter()
-            .map(|r| ClientView { id: r.id, label: r.label })
+            .map(|r| ClientView {
+                id: r.id,
+                label: r.label,
+            })
             .collect();
         Ok(Json(v))
     }
@@ -803,7 +893,11 @@ pub(crate) fn build_pairing_router(
         Json(st.info.read().await.clone())
     }
 
-    let st = St { pairing, store, info };
+    let st = St {
+        pairing,
+        store,
+        info,
+    };
     Router::new()
         .route("/pair/enroll", post(enroll))
         .route("/pair/clients", get(list_clients))
@@ -829,7 +923,8 @@ async fn spawn_pairing_service(
         let _ = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
-        ).await;
+        )
+        .await;
     }))
 }
 
@@ -886,13 +981,19 @@ mod pairing_router_tests {
     async fn enroll_succeeds_with_valid_code() {
         let (_dir, store, pairing) = fresh_store_and_pairing();
         let code = pairing.issue_code().await;
-        let app = build_pairing_router(pairing.clone(), store.clone(), std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())));
+        let app = build_pairing_router(
+            pairing.clone(),
+            store.clone(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())),
+        );
 
         let req = Request::builder()
             .method(Method::POST)
             .uri("/pair/enroll")
             .header("content-type", "application/json")
-            .body(json_body(&serde_json::json!({ "code": code, "label": "iPad" })))
+            .body(json_body(
+                &serde_json::json!({ "code": code, "label": "iPad" }),
+            ))
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
@@ -905,13 +1006,19 @@ mod pairing_router_tests {
     #[tokio::test]
     async fn enroll_returns_401_on_invalid_code() {
         let (_dir, store, pairing) = fresh_store_and_pairing();
-        let app = build_pairing_router(pairing, store.clone(), std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())));
+        let app = build_pairing_router(
+            pairing,
+            store.clone(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())),
+        );
 
         let req = Request::builder()
             .method(Method::POST)
             .uri("/pair/enroll")
             .header("content-type", "application/json")
-            .body(json_body(&serde_json::json!({ "code": "000000", "label": "iPad" })))
+            .body(json_body(
+                &serde_json::json!({ "code": "000000", "label": "iPad" }),
+            ))
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
@@ -923,13 +1030,19 @@ mod pairing_router_tests {
     async fn enroll_persists_token_in_store() {
         let (_dir, store, pairing) = fresh_store_and_pairing();
         let code = pairing.issue_code().await;
-        let app = build_pairing_router(pairing.clone(), store.clone(), std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())));
+        let app = build_pairing_router(
+            pairing.clone(),
+            store.clone(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())),
+        );
 
         let req = Request::builder()
             .method(Method::POST)
             .uri("/pair/enroll")
             .header("content-type", "application/json")
-            .body(json_body(&serde_json::json!({ "code": code, "label": "phone-1" })))
+            .body(json_body(
+                &serde_json::json!({ "code": code, "label": "phone-1" }),
+            ))
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
@@ -944,7 +1057,11 @@ mod pairing_router_tests {
         let (_dir, store, pairing) = fresh_store_and_pairing();
         let code = pairing.issue_code().await;
         let _ = pairing.enroll(&code, "loopback-client").await.unwrap();
-        let app = build_pairing_router(pairing, store, std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())));
+        let app = build_pairing_router(
+            pairing,
+            store,
+            std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())),
+        );
 
         let req = Request::builder()
             .method(Method::GET)
@@ -967,7 +1084,11 @@ mod pairing_router_tests {
         let (_dir, store, pairing) = fresh_store_and_pairing();
         let code = pairing.issue_code().await;
         let _ = pairing.enroll(&code, "client").await.unwrap();
-        let app = build_pairing_router(pairing, store, std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())));
+        let app = build_pairing_router(
+            pairing,
+            store,
+            std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())),
+        );
 
         let req = Request::builder()
             .method(Method::GET)
@@ -986,7 +1107,11 @@ mod pairing_router_tests {
         let code = pairing.issue_code().await;
         let _ = pairing.enroll(&code, "to-revoke").await.unwrap();
         let id = store.list().unwrap()[0].id;
-        let app = build_pairing_router(pairing, store.clone(), std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())));
+        let app = build_pairing_router(
+            pairing,
+            store.clone(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())),
+        );
 
         let req = Request::builder()
             .method(Method::POST)
@@ -1006,7 +1131,11 @@ mod pairing_router_tests {
         let code = pairing.issue_code().await;
         let _ = pairing.enroll(&code, "to-keep").await.unwrap();
         let id = store.list().unwrap()[0].id;
-        let app = build_pairing_router(pairing, store.clone(), std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())));
+        let app = build_pairing_router(
+            pairing,
+            store.clone(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())),
+        );
 
         let req = Request::builder()
             .method(Method::POST)
@@ -1023,7 +1152,11 @@ mod pairing_router_tests {
     #[tokio::test]
     async fn revoke_returns_204_even_for_unknown_id() {
         let (_dir, store, pairing) = fresh_store_and_pairing();
-        let app = build_pairing_router(pairing, store, std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())));
+        let app = build_pairing_router(
+            pairing,
+            store,
+            std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())),
+        );
 
         let req = Request::builder()
             .method(Method::POST)
@@ -1039,7 +1172,11 @@ mod pairing_router_tests {
     #[tokio::test]
     async fn info_returns_snapshot_with_configured_ports() {
         let (_dir, store, pairing) = fresh_store_and_pairing();
-        let app = build_pairing_router(pairing, store, std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())));
+        let app = build_pairing_router(
+            pairing,
+            store,
+            std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())),
+        );
 
         let req = Request::builder()
             .method(Method::GET)
@@ -1062,7 +1199,11 @@ mod pairing_router_tests {
     #[tokio::test]
     async fn info_requires_no_auth_or_loopback() {
         let (_dir, store, pairing) = fresh_store_and_pairing();
-        let app = build_pairing_router(pairing, store, std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())));
+        let app = build_pairing_router(
+            pairing,
+            store,
+            std::sync::Arc::new(tokio::sync::RwLock::new(sample_info())),
+        );
 
         let req = Request::builder()
             .method(Method::GET)
@@ -1128,7 +1269,10 @@ mod lifecycle_tests {
         }
         let c = cfg_with_tokens_at(PathBuf::from("/tmp/x"), key, "irrelevant");
         let dbg = format!("{:?}", c);
-        assert!(dbg.contains("<redacted: 32 bytes>"), "Debug must redact key marker; got: {dbg}");
+        assert!(
+            dbg.contains("<redacted: 32 bytes>"),
+            "Debug must redact key marker; got: {dbg}"
+        );
         let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
         assert!(
             !dbg.to_lowercase().contains(&hex),
@@ -1141,7 +1285,10 @@ mod lifecycle_tests {
         let api_key = "secret-key-DO-NOT-LEAK-12345";
         let c = cfg_with_tokens_at(PathBuf::from("/tmp/x"), [0u8; 32], api_key);
         let dbg = format!("{:?}", c);
-        assert!(dbg.contains("<redacted>"), "Debug must contain redacted marker for api key; got: {dbg}");
+        assert!(
+            dbg.contains("<redacted>"),
+            "Debug must contain redacted marker for api key; got: {dbg}"
+        );
         assert!(
             !dbg.contains(api_key),
             "Debug must not contain literal api key"
@@ -1237,7 +1384,10 @@ mod lifecycle_tests {
         assert!(s.enabled);
         assert!(s.ollama_ok, "ollama reflects probe cache");
         assert!(s.whisper_ok, "whisper reflects probe cache");
-        assert!(!s.lmstudio_ok, "lmstudio reflects probe cache (not running flag)");
+        assert!(
+            !s.lmstudio_ok,
+            "lmstudio reflects probe cache (not running flag)"
+        );
     }
 
     /// Bind to 127.0.0.1:0, capture the assigned port, drop the listener.
@@ -1288,7 +1438,9 @@ mod lifecycle_tests {
 
         // Zero-length gate: probe once, move on. whisper_internal has nothing
         // listening, so whisper must be unready.
-        svc.start_with_gate(std::time::Duration::ZERO).await.expect("start");
+        svc.start_with_gate(std::time::Duration::ZERO)
+            .await
+            .expect("start");
 
         let r = svc.readiness.read().await;
         assert!(
@@ -1308,7 +1460,11 @@ mod lifecycle_tests {
         // stable map. So we assert the ready-subset behavior via the readiness
         // cache above, which is the source of truth for status()).
         let info = svc.info.read().await;
-        assert_eq!(info.ports.pairing, Some(pairing), "pairing always advertised");
+        assert_eq!(
+            info.ports.pairing,
+            Some(pairing),
+            "pairing always advertised"
+        );
 
         // Clean up so the spawned pairing task doesn't outlive the test.
         let _ = svc.stop().await;
@@ -1325,8 +1481,8 @@ mod lifecycle_tests {
     /// and lmstudio are left unconfigured so only whisper is probed.
     #[tokio::test]
     async fn watcher_binds_late_upstream_and_re_advertises() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         // Stand up a mock whisper upstream returning 200 on /health (the
         // whisper.cpp server readiness endpoint — it has no /v1/models).
@@ -1385,11 +1541,11 @@ mod lifecycle_tests {
         svc.bind_ready_upstreams_once(&probe_client).await;
 
         // The watch channel must have delivered a new state with whisper bound.
-        let changed = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            rx.changed(),
-        ).await;
-        assert!(changed.is_ok(), "watch channel must fire when upstream binds");
+        let changed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.changed()).await;
+        assert!(
+            changed.is_ok(),
+            "watch channel must fire when upstream binds"
+        );
 
         let r = svc.readiness.read().await;
         assert!(
@@ -1399,7 +1555,11 @@ mod lifecycle_tests {
 
         // /info must now advertise the whisper proxy port.
         let info = svc.info.read().await;
-        assert_eq!(info.ports.whisper, Some(whisper_proxy), "/info must advertise whisper");
+        assert_eq!(
+            info.ports.whisper,
+            Some(whisper_proxy),
+            "/info must advertise whisper"
+        );
 
         let _ = svc.stop().await;
     }

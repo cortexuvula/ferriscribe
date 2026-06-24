@@ -104,10 +104,7 @@ fn classify_ip(ip: std::net::IpAddr) -> EndpointKind {
                 return EndpointKind::LinkLocal;
             }
             // RFC1918
-            if a == 10
-                || (a == 172 && (16..=31).contains(&b))
-                || (a == 192 && b == 168)
-            {
+            if a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168) {
                 return EndpointKind::LanRfc1918;
             }
             // Tailscale CGNAT: 100.64.0.0/10 → 100.64.0.0 .. 100.127.255.255
@@ -144,10 +141,7 @@ fn classify_ip(ip: std::net::IpAddr) -> EndpointKind {
 ///
 /// Called at Settings-save time and at provider construction to enforce
 /// the local-only AI/STT constraint.
-pub fn validate_local_endpoint(
-    host: &str,
-    allow_public: bool,
-) -> Result<(), EndpointPolicyError> {
+pub fn validate_local_endpoint(host: &str, allow_public: bool) -> Result<(), EndpointPolicyError> {
     let kind = classify_endpoint(host);
     match kind {
         EndpointKind::Public | EndpointKind::Unknown if !allow_public => {
@@ -182,15 +176,15 @@ pub fn extract_host(input: &str) -> &str {
 
     // Stop at the first '/' or '?' (path/query separator).
     let no_path = after_scheme
-        .find(|c| c == '/' || c == '?')
+        .find(['/', '?'])
         .map(|idx| &after_scheme[..idx])
         .unwrap_or(after_scheme);
 
     // IPv6 bracket form: [host]:port — bracket span up to `]`.
-    if let Some(rest) = no_path.strip_prefix('[') {
-        if let Some(end) = rest.find(']') {
-            return &rest[..end];
-        }
+    if let Some(rest) = no_path.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        return &rest[..end];
     }
 
     // host or host:port — split on last colon, but only if the colon
@@ -210,10 +204,7 @@ pub fn extract_host(input: &str) -> &str {
 ///
 /// Convenience function for Tauri commands that receive full URLs
 /// (e.g. `"http://192.168.1.42:11434/v1"`) from the settings UI.
-pub fn validate_url(
-    input: &str,
-    allow_public: bool,
-) -> Result<(), EndpointPolicyError> {
+pub fn validate_url(input: &str, allow_public: bool) -> Result<(), EndpointPolicyError> {
     validate_local_endpoint(extract_host(input), allow_public)
 }
 
@@ -245,7 +236,10 @@ mod tests {
     #[test]
     fn rfc1918_10_block() {
         assert_eq!(classify_endpoint("10.0.0.0"), EndpointKind::LanRfc1918);
-        assert_eq!(classify_endpoint("10.255.255.255"), EndpointKind::LanRfc1918);
+        assert_eq!(
+            classify_endpoint("10.255.255.255"),
+            EndpointKind::LanRfc1918
+        );
         assert_eq!(classify_endpoint("9.255.255.255"), EndpointKind::Public);
         assert_eq!(classify_endpoint("11.0.0.0"), EndpointKind::Public);
     }
@@ -253,7 +247,10 @@ mod tests {
     #[test]
     fn rfc1918_172_block() {
         assert_eq!(classify_endpoint("172.16.0.0"), EndpointKind::LanRfc1918);
-        assert_eq!(classify_endpoint("172.31.255.255"), EndpointKind::LanRfc1918);
+        assert_eq!(
+            classify_endpoint("172.31.255.255"),
+            EndpointKind::LanRfc1918
+        );
         assert_eq!(classify_endpoint("172.15.255.255"), EndpointKind::Public);
         assert_eq!(classify_endpoint("172.32.0.0"), EndpointKind::Public);
     }
@@ -261,7 +258,10 @@ mod tests {
     #[test]
     fn rfc1918_192_168_block() {
         assert_eq!(classify_endpoint("192.168.0.0"), EndpointKind::LanRfc1918);
-        assert_eq!(classify_endpoint("192.168.255.255"), EndpointKind::LanRfc1918);
+        assert_eq!(
+            classify_endpoint("192.168.255.255"),
+            EndpointKind::LanRfc1918
+        );
         assert_eq!(classify_endpoint("192.167.255.255"), EndpointKind::Public);
         assert_eq!(classify_endpoint("192.169.0.0"), EndpointKind::Public);
     }
@@ -284,7 +284,10 @@ mod tests {
     #[test]
     fn tailscale_cgnat() {
         assert_eq!(classify_endpoint("100.64.0.0"), EndpointKind::Tailscale);
-        assert_eq!(classify_endpoint("100.127.255.255"), EndpointKind::Tailscale);
+        assert_eq!(
+            classify_endpoint("100.127.255.255"),
+            EndpointKind::Tailscale
+        );
         assert_eq!(classify_endpoint("100.63.255.255"), EndpointKind::Public);
         assert_eq!(classify_endpoint("100.128.0.0"), EndpointKind::Public);
     }
@@ -352,7 +355,10 @@ mod tests {
         // ".local" appears in the middle, not as the suffix.
         assert_eq!(classify_endpoint("not.local.com"), EndpointKind::Unknown);
         // ".lan" is similarly a middle label here.
-        assert_eq!(classify_endpoint("subdomain.lan.example.com"), EndpointKind::Unknown);
+        assert_eq!(
+            classify_endpoint("subdomain.lan.example.com"),
+            EndpointKind::Unknown
+        );
     }
 
     // ── classify_endpoint: Public / Unknown ────────────────────────
@@ -367,8 +373,14 @@ mod tests {
         // We can't statically tell a public domain from a private one without
         // DNS. Treat all unrecognised hostnames as Unknown.
         assert_eq!(classify_endpoint("api.openai.com"), EndpointKind::Unknown);
-        assert_eq!(classify_endpoint("clinic.example.com"), EndpointKind::Unknown);
-        assert_eq!(classify_endpoint("api.anthropic.com"), EndpointKind::Unknown);
+        assert_eq!(
+            classify_endpoint("clinic.example.com"),
+            EndpointKind::Unknown
+        );
+        assert_eq!(
+            classify_endpoint("api.anthropic.com"),
+            EndpointKind::Unknown
+        );
         assert_eq!(classify_endpoint("example.com"), EndpointKind::Unknown);
     }
 
@@ -382,10 +394,7 @@ mod tests {
             EndpointKind::Tailscale
         );
         // Pathological double trailing dot — defensive guard.
-        assert_eq!(
-            classify_endpoint("foo.ts.net.."),
-            EndpointKind::Tailscale
-        );
+        assert_eq!(classify_endpoint("foo.ts.net.."), EndpointKind::Tailscale);
     }
 
     #[test]
@@ -411,32 +420,44 @@ mod tests {
     #[test]
     fn validate_blocks_public_and_unknown_unless_allow_public() {
         for host in ["api.openai.com", "8.8.8.8", "example.com"] {
-            assert!(validate_local_endpoint(host, false).is_err(), "should block: {host}");
-            assert!(validate_local_endpoint(host, true).is_ok(),  "opt-out should accept: {host}");
+            assert!(
+                validate_local_endpoint(host, false).is_err(),
+                "should block: {host}"
+            );
+            assert!(
+                validate_local_endpoint(host, true).is_ok(),
+                "opt-out should accept: {host}"
+            );
         }
     }
 
     #[test]
     fn validate_accepts_all_local_kinds_regardless_of_allow_public() {
         for host in [
-            "localhost",          // Loopback
+            "localhost", // Loopback
             "127.0.0.1",
             "::1",
-            "192.168.1.42",       // RFC1918
+            "192.168.1.42", // RFC1918
             "10.0.0.5",
             "172.20.0.1",
-            "100.64.0.1",                  // Tailscale CGNAT
-            "fd7a:115c:a1e0::1",           // Tailscale ULA
-            "mac.tail161478.ts.net",       // Tailscale MagicDNS
-            "169.254.0.1",        // Link-local
+            "100.64.0.1",            // Tailscale CGNAT
+            "fd7a:115c:a1e0::1",     // Tailscale ULA
+            "mac.tail161478.ts.net", // Tailscale MagicDNS
+            "169.254.0.1",           // Link-local
             "fe80::1",
-            "clinic.local",       // mDNS
+            "clinic.local", // mDNS
             "box.lan",
             "server.internal",
             "host.home.arpa",
         ] {
-            assert!(validate_local_endpoint(host, false).is_ok(), "should accept: {host}");
-            assert!(validate_local_endpoint(host, true).is_ok(),  "should still accept with opt-out: {host}");
+            assert!(
+                validate_local_endpoint(host, false).is_ok(),
+                "should accept: {host}"
+            );
+            assert!(
+                validate_local_endpoint(host, true).is_ok(),
+                "should still accept with opt-out: {host}"
+            );
         }
     }
 
@@ -466,7 +487,10 @@ mod tests {
     fn extract_host_full_url() {
         assert_eq!(extract_host("http://localhost:1234"), "localhost");
         assert_eq!(extract_host("https://api.openai.com/v1"), "api.openai.com");
-        assert_eq!(extract_host("http://192.168.1.42:11434/v1/chat"), "192.168.1.42");
+        assert_eq!(
+            extract_host("http://192.168.1.42:11434/v1/chat"),
+            "192.168.1.42"
+        );
     }
 
     #[test]

@@ -79,7 +79,11 @@ pub struct TranslationSession {
 
 impl TranslationSession {
     /// Creates a new translation session.
-    pub fn new(source_lang: impl Into<String>, target_lang: impl Into<String>, mode: TranslationMode) -> Self {
+    pub fn new(
+        source_lang: impl Into<String>,
+        target_lang: impl Into<String>,
+        mode: TranslationMode,
+    ) -> Self {
         Self {
             source_lang: source_lang.into(),
             target_lang: target_lang.into(),

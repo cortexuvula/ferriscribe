@@ -12,8 +12,7 @@ pub struct UserDictionaryRepo;
 impl UserDictionaryRepo {
     /// List all dictionary words, sorted case-insensitively.
     pub fn list(conn: &Connection) -> DbResult<Vec<String>> {
-        let mut stmt =
-            conn.prepare("SELECT word FROM user_dictionary ORDER BY LOWER(word)")?;
+        let mut stmt = conn.prepare("SELECT word FROM user_dictionary ORDER BY LOWER(word)")?;
         let words = stmt
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;

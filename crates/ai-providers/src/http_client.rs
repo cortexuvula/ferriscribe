@@ -17,9 +17,9 @@
 //!
 //! [`AppConfig`]: medical_core::types::settings::AppConfig
 
-use std::time::{Duration, Instant};
-use reqwest::{Client, header};
 use rand::Rng;
+use reqwest::{Client, header};
+use std::time::{Duration, Instant};
 
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::settings::AppConfig;
@@ -30,8 +30,8 @@ use medical_core::types::settings::AppConfig;
 /// that are invalid in HTTP header values (newlines, raw control bytes) or if
 /// reqwest's builder fails — the caller decides how to surface that.
 pub fn build_client(api_key: &str, timeout_secs: u64) -> AppResult<Client> {
-    let mut auth_value = header::HeaderValue::from_str(&format!("Bearer {api_key}"))
-        .map_err(|_| {
+    let mut auth_value =
+        header::HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| {
             AppError::AiProvider("API key contains characters invalid in HTTP headers".into())
         })?;
     auth_value.set_sensitive(true);
@@ -97,8 +97,8 @@ impl Default for RetryConfig {
 impl RetryConfig {
     /// Return the delay to wait before `attempt` (0-indexed).
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        let millis = self.initial_delay.as_millis() as f64
-            * self.backoff_factor.powi(attempt as i32);
+        let millis =
+            self.initial_delay.as_millis() as f64 * self.backoff_factor.powi(attempt as i32);
         let capped = millis.min(self.max_delay.as_millis() as f64) as u64;
         Duration::from_millis(capped)
     }
@@ -251,9 +251,7 @@ pub fn classify_error(err: &reqwest::Error) -> RetryDecision {
 }
 
 /// Classify a `Result<reqwest::Response, reqwest::Error>` for retry purposes.
-pub fn classify(
-    result: &Result<reqwest::Response, reqwest::Error>,
-) -> RetryDecision {
+pub fn classify(result: &Result<reqwest::Response, reqwest::Error>) -> RetryDecision {
     match result {
         Ok(r) => classify_status(r.status(), r.headers()),
         Err(e) => classify_error(e),
@@ -441,8 +439,12 @@ mod tests {
         let mut saw_above = false;
         for _ in 0..500 {
             let j = cfg.jittered(base, &mut rng);
-            if j < base { saw_below = true; }
-            if j > base { saw_above = true; }
+            if j < base {
+                saw_below = true;
+            }
+            if j > base {
+                saw_above = true;
+            }
         }
         assert!(saw_below, "expected at least one jittered sample < base");
         assert!(saw_above, "expected at least one jittered sample > base");

@@ -21,7 +21,10 @@ async fn enroll_consumes_code_once() {
     let state = PairingState::new(st.clone());
 
     let code = state.issue_code().await;
-    let token = state.enroll(&code, "laptop").await.expect("first enroll succeeds");
+    let token = state
+        .enroll(&code, "laptop")
+        .await
+        .expect("first enroll succeeds");
     assert!(!token.is_empty());
 
     let err = state.enroll(&code, "another").await.unwrap_err();

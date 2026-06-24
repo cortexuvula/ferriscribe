@@ -5,13 +5,64 @@ on:
   push:
     branches: [master]
 
-env:
-  # Opt into Node.js 24 for GitHub Actions (actions/checkout@v4 and others
-  # still run on Node.js 20 by default, which is deprecated as of 2026-05-26).
-  # Node.js 24 will become the default on 2026-06-02.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+# Least-privilege defaults. Release artifacts are produced by release.yml,
+# which grants its own write permissions; CI only needs to read + check out.
+permissions:
+  contents: read
 
 jobs:
+  # Fast, dependency-light gate: the three version files must agree before
+  # anything else runs. A mismatch breaks the auto-updater (latest.json is
+  # keyed by version), so this fails the build rather than silently shipping
+  # a wrong-versioned installer. See scripts/check-version-sync.mjs.
+  version-sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify version is in sync across Cargo.toml / package.json / tauri.conf.json
+        run: node scripts/check-version-sync.mjs
+
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Type-check (svelte-check)
+        run: npm run check
+      - name: Frontend tests (vitest)
+        run: npx vitest run
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: swatinem/rust-cache@v2
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev pkg-config
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy (-D warnings)
+        # lib + tests only — the Tauri shell pulls in platform GUI deps that
+        # aren't relevant to the workspace lint gate. `--all-targets` includes
+        # tests/examples so we catch lint regressions in test code too.
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   test:
     strategy:
       fail-fast: false
@@ -22,6 +73,7 @@ jobs:
         # we keep Windows out of the CI test matrix.
         platform: [macos-latest, ubuntu-24.04]
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

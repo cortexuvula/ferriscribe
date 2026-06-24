@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
@@ -64,7 +64,9 @@ struct ErrorPayload {
 /// Returns a hard error if the settings can't be read — a silent fallback to a
 /// hardcoded model (previously `"gpt-4o"`) would route requests to the wrong
 /// provider for any user configured for Anthropic/Ollama/etc.
-fn load_app_config(state: &tauri::State<'_, AppState>) -> AppResult<medical_core::types::settings::AppConfig> {
+fn load_app_config(
+    state: &tauri::State<'_, AppState>,
+) -> AppResult<medical_core::types::settings::AppConfig> {
     let conn = state
         .db
         .conn()
@@ -74,7 +76,6 @@ fn load_app_config(state: &tauri::State<'_, AppState>) -> AppResult<medical_core
     cfg.migrate();
     Ok(cfg)
 }
-
 
 /// Convert a frontend role string to the core `Role` enum.
 fn parse_role(s: &str) -> Role {
@@ -178,18 +179,15 @@ async fn chat_send_inner(
 
     debug!("chat_send: calling provider '{}'", provider.name());
 
-    let response = provider
-        .complete(request)
-        .await
-        .map_err(|e| match e {
-            // Preserve EndpointOffline as-is so the frontend dialog can fire.
-            AppError::EndpointOffline { .. } => e,
-            // For other errors, keep the existing nicer wrapping.
-            _ => AppError::AiProvider(format!(
-                "AI completion failed: {}",
-                super::unwrap_app_error_message(e)
-            )),
-        })?;
+    let response = provider.complete(request).await.map_err(|e| match e {
+        // Preserve EndpointOffline as-is so the frontend dialog can fire.
+        AppError::EndpointOffline { .. } => e,
+        // For other errors, keep the existing nicer wrapping.
+        _ => AppError::AiProvider(format!(
+            "AI completion failed: {}",
+            super::unwrap_app_error_message(e)
+        )),
+    })?;
 
     Ok(response.content)
 }
@@ -468,9 +466,7 @@ pub async fn chat_with_agent(
 
 /// List all registered AI provider names.
 #[tauri::command]
-pub async fn list_ai_providers(
-    state: tauri::State<'_, AppState>,
-) -> AppResult<Vec<String>> {
+pub async fn list_ai_providers(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
     let registry = state.ai_providers.lock().await;
     Ok(registry.list_available())
 }
@@ -562,8 +558,8 @@ mod preflight_tests {
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let config_dir = tmp.path().join("config");
-        let keys = medical_security::key_storage::KeyStorage::open(&config_dir)
-            .expect("KeyStorage::open");
+        let keys =
+            medical_security::key_storage::KeyStorage::open(&config_dir).expect("KeyStorage::open");
 
         let embedding_generator = Arc::new(
             medical_rag::embeddings::EmbeddingGenerator::new_ollama(None, None)
@@ -578,7 +574,9 @@ mod preflight_tests {
             Arc::clone(&graph_search),
         ));
         let tool_registry = medical_agents::tools::ToolRegistry::with_defaults();
-        let orchestrator = Arc::new(medical_agents::orchestrator::AgentOrchestrator::new(tool_registry));
+        let orchestrator = Arc::new(medical_agents::orchestrator::AgentOrchestrator::new(
+            tool_registry,
+        ));
         let http_client = Arc::new(reqwest::Client::new());
 
         let state = AppState {
@@ -664,13 +662,8 @@ mod preflight_tests {
         let (state, _tmp) = build_chat_test_state("ollama", "192.0.2.1", 11434).await;
 
         let start = std::time::Instant::now();
-        let result = chat_with_agent_inner(
-            &state,
-            "Hello".to_string(),
-            "chat".to_string(),
-            None,
-        )
-        .await;
+        let result =
+            chat_with_agent_inner(&state, "Hello".to_string(), "chat".to_string(), None).await;
         let elapsed = start.elapsed();
 
         let err = result.expect_err("must fail with offline error");

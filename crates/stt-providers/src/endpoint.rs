@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use medical_core::error::{AppError, AppResult, OfflineReason, ServiceKind};
-use medical_core::types::{http_url, RemoteEndpoint};
+use medical_core::types::{RemoteEndpoint, http_url};
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -110,13 +110,22 @@ mod tests {
         });
 
         // Should ignore expired cache and resolve fresh
-        let result = current_base_url(&endpoint, "http://fallback.com:8080", &mut cache).await.unwrap();
-        assert_eq!(result, format!("http://127.0.0.1:{}", port), "should resolve fresh, not use expired cache");
+        let result = current_base_url(&endpoint, "http://fallback.com:8080", &mut cache)
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            format!("http://127.0.0.1:{}", port),
+            "should resolve fresh, not use expired cache"
+        );
 
         // Cache should be updated with new URL
         let updated = cache.unwrap();
         assert_eq!(updated.url, result);
-        assert!(updated.resolved_at.elapsed() < Duration::from_secs(1), "cache timestamp should be fresh");
+        assert!(
+            updated.resolved_at.elapsed() < Duration::from_secs(1),
+            "cache timestamp should be fresh"
+        );
     }
 
     #[tokio::test]
@@ -144,7 +153,9 @@ mod tests {
         let mut cache = None;
 
         // First call resolves and caches
-        let url1 = current_base_url(&endpoint, "http://fallback.com:8080", &mut cache).await.unwrap();
+        let url1 = current_base_url(&endpoint, "http://fallback.com:8080", &mut cache)
+            .await
+            .unwrap();
         assert_eq!(url1, format!("http://127.0.0.1:{}", port));
         assert!(cache.is_some());
 
@@ -152,7 +163,9 @@ mod tests {
         drop(listener);
 
         // Second call should return cached URL (port is closed, so fresh probe would fail)
-        let url2 = current_base_url(&endpoint, "http://fallback.com:8080", &mut cache).await.unwrap();
+        let url2 = current_base_url(&endpoint, "http://fallback.com:8080", &mut cache)
+            .await
+            .unwrap();
         assert_eq!(url1, url2, "cache should serve URL even after port closes");
     }
 }

@@ -21,11 +21,9 @@
     testError = null;
     try {
       if (provider === 'lmstudio') {
-        const msg = await testLmStudioConnection(lmHost, lmPort, undefined);
-        console.log('LM Studio:', msg);
+        await testLmStudioConnection(lmHost, lmPort, undefined);
       } else {
-        const msg = await testOllamaConnection(ollamaHost, ollamaPort, undefined);
-        console.log('Ollama:', msg);
+        await testOllamaConnection(ollamaHost, ollamaPort, undefined);
       }
       testStatus = 'success';
     } catch (e) {

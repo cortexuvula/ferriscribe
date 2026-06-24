@@ -178,7 +178,10 @@ impl PhiRedactor {
             result = ext.regex.replace_all(&result, ext.placeholder).into_owned();
         }
         for pattern in PATTERNS.iter() {
-            result = pattern.regex.replace_all(&result, pattern.placeholder).into_owned();
+            result = pattern
+                .regex
+                .replace_all(&result, pattern.placeholder)
+                .into_owned();
         }
         result
     }
@@ -240,7 +243,10 @@ pub mod datetime {
             \b
         ";
         let regex = Regex::new(pat).expect("hardcoded datetime regex");
-        Extension { regex, placeholder: "[DATE]" }
+        Extension {
+            regex,
+            placeholder: "[DATE]",
+        }
     }
 }
 
@@ -303,7 +309,10 @@ pub mod names {
 
         let combined = format!(r"(?i)(?:{})", alts.join("|"));
         let regex = Regex::new(&combined).ok()?;
-        Some(Extension { regex, placeholder: "[PT_NAME]" })
+        Some(Extension {
+            regex,
+            placeholder: "[PT_NAME]",
+        })
     }
 }
 
@@ -318,16 +327,28 @@ mod tests {
         // Keyword-prefixed SSN patterns should be redacted.
         assert_eq!(PhiRedactor::redact("SSN: 123-45-6789"), "[SSN]");
         assert_eq!(PhiRedactor::redact("SSN 123-45-6789"), "[SSN]");
-        assert_eq!(PhiRedactor::redact("Social Security Number: 123-45-6789"), "[SSN]");
+        assert_eq!(
+            PhiRedactor::redact("Social Security Number: 123-45-6789"),
+            "[SSN]"
+        );
         assert_eq!(PhiRedactor::redact("SS# 123456789"), "[SSN]");
     }
 
     #[test]
     fn does_not_redact_9_digit_numbers() {
         // 9-digit numbers without SSN keyword context must NOT be redacted.
-        assert_eq!(PhiRedactor::redact("Lab value 123456789"), "Lab value 123456789");
-        assert_eq!(PhiRedactor::redact("Reference #987654321"), "Reference #987654321");
-        assert_eq!(PhiRedactor::redact("id 123456789 here"), "id 123456789 here");
+        assert_eq!(
+            PhiRedactor::redact("Lab value 123456789"),
+            "Lab value 123456789"
+        );
+        assert_eq!(
+            PhiRedactor::redact("Reference #987654321"),
+            "Reference #987654321"
+        );
+        assert_eq!(
+            PhiRedactor::redact("id 123456789 here"),
+            "id 123456789 here"
+        );
     }
 
     #[test]
@@ -408,7 +429,10 @@ mod tests {
         // 5-digit numbers without address/zip context must NOT be redacted.
         assert_eq!(PhiRedactor::redact("WBC count 15000"), "WBC count 15000");
         assert_eq!(PhiRedactor::redact("Dose 10000 units"), "Dose 10000 units");
-        assert_eq!(PhiRedactor::redact("Platelet count 85000"), "Platelet count 85000");
+        assert_eq!(
+            PhiRedactor::redact("Platelet count 85000"),
+            "Platelet count 85000"
+        );
     }
 
     #[test]
@@ -456,7 +480,7 @@ mod datetime_tests {
         let ext = datetime::build_datetime_extension();
         let cases = ["BP 120/80", "98.6 F", "Lab 5/15 reactive"];
         for c in cases {
-            let out = PhiRedactor::redact_with(c, &[ext.clone()]);
+            let out = PhiRedactor::redact_with(c, std::slice::from_ref(&ext));
             assert_eq!(out, c, "clinical number wrongly redacted: {c} -> {out}");
         }
     }
@@ -468,8 +492,8 @@ mod names_tests {
 
     #[test]
     fn build_patient_name_extension_handles_full_name() {
-        let ext = names::build_patient_name_extension("Jane Smith")
-            .expect("should build extension");
+        let ext =
+            names::build_patient_name_extension("Jane Smith").expect("should build extension");
         let out = PhiRedactor::redact_with("Jane Smith presents with cough.", &[ext]);
         assert!(out.contains("[PT_NAME]"));
         assert!(!out.contains("Jane Smith"));

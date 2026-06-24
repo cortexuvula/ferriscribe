@@ -546,9 +546,7 @@ mod tests {
         assert!(prompt.contains("EXAMPLE 2"));
         assert!(prompt.contains("lab-review visit"));
         // Lab-review example must teach the new always-on ICD as plain text
-        let lab_idx = prompt
-            .find("EXAMPLE 2")
-            .expect("EXAMPLE 2 must be present");
+        let lab_idx = prompt.find("EXAMPLE 2").expect("EXAMPLE 2 must be present");
         let after_example = &prompt[lab_idx..];
         assert!(after_example.contains("ICD-9 Code: 266.2"));
         // Lab-review example must teach the "dose not specified" pattern
@@ -569,9 +567,7 @@ mod tests {
     #[test]
     fn default_soap_prompt_lab_review_example_has_three_differentials() {
         let prompt = build_soap_prompt(&SoapPromptConfig::default());
-        let lab_idx = prompt
-            .find("EXAMPLE 2")
-            .expect("EXAMPLE 2 must be present");
+        let lab_idx = prompt.find("EXAMPLE 2").expect("EXAMPLE 2 must be present");
         let after_example = &prompt[lab_idx..];
 
         let ddx_idx = after_example
@@ -855,9 +851,7 @@ mod tests {
         // categorical anti-fabrication checks. Each of these labels must
         // still appear in the SELF-CHECK block.
         let prompt = build_soap_prompt(&SoapPromptConfig::default());
-        let sc_idx = prompt
-            .find("SELF-CHECK")
-            .expect("SELF-CHECK block missing");
+        let sc_idx = prompt.find("SELF-CHECK").expect("SELF-CHECK block missing");
         let sc_block = &prompt[sc_idx..];
         for label in [
             "Demographics check",
@@ -902,7 +896,9 @@ mod tests {
         let format_idx = prompt
             .find("OUTPUT FORMAT")
             .expect("OUTPUT FORMAT section missing");
-        let sc_idx = prompt.find("SELF-CHECK").expect("SELF-CHECK section missing");
+        let sc_idx = prompt
+            .find("SELF-CHECK")
+            .expect("SELF-CHECK section missing");
 
         let examples_block = &prompt[example_idx..format_idx];
         assert!(

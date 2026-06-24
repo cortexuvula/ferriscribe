@@ -111,14 +111,19 @@ impl Tool for ChecklistTool {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let (checklist_type, items): (&str, Vec<&str>) =
-            if procedure.contains("new patient") || procedure.contains("new pt") || procedure.contains("intake") {
-                ("New Patient Visit", new_patient_checklist())
-            } else if procedure.contains("follow") || procedure.contains("f/u") || procedure.contains("followup") {
-                ("Follow-Up Visit", follow_up_checklist())
-            } else {
-                ("General Clinical Checklist", general_checklist())
-            };
+        let (checklist_type, items): (&str, Vec<&str>) = if procedure.contains("new patient")
+            || procedure.contains("new pt")
+            || procedure.contains("intake")
+        {
+            ("New Patient Visit", new_patient_checklist())
+        } else if procedure.contains("follow")
+            || procedure.contains("f/u")
+            || procedure.contains("followup")
+        {
+            ("Follow-Up Visit", follow_up_checklist())
+        } else {
+            ("General Clinical Checklist", general_checklist())
+        };
 
         let numbered_items: Vec<serde_json::Value> = items
             .iter()
@@ -165,7 +170,10 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(parsed["checklist_type"], "New Patient Visit");
         let steps = parsed["total_steps"].as_u64().unwrap();
-        assert!(steps >= 10, "New patient checklist should have at least 10 steps");
+        assert!(
+            steps >= 10,
+            "New patient checklist should have at least 10 steps"
+        );
         // Verify step structure
         let checklist = parsed["checklist"].as_array().unwrap();
         assert!(!checklist.is_empty());

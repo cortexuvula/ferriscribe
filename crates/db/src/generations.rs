@@ -74,13 +74,12 @@ impl GenerationsRepo {
         input: GenerationInsert<'_>,
     ) -> DbResult<Generation> {
         let id = Uuid::new_v4();
-        let prev_max: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(regeneration_seq), 0) FROM generations \
+        let prev_max: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(regeneration_seq), 0) FROM generations \
                  WHERE recording_id = ? AND output_type = ?",
-                params![input.recording_id.to_string(), input.output_type],
-                |r| r.get(0),
-            )?;
+            params![input.recording_id.to_string(), input.output_type],
+            |r| r.get(0),
+        )?;
         let seq = prev_max + 1;
 
         conn.execute(
@@ -294,13 +293,14 @@ impl GenerationsRepo {
     ///
     /// Returns [`DbError::Other`] on invalid status value or if the
     /// generation ID is not found.
-    pub fn set_corpus_status(
-        conn: &Connection,
-        id: Uuid,
-        new_status: &str,
-    ) -> DbResult<()> {
-        if !matches!(new_status, "candidate" | "promoted" | "rejected" | "excluded") {
-            return Err(DbError::Other(format!("invalid corpus_status: {new_status}")));
+    pub fn set_corpus_status(conn: &Connection, id: Uuid, new_status: &str) -> DbResult<()> {
+        if !matches!(
+            new_status,
+            "candidate" | "promoted" | "rejected" | "excluded"
+        ) {
+            return Err(DbError::Other(format!(
+                "invalid corpus_status: {new_status}"
+            )));
         }
         let affected = conn.execute(
             "UPDATE generations
@@ -420,7 +420,10 @@ mod tests {
             },
         );
 
-        assert!(result.is_err(), "should propagate query error, not silently use 0");
+        assert!(
+            result.is_err(),
+            "should propagate query error, not silently use 0"
+        );
     }
 
     #[test]
@@ -538,10 +541,10 @@ mod tests {
         conn.execute(
             "UPDATE generations SET final_text = 'finalized' WHERE recording_id = ?",
             params![rec_id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
 
-        let (rows, total) =
-            GenerationsRepo::list_by_status(&conn, "candidate", 10, 0).unwrap();
+        let (rows, total) = GenerationsRepo::list_by_status(&conn, "candidate", 10, 0).unwrap();
         assert_eq!(total, 2);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, g2.id, "newest first");
@@ -575,7 +578,8 @@ mod tests {
         conn.execute(
             "UPDATE generations SET final_text = 'finalized' WHERE recording_id = ?",
             params![rec_id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
         let (page1, total) = GenerationsRepo::list_by_status(&conn, "candidate", 2, 0).unwrap();
         assert_eq!(total, 5);
         assert_eq!(page1.len(), 2);
@@ -622,7 +626,8 @@ mod tests {
         conn.execute(
             "UPDATE generations SET final_text = 'finalized' WHERE id = ?",
             params![g_cand.id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
 
         let (c, p, r, e) = GenerationsRepo::count_by_status(&conn).unwrap();
         assert_eq!(c, 1);
@@ -658,7 +663,8 @@ mod tests {
             "INSERT INTO recordings (id, filename, processing_status, created_at) \
              VALUES (?, 'test.wav', 'done', datetime('now'))",
             params![rec_id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
         // One candidate with final_text present:
         let with_final = Uuid::new_v4();
         conn.execute(
@@ -668,7 +674,8 @@ mod tests {
              VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'qwen3.6',
                      'transcript', 'draft body', 'final body', 'candidate', 1)",
             params![with_final.to_string(), rec_id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
         // One candidate with final_text NULL (the case we filter out):
         let without_final = Uuid::new_v4();
         conn.execute(
@@ -678,11 +685,14 @@ mod tests {
              VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'qwen3.6',
                      'transcript', 'draft body', NULL, 'candidate', 2)",
             params![without_final.to_string(), rec_id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
 
-        let (items, total) =
-            GenerationsRepo::list_by_status(&conn, "candidate", 10, 0).unwrap();
-        assert_eq!(total, 1, "total should reflect only candidates with final_text");
+        let (items, total) = GenerationsRepo::list_by_status(&conn, "candidate", 10, 0).unwrap();
+        assert_eq!(
+            total, 1,
+            "total should reflect only candidates with final_text"
+        );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, with_final);
     }
@@ -695,7 +705,8 @@ mod tests {
             "INSERT INTO recordings (id, filename, processing_status, created_at) \
              VALUES (?, 'test.wav', 'done', datetime('now'))",
             params![rec_id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
         let id = Uuid::new_v4();
         conn.execute(
             "INSERT INTO generations
@@ -704,10 +715,10 @@ mod tests {
              VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'qwen3.6',
                      'transcript', 'draft body', NULL, 'promoted', 1)",
             params![id.to_string(), rec_id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
 
-        let (items, total) =
-            GenerationsRepo::list_by_status(&conn, "promoted", 10, 0).unwrap();
+        let (items, total) = GenerationsRepo::list_by_status(&conn, "promoted", 10, 0).unwrap();
         assert_eq!(total, 1);
         assert_eq!(items.len(), 1);
     }
@@ -750,8 +761,7 @@ mod tests {
 
         // Should error due to invalid UUID, not return Ok with Uuid::nil()
         assert!(
-            result.is_err()
-                || matches!(result, Ok(Generation { id, .. }) if id != Uuid::nil()),
+            result.is_err() || matches!(result, Ok(Generation { id, .. }) if id != Uuid::nil()),
             "invalid UUID must produce an error, not a nil UUID"
         );
     }
@@ -764,7 +774,8 @@ mod tests {
             "INSERT INTO recordings (id, filename, processing_status, created_at) \
              VALUES (?, 'test.wav', 'done', datetime('now'))",
             params![rec_id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
         // Two candidates: one with final_text, one without.
         conn.execute(
             "INSERT INTO generations
@@ -773,7 +784,8 @@ mod tests {
              VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'qwen3.6',
                      'transcript', 'draft body', 'final body', 'candidate', 1)",
             params![Uuid::new_v4().to_string(), rec_id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO generations
                (id, recording_id, output_type, created_at, ai_provider, ai_model,
@@ -781,7 +793,8 @@ mod tests {
              VALUES (?, ?, 'soap', datetime('now'), 'ollama', 'qwen3.6',
                      'transcript', 'draft body', NULL, 'candidate', 2)",
             params![Uuid::new_v4().to_string(), rec_id.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
 
         let (c, _p, _r, _e) = GenerationsRepo::count_by_status(&conn).unwrap();
         assert_eq!(c, 1, "candidate count must match list_by_status filtering");

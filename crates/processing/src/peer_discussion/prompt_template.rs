@@ -259,9 +259,7 @@ mod tests {
     #[test]
     fn self_check_block_is_at_end_for_recency() {
         let prompt = build_peer_discussion_prompt(&default_config());
-        let pos_self_check = prompt
-            .find("SELF-CHECK")
-            .expect("self-check block missing");
+        let pos_self_check = prompt.find("SELF-CHECK").expect("self-check block missing");
         let pos_format_rules = prompt
             .find("FORMATTING RULES")
             .expect("formatting rules section missing");

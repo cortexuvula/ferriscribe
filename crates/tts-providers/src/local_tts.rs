@@ -63,7 +63,9 @@ mod inner {
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to initialise local TTS engine: {e}. Provider will be unavailable.");
+                    warn!(
+                        "Failed to initialise local TTS engine: {e}. Provider will be unavailable."
+                    );
                     Self { handle: None }
                 }
             }

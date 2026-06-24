@@ -2,17 +2,19 @@
 //! client-side `pair_with_server` / `paired_endpoint` / `unpair` commands.
 
 use medical_core::error::{AppError, AppResult};
-use medical_sharing::qr::{encode, PairPayload, PairPorts};
+use medical_sharing::qr::{PairPayload, PairPorts, encode};
 use tauri::State;
 
 use crate::state::AppState;
 
-use super::{paired_connection_path, ClientDto, PairedConnection};
+use super::{ClientDto, PairedConnection, paired_connection_path};
 
 #[tauri::command]
 pub async fn pairing_qr(state: State<'_, AppState>) -> AppResult<String> {
     let svc = state.sharing.read().await;
-    let svc = svc.as_ref().ok_or_else(|| AppError::Other("sharing not running".into()))?;
+    let svc = svc
+        .as_ref()
+        .ok_or_else(|| AppError::Other("sharing not running".into()))?;
     let code = svc.pairing_state().issue_code().await;
     let cfg = svc.config();
     let lan = local_lan_address();
@@ -35,8 +37,13 @@ pub async fn pairing_qr(state: State<'_, AppState>) -> AppResult<String> {
 #[tauri::command]
 pub async fn list_paired_clients(state: State<'_, AppState>) -> AppResult<Vec<ClientDto>> {
     let svc = state.sharing.read().await;
-    let svc = svc.as_ref().ok_or_else(|| AppError::Other("sharing not running".into()))?;
-    let rows = svc.token_store().list().map_err(|e| AppError::Other(e.to_string()))?;
+    let svc = svc
+        .as_ref()
+        .ok_or_else(|| AppError::Other("sharing not running".into()))?;
+    let rows = svc
+        .token_store()
+        .list()
+        .map_err(|e| AppError::Other(e.to_string()))?;
     Ok(rows
         .into_iter()
         .map(|r| ClientDto {
@@ -49,22 +56,24 @@ pub async fn list_paired_clients(state: State<'_, AppState>) -> AppResult<Vec<Cl
 #[tauri::command]
 pub async fn revoke_client(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     let svc = state.sharing.read().await;
-    let svc = svc.as_ref().ok_or_else(|| AppError::Other("sharing not running".into()))?;
-    svc.token_store().revoke(id).map_err(|e| AppError::Other(e.to_string()))?;
+    let svc = svc
+        .as_ref()
+        .ok_or_else(|| AppError::Other("sharing not running".into()))?;
+    svc.token_store()
+        .revoke(id)
+        .map_err(|e| AppError::Other(e.to_string()))?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn rename_client(
-    state: State<'_, AppState>,
-    id: i64,
-    label: String,
-) -> AppResult<()> {
+pub async fn rename_client(state: State<'_, AppState>, id: i64, label: String) -> AppResult<()> {
     if label.trim().is_empty() {
         return Err(AppError::Other("label cannot be empty".into()));
     }
     let svc = state.sharing.read().await;
-    let svc = svc.as_ref().ok_or_else(|| AppError::Other("sharing not running".into()))?;
+    let svc = svc
+        .as_ref()
+        .ok_or_else(|| AppError::Other("sharing not running".into()))?;
     svc.token_store()
         .update_label(id, &label)
         .map_err(|e| AppError::Other(e.to_string()))?;
@@ -216,7 +225,12 @@ pub async fn pair_with_server(
         .map_err(|e| AppError::Other(format!("keychain write: {e}")))?;
 
     // Persist non-secret endpoint metadata.
-    let conn = PairedConnection { lan: lan.clone(), tailscale: tailscale.clone(), ports: ports.clone(), label };
+    let conn = PairedConnection {
+        lan: lan.clone(),
+        tailscale: tailscale.clone(),
+        ports: ports.clone(),
+        label,
+    };
     let json = serde_json::to_string(&conn)?;
     let path = paired_connection_path()?;
     std::fs::write(&path, json)?;
@@ -224,7 +238,10 @@ pub async fn pair_with_server(
     // Update in-memory provider endpoints immediately so the "models visible"
     // success message in ClientPair.svelte is truthful without an app restart.
     let allow_public = {
-        let conn = state.db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+        let conn = state
+            .db
+            .conn()
+            .map_err(|e| AppError::Other(e.to_string()))?;
         let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
             .map_err(|e| AppError::Other(e.to_string()))?;
         cfg.migrate();
@@ -273,7 +290,10 @@ pub async fn pair_with_server(
     // provider is still the active one.
     {
         use medical_core::types::settings::SttMode;
-        let conn = state.db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+        let conn = state
+            .db
+            .conn()
+            .map_err(|e| AppError::Other(e.to_string()))?;
         let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
             .map_err(|e| AppError::Other(e.to_string()))?;
         cfg.migrate();
@@ -283,11 +303,8 @@ pub async fn pair_with_server(
                 .map_err(|e| AppError::Other(e.to_string()))?;
             tracing::info!("pair: switched stt_mode to Remote");
         }
-        let stt_handles = crate::state::init_stt_providers_with_config(
-            &state.data_dir,
-            &cfg,
-            whisper_ep.clone(),
-        );
+        let stt_handles =
+            crate::state::init_stt_providers_with_config(&state.data_dir, &cfg, whisper_ep.clone());
         {
             let mut guard = state.stt_providers.lock().await;
             *guard = stt_handles.provider;
@@ -318,13 +335,17 @@ pub async fn pair_with_server(
         // 2. Write the bearer to per-service keychain slots via state.keys.
         //    Same KeyStorage abstraction the set_api_key Tauri command uses.
         for slot in &["stt_remote_api_key", "ollama_api_key", "lmstudio_api_key"] {
-            state.keys.store_key(slot, &token).map_err(|e| {
-                AppError::Other(format!("autofill: store {slot}: {e}"))
-            })?;
+            state
+                .keys
+                .store_key(slot, &token)
+                .map_err(|e| AppError::Other(format!("autofill: store {slot}: {e}")))?;
         }
 
         // 3. Update AppConfig with the paired endpoint values.
-        let conn = state.db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+        let conn = state
+            .db
+            .conn()
+            .map_err(|e| AppError::Other(e.to_string()))?;
         let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
             .map_err(|e| AppError::Other(e.to_string()))?;
         cfg.migrate();
@@ -381,7 +402,10 @@ pub async fn unpair(state: State<'_, AppState>) -> AppResult<()> {
             let _ = state.keys.remove_key(slot);
         }
 
-        let conn = state.db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+        let conn = state
+            .db
+            .conn()
+            .map_err(|e| AppError::Other(e.to_string()))?;
         let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
             .map_err(|e| AppError::Other(e.to_string()))?;
         cfg.migrate();

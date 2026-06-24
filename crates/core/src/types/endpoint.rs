@@ -58,27 +58,24 @@ impl RemoteEndpoint {
     /// Returns the URL prefix (e.g. `"http://192.168.1.42:11435"`) for
     /// the first reachable address, or `None` if neither is reachable.
     pub async fn resolve_base_url(&self) -> Option<String> {
-        if let Some(lan) = &self.lan {
-            if Self::can_connect(lan, self.port, std::time::Duration::from_millis(500)).await {
-                return Some(http_url(lan, self.port));
-            }
+        if let Some(lan) = &self.lan
+            && Self::can_connect(lan, self.port, std::time::Duration::from_millis(500)).await
+        {
+            return Some(http_url(lan, self.port));
         }
-        if let Some(ts) = &self.tailscale {
-            if Self::can_connect(ts, self.port, std::time::Duration::from_secs(2)).await {
-                return Some(http_url(ts, self.port));
-            }
+        if let Some(ts) = &self.tailscale
+            && Self::can_connect(ts, self.port, std::time::Duration::from_secs(2)).await
+        {
+            return Some(http_url(ts, self.port));
         }
         None
     }
 
     async fn can_connect(host: &str, port: u16, timeout: std::time::Duration) -> bool {
-        tokio::time::timeout(
-            timeout,
-            tokio::net::TcpStream::connect((host, port)),
-        )
-        .await
-        .map(|r| r.is_ok())
-        .unwrap_or(false)
+        tokio::time::timeout(timeout, tokio::net::TcpStream::connect((host, port)))
+            .await
+            .map(|r| r.is_ok())
+            .unwrap_or(false)
     }
 }
 

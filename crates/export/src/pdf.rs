@@ -31,9 +31,10 @@ impl PdfExporter {
     ///
     /// Returns [`ExportError::Pdf`] if `recording.soap_note` is `None`.
     pub fn export_soap(recording: &Recording) -> ExportResult<Vec<u8>> {
-        let soap = recording.soap_note.as_deref().ok_or_else(|| {
-            ExportError::Pdf("Recording has no SOAP note".to_string())
-        })?;
+        let soap = recording
+            .soap_note
+            .as_deref()
+            .ok_or_else(|| ExportError::Pdf("Recording has no SOAP note".to_string()))?;
         let date = recording.created_at.format("%Y-%m-%d").to_string();
         render_document("SOAP Note", soap, &date)
     }
@@ -44,9 +45,10 @@ impl PdfExporter {
     ///
     /// Returns [`ExportError::Pdf`] if `recording.referral` is `None`.
     pub fn export_referral(recording: &Recording) -> ExportResult<Vec<u8>> {
-        let referral = recording.referral.as_deref().ok_or_else(|| {
-            ExportError::Pdf("Recording has no referral letter".to_string())
-        })?;
+        let referral = recording
+            .referral
+            .as_deref()
+            .ok_or_else(|| ExportError::Pdf("Recording has no referral letter".to_string()))?;
         let date = recording.created_at.format("%Y-%m-%d").to_string();
         render_document("Referral Letter", referral, &date)
     }
@@ -57,9 +59,10 @@ impl PdfExporter {
     ///
     /// Returns [`ExportError::Pdf`] if `recording.letter` is `None`.
     pub fn export_letter(recording: &Recording) -> ExportResult<Vec<u8>> {
-        let letter = recording.letter.as_deref().ok_or_else(|| {
-            ExportError::Pdf("Recording has no letter".to_string())
-        })?;
+        let letter = recording
+            .letter
+            .as_deref()
+            .ok_or_else(|| ExportError::Pdf("Recording has no letter".to_string()))?;
         let date = recording.created_at.format("%Y-%m-%d").to_string();
         render_document("Letter", letter, &date)
     }
@@ -94,8 +97,7 @@ pub fn render_document(title: &str, body: &str, date: &str) -> ExportResult<Vec<
     const MARGIN_BOTTOM: f32 = 10.0;
     const LINE_HEIGHT: f32 = 6.0;
 
-    let (doc, page1, layer1) =
-        PdfDocument::new(title, Mm(A4_WIDTH), Mm(A4_HEIGHT), "Main Layer");
+    let (doc, page1, layer1) = PdfDocument::new(title, Mm(A4_WIDTH), Mm(A4_HEIGHT), "Main Layer");
 
     let font = doc
         .add_builtin_font(BuiltinFont::Helvetica)
@@ -119,8 +121,7 @@ pub fn render_document(title: &str, body: &str, date: &str) -> ExportResult<Vec<
     for line in body.lines() {
         if y < MARGIN_BOTTOM {
             // Page overflow — create a new page and continue.
-            let (new_page, new_layer) =
-                doc.add_page(Mm(A4_WIDTH), Mm(A4_HEIGHT), "Main Layer");
+            let (new_page, new_layer) = doc.add_page(Mm(A4_WIDTH), Mm(A4_HEIGHT), "Main Layer");
             current_layer = doc.get_page(new_page).get_layer(new_layer);
             y = MARGIN_TOP;
         }

@@ -20,3 +20,6 @@ tts = { version = "0.26", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints]
+workspace = true

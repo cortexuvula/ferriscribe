@@ -107,9 +107,7 @@ fn try_collapse_pattern(tokens: &[&str], pattern_len: usize) -> Option<String> {
 /// Apply repetition-loop collapse to each segment of a transcript, returning
 /// a new transcript text. Called after whisper transcription but before
 /// formatting/storage.
-pub(super) fn filter_segment_repetitions(
-    transcript: &mut medical_core::types::stt::Transcript,
-) {
+pub(super) fn filter_segment_repetitions(transcript: &mut medical_core::types::stt::Transcript) {
     for seg in &mut transcript.segments {
         let original = &seg.text;
         let collapsed = collapse_repetition_loops(original);
@@ -164,12 +162,10 @@ pub(super) fn load_wav_to_audio_data(path: &std::path::Path) -> Result<AudioData
     let spec = reader.spec();
 
     let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => {
-            reader
-                .into_samples::<f32>()
-                .collect::<Result<Vec<f32>, _>>()
-                .map_err(|e| AppError::Processing(format!("Corrupt WAV sample data: {e}")))?
-        }
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .collect::<Result<Vec<f32>, _>>()
+            .map_err(|e| AppError::Processing(format!("Corrupt WAV sample data: {e}")))?,
         hound::SampleFormat::Int => {
             let max_val = compute_int_max_val(spec.bits_per_sample)?;
             reader
@@ -347,11 +343,13 @@ mod tests {
         let id = Uuid::new_v4();
         let transcript = "patient says hello";
 
-        let path = persist_orphaned_transcript(tmp.path(), &id, transcript)
-            .expect("persist");
+        let path = persist_orphaned_transcript(tmp.path(), &id, transcript).expect("persist");
 
         assert!(path.starts_with(tmp.path().join("orphaned_transcripts")));
-        assert_eq!(path.file_name().unwrap().to_string_lossy(), format!("{id}.txt"));
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            format!("{id}.txt")
+        );
         let on_disk = fs::read_to_string(&path).expect("read");
         assert_eq!(on_disk, transcript);
     }

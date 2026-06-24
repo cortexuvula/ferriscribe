@@ -29,7 +29,10 @@ pub struct UpstreamTarget {
 
 impl UpstreamTarget {
     pub fn new(kind: UpstreamKind, base_url: impl Into<String>) -> Self {
-        Self { kind, base_url: base_url.into() }
+        Self {
+            kind,
+            base_url: base_url.into(),
+        }
     }
 
     /// URL probed for readiness. GET, status 200 == ready.
@@ -78,8 +81,8 @@ pub async fn probe_with_backoff(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
     use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client() -> Client {
         Client::builder()

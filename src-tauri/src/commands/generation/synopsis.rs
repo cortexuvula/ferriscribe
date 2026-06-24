@@ -6,10 +6,10 @@ use tracing::debug;
 
 use crate::state::AppState;
 
+use super::MAX_SOAP_NOTE_CHARS;
 use super::helpers::{
     build_completion_request, load_recording_and_settings, persist_recording, resolve_provider,
 };
-use super::MAX_SOAP_NOTE_CHARS;
 
 /// Generate a brief synopsis from a recording's SOAP note.
 ///
@@ -23,10 +23,7 @@ pub async fn generate_synopsis(
     generate_synopsis_inner(&state, &recording_id).await
 }
 
-async fn generate_synopsis_inner(
-    state: &AppState,
-    recording_id: &str,
-) -> AppResult<String> {
+async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppResult<String> {
     let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
 
@@ -78,18 +75,15 @@ async fn generate_synopsis_inner(
         None,
     );
 
-    let response = provider
-        .complete(request)
-        .await
-        .map_err(|e| match e {
-            // Preserve EndpointOffline as-is so the frontend dialog can fire.
-            AppError::EndpointOffline { .. } => e,
-            // For other errors, keep the existing nicer wrapping.
-            _ => AppError::AiProvider(format!(
-                "AI completion failed: {}",
-                crate::commands::unwrap_app_error_message(e)
-            )),
-        })?;
+    let response = provider.complete(request).await.map_err(|e| match e {
+        // Preserve EndpointOffline as-is so the frontend dialog can fire.
+        AppError::EndpointOffline { .. } => e,
+        // For other errors, keep the existing nicer wrapping.
+        _ => AppError::AiProvider(format!(
+            "AI completion failed: {}",
+            crate::commands::unwrap_app_error_message(e)
+        )),
+    })?;
 
     let synopsis_text = response.content;
     if synopsis_text.is_empty() {
@@ -115,8 +109,8 @@ async fn generate_synopsis_inner(
 
 #[cfg(test)]
 mod preflight_tests {
-    use super::*;
     use super::super::test_helpers::build_test_state_with_recording;
+    use super::*;
     use medical_core::error::{AppError, OfflineReason, ServiceKind};
     use medical_core::types::settings::AppConfig;
 
@@ -130,11 +124,8 @@ mod preflight_tests {
         config.ollama_port = 11434;
         config.ai_model = "llama3".to_string();
 
-        let (state, recording_id) = build_test_state_with_recording(
-            config,
-            "Patient reports headache and fatigue.",
-        )
-        .await;
+        let (state, recording_id) =
+            build_test_state_with_recording(config, "Patient reports headache and fatigue.").await;
 
         let start = std::time::Instant::now();
         let result = generate_synopsis_inner(&state, &recording_id).await;

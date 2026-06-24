@@ -136,7 +136,9 @@ pub enum AppError {
     Config(String),
 
     /// An endpoint URL was rejected by the local-only endpoint policy.
-    #[error("invalid endpoint '{host}' for {field}: public/unknown endpoints are blocked (kind={kind:?}). Enable 'Allow public endpoints' in Advanced settings to override.")]
+    #[error(
+        "invalid endpoint '{host}' for {field}: public/unknown endpoints are blocked (kind={kind:?}). Enable 'Allow public endpoints' in Advanced settings to override."
+    )]
     InvalidEndpoint {
         /// The settings field being validated (e.g. `"ollama_host"`).
         field: String,

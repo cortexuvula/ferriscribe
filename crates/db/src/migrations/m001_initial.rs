@@ -210,10 +210,7 @@ mod tests {
             [],
         )
         .expect("insert");
-        let result = conn.execute(
-            "UPDATE audit_log SET action='hacked' WHERE id=1",
-            [],
-        );
+        let result = conn.execute("UPDATE audit_log SET action='hacked' WHERE id=1", []);
         assert!(result.is_err(), "UPDATE on audit_log must be rejected");
     }
 

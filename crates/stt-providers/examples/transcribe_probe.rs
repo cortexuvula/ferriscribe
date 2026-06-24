@@ -81,7 +81,11 @@ fn main() {
     print_summary(&transcript_c);
 
     // Write full transcripts to /tmp for eyeballing.
-    for (name, transcript) in [("A_baseline", &transcript_a), ("B_beam", &transcript_b), ("C_beam_rubato", &transcript_c)] {
+    for (name, transcript) in [
+        ("A_baseline", &transcript_a),
+        ("B_beam", &transcript_b),
+        ("C_beam_rubato", &transcript_c),
+    ] {
         let out = PathBuf::from(format!("/tmp/probe_{name}.txt"));
         fs::write(&out, transcript.join("\n")).expect("write");
         println!("wrote {}", out.display());
@@ -160,18 +164,11 @@ fn resample_rubato(samples: &[f32], src_rate: u32, channels: u16) -> Vec<f32> {
         window: WindowFunction::BlackmanHarris2,
     };
     let chunk = 4096;
-    let mut resampler = SincFixedIn::<f32>::new(
-        16_000.0 / src_rate as f64,
-        2.0,
-        params,
-        chunk,
-        1,
-    )
-    .expect("build resampler");
+    let mut resampler = SincFixedIn::<f32>::new(16_000.0 / src_rate as f64, 2.0, params, chunk, 1)
+        .expect("build resampler");
 
-    let mut out: Vec<f32> = Vec::with_capacity(
-        (mono.len() as f64 * 16_000.0 / src_rate as f64) as usize + chunk,
-    );
+    let mut out: Vec<f32> =
+        Vec::with_capacity((mono.len() as f64 * 16_000.0 / src_rate as f64) as usize + chunk);
     let mut pos = 0;
     let mut in_buf = vec![vec![0.0_f32; chunk]];
     while pos + chunk <= mono.len() {
@@ -191,11 +188,7 @@ fn resample_rubato(samples: &[f32], src_rate: u32, channels: u16) -> Vec<f32> {
     out
 }
 
-fn run_whisper(
-    ctx: &WhisperContext,
-    audio: &[f32],
-    sampling: SamplingStrategy,
-) -> Vec<String> {
+fn run_whisper(ctx: &WhisperContext, audio: &[f32], sampling: SamplingStrategy) -> Vec<String> {
     let mut state = ctx.create_state().expect("state");
     let mut params = FullParams::new(sampling);
     params.set_language(Some("en"));
@@ -226,7 +219,14 @@ fn print_summary(segments: &[String]) {
         println!("  {}", s);
     }
     println!("--- last 3 segments ---");
-    for s in segments.iter().rev().take(3).collect::<Vec<_>>().iter().rev() {
+    for s in segments
+        .iter()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .iter()
+        .rev()
+    {
         println!("  {}", s);
     }
 }

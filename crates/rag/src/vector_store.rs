@@ -6,8 +6,8 @@ use medical_core::types::rag::{DocumentChunk, RagChunkMetadata, RagResult, Searc
 use medical_db::Database;
 use medical_db::vectors::VectorsRepo;
 
-use crate::mmr::cosine_similarity;
 use crate::RagError;
+use crate::mmr::cosine_similarity;
 
 /// Vector store backed by SQLite via `medical_db::vectors::VectorsRepo`.
 ///
@@ -25,7 +25,10 @@ impl VectorStore {
 
     /// Persist a document chunk with its embedding into SQLite.
     pub fn store_chunk(&self, chunk: &DocumentChunk) -> Result<(), RagError> {
-        let conn = self.db.conn().map_err(|e| RagError::Database(e.to_string()))?;
+        let conn = self
+            .db
+            .conn()
+            .map_err(|e| RagError::Database(e.to_string()))?;
 
         let metadata_json = serde_json::to_string(&chunk.metadata)
             .map_err(|e| RagError::Database(format!("failed to serialize metadata: {e}")))?;
@@ -61,7 +64,10 @@ impl VectorStore {
         top_k: usize,
         threshold: f32,
     ) -> Result<Vec<RagResult>, RagError> {
-        let conn = self.db.conn().map_err(|e| RagError::Database(e.to_string()))?;
+        let conn = self
+            .db
+            .conn()
+            .map_err(|e| RagError::Database(e.to_string()))?;
 
         let all_embeddings = VectorsRepo::get_all_embeddings(&conn)
             .map_err(|e| RagError::Database(e.to_string()))?;
@@ -108,7 +114,10 @@ impl VectorStore {
 
     /// Delete all chunks belonging to a document.
     pub fn delete_document(&self, document_id: &Uuid) -> Result<(), RagError> {
-        let conn = self.db.conn().map_err(|e| RagError::Database(e.to_string()))?;
+        let conn = self
+            .db
+            .conn()
+            .map_err(|e| RagError::Database(e.to_string()))?;
 
         VectorsRepo::delete_by_document(&conn, &document_id.to_string())
             .map_err(|e| RagError::Database(e.to_string()))?;
@@ -125,7 +134,13 @@ mod tests {
         Arc::new(Database::open_in_memory().expect("open in-memory DB"))
     }
 
-    fn make_chunk(id: u128, doc_id: u128, content: &str, embedding: Vec<f32>, index: u32) -> DocumentChunk {
+    fn make_chunk(
+        id: u128,
+        doc_id: u128,
+        content: &str,
+        embedding: Vec<f32>,
+        index: u32,
+    ) -> DocumentChunk {
         DocumentChunk {
             id: Uuid::from_u128(id),
             document_id: Uuid::from_u128(doc_id),
@@ -162,7 +177,10 @@ mod tests {
         assert!(!results.is_empty(), "should return at least one result");
         // chunk1 should be ranked first (exact match)
         assert_eq!(results[0].chunk_id, Uuid::from_u128(1));
-        assert!((results[0].score - 1.0).abs() < 1e-5, "exact match should have score ~1.0");
+        assert!(
+            (results[0].score - 1.0).abs() < 1e-5,
+            "exact match should have score ~1.0"
+        );
     }
 
     #[test]
@@ -235,7 +253,9 @@ mod tests {
         store.store_chunk(&chunk2).expect("store");
         store.store_chunk(&chunk3).expect("store");
 
-        store.delete_document(&Uuid::from_u128(doc_id)).expect("delete");
+        store
+            .delete_document(&Uuid::from_u128(doc_id))
+            .expect("delete");
 
         // Only chunk3 (from doc 200) should remain
         let query = vec![1.0, 0.0];

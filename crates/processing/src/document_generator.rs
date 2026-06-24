@@ -174,9 +174,8 @@ pub fn build_letter_prompt(
 
         if let Some(ref user_tmpl) = aud.user_template {
             // Case 1: audience with user_template — resolve placeholders
-            let user = resolve_audience_user_template(
-                user_tmpl, letter_type, &time_date, soap_note,
-            );
+            let user =
+                resolve_audience_user_template(user_tmpl, letter_type, &time_date, soap_note);
             return (system, user);
         }
 
@@ -197,7 +196,7 @@ pub fn build_letter_prompt(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_letter_prompt());
 
-    let system = resolve_prompt(&template, &placeholders);
+    let system = resolve_prompt(template, &placeholders);
 
     let user = format!(
         "Please write a {letter_type} letter for the patient based on the following SOAP \
@@ -236,22 +235,14 @@ pub fn strip_markdown(text: &str) -> String {
     use regex::Regex;
     use std::sync::LazyLock;
 
-    static HEADING: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?m)^#{1,6}\s+(.+)$").unwrap());
-    static BOLD: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
-    static ITALIC_STAR: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\*([^*]+)\*").unwrap());
-    static INLINE_CODE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
-    static LINK: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap());
-    static BULLET: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?m)^(\s*)[*-]\s+").unwrap());
-    static HR: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?m)^[-*_]{3,}\s*$").unwrap());
-    static MULTI_BLANK: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+    static HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^#{1,6}\s+(.+)$").unwrap());
+    static BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").unwrap());
+    static ITALIC_STAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*([^*]+)\*").unwrap());
+    static INLINE_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+)`").unwrap());
+    static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap());
+    static BULLET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^(\s*)[*-]\s+").unwrap());
+    static HR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^[-*_]{3,}\s*$").unwrap());
+    static MULTI_BLANK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
     // Strip italic underscore using manual scan (look-around not supported in Rust regex).
     // Only strip underscores that are not adjacent to word characters or other underscores.
@@ -291,9 +282,7 @@ pub fn strip_markdown(text: &str) -> String {
 
     // Convert headings to uppercase lines
     out = HEADING
-        .replace_all(&out, |caps: &regex::Captures| {
-            caps[1].to_uppercase()
-        })
+        .replace_all(&out, |caps: &regex::Captures| caps[1].to_uppercase())
         .into_owned();
 
     // Strip bold
@@ -333,10 +322,7 @@ pub fn strip_markdown(text: &str) -> String {
 ///
 /// The user prompt includes the current date/time and the full SOAP note,
 /// with an instruction to summarise in under 200 words.
-pub fn build_synopsis_prompt(
-    soap_note: &str,
-    custom_template: Option<&str>,
-) -> (String, String) {
+pub fn build_synopsis_prompt(soap_note: &str, custom_template: Option<&str>) -> (String, String) {
     let template = custom_template
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_synopsis_prompt());
@@ -415,7 +401,8 @@ mod tests {
         let soap = "S: Chest tightness\nO: ECG normal\nA: Musculoskeletal chest pain\nP: Reassure";
         let audience = LetterAudienceContext {
             name: "Insurance Company".into(),
-            system_prompt: "You are writing to an insurance company. Be factual and concise.".into(),
+            system_prompt: "You are writing to an insurance company. Be factual and concise."
+                .into(),
             user_template: Some(
                 "Generate a {letter_type} letter for the insurance company.\n\
                  Reference date: {time_date}\n\nSOAP note:\n{soap_note}"
@@ -437,7 +424,8 @@ mod tests {
         let soap = "S: Headache\nO: Neuro exam normal\nA: Tension headache\nP: Analgesia";
         let audience = LetterAudienceContext {
             name: "Employer".into(),
-            system_prompt: "Write a professional letter to an employer regarding fitness for work.".into(),
+            system_prompt: "Write a professional letter to an employer regarding fitness for work."
+                .into(),
             user_template: None,
         };
         let (system, user) = build_letter_prompt(soap, "fitness", Some(&audience), None);
@@ -513,7 +501,10 @@ mod tests {
 
     #[test]
     fn strip_markdown_converts_heading_to_uppercase() {
-        assert_eq!(strip_markdown("## Reason for Referral"), "REASON FOR REFERRAL");
+        assert_eq!(
+            strip_markdown("## Reason for Referral"),
+            "REASON FOR REFERRAL"
+        );
     }
 
     #[test]
@@ -529,7 +520,10 @@ mod tests {
 
     #[test]
     fn strip_markdown_removes_links() {
-        assert_eq!(strip_markdown("[click here](http://example.com)"), "click here");
+        assert_eq!(
+            strip_markdown("[click here](http://example.com)"),
+            "click here"
+        );
     }
 
     #[test]
@@ -552,6 +546,9 @@ mod tests {
 
     #[test]
     fn strip_markdown_preserves_underscores_in_identifiers() {
-        assert_eq!(strip_markdown("patient_id and some_variable"), "patient_id and some_variable");
+        assert_eq!(
+            strip_markdown("patient_id and some_variable"),
+            "patient_id and some_variable"
+        );
     }
 }

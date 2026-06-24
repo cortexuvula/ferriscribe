@@ -134,11 +134,8 @@ mod tests {
 
     #[test]
     fn ollama_constructor_custom() {
-        let emb = EmbeddingGenerator::new_ollama(
-            Some("http://myhost:1234"),
-            Some("custom-model"),
-        )
-        .unwrap();
+        let emb = EmbeddingGenerator::new_ollama(Some("http://myhost:1234"), Some("custom-model"))
+            .unwrap();
         assert_eq!(emb.dimension(), 768);
         assert_eq!(emb.host, "http://myhost:1234");
         assert_eq!(emb.model, "custom-model");

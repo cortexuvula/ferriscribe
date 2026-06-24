@@ -6,21 +6,21 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use medical_ai_providers::ollama::OllamaProvider;
-use medical_ai_providers::lmstudio::LmStudioProvider;
-use medical_ai_providers::http_client::RetryConfig;
 use medical_ai_providers::ProviderRegistry;
+use medical_ai_providers::http_client::RetryConfig;
+use medical_ai_providers::lmstudio::LmStudioProvider;
+use medical_ai_providers::ollama::OllamaProvider;
 
-use medical_core::types::settings::AppConfig;
 use medical_core::types::RemoteEndpoint;
+use medical_core::types::settings::AppConfig;
 
 use medical_agents::orchestrator::AgentOrchestrator;
 use medical_agents::tools::{RagSearchTool, ToolRegistry};
 
 use medical_audio::capture::CaptureHandle;
 
-use medical_db::recordings::RecordingsRepo;
 use medical_db::Database;
+use medical_db::recordings::RecordingsRepo;
 
 use medical_rag::bm25::Bm25Search;
 use medical_rag::embeddings::EmbeddingGenerator;
@@ -157,7 +157,6 @@ pub struct CurrentRecording {
     pub started_at: Instant,
 }
 
-
 /// Application state managed by Tauri and injected into every command via
 /// `tauri::State<'_, AppState>`.
 ///
@@ -240,7 +239,8 @@ pub struct AppState {
     /// Concrete LM Studio provider reference; allows `set_endpoint` after startup.
     pub lmstudio_provider: RwLock<Option<Arc<LmStudioProvider>>>,
     /// Concrete RemoteSttProvider reference; `None` when STT mode is Local.
-    pub remote_stt_provider: RwLock<Option<Arc<medical_stt_providers::remote_provider::RemoteSttProvider>>>,
+    pub remote_stt_provider:
+        RwLock<Option<Arc<medical_stt_providers::remote_provider::RemoteSttProvider>>>,
     /// Shared HTTP client for connection-test and pairing commands.
     /// Pooled per-host; reuse this instead of constructing a fresh
     /// `reqwest::Client` per call.
@@ -328,36 +328,64 @@ pub fn init_ai_providers(
     // Ollama — always available (local, no key needed).
     // Builder failures are logged and the provider skipped rather than
     // crashing startup, so a weird system HTTP config doesn't brick the app.
-    let ollama_host = if config.ollama_host.is_empty() { "localhost" } else { &config.ollama_host };
+    let ollama_host = if config.ollama_host.is_empty() {
+        "localhost"
+    } else {
+        &config.ollama_host
+    };
     let ollama_url = format!("http://{}:{}", ollama_host, config.ollama_port);
     // Bearer is taken from the endpoint (if set) for proxied remote connections.
     let ollama_bearer = ollama_ep.as_ref().and_then(|ep| ep.bearer.clone());
-    match OllamaProvider::new_with_endpoint(Some(&ollama_url), config.allow_public_endpoint, ollama_bearer, policy.clone(), ollama_ep) {
+    match OllamaProvider::new_with_endpoint(
+        Some(&ollama_url),
+        config.allow_public_endpoint,
+        ollama_bearer,
+        policy.clone(),
+        ollama_ep,
+    ) {
         Ok(p) => {
             info!(url = %ollama_url, "Registering Ollama provider");
             let arc = Arc::new(p);
             registry.register(Arc::clone(&arc) as Arc<dyn medical_core::traits::AiProvider>);
             ollama_handle = Some(arc);
         }
-        Err(e) => tracing::error!(error = %e, url = %ollama_url, "Failed to build Ollama provider; skipping"),
+        Err(e) => {
+            tracing::error!(error = %e, url = %ollama_url, "Failed to build Ollama provider; skipping")
+        }
     }
 
     // LM Studio — always available (local or remote, no key needed)
-    let lmstudio_host = if config.lmstudio_host.is_empty() { "localhost" } else { &config.lmstudio_host };
+    let lmstudio_host = if config.lmstudio_host.is_empty() {
+        "localhost"
+    } else {
+        &config.lmstudio_host
+    };
     let lmstudio_url = format!("http://{}:{}", lmstudio_host, config.lmstudio_port);
     let lmstudio_bearer = lmstudio_ep.as_ref().and_then(|ep| ep.bearer.clone());
-    match LmStudioProvider::new_with_endpoint(Some(&lmstudio_url), config.allow_public_endpoint, lmstudio_bearer, policy.clone(), lmstudio_ep) {
+    match LmStudioProvider::new_with_endpoint(
+        Some(&lmstudio_url),
+        config.allow_public_endpoint,
+        lmstudio_bearer,
+        policy.clone(),
+        lmstudio_ep,
+    ) {
         Ok(p) => {
             info!(url = %lmstudio_url, "Registering LM Studio provider");
             let arc = Arc::new(p);
             registry.register(Arc::clone(&arc) as Arc<dyn medical_core::traits::AiProvider>);
             lmstudio_handle = Some(arc);
         }
-        Err(e) => tracing::error!(error = %e, url = %lmstudio_url, "Failed to build LM Studio provider; skipping"),
+        Err(e) => {
+            tracing::error!(error = %e, url = %lmstudio_url, "Failed to build LM Studio provider; skipping")
+        }
     }
 
     info!("AI providers available: {:?}", registry.list_available());
-    AiProviderHandles { registry, ollama: ollama_handle, lmstudio: lmstudio_handle }
+    AiProviderHandles {
+        registry,
+        ollama: ollama_handle,
+        lmstudio: lmstudio_handle,
+    }
 }
 
 /// The return type of `init_stt_providers_with_config`, bundling the trait
@@ -392,11 +420,13 @@ pub fn init_stt_providers_with_config(
                 "Initializing local STT provider"
             );
             SttProviderHandles {
-                provider: Some(Arc::new(medical_stt_providers::local_provider::LocalSttProvider::new(
-                    whisper_path,
-                    seg_path,
-                    emb_path,
-                ))),
+                provider: Some(Arc::new(
+                    medical_stt_providers::local_provider::LocalSttProvider::new(
+                        whisper_path,
+                        seg_path,
+                        emb_path,
+                    ),
+                )),
                 remote: None,
             }
         }
@@ -408,7 +438,10 @@ pub fn init_stt_providers_with_config(
                 .ok()
                 .and_then(|ks| ks.get_key("stt_remote_api_key").ok().flatten());
             // Bearer from the whisper endpoint (if set) overrides the keychain api_key.
-            let bearer = whisper_ep.as_ref().and_then(|ep| ep.bearer.clone()).or(api_key);
+            let bearer = whisper_ep
+                .as_ref()
+                .and_then(|ep| ep.bearer.clone())
+                .or(api_key);
 
             let paired = whisper_ep.as_ref().map(|ep| {
                 format!(
@@ -446,7 +479,10 @@ pub fn init_stt_providers_with_config(
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to build remote STT provider");
-                    SttProviderHandles { provider: None, remote: None }
+                    SttProviderHandles {
+                        provider: None,
+                        remote: None,
+                    }
                 }
             }
         }
@@ -480,7 +516,9 @@ impl AppState {
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .map_err(|e| InitError::Other(format!("Failed to build shared HTTP client: {e}").into()))?,
+                .map_err(|e| {
+                    InitError::Other(format!("Failed to build shared HTTP client: {e}").into())
+                })?,
         );
 
         let db_path = data_dir.join("medical.db");
@@ -489,10 +527,10 @@ impl AppState {
         // Look up the existing keychain entry (if any) and detect whether
         // the DB on disk is plaintext or encrypted.
         let keychain_lookup = medical_security::keychain::get_db_key();
-        let plaintext_on_disk = medical_db::encryption::is_plaintext_db(&db_path)
-            .unwrap_or(false);
+        let plaintext_on_disk = medical_db::encryption::is_plaintext_db(&db_path).unwrap_or(false);
 
-        let db_key: Option<[u8; 32]> = match (plaintext_on_disk, &keychain_lookup, db_path.exists()) {
+        let db_key: Option<[u8; 32]> = match (plaintext_on_disk, &keychain_lookup, db_path.exists())
+        {
             // Encrypted DB exists, key found → normal start.
             (false, Ok(Some(key)), true) => Some(*key),
 
@@ -511,32 +549,32 @@ impl AppState {
             }
 
             // Plaintext DB, no key yet → first-time encryption migration.
-            (true, Ok(None), _) => {
-                match medical_security::keychain::get_or_create_db_key() {
-                    Ok(key) => {
-                        match medical_db::encryption::migrate_plaintext_to_encrypted(&db_path, &key) {
-                            Ok(_) => {
-                                tracing::info!("Database encrypted on first launch");
-                                Some(key)
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "DB encryption migration failed; continuing on plaintext");
-                                None
-                            }
+            (true, Ok(None), _) => match medical_security::keychain::get_or_create_db_key() {
+                Ok(key) => {
+                    match medical_db::encryption::migrate_plaintext_to_encrypted(&db_path, &key) {
+                        Ok(_) => {
+                            tracing::info!("Database encrypted on first launch");
+                            Some(key)
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "DB encryption migration failed; continuing on plaintext");
+                            None
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Could not access OS keychain; running on plaintext DB");
-                        None
-                    }
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Could not access OS keychain; running on plaintext DB");
+                    None
+                }
+            },
 
             // Plaintext DB exists but a key is also present (user replaced the file?).
             // Run on plaintext for this boot; warn loudly. A re-encryption flow
             // could be a follow-up.
             (true, Ok(Some(_)), _) => {
-                tracing::warn!("Plaintext DB found but a keychain key exists; running on plaintext for safety");
+                tracing::warn!(
+                    "Plaintext DB found but a keychain key exists; running on plaintext for safety"
+                );
                 None
             }
 
@@ -548,15 +586,13 @@ impl AppState {
 
             // No DB at all (fresh install): generate key, store it; a fresh
             // encrypted DB will be created.
-            (_, _, false) => {
-                match medical_security::keychain::get_or_create_db_key() {
-                    Ok(key) => Some(key),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Fresh install: could not store DB key in keychain; using plaintext");
-                        None
-                    }
+            (_, _, false) => match medical_security::keychain::get_or_create_db_key() {
+                Ok(key) => Some(key),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Fresh install: could not store DB key in keychain; using plaintext");
+                    None
                 }
-            }
+            },
         };
 
         let db = Database::open(&db_path, db_key)?;
@@ -583,7 +619,10 @@ impl AppState {
         let config = {
             let conn = db.conn().ok();
             conn.and_then(|c| medical_db::settings::SettingsRepo::load_config(&c).ok())
-                .map(|mut c| { c.migrate(); c })
+                .map(|mut c| {
+                    c.migrate();
+                    c
+                })
         };
         let config_ref = config.as_ref().cloned().unwrap_or_default();
 
@@ -592,7 +631,11 @@ impl AppState {
         // saved endpoint metadata and bearer token so providers can resolve
         // LAN / Tailscale addresses dynamically.
         let paired = load_paired_connection();
-        let bearer = if paired.is_some() { load_sharing_bearer() } else { None };
+        let bearer = if paired.is_some() {
+            load_sharing_bearer()
+        } else {
+            None
+        };
 
         let (ollama_ep, lmstudio_ep, whisper_ep) = if let Some(ref p) = paired {
             (
@@ -626,9 +669,13 @@ impl AppState {
 
         // Set the active AI provider from saved settings
         if let Some(ref cfg) = config
-            && ai_handles.registry.set_active(&cfg.ai_provider) {
-                info!("Active AI provider set to '{}' from settings", cfg.ai_provider);
-            }
+            && ai_handles.registry.set_active(&cfg.ai_provider)
+        {
+            info!(
+                "Active AI provider set to '{}' from settings",
+                cfg.ai_provider
+            );
+        }
 
         let ollama_provider = RwLock::new(ai_handles.ollama.take());
         let lmstudio_provider = RwLock::new(ai_handles.lmstudio.take());
@@ -709,10 +756,16 @@ mod tests {
         config.allow_public_endpoint = true;
         let handles = init_ai_providers(&config, None, None);
         assert!(
-            handles.registry.list_available().contains(&"ollama".to_string()),
+            handles
+                .registry
+                .list_available()
+                .contains(&"ollama".to_string()),
             "ollama should still be registered with a custom host"
         );
-        assert!(handles.ollama.is_some(), "ollama handle should be populated");
+        assert!(
+            handles.ollama.is_some(),
+            "ollama handle should be populated"
+        );
     }
 
     #[test]

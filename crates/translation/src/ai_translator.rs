@@ -39,18 +39,54 @@ impl TranslationProvider for AiTranslationProvider {
 
     async fn supported_languages(&self) -> AppResult<Vec<Language>> {
         Ok(vec![
-            Language { code: "en".into(), name: "English".into() },
-            Language { code: "es".into(), name: "Spanish".into() },
-            Language { code: "fr".into(), name: "French".into() },
-            Language { code: "de".into(), name: "German".into() },
-            Language { code: "zh".into(), name: "Chinese".into() },
-            Language { code: "ja".into(), name: "Japanese".into() },
-            Language { code: "ko".into(), name: "Korean".into() },
-            Language { code: "pt".into(), name: "Portuguese".into() },
-            Language { code: "ar".into(), name: "Arabic".into() },
-            Language { code: "hi".into(), name: "Hindi".into() },
-            Language { code: "ru".into(), name: "Russian".into() },
-            Language { code: "it".into(), name: "Italian".into() },
+            Language {
+                code: "en".into(),
+                name: "English".into(),
+            },
+            Language {
+                code: "es".into(),
+                name: "Spanish".into(),
+            },
+            Language {
+                code: "fr".into(),
+                name: "French".into(),
+            },
+            Language {
+                code: "de".into(),
+                name: "German".into(),
+            },
+            Language {
+                code: "zh".into(),
+                name: "Chinese".into(),
+            },
+            Language {
+                code: "ja".into(),
+                name: "Japanese".into(),
+            },
+            Language {
+                code: "ko".into(),
+                name: "Korean".into(),
+            },
+            Language {
+                code: "pt".into(),
+                name: "Portuguese".into(),
+            },
+            Language {
+                code: "ar".into(),
+                name: "Arabic".into(),
+            },
+            Language {
+                code: "hi".into(),
+                name: "Hindi".into(),
+            },
+            Language {
+                code: "ru".into(),
+                name: "Russian".into(),
+            },
+            Language {
+                code: "it".into(),
+                name: "Italian".into(),
+            },
         ])
     }
 
@@ -199,11 +235,12 @@ mod tests {
         assert_eq!(req.temperature, Some(0.1));
         assert_eq!(req.max_tokens, Some(4096));
         assert!(req.system_prompt.is_some());
-        assert!(req
-            .system_prompt
-            .as_ref()
-            .unwrap()
-            .contains("medical translator"));
+        assert!(
+            req.system_prompt
+                .as_ref()
+                .unwrap()
+                .contains("medical translator")
+        );
 
         // Verify the user message contains the expected elements.
         if let MessageContent::Text(ref text) = req.messages[0].content {

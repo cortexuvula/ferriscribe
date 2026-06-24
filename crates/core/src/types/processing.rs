@@ -22,7 +22,6 @@ pub enum Priority {
     High,
 }
 
-
 impl Priority {
     /// Returns a signed integer representation suitable for ordering
     /// queries (`Low = -1`, `Normal = 0`, `High = 1`).

@@ -226,6 +226,7 @@
     pipelineCompleteUnlisten?.();
     pipelineFailedUnlisten?.();
     updater.stopAutoCheck();
+    audio.destroy();
   });
 </script>
 

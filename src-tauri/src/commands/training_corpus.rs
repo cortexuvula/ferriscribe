@@ -25,13 +25,19 @@ pub struct GenerationPage {
 }
 
 #[tauri::command]
-pub async fn training_corpus_counts(
-    state: tauri::State<'_, AppState>,
-) -> AppResult<CorpusCounts> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-    let (c, p, r, e) = GenerationsRepo::count_by_status(&conn)
+pub async fn training_corpus_counts(state: tauri::State<'_, AppState>) -> AppResult<CorpusCounts> {
+    let conn = state
+        .db
+        .conn()
         .map_err(|e| AppError::Database(e.to_string()))?;
-    Ok(CorpusCounts { candidates: c, promoted: p, rejected: r, excluded: e })
+    let (c, p, r, e) =
+        GenerationsRepo::count_by_status(&conn).map_err(|e| AppError::Database(e.to_string()))?;
+    Ok(CorpusCounts {
+        candidates: c,
+        promoted: p,
+        rejected: r,
+        excluded: e,
+    })
 }
 
 #[tauri::command]
@@ -41,14 +47,13 @@ pub async fn training_corpus_list(
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> AppResult<GenerationPage> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-    let (items, total) = GenerationsRepo::list_by_status(
-        &conn,
-        &status,
-        limit.unwrap_or(50),
-        offset.unwrap_or(0),
-    )
-    .map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
+    let (items, total) =
+        GenerationsRepo::list_by_status(&conn, &status, limit.unwrap_or(50), offset.unwrap_or(0))
+            .map_err(|e| AppError::Database(e.to_string()))?;
     Ok(GenerationPage { items, total })
 }
 
@@ -58,9 +63,12 @@ pub async fn training_corpus_set_status(
     id: String,
     new_status: String,
 ) -> AppResult<()> {
-    let id = Uuid::parse_str(&id)
-        .map_err(|e| AppError::Other(format!("invalid generation id: {e}")))?;
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let id =
+        Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid generation id: {e}")))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     GenerationsRepo::set_corpus_status(&conn, id, &new_status)
         .map_err(|e| AppError::Database(e.to_string()))?;
     Ok(())

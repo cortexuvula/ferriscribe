@@ -22,3 +22,6 @@ proptest = { workspace = true }
 http = "1"
 wiremock = "0.6"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

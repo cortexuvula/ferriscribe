@@ -53,7 +53,9 @@ pub async fn download_model(
         let path = stt_models::pyannote_model_path(&data_dir, &m.filename);
         (m.clone(), path)
     } else {
-        return Err(AppError::SttProvider(format!("Unknown model ID: {model_id}")));
+        return Err(AppError::SttProvider(format!(
+            "Unknown model ID: {model_id}"
+        )));
     };
 
     if dest_path.exists() {
@@ -79,7 +81,10 @@ pub async fn download_model(
     // After downloading, reinitialize the STT provider so it picks up new models.
     // Load the full AppConfig so local/remote mode + remote host/port/key all flow through.
     let config = {
-        let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = state
+            .db
+            .conn()
+            .map_err(|e| AppError::Database(e.to_string()))?;
         let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
             .map_err(|e| AppError::Database(e.to_string()))?;
         cfg.migrate();
@@ -89,7 +94,11 @@ pub async fn download_model(
     // provider routes to the office server rather than silently falling back
     // to localhost.
     let paired = crate::state::load_paired_connection();
-    let bearer = if paired.is_some() { crate::state::load_sharing_bearer() } else { None };
+    let bearer = if paired.is_some() {
+        crate::state::load_sharing_bearer()
+    } else {
+        None
+    };
     let whisper_ep = if let Some(ref p) = paired {
         use medical_core::types::RemoteEndpoint;
         Some(RemoteEndpoint {
@@ -102,8 +111,10 @@ pub async fn download_model(
         None
     };
 
-    let crate::state::SttProviderHandles { provider: new_stt_provider, remote: new_remote_stt } =
-        crate::state::init_stt_providers_with_config(&state.data_dir, &config, whisper_ep);
+    let crate::state::SttProviderHandles {
+        provider: new_stt_provider,
+        remote: new_remote_stt,
+    } = crate::state::init_stt_providers_with_config(&state.data_dir, &config, whisper_ep);
     {
         let mut guard = state.stt_providers.lock().await;
         *guard = new_stt_provider;
@@ -117,10 +128,7 @@ pub async fn download_model(
 
 /// Delete a downloaded model to reclaim disk space.
 #[tauri::command]
-pub async fn delete_model(
-    state: tauri::State<'_, AppState>,
-    model_id: String,
-) -> AppResult<()> {
+pub async fn delete_model(state: tauri::State<'_, AppState>, model_id: String) -> AppResult<()> {
     let data_dir = state.data_dir.clone();
 
     // Search both whisper and pyannote model lists
@@ -132,7 +140,9 @@ pub async fn delete_model(
     } else if let Some(m) = all_pyannote.iter().find(|m| m.id == model_id) {
         stt_models::pyannote_model_path(&data_dir, &m.filename)
     } else {
-        return Err(AppError::SttProvider(format!("Unknown model ID: {model_id}")));
+        return Err(AppError::SttProvider(format!(
+            "Unknown model ID: {model_id}"
+        )));
     };
 
     stt_models::delete_model(&path)

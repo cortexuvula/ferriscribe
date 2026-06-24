@@ -116,7 +116,10 @@ mod tests {
 
     #[test]
     fn server_config_round_trips_through_json() {
-        let cfg = ServerConfig { version: 1, friendly_name: "Clinic Server".into() };
+        let cfg = ServerConfig {
+            version: 1,
+            friendly_name: "Clinic Server".into(),
+        };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: ServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.version, 1);
@@ -149,8 +152,11 @@ mod tests {
         delete_server_config(); // idempotent — file already missing
 
         // Write, confirm, then delete twice.
-        write_server_config(&ServerConfig { version: 1, friendly_name: "Test".into() })
-            .expect("write should succeed");
+        write_server_config(&ServerConfig {
+            version: 1,
+            friendly_name: "Test".into(),
+        })
+        .expect("write should succeed");
         assert!(path.exists(), "config should exist after write");
         delete_server_config();
         assert!(!path.exists(), "config should be gone after delete");

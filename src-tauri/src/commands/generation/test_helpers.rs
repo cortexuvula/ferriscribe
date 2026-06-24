@@ -75,8 +75,8 @@ pub(super) async fn build_test_state_with_recording(
     // ── Key storage ───────────────────────────────────────────────────────────
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_dir = tmp.path().join("config");
-    let keys = medical_security::key_storage::KeyStorage::open(&config_dir)
-        .expect("KeyStorage::open");
+    let keys =
+        medical_security::key_storage::KeyStorage::open(&config_dir).expect("KeyStorage::open");
     // Keep `tmp` alive for the duration of the state by leaking it (acceptable
     // in tests — memory is reclaimed when the process exits).
     std::mem::forget(tmp);
@@ -97,7 +97,9 @@ pub(super) async fn build_test_state_with_recording(
 
     // ── Agent orchestrator ────────────────────────────────────────────────────
     let tool_registry = medical_agents::tools::ToolRegistry::with_defaults();
-    let orchestrator = Arc::new(medical_agents::orchestrator::AgentOrchestrator::new(tool_registry));
+    let orchestrator = Arc::new(medical_agents::orchestrator::AgentOrchestrator::new(
+        tool_registry,
+    ));
 
     // ── HTTP client ───────────────────────────────────────────────────────────
     let http_client = Arc::new(reqwest::Client::new());

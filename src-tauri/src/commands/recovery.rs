@@ -17,9 +17,7 @@ use crate::state::RecoveryState;
 /// Return the current recovery reason. The frontend invokes this on mount;
 /// if `Some`, it renders the recovery dialog.
 #[tauri::command]
-pub fn get_database_recovery_state(
-    state: tauri::State<'_, Arc<RecoveryState>>,
-) -> Option<String> {
+pub fn get_database_recovery_state(state: tauri::State<'_, Arc<RecoveryState>>) -> Option<String> {
     state.get()
 }
 
@@ -59,8 +57,7 @@ pub async fn recover_database_from_path(backup_path: String) -> AppResult<()> {
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
 
     // Copy the picked backup into place.
-    std::fs::copy(&backup, &db_path)
-        .map_err(|e| AppError::Other(format!("copy backup: {e}")))?;
+    std::fs::copy(&backup, &db_path).map_err(|e| AppError::Other(format!("copy backup: {e}")))?;
 
     // Generate a fresh key and migrate.
     let key = medical_security::keychain::get_or_create_db_key()
@@ -80,8 +77,7 @@ pub async fn recover_database_wipe() -> AppResult<()> {
     medical_security::keychain::wipe_db_key()
         .map_err(|e| AppError::Other(format!("wipe keychain: {e}")))?;
     if db_path.exists() {
-        std::fs::remove_file(&db_path)
-            .map_err(|e| AppError::Other(format!("remove db: {e}")))?;
+        std::fs::remove_file(&db_path).map_err(|e| AppError::Other(format!("remove db: {e}")))?;
     }
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

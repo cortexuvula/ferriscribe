@@ -39,12 +39,20 @@ impl<'a> TemplatesRemote<'a> {
         // treat that as "templates sync unavailable" and fall back to
         // local.
         conn.ports.vocab?;
-        Some(Self { conn, bearer, client })
+        Some(Self {
+            conn,
+            bearer,
+            client,
+        })
     }
 
     fn base_url(&self) -> Option<String> {
         let port = self.conn.ports.vocab?;
-        let host = self.conn.lan.as_deref().or(self.conn.tailscale.as_deref())?;
+        let host = self
+            .conn
+            .lan
+            .as_deref()
+            .or(self.conn.tailscale.as_deref())?;
         Some(http_url(host, port))
     }
 
@@ -54,7 +62,8 @@ impl<'a> TemplatesRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/context-templates");
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
@@ -70,12 +79,16 @@ impl<'a> TemplatesRemote<'a> {
     /// Create or update a context template by name.
     pub async fn upsert(&self, name: &str, body: &str) -> AppResult<ContextTemplate> {
         #[derive(Serialize)]
-        struct B<'a> { name: &'a str, body: &'a str }
+        struct B<'a> {
+            name: &'a str,
+            body: &'a str,
+        }
         let base = self
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/context-templates/upsert");
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
@@ -90,18 +103,18 @@ impl<'a> TemplatesRemote<'a> {
     }
 
     /// Rename a context template (atomic rename on the server).
-    pub async fn rename(
-        &self,
-        old_name: &str,
-        new_name: &str,
-    ) -> AppResult<ContextTemplate> {
+    pub async fn rename(&self, old_name: &str, new_name: &str) -> AppResult<ContextTemplate> {
         #[derive(Serialize)]
-        struct B<'a> { old_name: &'a str, new_name: &'a str }
+        struct B<'a> {
+            old_name: &'a str,
+            new_name: &'a str,
+        }
         let base = self
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/context-templates/rename");
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
@@ -118,12 +131,15 @@ impl<'a> TemplatesRemote<'a> {
     /// Delete a context template by name.
     pub async fn delete(&self, name: &str) -> AppResult<()> {
         #[derive(Serialize)]
-        struct B<'a> { name: &'a str }
+        struct B<'a> {
+            name: &'a str,
+        }
         let base = self
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/context-templates/delete");
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)

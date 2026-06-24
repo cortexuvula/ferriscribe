@@ -178,10 +178,14 @@ fn verify_row_counts(
     let tables = list_user_tables(&plaintext)?;
     for table in tables {
         let plaintext_count: i64 = plaintext
-            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |row| row.get(0))
+            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |row| {
+                row.get(0)
+            })
             .map_err(|e| crate::DbError::Other(format!("count plaintext.{table}: {e}")))?;
         let encrypted_count: i64 = encrypted
-            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |row| row.get(0))
+            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |row| {
+                row.get(0)
+            })
             .map_err(|e| crate::DbError::Other(format!("count encrypted.{table}: {e}")))?;
         if plaintext_count != encrypted_count {
             return Err(crate::DbError::Other(format!(
@@ -206,7 +210,10 @@ fn list_user_tables(conn: &Connection) -> DbResult<Vec<String>> {
     // (starts with letter/underscore, alphanumeric+underscore only) so a
     // hostile name containing a double-quote or backtick can't break out of
     // the quoting. Real tables created by this app always match this pattern.
-    let valid = names.into_iter().filter(|n| is_safe_identifier(n)).collect();
+    let valid = names
+        .into_iter()
+        .filter(|n| is_safe_identifier(n))
+        .collect();
     Ok(valid)
 }
 

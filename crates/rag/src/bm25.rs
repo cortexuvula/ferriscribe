@@ -29,7 +29,10 @@ impl Bm25Search {
             return Ok(Vec::new());
         }
 
-        let conn = self.db.conn().map_err(|e| RagError::Database(e.to_string()))?;
+        let conn = self
+            .db
+            .conn()
+            .map_err(|e| RagError::Database(e.to_string()))?;
 
         let fts_results = VectorsRepo::search_fts(&conn, query, top_k as u32)
             .map_err(|e| RagError::Database(e.to_string()))?;
@@ -112,8 +115,16 @@ mod tests {
         let results = bm25.search("diabetes", 10).expect("search");
 
         assert_eq!(results.len(), 1);
-        assert!(results[0].score > 0.0, "score should be positive, got {}", results[0].score);
-        assert!(results[0].score <= 1.0, "score should be <= 1.0, got {}", results[0].score);
+        assert!(
+            results[0].score > 0.0,
+            "score should be positive, got {}",
+            results[0].score
+        );
+        assert!(
+            results[0].score <= 1.0,
+            "score should be <= 1.0, got {}",
+            results[0].score
+        );
     }
 
     #[test]

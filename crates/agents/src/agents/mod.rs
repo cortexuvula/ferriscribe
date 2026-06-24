@@ -16,23 +16,23 @@
 //! | [`ReferralAgent`] | ICD lookup | Referral letter generation |
 //! | [`SynopsisAgent`] | _(none)_ | Concise SOAP note summaries (<200 words) |
 
-pub mod medication;
-pub mod diagnostic;
+pub mod chat;
 pub mod compliance;
 pub mod data_extraction;
-pub mod workflow;
+pub mod diagnostic;
+pub mod medication;
 pub mod referral;
 pub mod synopsis;
-pub mod chat;
+pub mod workflow;
 
-pub use medication::MedicationAgent;
-pub use diagnostic::DiagnosticAgent;
+pub use chat::ChatAgent;
 pub use compliance::ComplianceAgent;
 pub use data_extraction::DataExtractionAgent;
-pub use workflow::WorkflowAgent;
+pub use diagnostic::DiagnosticAgent;
+pub use medication::MedicationAgent;
 pub use referral::ReferralAgent;
 pub use synopsis::SynopsisAgent;
-pub use chat::ChatAgent;
+pub use workflow::WorkflowAgent;
 
 use medical_core::traits::Agent;
 
@@ -85,11 +85,26 @@ mod tests {
         );
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(tool_names.contains(&"search_icd_codes"), "Missing search_icd_codes");
-        assert!(tool_names.contains(&"lookup_drug_interactions"), "Missing lookup_drug_interactions");
-        assert!(tool_names.contains(&"extract_vitals"), "Missing extract_vitals");
-        assert!(tool_names.contains(&"search_knowledge_base"), "Missing search_knowledge_base");
-        assert!(tool_names.contains(&"generate_checklist"), "Missing generate_checklist");
+        assert!(
+            tool_names.contains(&"search_icd_codes"),
+            "Missing search_icd_codes"
+        );
+        assert!(
+            tool_names.contains(&"lookup_drug_interactions"),
+            "Missing lookup_drug_interactions"
+        );
+        assert!(
+            tool_names.contains(&"extract_vitals"),
+            "Missing extract_vitals"
+        );
+        assert!(
+            tool_names.contains(&"search_knowledge_base"),
+            "Missing search_knowledge_base"
+        );
+        assert!(
+            tool_names.contains(&"generate_checklist"),
+            "Missing generate_checklist"
+        );
     }
 
     #[test]

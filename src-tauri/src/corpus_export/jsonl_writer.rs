@@ -37,9 +37,18 @@ pub fn write_jsonl<W: Write>(
     for r in records {
         let record = Record {
             messages: vec![
-                Message { role: "system", content: &r.system },
-                Message { role: "user", content: &r.user },
-                Message { role: "assistant", content: &r.assistant },
+                Message {
+                    role: "system",
+                    content: &r.system,
+                },
+                Message {
+                    role: "user",
+                    content: &r.user,
+                },
+                Message {
+                    role: "assistant",
+                    content: &r.assistant,
+                },
             ],
         };
         let line = serde_json::to_string(&record)

@@ -18,7 +18,8 @@ use std::sync::LazyLock;
 
 static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)```.+?```").unwrap());
 static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`(.+?)`").unwrap());
-static MARKDOWN_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*#+\s*").unwrap());
+static MARKDOWN_HEADING_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*#+\s*").unwrap());
 static BOLD_STAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*(.*?)\*\*").unwrap());
 static BOLD_UNDER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"__(.*?)__").unwrap());
 static ITALIC_STAR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*([^*]+?)\*").unwrap());
@@ -28,14 +29,17 @@ static CITATION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\[\d+\])+")
 /// Precomputed per-header regex triples: (mid-line-with-colon, header-at-end,
 /// header-then-bullet). One triple per SECTION_HEADERS entry, same order.
 static SECTION_HEADER_RES: LazyLock<Vec<(Regex, Regex, Regex)>> = LazyLock::new(|| {
-    SECTION_HEADERS.iter().map(|header| {
-        let escaped = regex::escape(header);
-        (
-            Regex::new(&format!(r"(?i)(\S)\s+({escaped}:)")).unwrap(),
-            Regex::new(&format!(r"(?im)(\S)\s+({escaped})\s*$")).unwrap(),
-            Regex::new(&format!(r"(?i)({escaped}:)\s*(- )")).unwrap(),
-        )
-    }).collect()
+    SECTION_HEADERS
+        .iter()
+        .map(|header| {
+            let escaped = regex::escape(header);
+            (
+                Regex::new(&format!(r"(?i)(\S)\s+({escaped}:)")).unwrap(),
+                Regex::new(&format!(r"(?im)(\S)\s+({escaped})\s*$")).unwrap(),
+                Regex::new(&format!(r"(?i)({escaped}:)\s*(- )")).unwrap(),
+            )
+        })
+        .collect()
 });
 
 static BULLET_SPLIT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" (- [A-Z])").unwrap());
@@ -100,8 +104,7 @@ fn format_soap_paragraphs(text: &str) -> String {
         let lower = stripped_no_bullet.to_lowercase();
 
         let is_header = SECTION_HEADERS.iter().any(|h| {
-            if lower.starts_with(h) {
-                let rest = &lower[h.len()..];
+            if let Some(rest) = lower.strip_prefix(h) {
                 rest.is_empty() || rest.starts_with(':') || rest.starts_with(' ')
             } else {
                 false
@@ -109,12 +112,12 @@ fn format_soap_paragraphs(text: &str) -> String {
         });
 
         // Insert blank line before header if previous line isn't blank
-        if is_header && i > 0 {
-            if let Some(last) = out.last() {
-                if !last.trim().is_empty() {
-                    out.push(String::new());
-                }
-            }
+        if is_header
+            && i > 0
+            && let Some(last) = out.last()
+            && !last.trim().is_empty()
+        {
+            out.push(String::new());
         }
 
         out.push(line.to_string());

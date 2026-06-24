@@ -26,20 +26,26 @@ use crate::SharingError;
 fn find_ollama_binary() -> Option<PathBuf> {
     // 1. Try `which` / `where.exe`.
     #[cfg(unix)]
-    let probe = std::process::Command::new("which").arg("ollama").output().ok();
+    let probe = std::process::Command::new("which")
+        .arg("ollama")
+        .output()
+        .ok();
     #[cfg(windows)]
-    let probe = std::process::Command::new("where.exe").arg("ollama").output().ok();
+    let probe = std::process::Command::new("where.exe")
+        .arg("ollama")
+        .output()
+        .ok();
 
-    if let Some(out) = probe {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            // `where.exe` may return multiple lines; take the first.
-            let first = s.lines().next().unwrap_or("").to_string();
-            if !first.is_empty() {
-                let p = PathBuf::from(first);
-                if p.exists() {
-                    return Some(p);
-                }
+    if let Some(out) = probe
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // `where.exe` may return multiple lines; take the first.
+        let first = s.lines().next().unwrap_or("").to_string();
+        if !first.is_empty() {
+            let p = PathBuf::from(first);
+            if p.exists() {
+                return Some(p);
             }
         }
     }
@@ -47,8 +53,8 @@ fn find_ollama_binary() -> Option<PathBuf> {
     // 2. Per-platform known locations.
     #[cfg(target_os = "macos")]
     let candidates: &[&str] = &[
-        "/opt/homebrew/bin/ollama",   // Apple Silicon Homebrew
-        "/usr/local/bin/ollama",      // Intel Homebrew / official installer
+        "/opt/homebrew/bin/ollama", // Apple Silicon Homebrew
+        "/usr/local/bin/ollama",    // Intel Homebrew / official installer
         "/usr/bin/ollama",
     ];
     #[cfg(target_os = "linux")]
@@ -58,9 +64,7 @@ fn find_ollama_binary() -> Option<PathBuf> {
         "/snap/bin/ollama",
     ];
     #[cfg(target_os = "windows")]
-    let candidates: &[&str] = &[
-        r"C:\Program Files\Ollama\ollama.exe",
-    ];
+    let candidates: &[&str] = &[r"C:\Program Files\Ollama\ollama.exe"];
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let candidates: &[&str] = &[];
 
@@ -148,10 +152,10 @@ mod macos {
 </plist>
 "#
         );
-        let parent = path.parent()
-            .ok_or_else(|| SharingError::InvalidPath(format!("no parent dir: {}", path.display())))?;
-        std::fs::create_dir_all(parent)
-            .map_err(SharingError::Io)?;
+        let parent = path.parent().ok_or_else(|| {
+            SharingError::InvalidPath(format!("no parent dir: {}", path.display()))
+        })?;
+        std::fs::create_dir_all(parent).map_err(SharingError::Io)?;
         std::fs::write(&path, plist).map_err(SharingError::Io)?;
         let status = std::process::Command::new("launchctl")
             .args(["load", "-w"])
@@ -160,7 +164,8 @@ mod macos {
             .map_err(SharingError::Io)?;
         if !status.success() {
             return Err(SharingError::ServiceInstaller(format!(
-                "launchctl load exited with {}", status
+                "launchctl load exited with {}",
+                status
             )));
         }
         tracing::info!("persistent ollama LaunchAgent installed and loaded");
@@ -204,10 +209,10 @@ mod linux {
         let unit = format!(
             "[Unit]\nDescription=Ollama (managed by FerriScribe)\n\n[Service]\nEnvironment=OLLAMA_HOST=127.0.0.1:11434\nExecStart={bin_str} serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n"
         );
-        let parent = path.parent()
-            .ok_or_else(|| SharingError::InvalidPath(format!("no parent dir: {}", path.display())))?;
-        std::fs::create_dir_all(parent)
-            .map_err(SharingError::Io)?;
+        let parent = path.parent().ok_or_else(|| {
+            SharingError::InvalidPath(format!("no parent dir: {}", path.display()))
+        })?;
+        std::fs::create_dir_all(parent).map_err(SharingError::Io)?;
         std::fs::write(&path, unit).map_err(SharingError::Io)?;
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "daemon-reload"])
@@ -277,7 +282,8 @@ mod windows {
             .map_err(SharingError::Io)?;
         if !status.success() {
             return Err(SharingError::ServiceInstaller(format!(
-                "schtasks /Create exited with {}", status
+                "schtasks /Create exited with {}",
+                status
             )));
         }
         tracing::info!("persistent ollama scheduled task installed");
@@ -296,10 +302,10 @@ mod windows {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub use macos::{install as install_persistent_ollama, state as ollama_service_state};
 #[cfg(target_os = "linux")]
 pub use linux::{install as install_persistent_ollama, state as ollama_service_state};
+#[cfg(target_os = "macos")]
+pub use macos::{install as install_persistent_ollama, state as ollama_service_state};
 #[cfg(target_os = "windows")]
 pub use windows::{install as install_persistent_ollama, state as ollama_service_state};
 
@@ -308,14 +314,18 @@ pub use windows::{install as install_persistent_ollama, state as ollama_service_
 /// Always returns an error on platforms other than macOS, Linux, or Windows.
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn install_persistent_ollama() -> Result<(), SharingError> {
-    Err(SharingError::ServiceInstaller("unsupported platform".into()))
+    Err(SharingError::ServiceInstaller(
+        "unsupported platform".into(),
+    ))
 }
 
 /// Query the persistent Ollama service state (unsupported platform stub).
 ///
 /// Always returns [`ServiceState::UnknownPlatform`] on unsupported OSes.
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-pub fn ollama_service_state() -> ServiceState { ServiceState::UnknownPlatform }
+pub fn ollama_service_state() -> ServiceState {
+    ServiceState::UnknownPlatform
+}
 
 #[cfg(test)]
 mod tests {
@@ -368,7 +378,11 @@ mod tests {
         // The filesystem root "/" has no parent.
         let root = Path::new("/");
         let result = resolve_parent(root);
-        assert!(result.is_err(), "expected Err for root path, got: {:?}", result);
+        assert!(
+            result.is_err(),
+            "expected Err for root path, got: {:?}",
+            result
+        );
         let err = result.unwrap_err();
         let msg = err.to_string();
         assert!(

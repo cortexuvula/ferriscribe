@@ -9,9 +9,7 @@ use medical_core::types::{
 
 use crate::http_client::RetryConfig;
 
-use super::wire::{
-    ApiFunction, ApiToolCall, ChatMessage, ChatRequest, ChatResponse,
-};
+use super::wire::{ApiFunction, ApiToolCall, ChatMessage, ChatRequest, ChatResponse};
 
 /// A client for any endpoint implementing the OpenAI chat-completions protocol.
 ///
@@ -55,11 +53,7 @@ impl OpenAiCompatibleClient {
     ///
     /// Suitable for local providers that don't require auth tokens.
     /// The `base_url` should include the `/v1` suffix.
-    pub fn new(
-        client: Client,
-        base_url: impl Into<String>,
-        policy: RetryConfig,
-    ) -> Self {
+    pub fn new(client: Client, base_url: impl Into<String>, policy: RetryConfig) -> Self {
         Self {
             client,
             base_url: base_url.into(),
@@ -201,11 +195,14 @@ impl OpenAiCompatibleClient {
         default_model: &str,
     ) -> CompletionResponse {
         let model = resp.model.unwrap_or_else(|| default_model.to_string());
-        let usage = resp.usage.map(|u| UsageInfo {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-        }).unwrap_or_default();
+        let usage = resp
+            .usage
+            .map(|u| UsageInfo {
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
+            })
+            .unwrap_or_default();
 
         let num_choices = resp.choices.len();
         let first_choice = resp.choices.into_iter().next();
@@ -217,9 +214,7 @@ impl OpenAiCompatibleClient {
             );
         }
 
-        let finish_reason = first_choice
-            .as_ref()
-            .and_then(|c| c.finish_reason.clone());
+        let finish_reason = first_choice.as_ref().and_then(|c| c.finish_reason.clone());
 
         let content = first_choice
             .as_ref()
@@ -309,7 +304,11 @@ mod tests {
 
     fn make_client() -> OpenAiCompatibleClient {
         // Build without real auth — only used for struct-level tests.
-        OpenAiCompatibleClient::new(Client::new(), "https://api.openai.com/v1", RetryConfig::default())
+        OpenAiCompatibleClient::new(
+            Client::new(),
+            "https://api.openai.com/v1",
+            RetryConfig::default(),
+        )
     }
 
     fn make_request() -> CompletionRequest {

@@ -45,6 +45,20 @@ class AudioStore {
     }
   }
 
+  /**
+   * Tear down all background resources (elapsed-seconds timer + waveform
+   * listener). Called from App.svelte onDestroy so a webview reload or app
+   * exit doesn't orphan the interval or the Tauri event listener. Safe to
+   * call when idle — both fields are null-checked.
+   */
+  destroy() {
+    this.clearTimer();
+    if (this.waveformUnlisten) {
+      this.waveformUnlisten();
+      this.waveformUnlisten = null;
+    }
+  }
+
   private startTimer() {
     this.clearTimer();
     this.timer = setInterval(() => {

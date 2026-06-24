@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use medical_core::types::recording::Recording;
 
-use crate::{recordings::RecordingsRepo, DbResult};
+use crate::{DbResult, recordings::RecordingsRepo};
 
 /// Repository for full-text search over recordings via FTS5.
 ///
@@ -72,7 +72,11 @@ mod tests {
         conn
     }
 
-    fn new_rec_with(filename: &str, transcript: Option<&str>, patient_name: Option<&str>) -> Recording {
+    fn new_rec_with(
+        filename: &str,
+        transcript: Option<&str>,
+        patient_name: Option<&str>,
+    ) -> Recording {
         let mut rec = Recording::new(filename, PathBuf::from("/audio/test.wav"));
         rec.transcript = transcript.map(String::from);
         rec.patient_name = patient_name.map(String::from);

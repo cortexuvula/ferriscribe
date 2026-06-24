@@ -84,9 +84,9 @@ pub async fn spawn_auth_proxy(
 ) -> crate::Result<tokio::task::JoinHandle<()>> {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.listen_port))
         .await
-        .map_err(|e| crate::SharingError::AuthProxy(format!(
-            "bind 0.0.0.0:{}: {e}", config.listen_port
-        )))?;
+        .map_err(|e| {
+            crate::SharingError::AuthProxy(format!("bind 0.0.0.0:{}: {e}", config.listen_port))
+        })?;
     let client = Client::builder()
         .pool_max_idle_per_host(8)
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -97,10 +97,12 @@ pub async fn spawn_auth_proxy(
         .timeout(std::time::Duration::from_secs(30 * 60))
         .build()
         .map_err(|e| crate::SharingError::AuthProxy(e.to_string()))?;
-    let state = AppState { config: config.clone(), client, store };
-    let app = Router::new()
-        .fallback(handler)
-        .with_state(state);
+    let state = AppState {
+        config: config.clone(),
+        client,
+        store,
+    };
+    let app = Router::new().fallback(handler).with_state(state);
     Ok(tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             warn!("auth_proxy serve exited: {e}");
@@ -136,10 +138,12 @@ pub async fn spawn_auth_proxy_on_listener(
         .timeout(std::time::Duration::from_secs(30 * 60))
         .build()
         .map_err(|e| crate::SharingError::AuthProxy(e.to_string()))?;
-    let state = AppState { config: config.clone(), client, store };
-    let app = Router::new()
-        .fallback(handler)
-        .with_state(state);
+    let state = AppState {
+        config: config.clone(),
+        client,
+        store,
+    };
+    let app = Router::new().fallback(handler).with_state(state);
     Ok(tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             warn!("auth_proxy serve exited: {e}");
@@ -198,7 +202,11 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("/");
-    let upstream_url = format!("{}{}", state.config.backend_url.trim_end_matches('/'), path_query);
+    let upstream_url = format!(
+        "{}{}",
+        state.config.backend_url.trim_end_matches('/'),
+        path_query
+    );
 
     let build_upstream = |body_bytes: BodyBytes| {
         let mut req_builder = state
@@ -250,9 +258,7 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
     }
 
     use futures_util::TryStreamExt;
-    let stream = upstream
-        .bytes_stream()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let stream = upstream.bytes_stream().map_err(std::io::Error::other);
     let body = Body::from_stream(stream);
     let mut resp = Response::new(body);
     *resp.status_mut() = status;
@@ -275,8 +281,10 @@ fn gateway_down_response() -> Response {
     );
     // Tag the failure mode so the client side can craft a tailored message if
     // it ever wants to (contract with crates/stt-providers/src/client.rs).
-    resp.headers_mut()
-        .insert("x-proxy-reason", HeaderValue::from_static("backend-unreachable"));
+    resp.headers_mut().insert(
+        "x-proxy-reason",
+        HeaderValue::from_static("backend-unreachable"),
+    );
     resp
 }
 
@@ -298,9 +306,7 @@ mod tests {
     fn fresh_store() -> (Arc<TokenStore>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("tokens.db");
-        let store = Arc::new(
-            TokenStore::open(&path, &[7u8; 32]).expect("open token store"),
-        );
+        let store = Arc::new(TokenStore::open(&path, &[7u8; 32]).expect("open token store"));
         (store, dir)
     }
 
@@ -349,7 +355,9 @@ mod tests {
             .expect("send");
         assert_eq!(resp.status(), 401);
         assert_eq!(
-            resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get("x-auth-reason")
+                .and_then(|v| v.to_str().ok()),
             Some("missing-bearer"),
         );
         handle.abort();
@@ -363,14 +371,16 @@ mod tests {
         let (port, handle) = spawn_test_proxy(store, upstream.uri(), None).await;
 
         let resp = reqwest::Client::new()
-            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .get(format!("http://127.0.0.1:{port}/anything"))
             .bearer_auth("not-a-real-token")
             .send()
             .await
             .expect("send");
         assert_eq!(resp.status(), 401);
         assert_eq!(
-            resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get("x-auth-reason")
+                .and_then(|v| v.to_str().ok()),
             Some("unknown-token"),
         );
         handle.abort();
@@ -385,14 +395,16 @@ mod tests {
         let (port, handle) = spawn_test_proxy(store, upstream.uri(), None).await;
 
         let resp = reqwest::Client::new()
-            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .get(format!("http://127.0.0.1:{port}/anything"))
             .bearer_auth(&issued.token)
             .send()
             .await
             .expect("send");
         assert_eq!(resp.status(), 401);
         assert_eq!(
-            resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get("x-auth-reason")
+                .and_then(|v| v.to_str().ok()),
             Some("unknown-token"),
             "revoked tokens classify as unknown-token because validate() filters revoked rows"
         );
@@ -415,7 +427,7 @@ mod tests {
         let (port, handle) = spawn_test_proxy(store, upstream.uri(), None).await;
 
         let resp = reqwest::Client::new()
-            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .get(format!("http://127.0.0.1:{port}/anything"))
             .bearer_auth(&issued.token)
             .send()
             .await
@@ -451,15 +463,11 @@ mod tests {
             .mount(&upstream)
             .await;
 
-        let (port, handle) = spawn_test_proxy(
-            store,
-            upstream.uri(),
-            Some("server-secret".to_string()),
-        )
-        .await;
+        let (port, handle) =
+            spawn_test_proxy(store, upstream.uri(), Some("server-secret".to_string())).await;
 
         let resp = reqwest::Client::new()
-            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .get(format!("http://127.0.0.1:{port}/anything"))
             .bearer_auth(&issued.token) // client uses its own token
             .send()
             .await
@@ -480,11 +488,10 @@ mod tests {
         // Port 1 is privileged on Unix and almost certainly not listening.
         // Even if it were, the connect_timeout would fire after 10s; tests
         // run in <1s for the typical "connection refused" case.
-        let (port, handle) =
-            spawn_test_proxy(store, "http://127.0.0.1:1".to_string(), None).await;
+        let (port, handle) = spawn_test_proxy(store, "http://127.0.0.1:1".to_string(), None).await;
 
         let resp = reqwest::Client::new()
-            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .get(format!("http://127.0.0.1:{port}/anything"))
             .bearer_auth(&issued.token)
             .send()
             .await
@@ -500,18 +507,19 @@ mod tests {
         let (store, _dir) = fresh_store();
         let issued = store.issue("a").expect("issue");
         // Port 1 refuses connections → both attempts fail → gateway_down_response().
-        let (port, handle) =
-            spawn_test_proxy(store, "http://127.0.0.1:1".to_string(), None).await;
+        let (port, handle) = spawn_test_proxy(store, "http://127.0.0.1:1".to_string(), None).await;
 
         let resp = reqwest::Client::new()
-            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .get(format!("http://127.0.0.1:{port}/anything"))
             .bearer_auth(&issued.token)
             .send()
             .await
             .expect("send");
         assert_eq!(resp.status(), 502);
         assert_eq!(
-            resp.headers().get("x-proxy-reason").and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get("x-proxy-reason")
+                .and_then(|v| v.to_str().ok()),
             Some("backend-unreachable"),
         );
         let body = resp.text().await.expect("text");
@@ -580,12 +588,8 @@ mod tests {
             }
         });
 
-        let (port, handle) = spawn_test_proxy(
-            store,
-            format!("http://127.0.0.1:{relay_port}"),
-            None,
-        )
-        .await;
+        let (port, handle) =
+            spawn_test_proxy(store, format!("http://127.0.0.1:{relay_port}"), None).await;
 
         // Fire the request from a task so we can open the relay gate while
         // it's in flight (during the 3s backoff).

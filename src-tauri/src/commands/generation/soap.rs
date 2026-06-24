@@ -15,7 +15,7 @@ use super::helpers::{
     build_completion_request, load_recording_and_settings, parse_soap_template,
     patient_context_is_empty, persist_recording, resolve_provider, validate_patient_context,
 };
-use super::{format_progress_error, GenerationProgress, MAX_CONTEXT_CHARS, MAX_TRANSCRIPT_CHARS};
+use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_TRANSCRIPT_CHARS, format_progress_error};
 
 /// Generate a SOAP note from a recording's transcript.
 ///
@@ -33,13 +33,14 @@ pub async fn generate_soap(
     // Reject oversized user-supplied context up front, before emitting "started"
     // or touching the DB / provider.
     if let Some(ref ctx) = context
-        && ctx.len() > MAX_CONTEXT_CHARS {
-            return Err(AppError::Other(format!(
-                "Context too large: {} chars, limit is {}",
-                ctx.len(),
-                MAX_CONTEXT_CHARS
-            )));
-        }
+        && ctx.len() > MAX_CONTEXT_CHARS
+    {
+        return Err(AppError::Other(format!(
+            "Context too large: {} chars, limit is {}",
+            ctx.len(),
+            MAX_CONTEXT_CHARS
+        )));
+    }
     if let Some(ref pc) = patient_context {
         validate_patient_context(pc)?;
     }
@@ -116,7 +117,9 @@ async fn generate_soap_inner(
         .as_deref()
         .filter(|t| !t.is_empty())
         .ok_or_else(|| {
-            AppError::Processing("Recording has no transcript. Run transcription first.".to_string())
+            AppError::Processing(
+                "Recording has no transcript. Run transcription first.".to_string(),
+            )
         })?;
 
     if transcript.len() > MAX_TRANSCRIPT_CHARS {
@@ -164,18 +167,15 @@ async fn generate_soap_inner(
         None,
     );
 
-    let response = provider
-        .complete(request)
-        .await
-        .map_err(|e| match e {
-            // Preserve EndpointOffline as-is so the frontend dialog can fire.
-            AppError::EndpointOffline { .. } => e,
-            // For other errors, keep the existing nicer wrapping.
-            _ => AppError::AiProvider(format!(
-                "AI completion failed: {}",
-                crate::commands::unwrap_app_error_message(e)
-            )),
-        })?;
+    let response = provider.complete(request).await.map_err(|e| match e {
+        // Preserve EndpointOffline as-is so the frontend dialog can fire.
+        AppError::EndpointOffline { .. } => e,
+        // For other errors, keep the existing nicer wrapping.
+        _ => AppError::AiProvider(format!(
+            "AI completion failed: {}",
+            crate::commands::unwrap_app_error_message(e)
+        )),
+    })?;
 
     let raw_soap = response.content;
     if raw_soap.is_empty() {
@@ -203,14 +203,13 @@ async fn generate_soap_inner(
     // ── Training-corpus capture (Task 6a) ────────────────────────────────
     // Gated on AppConfig.capture_for_training (default: false). Failure
     // must never break the user's workflow — log at warn and continue.
-    let recording_uuid = Uuid::parse_str(recording_id)
-        .ok(); // already validated by load_recording_and_settings; unwrap safe
+    let recording_uuid = Uuid::parse_str(recording_id).ok(); // already validated by load_recording_and_settings; unwrap safe
 
     let capture_generation_id: Option<Uuid> = if let Some(rec_uuid) = recording_uuid {
         match state.db.conn() {
             Ok(conn) => {
-                let cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-                    .unwrap_or_default();
+                let cfg =
+                    medical_db::settings::SettingsRepo::load_config(&conn).unwrap_or_default();
                 if cfg.capture_for_training {
                     let context_blob = serde_json::json!({
                         "context": context,
@@ -228,7 +227,8 @@ async fn generate_soap_inner(
                         input_context_json: Some(context_json.as_str()),
                         draft_text: &soap_text,
                     };
-                    match medical_db::generations::GenerationsRepo::record_generation(&conn, insert) {
+                    match medical_db::generations::GenerationsRepo::record_generation(&conn, insert)
+                    {
                         Ok(g) => {
                             tracing::debug!(generation_id = %g.id, "captured SOAP generation for training corpus");
                             Some(g.id)
@@ -257,17 +257,21 @@ async fn generate_soap_inner(
     }
     if let Some(obj) = recording.metadata.as_object_mut() {
         if let Some(ctx) = context
-            && !ctx.is_empty() {
-                obj.insert("context".to_string(), serde_json::Value::String(ctx.to_string()));
-            }
+            && !ctx.is_empty()
+        {
+            obj.insert(
+                "context".to_string(),
+                serde_json::Value::String(ctx.to_string()),
+            );
+        }
         if let Some(pc) = patient_context
-            && !patient_context_is_empty(pc) {
-                obj.insert(
-                    "patient_context".to_string(),
-                    serde_json::to_value(pc)
-                        .unwrap_or(serde_json::Value::Null),
-                );
-            }
+            && !patient_context_is_empty(pc)
+        {
+            obj.insert(
+                "patient_context".to_string(),
+                serde_json::to_value(pc).unwrap_or(serde_json::Value::Null),
+            );
+        }
     }
 
     // Persist to DB (on blocking thread)
@@ -281,15 +285,12 @@ async fn generate_soap_inner(
     // SettingsRepo / GenerationsRepo round trips) on every SOAP
     // generation for users who haven't opted into capture.
     if capture_generation_id.is_some() {
-        let rec_uuid = recording_uuid
-            .expect("capture_generation_id Some implies recording_uuid Some");
+        let rec_uuid =
+            recording_uuid.expect("capture_generation_id Some implies recording_uuid Some");
         match state.db.conn() {
             Ok(conn) => {
                 match medical_db::generations::GenerationsRepo::update_final_text(
-                    &conn,
-                    rec_uuid,
-                    "soap",
-                    &soap_text,
+                    &conn, rec_uuid, "soap", &soap_text,
                 ) {
                     Ok(Some(g)) => {
                         tracing::debug!(generation_id = %g.id, "updated final_text on generations row");
@@ -315,10 +316,50 @@ async fn generate_soap_inner(
     Ok(soap_text)
 }
 
+/// Spawn a blocking task that computes word-level Levenshtein between the
+/// draft and the final (saved) text, then writes the result back to the
+/// `generations` row. Best-effort: failures log at warn and are discarded.
+///
+/// `pub(crate)` so the edit-save command in `recordings_edit` can reuse it.
+pub(crate) fn spawn_edit_distance_task(
+    db: Arc<medical_db::Database>,
+    generation_id: Uuid,
+    draft: String,
+    final_text: String,
+) {
+    tokio::task::spawn_blocking(move || {
+        let (distance, ratio) =
+            medical_processing::edit_distance::word_edit_distance(&draft, &final_text);
+        match db.conn() {
+            Ok(conn) => {
+                if let Err(e) = medical_db::generations::GenerationsRepo::set_edit_distance(
+                    &conn,
+                    generation_id,
+                    distance as i64,
+                    ratio,
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        generation_id = %generation_id,
+                        "set_edit_distance failed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    generation_id = %generation_id,
+                    "edit-distance task could not open DB connection"
+                );
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod preflight_tests {
-    use super::*;
     use super::super::test_helpers::build_test_state_with_recording;
+    use super::*;
     use medical_core::error::{AppError, OfflineReason, ServiceKind};
     use medical_core::types::settings::AppConfig;
 
@@ -332,11 +373,8 @@ mod preflight_tests {
         config.ollama_port = 11434;
         config.ai_model = "llama3".to_string();
 
-        let (state, recording_id) = build_test_state_with_recording(
-            config,
-            "Patient reports headache and fatigue.",
-        )
-        .await;
+        let (state, recording_id) =
+            build_test_state_with_recording(config, "Patient reports headache and fatigue.").await;
 
         let start = std::time::Instant::now();
         let result = generate_soap_inner(
@@ -379,44 +417,4 @@ mod preflight_tests {
             "should have short-circuited at ~3s; took {elapsed:?}"
         );
     }
-}
-
-/// Spawn a blocking task that computes word-level Levenshtein between the
-/// draft and the final (saved) text, then writes the result back to the
-/// `generations` row. Best-effort: failures log at warn and are discarded.
-///
-/// `pub(crate)` so the edit-save command in `recordings_edit` can reuse it.
-pub(crate) fn spawn_edit_distance_task(
-    db: Arc<medical_db::Database>,
-    generation_id: Uuid,
-    draft: String,
-    final_text: String,
-) {
-    tokio::task::spawn_blocking(move || {
-        let (distance, ratio) =
-            medical_processing::edit_distance::word_edit_distance(&draft, &final_text);
-        match db.conn() {
-            Ok(conn) => {
-                if let Err(e) = medical_db::generations::GenerationsRepo::set_edit_distance(
-                    &conn,
-                    generation_id,
-                    distance as i64,
-                    ratio,
-                ) {
-                    tracing::warn!(
-                        error = %e,
-                        generation_id = %generation_id,
-                        "set_edit_distance failed"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    generation_id = %generation_id,
-                    "edit-distance task could not open DB connection"
-                );
-            }
-        }
-    });
 }

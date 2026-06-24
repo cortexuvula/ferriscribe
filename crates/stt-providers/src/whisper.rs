@@ -66,16 +66,16 @@ impl WhisperTranscriber {
         language: Option<&str>,
     ) -> AppResult<Vec<WhisperSegment>> {
         let ctx = WhisperContext::new_with_params(
-            self.model_path.to_str().ok_or_else(|| {
-                AppError::SttProvider("Model path is not valid UTF-8".into())
-            })?,
+            self.model_path
+                .to_str()
+                .ok_or_else(|| AppError::SttProvider("Model path is not valid UTF-8".into()))?,
             WhisperContextParameters::default(),
         )
         .map_err(|e| AppError::SttProvider(format!("Failed to load Whisper model: {e}")))?;
 
-        let mut state = ctx.create_state().map_err(|e| {
-            AppError::SttProvider(format!("Failed to create Whisper state: {e}"))
-        })?;
+        let mut state = ctx
+            .create_state()
+            .map_err(|e| AppError::SttProvider(format!("Failed to create Whisper state: {e}")))?;
 
         // BeamSearch with beam_size=5 matches whisper.cpp's default and is
         // empirically ~3× more complete than Greedy{best_of=1} on long audio
@@ -108,17 +108,17 @@ impl WhisperTranscriber {
             "Running local Whisper inference"
         );
 
-        state.full(params, audio_16k_mono).map_err(|e| {
-            AppError::SttProvider(format!("Whisper inference failed: {e}"))
-        })?;
+        state
+            .full(params, audio_16k_mono)
+            .map_err(|e| AppError::SttProvider(format!("Whisper inference failed: {e}")))?;
 
         let num_segments = state.full_n_segments();
         let mut segments = Vec::with_capacity(num_segments as usize);
 
         for i in 0..num_segments {
-            let segment = state.get_segment(i).ok_or_else(|| {
-                AppError::SttProvider(format!("Segment {i} out of bounds"))
-            })?;
+            let segment = state
+                .get_segment(i)
+                .ok_or_else(|| AppError::SttProvider(format!("Segment {i} out of bounds")))?;
 
             let text = segment.to_str_lossy().map_err(|e| {
                 AppError::SttProvider(format!("Failed to get segment {i} text: {e}"))

@@ -23,6 +23,17 @@ edition = "2024"
 license = "MIT"
 rust-version = "1.85"
 
+# Workspace-wide Clippy lint configuration. This is Cargo's official mechanism
+# for setting lint levels across every member crate without sprinkling
+# `#![allow(...)]` attributes at each crate root. Enforced in CI via
+# `cargo clippy --workspace --all-targets -- -D warnings`.
+#
+# `field_reassign_with_default` — the pattern `let mut cfg = Config::default();
+# cfg.field = x;` is deliberate style here; the suggested struct-init form is
+# not uniformly more readable when many fields are set across statements.
+[workspace.lints.clippy]
+field_reassign_with_default = "allow"
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

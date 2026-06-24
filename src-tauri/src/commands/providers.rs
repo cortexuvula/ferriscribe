@@ -14,7 +14,10 @@ use crate::state::{self, AppState};
 /// (AGENTS.md: no hosted AI APIs, no telemetry).
 fn validate_probe_host(state: &AppState, host: &str) -> AppResult<()> {
     let allow_public = {
-        let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = state
+            .db
+            .conn()
+            .map_err(|e| AppError::Database(e.to_string()))?;
         medical_db::settings::SettingsRepo::load_config(&conn)
             .map(|mut c| {
                 c.migrate();
@@ -43,7 +46,11 @@ async fn probe_endpoint_reachable_inner(
     probe_path: String,
     api_key: Option<String>,
 ) -> AppResult<()> {
-    let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
+    let effective_host = if host.is_empty() {
+        "localhost".to_string()
+    } else {
+        host
+    };
     let base_url = format!("http://{}:{}", effective_host, port);
     let url = format!(
         "{}/{}",
@@ -112,12 +119,13 @@ pub async fn probe_endpoint_reachable(
 ///
 /// Returns the list of available AI provider names after reinitialization.
 #[tauri::command]
-pub async fn reinit_providers(
-    state: tauri::State<'_, AppState>,
-) -> AppResult<Vec<String>> {
+pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
     // Load saved settings for provider config (host, port, active provider, whisper model)
     let config = {
-        let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = state
+            .db
+            .conn()
+            .map_err(|e| AppError::Database(e.to_string()))?;
         let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
             .map_err(|e| AppError::Database(e.to_string()))?;
         cfg.migrate();
@@ -126,13 +134,32 @@ pub async fn reinit_providers(
 
     // Re-load paired endpoint so reinit also re-wires endpoints.
     let paired = state::load_paired_connection();
-    let bearer = if paired.is_some() { state::load_sharing_bearer() } else { None };
+    let bearer = if paired.is_some() {
+        state::load_sharing_bearer()
+    } else {
+        None
+    };
     let (ollama_ep, lmstudio_ep, whisper_ep) = if let Some(ref p) = paired {
         use medical_core::types::RemoteEndpoint;
         (
-            Some(RemoteEndpoint { lan: p.lan.clone(), tailscale: p.tailscale.clone(), port: p.ports.ollama, bearer: bearer.clone() }),
-            p.ports.lmstudio.map(|lp| RemoteEndpoint { lan: p.lan.clone(), tailscale: p.tailscale.clone(), port: lp, bearer: bearer.clone() }),
-            Some(RemoteEndpoint { lan: p.lan.clone(), tailscale: p.tailscale.clone(), port: p.ports.whisper, bearer: bearer.clone() }),
+            Some(RemoteEndpoint {
+                lan: p.lan.clone(),
+                tailscale: p.tailscale.clone(),
+                port: p.ports.ollama,
+                bearer: bearer.clone(),
+            }),
+            p.ports.lmstudio.map(|lp| RemoteEndpoint {
+                lan: p.lan.clone(),
+                tailscale: p.tailscale.clone(),
+                port: lp,
+                bearer: bearer.clone(),
+            }),
+            Some(RemoteEndpoint {
+                lan: p.lan.clone(),
+                tailscale: p.tailscale.clone(),
+                port: p.ports.whisper,
+                bearer: bearer.clone(),
+            }),
         )
     } else {
         (None, None, None)
@@ -148,7 +175,11 @@ pub async fn reinit_providers(
     let available = ai_handles.registry.list_available();
 
     // Destructure before any partial moves so all fields remain accessible.
-    let state::AiProviderHandles { registry, ollama: new_ollama, lmstudio: new_lmstudio } = ai_handles;
+    let state::AiProviderHandles {
+        registry,
+        ollama: new_ollama,
+        lmstudio: new_lmstudio,
+    } = ai_handles;
     {
         let mut guard = state.ai_providers.lock().await;
         *guard = registry;
@@ -156,7 +187,10 @@ pub async fn reinit_providers(
 
     // Rebuild STT provider based on current config (mode + whisper model + remote host/port/key).
     let stt_handles = state::init_stt_providers_with_config(&state.data_dir, &config, whisper_ep);
-    let state::SttProviderHandles { provider: new_stt_provider, remote: new_remote_stt } = stt_handles;
+    let state::SttProviderHandles {
+        provider: new_stt_provider,
+        remote: new_remote_stt,
+    } = stt_handles;
     {
         let mut guard = state.stt_providers.lock().await;
         *guard = new_stt_provider;
@@ -188,38 +222,41 @@ pub async fn test_lmstudio_connection(
     api_key: Option<String>,
 ) -> AppResult<String> {
     validate_probe_host(&state, &host)?;
-    let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
+    let effective_host = if host.is_empty() {
+        "localhost".to_string()
+    } else {
+        host
+    };
     let url = format!("http://{}:{}/v1/models", effective_host, port);
 
     info!(url = %url, "Testing LM Studio connection");
 
-    let mut req = state.http_client
-        .get(&url)
-        .timeout(Duration::from_secs(5));
+    let mut req = state.http_client.get(&url).timeout(Duration::from_secs(5));
     if let Some(key) = api_key.as_deref().filter(|s| !s.is_empty()) {
         req = req.header("Authorization", format!("Bearer {key}"));
     }
     let response = req.send().await.map_err(|e| {
-            use medical_core::error::OfflineReason;
-            use medical_core::preflight::classify_reqwest_error;
-            match classify_reqwest_error(&e) {
-                Some(OfflineReason::ConnectionRefused) => AppError::AiProvider(format!(
-                    "Connection refused — is LM Studio running at {}:{}?",
-                    effective_host, port
-                )),
-                Some(OfflineReason::Timeout) => AppError::AiProvider(format!(
-                    "Connection timed out — check that {}:{} is reachable",
-                    effective_host, port
-                )),
-                Some(OfflineReason::DnsFailure) => AppError::AiProvider(format!(
-                    "Cannot resolve hostname '{}'", effective_host
-                )),
-                Some(OfflineReason::TlsFailure) => AppError::AiProvider(format!(
-                    "TLS handshake failed at {}:{}", effective_host, port
-                )),
-                None => AppError::AiProvider(format!("Connection failed: {e}")),
+        use medical_core::error::OfflineReason;
+        use medical_core::preflight::classify_reqwest_error;
+        match classify_reqwest_error(&e) {
+            Some(OfflineReason::ConnectionRefused) => AppError::AiProvider(format!(
+                "Connection refused — is LM Studio running at {}:{}?",
+                effective_host, port
+            )),
+            Some(OfflineReason::Timeout) => AppError::AiProvider(format!(
+                "Connection timed out — check that {}:{} is reachable",
+                effective_host, port
+            )),
+            Some(OfflineReason::DnsFailure) => {
+                AppError::AiProvider(format!("Cannot resolve hostname '{}'", effective_host))
             }
-        })?;
+            Some(OfflineReason::TlsFailure) => AppError::AiProvider(format!(
+                "TLS handshake failed at {}:{}",
+                effective_host, port
+            )),
+            None => AppError::AiProvider(format!("Connection failed: {e}")),
+        }
+    })?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED
         || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -233,7 +270,9 @@ pub async fn test_lmstudio_connection(
     if !response.status().is_success() {
         let status = response.status();
         let body = medical_core::http_error_body::read_error_body(response, 200).await;
-        return Err(AppError::AiProvider(format!("Server returned HTTP {status}: {body}")));
+        return Err(AppError::AiProvider(format!(
+            "Server returned HTTP {status}: {body}"
+        )));
     }
 
     // Parse the OpenAI-compatible models response to count models
@@ -268,14 +307,16 @@ pub async fn test_stt_remote_connection(
     api_key: Option<String>,
 ) -> AppResult<String> {
     validate_probe_host(&state, &host)?;
-    let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
+    let effective_host = if host.is_empty() {
+        "localhost".to_string()
+    } else {
+        host
+    };
     let url = format!("http://{}:{}/v1/models", effective_host, port);
 
     info!(url = %url, "Testing Whisper server connection");
 
-    let mut req = state.http_client
-        .get(&url)
-        .timeout(Duration::from_secs(10));
+    let mut req = state.http_client.get(&url).timeout(Duration::from_secs(10));
     if let Some(key) = api_key.as_deref().filter(|s| !s.is_empty()) {
         req = req.header("Authorization", format!("Bearer {key}"));
     }
@@ -292,11 +333,12 @@ pub async fn test_stt_remote_connection(
                 "Connection timed out — check that {}:{} is reachable",
                 effective_host, port
             )),
-            Some(OfflineReason::DnsFailure) => AppError::SttProvider(format!(
-                "Cannot resolve hostname '{}'", effective_host
-            )),
+            Some(OfflineReason::DnsFailure) => {
+                AppError::SttProvider(format!("Cannot resolve hostname '{}'", effective_host))
+            }
             Some(OfflineReason::TlsFailure) => AppError::SttProvider(format!(
-                "TLS handshake failed at {}:{}", effective_host, port
+                "TLS handshake failed at {}:{}",
+                effective_host, port
             )),
             None => AppError::SttProvider(format!("Connection failed: {e}")),
         }
@@ -314,7 +356,9 @@ pub async fn test_stt_remote_connection(
     if !response.status().is_success() {
         let status = response.status();
         let body = medical_core::http_error_body::read_error_body(response, 200).await;
-        return Err(AppError::SttProvider(format!("Server returned HTTP {status}: {body}")));
+        return Err(AppError::SttProvider(format!(
+            "Server returned HTTP {status}: {body}"
+        )));
     }
 
     let body: serde_json::Value = response
@@ -349,38 +393,41 @@ pub async fn test_ollama_connection(
     api_key: Option<String>,
 ) -> AppResult<String> {
     validate_probe_host(&state, &host)?;
-    let effective_host = if host.is_empty() { "localhost".to_string() } else { host };
+    let effective_host = if host.is_empty() {
+        "localhost".to_string()
+    } else {
+        host
+    };
     let url = format!("http://{}:{}/api/tags", effective_host, port);
 
     info!(url = %url, "Testing Ollama connection");
 
-    let mut req = state.http_client
-        .get(&url)
-        .timeout(Duration::from_secs(5));
+    let mut req = state.http_client.get(&url).timeout(Duration::from_secs(5));
     if let Some(key) = api_key.as_deref().filter(|s| !s.is_empty()) {
         req = req.header("Authorization", format!("Bearer {key}"));
     }
     let response = req.send().await.map_err(|e| {
-            use medical_core::error::OfflineReason;
-            use medical_core::preflight::classify_reqwest_error;
-            match classify_reqwest_error(&e) {
-                Some(OfflineReason::ConnectionRefused) => AppError::AiProvider(format!(
-                    "Connection refused — is Ollama running at {}:{}?",
-                    effective_host, port
-                )),
-                Some(OfflineReason::Timeout) => AppError::AiProvider(format!(
-                    "Connection timed out — check that {}:{} is reachable",
-                    effective_host, port
-                )),
-                Some(OfflineReason::DnsFailure) => AppError::AiProvider(format!(
-                    "Cannot resolve hostname '{}'", effective_host
-                )),
-                Some(OfflineReason::TlsFailure) => AppError::AiProvider(format!(
-                    "TLS handshake failed at {}:{}", effective_host, port
-                )),
-                None => AppError::AiProvider(format!("Connection failed: {e}")),
+        use medical_core::error::OfflineReason;
+        use medical_core::preflight::classify_reqwest_error;
+        match classify_reqwest_error(&e) {
+            Some(OfflineReason::ConnectionRefused) => AppError::AiProvider(format!(
+                "Connection refused — is Ollama running at {}:{}?",
+                effective_host, port
+            )),
+            Some(OfflineReason::Timeout) => AppError::AiProvider(format!(
+                "Connection timed out — check that {}:{} is reachable",
+                effective_host, port
+            )),
+            Some(OfflineReason::DnsFailure) => {
+                AppError::AiProvider(format!("Cannot resolve hostname '{}'", effective_host))
             }
-        })?;
+            Some(OfflineReason::TlsFailure) => AppError::AiProvider(format!(
+                "TLS handshake failed at {}:{}",
+                effective_host, port
+            )),
+            None => AppError::AiProvider(format!("Connection failed: {e}")),
+        }
+    })?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED
         || response.status() == reqwest::StatusCode::FORBIDDEN
@@ -394,7 +441,9 @@ pub async fn test_ollama_connection(
     if !response.status().is_success() {
         let status = response.status();
         let body = medical_core::http_error_body::read_error_body(response, 200).await;
-        return Err(AppError::AiProvider(format!("Server returned HTTP {status}: {body}")));
+        return Err(AppError::AiProvider(format!(
+            "Server returned HTTP {status}: {body}"
+        )));
     }
 
     let body: serde_json::Value = response
@@ -444,7 +493,8 @@ mod tests {
             port,
             "/v1/models".to_string(),
             None,
-        ).await;
+        )
+        .await;
 
         assert!(result.is_ok(), "200 should be Ok; got {result:?}");
     }
@@ -469,7 +519,8 @@ mod tests {
             port,
             "/v1/models".to_string(),
             None,
-        ).await;
+        )
+        .await;
 
         assert!(
             result.is_ok(),
@@ -497,7 +548,8 @@ mod tests {
             port,
             "/v1/models".to_string(),
             None,
-        ).await;
+        )
+        .await;
 
         let err = result.expect_err("401 must surface as Err so the pill reflects auth issues");
         assert!(
@@ -511,7 +563,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/models"))
-            .and(wiremock::matchers::header("authorization", "Bearer secret-token"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer secret-token",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
             .mount(&server)
             .await;
@@ -527,9 +582,13 @@ mod tests {
             port,
             "/v1/models".to_string(),
             Some("secret-token".to_string()),
-        ).await;
+        )
+        .await;
 
-        assert!(result.is_ok(), "authenticated 200 should be Ok; got {result:?}");
+        assert!(
+            result.is_ok(),
+            "authenticated 200 should be Ok; got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -545,7 +604,8 @@ mod tests {
             port,
             "/v1/models".to_string(),
             None,
-        ).await;
+        )
+        .await;
 
         let err = result.expect_err("connect refused must error");
         assert!(matches!(err, AppError::EndpointOffline { .. }));

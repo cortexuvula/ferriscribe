@@ -100,23 +100,21 @@ impl Tool for RagSearchTool {
             None => return Ok(ToolOutput::error("query parameter is required")),
         };
 
-        let top_k = arguments
-            .get("top_k")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5) as usize;
+        let top_k = arguments.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
         // If RAG is not configured, return an informational stub.
         // Use an if-let guard (rather than is_configured() + unwrap) so the
         // check and the borrow happen atomically — eliminates any theoretical
         // panic risk from concurrent reconfiguration and keeps unwraps off the
         // agent hot path.
-        let (embeddings, vector_store, bm25) =
-            match (&self.embeddings, &self.vector_store, &self.bm25) {
-                (Some(embeddings), Some(vector_store), Some(bm25)) => {
-                    (embeddings, vector_store, bm25)
-                }
-                _ => {
-                    let content = serde_json::to_string_pretty(&json!({
+        let (embeddings, vector_store, bm25) = match (
+            &self.embeddings,
+            &self.vector_store,
+            &self.bm25,
+        ) {
+            (Some(embeddings), Some(vector_store), Some(bm25)) => (embeddings, vector_store, bm25),
+            _ => {
+                let content = serde_json::to_string_pretty(&json!({
                         "query": query,
                         "top_k": top_k,
                         "results": [],
@@ -124,9 +122,9 @@ impl Tool for RagSearchTool {
                     }))
                     .unwrap_or_else(|_| "serialization error".into());
 
-                    return Ok(ToolOutput::success(content));
-                }
-            };
+                return Ok(ToolOutput::success(content));
+            }
+        };
 
         // 1. Embed the query
         let query_embedding = embeddings.embed(query).await?;
@@ -194,7 +192,12 @@ mod tests {
         assert!(!result.is_error);
         let parsed: serde_json::Value = serde_json::from_str(&result.content).unwrap();
         assert!(parsed["results"].as_array().unwrap().is_empty());
-        assert!(parsed["note"].as_str().unwrap().contains("not yet connected"));
+        assert!(
+            parsed["note"]
+                .as_str()
+                .unwrap()
+                .contains("not yet connected")
+        );
     }
 
     #[tokio::test]

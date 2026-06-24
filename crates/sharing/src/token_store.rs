@@ -107,7 +107,9 @@ impl TokenStore {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_token_hash ON clients(token_hash);
             "#,
         )?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Issue a new bearer token for a client with the given label.
@@ -124,13 +126,13 @@ impl TokenStore {
         rand::thread_rng()
             .try_fill_bytes(&mut raw)
             .map_err(|e| TokenStoreError::Entropy(e.to_string()))?;
-        let token = base64::Engine::encode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            raw,
-        );
+        let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, raw);
         let hash = Sha256::digest(token.as_bytes()).to_vec();
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| TokenStoreError::LockPoisoned)?;
         conn.execute(
             "INSERT INTO clients (label, token_hash, created_at) VALUES (?, ?, ?)",
             params![label, hash, now],
@@ -147,7 +149,10 @@ impl TokenStore {
     /// separately after a successful validation.
     pub fn validate(&self, token: &str) -> Result<Option<ClientRow>> {
         let hash = Sha256::digest(token.as_bytes()).to_vec();
-        let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| TokenStoreError::LockPoisoned)?;
         let row = conn
             .query_row(
                 "SELECT id, label, created_at, last_seen_at, revoked_at \
@@ -158,14 +163,8 @@ impl TokenStore {
                         id: r.get(0)?,
                         label: r.get(1)?,
                         created_at: parse_ts(r.get::<_, String>(2)?)?,
-                        last_seen_at: r
-                            .get::<_, Option<String>>(3)?
-                            .map(parse_ts)
-                            .transpose()?,
-                        revoked_at: r
-                            .get::<_, Option<String>>(4)?
-                            .map(parse_ts)
-                            .transpose()?,
+                        last_seen_at: r.get::<_, Option<String>>(3)?.map(parse_ts).transpose()?,
+                        revoked_at: r.get::<_, Option<String>>(4)?.map(parse_ts).transpose()?,
                     })
                 },
             )
@@ -179,7 +178,10 @@ impl TokenStore {
     /// the admin UI can show when a client was last active.
     pub fn touch(&self, id: i64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| TokenStoreError::LockPoisoned)?;
         conn.execute(
             "UPDATE clients SET last_seen_at = ? WHERE id = ?",
             params![now, id],
@@ -193,7 +195,10 @@ impl TokenStore {
     /// After revocation, the token immediately fails [`validate`](Self::validate).
     pub fn revoke(&self, id: i64) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| TokenStoreError::LockPoisoned)?;
         conn.execute(
             "UPDATE clients SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
             params![now, id],
@@ -211,7 +216,10 @@ impl TokenStore {
         }
         let truncated: String = trimmed.chars().take(80).collect();
 
-        let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| TokenStoreError::LockPoisoned)?;
         let rows = conn.execute(
             "UPDATE clients SET label = ? WHERE id = ? AND revoked_at IS NULL",
             params![truncated, id],
@@ -227,7 +235,10 @@ impl TokenStore {
     /// Used by the admin UI to display paired devices. Revoked rows are
     /// excluded. Each returned row has `revoked_at == None`.
     pub fn list(&self) -> Result<Vec<ClientRow>> {
-        let conn = self.conn.lock().map_err(|_| TokenStoreError::LockPoisoned)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| TokenStoreError::LockPoisoned)?;
         let mut stmt = conn.prepare(
             "SELECT id, label, created_at, last_seen_at, revoked_at \
              FROM clients WHERE revoked_at IS NULL ORDER BY id ASC",
@@ -238,10 +249,7 @@ impl TokenStore {
                     id: r.get(0)?,
                     label: r.get(1)?,
                     created_at: parse_ts(r.get::<_, String>(2)?)?,
-                    last_seen_at: r
-                        .get::<_, Option<String>>(3)?
-                        .map(parse_ts)
-                        .transpose()?,
+                    last_seen_at: r.get::<_, Option<String>>(3)?.map(parse_ts).transpose()?,
                     revoked_at: None,
                 })
             })?
@@ -253,7 +261,9 @@ impl TokenStore {
 fn parse_ts(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .map(|d| d.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 #[cfg(test)]
@@ -290,7 +300,10 @@ mod tests {
         // Drop the first store, reopen with the same path + key.
         let store = TokenStore::open(&path, &key).expect("open2");
         let validated = store.validate(&token).expect("validate");
-        assert!(validated.is_some(), "issued token should still validate after reopen");
+        assert!(
+            validated.is_some(),
+            "issued token should still validate after reopen"
+        );
         assert_eq!(validated.unwrap().label, "first-client");
     }
 
@@ -308,17 +321,12 @@ mod tests {
 
         // Reopening with key_b should fail (SQLCipher key mismatch on any query).
         let reopened = TokenStore::open(&path, &key_b);
-        match reopened {
-            Ok(store) => {
-                // open() may succeed lazily; the first real query must fail.
-                let r = store.list();
-                assert!(
-                    r.is_err(),
-                    "list() with the wrong key must fail; got {r:?}"
-                );
-            }
-            Err(_) => {} // open() rejected up front — also acceptable
+        if let Ok(store) = reopened {
+            // open() may succeed lazily; the first real query must fail.
+            let r = store.list();
+            assert!(r.is_err(), "list() with the wrong key must fail; got {r:?}");
         }
+        // Err(_) from open() is also acceptable (rejected up front).
     }
 
     #[test]
@@ -333,7 +341,10 @@ mod tests {
             issued.token.len()
         );
         assert!(
-            issued.token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            issued
+                .token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "token must be base64-url-safe: {}",
             issued.token
         );
@@ -354,7 +365,10 @@ mod tests {
     fn validate_returns_some_for_issued_token() {
         let (store, _dir) = fresh_store();
         let issued = store.issue("clinic-laptop").expect("issue");
-        let row = store.validate(&issued.token).expect("validate").expect("Some");
+        let row = store
+            .validate(&issued.token)
+            .expect("validate")
+            .expect("Some");
         assert_eq!(row.id, issued.id);
         assert_eq!(row.label, "clinic-laptop");
         assert!(row.revoked_at.is_none());
@@ -395,7 +409,10 @@ mod tests {
             .validate(&issued.token)
             .expect("validate after")
             .expect("Some after");
-        assert!(after.last_seen_at.is_some(), "touch must populate last_seen_at");
+        assert!(
+            after.last_seen_at.is_some(),
+            "touch must populate last_seen_at"
+        );
     }
 
     #[test]
@@ -404,7 +421,9 @@ mod tests {
         let issued = store.issue("x").expect("issue");
         store.revoke(issued.id).expect("first revoke");
         // Second revoke must not error (no-op or successful idempotent UPDATE).
-        store.revoke(issued.id).expect("second revoke is idempotent");
+        store
+            .revoke(issued.id)
+            .expect("second revoke is idempotent");
     }
 
     #[test]
@@ -445,7 +464,11 @@ mod tests {
             .update_label(issued.id, &long)
             .expect("update with long label");
         let rows = store.list().expect("list");
-        assert_eq!(rows[0].label.chars().count(), 80, "label truncated to 80 chars");
+        assert_eq!(
+            rows[0].label.chars().count(),
+            80,
+            "label truncated to 80 chars"
+        );
     }
 
     #[test]

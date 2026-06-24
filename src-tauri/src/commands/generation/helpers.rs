@@ -12,9 +12,7 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-use super::{
-    MAX_CONTEXT_CHARS, PATIENT_CTX_MAX_ITEMS_PER_LIST, PATIENT_CTX_MAX_ITEM_CHARS,
-};
+use super::{MAX_CONTEXT_CHARS, PATIENT_CTX_MAX_ITEM_CHARS, PATIENT_CTX_MAX_ITEMS_PER_LIST};
 
 /// Loaded settings needed for generation.
 pub(super) struct GenerationSettings {
@@ -230,7 +228,7 @@ mod tests {
         // which exceeds MAX_CONTEXT_CHARS (50_000) by 500 — so only the
         // total-cap check should fire.
         let big = "x".repeat(500);
-        let fifty: Vec<&str> = std::iter::repeat(big.as_str()).take(50).collect();
+        let fifty: Vec<&str> = std::iter::repeat_n(big.as_str(), 50).collect();
         let mut ctx = pc(&fifty, &fifty, &[]);
         ctx.conditions.push(big.clone());
         let err = validate_patient_context(&ctx).unwrap_err();

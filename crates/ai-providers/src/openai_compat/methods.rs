@@ -18,9 +18,7 @@ use medical_core::{
 use crate::sse::parse_sse_response;
 
 use super::client::OpenAiCompatibleClient;
-use super::wire::{
-    ApiTool, ApiToolDef, ChatResponse, ModelsListResponse, StreamOptions,
-};
+use super::wire::{ApiTool, ApiToolDef, ChatResponse, ModelsListResponse, StreamOptions};
 
 impl OpenAiCompatibleClient {
     /// Fetch the list of model IDs from the `/models` endpoint.
@@ -34,11 +32,9 @@ impl OpenAiCompatibleClient {
     /// - `AiProvider(String)` on HTTP errors or JSON parse failures.
     pub async fn list_models(&self) -> AppResult<Vec<String>> {
         let url = format!("{}/models", self.base_url);
-        let response = crate::http_client::send_with_retry(&self.policy, || {
-            self.get(&url)
-        })
-        .await
-        .map_err(|e| self.classify_send_error(e))?;
+        let response = crate::http_client::send_with_retry(&self.policy, || self.get(&url))
+            .await
+            .map_err(|e| self.classify_send_error(e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -78,11 +74,10 @@ impl OpenAiCompatibleClient {
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_request(request);
 
-        let response = crate::http_client::send_with_retry(&self.policy, || {
-            self.post_json(&url, &body)
-        })
-        .await
-        .map_err(|e| self.classify_send_error(e))?;
+        let response =
+            crate::http_client::send_with_retry(&self.policy, || self.post_json(&url, &body))
+                .await
+                .map_err(|e| self.classify_send_error(e))?;
 
         let status = response.status();
         // Read full body — used for both the error message (truncated) and
@@ -102,14 +97,13 @@ impl OpenAiCompatibleClient {
             return Err(AppError::AiProvider(format!("HTTP {status}: {preview}")));
         }
 
-        let resp: ChatResponse = serde_json::from_str(&raw_body)
-            .map_err(|e| {
-                warn!(
-                    body_len = raw_body.len(),
-                    "Failed to parse AI response JSON"
-                );
-                AppError::AiProvider(format!("JSON parse error: {e}"))
-            })?;
+        let resp: ChatResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            warn!(
+                body_len = raw_body.len(),
+                "Failed to parse AI response JSON"
+            );
+            AppError::AiProvider(format!("JSON parse error: {e}"))
+        })?;
 
         debug!(
             url = %url,
@@ -118,10 +112,14 @@ impl OpenAiCompatibleClient {
             "AI completion response received"
         );
 
-        let finish_reason = resp.choices.first()
+        let finish_reason = resp
+            .choices
+            .first()
             .and_then(|c| c.finish_reason.as_deref())
             .unwrap_or("unknown");
-        let has_content = resp.choices.first()
+        let has_content = resp
+            .choices
+            .first()
             .and_then(|c| c.message.as_ref())
             .and_then(|m| m.content.as_ref())
             .map(|c| !c.is_empty())
@@ -163,13 +161,14 @@ impl OpenAiCompatibleClient {
         let url = format!("{}/chat/completions", self.base_url);
         let mut body = self.build_request(request);
         body.stream = Some(true);
-        body.stream_options = Some(StreamOptions { include_usage: true });
+        body.stream_options = Some(StreamOptions {
+            include_usage: true,
+        });
 
-        let response = crate::http_client::send_with_retry(&self.policy, || {
-            self.post_json(&url, &body)
-        })
-        .await
-        .map_err(|e| self.classify_send_error(e))?;
+        let response =
+            crate::http_client::send_with_retry(&self.policy, || self.post_json(&url, &body))
+                .await
+                .map_err(|e| self.classify_send_error(e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -291,11 +290,10 @@ impl OpenAiCompatibleClient {
                 .collect(),
         );
 
-        let response = crate::http_client::send_with_retry(&self.policy, || {
-            self.post_json(&url, &body)
-        })
-        .await
-        .map_err(|e| self.classify_send_error(e))?;
+        let response =
+            crate::http_client::send_with_retry(&self.policy, || self.post_json(&url, &body))
+                .await
+                .map_err(|e| self.classify_send_error(e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -308,11 +306,14 @@ impl OpenAiCompatibleClient {
             .await
             .map_err(|e| AppError::AiProvider(e.to_string()))?;
 
-        let usage = resp.usage.map(|u| UsageInfo {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-        }).unwrap_or_default();
+        let usage = resp
+            .usage
+            .map(|u| UsageInfo {
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
+            })
+            .unwrap_or_default();
 
         let first_choice = resp.choices.into_iter().next();
 
@@ -492,10 +493,10 @@ mod tests {
         let mut saw_delta = false;
         while let Some(item) = stream.next().await {
             let chunk = item.expect("no stream errors");
-            if let medical_core::types::StreamChunk::Delta { text } = chunk {
-                if text == "hi" {
-                    saw_delta = true;
-                }
+            if let medical_core::types::StreamChunk::Delta { text } = chunk
+                && text == "hi"
+            {
+                saw_delta = true;
             }
         }
         assert!(saw_delta, "expected to see 'hi' delta");

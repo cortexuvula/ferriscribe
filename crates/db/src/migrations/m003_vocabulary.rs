@@ -3,7 +3,8 @@ use rusqlite::Connection;
 use crate::DbResult;
 
 pub fn up(conn: &Connection) -> DbResult<()> {
-    conn.execute_batch(r#"
+    conn.execute_batch(
+        r#"
         CREATE TABLE IF NOT EXISTS vocabulary_entries (
             id              TEXT PRIMARY KEY NOT NULL,
             find_text       TEXT NOT NULL,
@@ -18,6 +19,7 @@ pub fn up(conn: &Connection) -> DbResult<()> {
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_vocabulary_find_text
             ON vocabulary_entries(find_text);
-    "#)?;
+    "#,
+    )?;
     Ok(())
 }

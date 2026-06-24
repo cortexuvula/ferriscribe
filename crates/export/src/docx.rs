@@ -35,9 +35,10 @@ impl DocxExporter {
     ///
     /// Returns [`ExportError::Docx`] if `recording.soap_note` is `None`.
     pub fn export_soap(recording: &Recording) -> ExportResult<Vec<u8>> {
-        let soap = recording.soap_note.as_deref().ok_or_else(|| {
-            ExportError::Docx("Recording has no SOAP note".to_string())
-        })?;
+        let soap = recording
+            .soap_note
+            .as_deref()
+            .ok_or_else(|| ExportError::Docx("Recording has no SOAP note".to_string()))?;
         let date = recording.created_at.format("%Y-%m-%d").to_string();
         render_document("SOAP Note", soap, &date)
     }
@@ -48,9 +49,10 @@ impl DocxExporter {
     ///
     /// Returns [`ExportError::Docx`] if `recording.referral` is `None`.
     pub fn export_referral(recording: &Recording) -> ExportResult<Vec<u8>> {
-        let referral = recording.referral.as_deref().ok_or_else(|| {
-            ExportError::Docx("Recording has no referral letter".to_string())
-        })?;
+        let referral = recording
+            .referral
+            .as_deref()
+            .ok_or_else(|| ExportError::Docx("Recording has no referral letter".to_string()))?;
         let date = recording.created_at.format("%Y-%m-%d").to_string();
         render_document("Referral Letter", referral, &date)
     }
@@ -61,9 +63,10 @@ impl DocxExporter {
     ///
     /// Returns [`ExportError::Docx`] if `recording.letter` is `None`.
     pub fn export_letter(recording: &Recording) -> ExportResult<Vec<u8>> {
-        let letter = recording.letter.as_deref().ok_or_else(|| {
-            ExportError::Docx("Recording has no letter".to_string())
-        })?;
+        let letter = recording
+            .letter
+            .as_deref()
+            .ok_or_else(|| ExportError::Docx("Recording has no letter".to_string()))?;
         let date = recording.created_at.format("%Y-%m-%d").to_string();
         render_document("Letter", letter, &date)
     }

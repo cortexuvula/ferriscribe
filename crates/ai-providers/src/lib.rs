@@ -34,14 +34,14 @@
 //! [`CircuitBreaker`]: http_client::CircuitBreaker
 
 pub mod http_client;
-pub mod sse;
-pub mod openai_compat;
-pub mod ollama;
 pub mod lmstudio;
+pub mod ollama;
+pub mod openai_compat;
+pub mod sse;
 
+use medical_core::traits::AiProvider;
 use std::collections::HashMap;
 use std::sync::Arc;
-use medical_core::traits::AiProvider;
 
 /// Registry of named [`AiProvider`] instances with a tracked active provider.
 ///
@@ -72,7 +72,10 @@ impl Default for ProviderRegistry {
 impl ProviderRegistry {
     /// Create an empty registry with no providers and no active provider.
     pub fn new() -> Self {
-        Self { providers: HashMap::new(), active: String::new() }
+        Self {
+            providers: HashMap::new(),
+            active: String::new(),
+        }
     }
 
     /// Register a provider under its [`AiProvider::name`].
@@ -81,7 +84,9 @@ impl ProviderRegistry {
     /// the active provider.
     pub fn register(&mut self, provider: Arc<dyn AiProvider>) {
         let name = provider.name().to_string();
-        if self.active.is_empty() { self.active = name.clone(); }
+        if self.active.is_empty() {
+            self.active = name.clone();
+        }
         self.providers.insert(name, provider);
     }
 
@@ -91,10 +96,14 @@ impl ProviderRegistry {
     }
 
     /// Return the currently active provider, if any.
-    pub fn active(&self) -> Option<&dyn AiProvider> { self.get(&self.active) }
+    pub fn active(&self) -> Option<&dyn AiProvider> {
+        self.get(&self.active)
+    }
 
     /// Returns the name of the currently active provider.
-    pub fn active_name(&self) -> &str { &self.active }
+    pub fn active_name(&self) -> &str {
+        &self.active
+    }
 
     /// Returns a cloned `Arc` of a named provider, suitable for use across await points.
     pub fn get_arc(&self, name: &str) -> Option<Arc<dyn AiProvider>> {
@@ -108,9 +117,16 @@ impl ProviderRegistry {
 
     /// Set the active provider by name. Returns `true` if the provider exists.
     pub fn set_active(&mut self, name: &str) -> bool {
-        if self.providers.contains_key(name) { self.active = name.to_string(); true } else { false }
+        if self.providers.contains_key(name) {
+            self.active = name.to_string();
+            true
+        } else {
+            false
+        }
     }
 
     /// List all registered provider names.
-    pub fn list_available(&self) -> Vec<String> { self.providers.keys().cloned().collect() }
+    pub fn list_available(&self) -> Vec<String> {
+        self.providers.keys().cloned().collect()
+    }
 }

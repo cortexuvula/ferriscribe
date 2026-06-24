@@ -7,8 +7,8 @@ use medical_db::search::SearchRepo;
 use medical_db::vectors::VectorsRepo;
 use uuid::Uuid;
 
-use crate::state::AppState;
 use super::resolve_recordings_dir;
+use crate::state::AppState;
 
 /// List recordings with optional pagination.
 ///
@@ -20,7 +20,10 @@ pub fn list_recordings(
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> AppResult<Vec<RecordingSummary>> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     RecordingsRepo::list_all(&conn, limit.unwrap_or(50), offset.unwrap_or(0))
         .map_err(|e| AppError::Database(e.to_string()))
 }
@@ -29,13 +32,13 @@ pub fn list_recordings(
 ///
 /// Returns the full `Recording` including transcript, SOAP note, and metadata.
 #[tauri::command]
-pub fn get_recording(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> AppResult<Recording> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+pub fn get_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<Recording> {
+    let uuid =
+        Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))
 }
 
@@ -48,7 +51,10 @@ pub fn search_recordings(
     query: String,
     limit: Option<u32>,
 ) -> AppResult<Vec<Recording>> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     SearchRepo::search_recordings(&conn, &query, limit.unwrap_or(20))
         .map_err(|e| AppError::Database(e.to_string()))
 }
@@ -59,13 +65,13 @@ pub fn search_recordings(
 /// The DB delete and vector cleanup are atomic (same transaction); the WAV
 /// file is removed only after the transaction commits.
 #[tauri::command]
-pub fn delete_recording(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> AppResult<()> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-    let mut conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+pub fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
+    let uuid =
+        Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+    let mut conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
 
     // Get the recording first so we can clean up the WAV file
     let recording = RecordingsRepo::get_by_id(&conn, &uuid).ok();
@@ -86,9 +92,10 @@ pub fn delete_recording(
     // pointing at nothing.
     if let Some(rec) = recording
         && rec.audio_path.exists()
-            && let Err(e) = std::fs::remove_file(&rec.audio_path) {
-                tracing::warn!(path = %rec.audio_path.display(), error = %e, "WAV delete failed");
-            }
+        && let Err(e) = std::fs::remove_file(&rec.audio_path)
+    {
+        tracing::warn!(path = %rec.audio_path.display(), error = %e, "WAV delete failed");
+    }
 
     Ok(())
 }
@@ -116,10 +123,11 @@ fn delete_rag_vectors_best_effort(conn: &medical_db::Connection, recording_id: &
 /// Removes all recording rows, RAG vectors, and WAV files from disk.
 /// Returns the number of recordings deleted.
 #[tauri::command]
-pub fn delete_all_recordings(
-    state: tauri::State<'_, AppState>,
-) -> AppResult<u32> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+pub fn delete_all_recordings(state: tauri::State<'_, AppState>) -> AppResult<u32> {
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
 
     // Delete all RAG vectors
     if let Err(e) = conn.execute("DELETE FROM vectors", []) {
@@ -185,17 +193,15 @@ pub fn import_audio_file(
 
     // Read duration and file size from the resulting WAV.
     let file_size = std::fs::metadata(&dest_path).map(|m| m.len()).ok();
-    let duration = hound::WavReader::open(&dest_path)
-        .ok()
-        .map(|reader| {
-            let spec = reader.spec();
-            let total_samples = reader.len() as f64;
-            if spec.sample_rate > 0 && spec.channels > 0 {
-                total_samples / (spec.sample_rate as f64 * spec.channels as f64)
-            } else {
-                0.0
-            }
-        });
+    let duration = hound::WavReader::open(&dest_path).ok().map(|reader| {
+        let spec = reader.spec();
+        let total_samples = reader.len() as f64;
+        if spec.sample_rate > 0 && spec.channels > 0 {
+            total_samples / (spec.sample_rate as f64 * spec.channels as f64)
+        } else {
+            0.0
+        }
+    });
 
     let dest_filename = dest_path
         .file_name()
@@ -209,7 +215,10 @@ pub fn import_audio_file(
     recording.file_size_bytes = file_size;
     recording.status = ProcessingStatus::Pending;
 
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     RecordingsRepo::insert(&conn, &recording).map_err(|e| AppError::Database(e.to_string()))?;
 
     Ok(recording_id.to_string())

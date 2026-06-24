@@ -114,12 +114,16 @@ impl GraphRepo {
     /// relation already exists, so we swallow those errors.
     fn ensure_schema(&self) -> DbResult<()> {
         // Ignore errors — the relation may already exist.
-        let _ = self
-            .db
-            .run_script(CREATE_ENTITY_RELATION, BTreeMap::new(), ScriptMutability::Mutable);
-        let _ = self
-            .db
-            .run_script(CREATE_RELATION_RELATION, BTreeMap::new(), ScriptMutability::Mutable);
+        let _ = self.db.run_script(
+            CREATE_ENTITY_RELATION,
+            BTreeMap::new(),
+            ScriptMutability::Mutable,
+        );
+        let _ = self.db.run_script(
+            CREATE_RELATION_RELATION,
+            BTreeMap::new(),
+            ScriptMutability::Mutable,
+        );
         Ok(())
     }
 
@@ -218,14 +222,8 @@ impl GraphRepo {
         top_k: usize,
     ) -> DbResult<Vec<(String, String, String)>> {
         let mut params = BTreeMap::new();
-        params.insert(
-            "name".to_string(),
-            DataValue::Str(entity_name.into()),
-        );
-        params.insert(
-            "top_k".to_string(),
-            DataValue::from(top_k as i64),
-        );
+        params.insert("name".to_string(), DataValue::Str(entity_name.into()));
+        params.insert("top_k".to_string(), DataValue::from(top_k as i64));
 
         // Query: find the entity by name, then traverse outgoing and incoming
         // relations to find related entities.
@@ -253,14 +251,14 @@ impl GraphRepo {
 
         let mut out = Vec::new();
         for row in &result.rows {
-            if let [DataValue::Str(name), DataValue::Str(etype), DataValue::Str(rtype), ..] =
-                row.as_slice()
+            if let [
+                DataValue::Str(name),
+                DataValue::Str(etype),
+                DataValue::Str(rtype),
+                ..,
+            ] = row.as_slice()
             {
-                out.push((
-                    name.to_string(),
-                    etype.to_string(),
-                    rtype.to_string(),
-                ));
+                out.push((name.to_string(), etype.to_string(), rtype.to_string()));
             }
         }
 
@@ -286,10 +284,7 @@ impl GraphRepo {
             "query".to_string(),
             DataValue::Str(query.to_lowercase().into()),
         );
-        params.insert(
-            "top_k".to_string(),
-            DataValue::from(top_k as i64),
-        );
+        params.insert("top_k".to_string(), DataValue::from(top_k as i64));
 
         // Use CozoDB's `lowercase` and `str_includes` built-in functions
         // for case-insensitive substring matching.
@@ -308,14 +303,14 @@ impl GraphRepo {
 
         let mut out = Vec::new();
         for row in &result.rows {
-            if let [DataValue::Str(id), DataValue::Str(name), DataValue::Str(etype), ..] =
-                row.as_slice()
+            if let [
+                DataValue::Str(id),
+                DataValue::Str(name),
+                DataValue::Str(etype),
+                ..,
+            ] = row.as_slice()
             {
-                out.push((
-                    id.to_string(),
-                    name.to_string(),
-                    etype.to_string(),
-                ));
+                out.push((id.to_string(), name.to_string(), etype.to_string()));
             }
         }
 

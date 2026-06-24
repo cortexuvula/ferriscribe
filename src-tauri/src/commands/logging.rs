@@ -33,9 +33,10 @@ pub fn get_recent_logs(lines: Option<usize>) -> AppResult<String> {
         }
         if let Ok(meta) = path.metadata()
             && let Ok(modified) = meta.modified()
-                && newest.as_ref().is_none_or(|(t, _)| modified > *t) {
-                    newest = Some((modified, path));
-                }
+            && newest.as_ref().is_none_or(|(t, _)| modified > *t)
+        {
+            newest = Some((modified, path));
+        }
     }
 
     let log_path = newest
@@ -52,7 +53,10 @@ pub fn get_recent_logs(lines: Option<usize>) -> AppResult<String> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
-    Ok(format!("--- {filename} (last {max_lines} lines) ---\n{}", result.join("\n")))
+    Ok(format!(
+        "--- {filename} (last {max_lines} lines) ---\n{}",
+        result.join("\n")
+    ))
 }
 
 /// Maximum length of the `message` field accepted by `frontend_log`.
@@ -94,10 +98,7 @@ fn truncate_for_log(s: &str, max: usize) -> String {
 pub fn frontend_log(level: String, message: String, context: Option<serde_json::Value>) {
     let message = truncate_for_log(&message, FRONTEND_LOG_MESSAGE_MAX);
     let ctx = truncate_for_log(
-        &context
-            .as_ref()
-            .map(|v| v.to_string())
-            .unwrap_or_default(),
+        &context.as_ref().map(|v| v.to_string()).unwrap_or_default(),
         FRONTEND_LOG_CONTEXT_MAX,
     );
 

@@ -7,8 +7,6 @@ use rusqlite::Connection;
 use crate::DbResult;
 
 pub fn up(conn: &Connection) -> DbResult<()> {
-    conn.execute_batch(
-        "ALTER TABLE recordings ADD COLUMN peer_discussion TEXT;",
-    )?;
+    conn.execute_batch("ALTER TABLE recordings ADD COLUMN peer_discussion TEXT;")?;
     Ok(())
 }

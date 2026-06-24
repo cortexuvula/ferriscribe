@@ -20,25 +20,22 @@
 //! [`ToolRegistry::with_defaults()`] to get all five tools pre-loaded, or
 //! build your own with [`ToolRegistry::new()`] + [`register()`](ToolRegistry::register).
 
-pub mod icd_lookup;
-pub mod drug_interaction;
-pub mod vitals_extractor;
-pub mod rag_search;
 pub mod checklist;
+pub mod drug_interaction;
+pub mod icd_lookup;
+pub mod rag_search;
+pub mod vitals_extractor;
 
-pub use icd_lookup::IcdLookupTool;
-pub use drug_interaction::DrugInteractionTool;
-pub use vitals_extractor::VitalsExtractorTool;
-pub use rag_search::RagSearchTool;
 pub use checklist::ChecklistTool;
+pub use drug_interaction::DrugInteractionTool;
+pub use icd_lookup::IcdLookupTool;
+pub use rag_search::RagSearchTool;
+pub use vitals_extractor::VitalsExtractorTool;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use medical_core::{
-    traits::Tool,
-    types::ToolDef,
-};
+use medical_core::{traits::Tool, types::ToolDef};
 
 /// Registry that holds all available tools by name.
 ///

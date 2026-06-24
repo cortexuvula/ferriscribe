@@ -115,8 +115,7 @@ impl SttProvider for LocalSttProvider {
             transcriber.transcribe(&audio_for_whisper, language.as_deref())
         })
         .await
-        .map_err(|e| AppError::SttProvider(format!("Whisper task panicked: {e}")))?
-        ?;
+        .map_err(|e| AppError::SttProvider(format!("Whisper task panicked: {e}")))??;
 
         // Post-check: if the user cancelled while whisper was running,
         // discard the transcript rather than continuing into diarization
@@ -130,7 +129,9 @@ impl SttProvider for LocalSttProvider {
         // diarize requested) vs. skipped. An empty speaker_turns after a
         // successful run just means a single speaker was detected — that's not
         // a failure and must not trigger a "models missing" warning.
-        let (speaker_turns, diarization_attempted) = if config.diarize && self.supports_diarization() {
+        let (speaker_turns, diarization_attempted) = if config.diarize
+            && self.supports_diarization()
+        {
             let seg_path = self.segmentation_model_path.clone();
             let emb_path = self.embedding_model_path.clone();
             let audio_i16 = audio_prep::f32_to_i16(&audio_16k);

@@ -47,7 +47,9 @@ async fn missing_bearer_returns_401_with_reason_header() {
         .unwrap();
     assert_eq!(resp.status(), 401);
     assert_eq!(
-        resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok()),
+        resp.headers()
+            .get("x-auth-reason")
+            .and_then(|v| v.to_str().ok()),
         Some("missing-bearer"),
         "401 from missing Authorization should be tagged"
     );
@@ -112,7 +114,9 @@ async fn unknown_or_revoked_bearer_returns_401_with_reason_header() {
         .unwrap();
     assert_eq!(resp.status(), 401);
     assert_eq!(
-        resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok()),
+        resp.headers()
+            .get("x-auth-reason")
+            .and_then(|v| v.to_str().ok()),
         Some("unknown-token"),
         "401 from revoked/unknown token should be tagged"
     );

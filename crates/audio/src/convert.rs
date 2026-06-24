@@ -27,9 +27,7 @@ pub fn convert_to_wav(input: &Path, output: &Path) -> AudioResult<()> {
     let channels = decoder.channels();
 
     // Collect all samples as f32.
-    let samples: Vec<f32> = decoder
-        .convert_samples::<f32>()
-        .collect();
+    let samples: Vec<f32> = decoder.convert_samples::<f32>().collect();
 
     if samples.is_empty() {
         return Err(AudioError::Encoding("Decoded audio is empty".into()));

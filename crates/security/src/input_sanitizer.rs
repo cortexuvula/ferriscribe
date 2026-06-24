@@ -86,10 +86,7 @@ mod tests {
             InputSanitizer::strip_html("<p>Hello, <b>world</b>!</p>"),
             "Hello, world!"
         );
-        assert_eq!(
-            InputSanitizer::strip_html("no tags here"),
-            "no tags here"
-        );
+        assert_eq!(InputSanitizer::strip_html("no tags here"), "no tags here");
         assert_eq!(
             InputSanitizer::strip_html("<script>alert('xss')</script>"),
             "alert('xss')"
@@ -117,7 +114,10 @@ mod tests {
     fn strip_html_decodes_common_entities() {
         assert_eq!(InputSanitizer::strip_html("a &amp; b"), "a & b");
         assert_eq!(InputSanitizer::strip_html("&lt;tag&gt;"), "<tag>");
-        assert_eq!(InputSanitizer::strip_html("say &quot;hi&quot;"), "say \"hi\"");
+        assert_eq!(
+            InputSanitizer::strip_html("say &quot;hi&quot;"),
+            "say \"hi\""
+        );
         assert_eq!(InputSanitizer::strip_html("it&#x27;s"), "it's");
         assert_eq!(InputSanitizer::strip_html("it&#39;s"), "it's");
     }
@@ -139,12 +139,13 @@ mod tests {
         assert_eq!(InputSanitizer::truncate("hello", 5), "hello");
 
         // Multi-byte: "é" is 2 bytes (0xC3 0xA9)
-        let s = "café";  // c-a-f-é  = 5 bytes
+        let s = "café"; // c-a-f-é  = 5 bytes
         // Truncate to 4 bytes → should not split the 2-byte "é", so result is "caf"
         let result = InputSanitizer::truncate(s, 4);
         assert!(
             result == "caf" || result == "café",
-            "unexpected truncation result: {:?}", result
+            "unexpected truncation result: {:?}",
+            result
         );
         // Either way the result must be valid UTF-8 and ≤ 4 bytes.
         assert!(result.len() <= 4);

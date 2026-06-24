@@ -21,19 +21,21 @@ use crate::state::AppState;
 /// complete on the next launch.
 #[tauri::command]
 pub fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     let onboarding_started = SettingsRepo::exists(&conn, "onboarding_started")
         .map_err(|e| AppError::Database(e.to_string()))?;
-    let config_existed = SettingsRepo::exists(&conn, "app_config")
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    let mut config = SettingsRepo::load_config(&conn)
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    let config_existed =
+        SettingsRepo::exists(&conn, "app_config").map_err(|e| AppError::Database(e.to_string()))?;
+    let mut config =
+        SettingsRepo::load_config(&conn).map_err(|e| AppError::Database(e.to_string()))?;
     config.migrate();
     if !config.onboarding_completed && config_existed && !onboarding_started {
         // Pre-wizard existing install: mark onboarded, never show the wizard.
         config.onboarding_completed = true;
-        SettingsRepo::save_config(&conn, &config)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        SettingsRepo::save_config(&conn, &config).map_err(|e| AppError::Database(e.to_string()))?;
     }
     Ok(config)
 }
@@ -44,7 +46,10 @@ pub fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
 /// idempotent — setting it again is a no-op.
 #[tauri::command]
 pub fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppResult<()> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     SettingsRepo::set(&conn, "onboarding_started", "1")
         .map_err(|e| AppError::Database(e.to_string()))?;
     Ok(())
@@ -56,14 +61,11 @@ pub fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppResult<()
 /// unless `allow_public_endpoint` is explicitly enabled. Rejects public hosts
 /// like `api.openai.com` to enforce the local-only PHI constraint.
 #[tauri::command]
-pub fn save_settings(
-    state: tauri::State<'_, AppState>,
-    config: AppConfig,
-) -> AppResult<()> {
+pub fn save_settings(state: tauri::State<'_, AppState>, config: AppConfig) -> AppResult<()> {
     // Reject public/unknown hosts unless the user has explicitly opted in.
     for (field, host) in [
-        ("ollama_host",     config.ollama_host.as_str()),
-        ("lmstudio_host",   config.lmstudio_host.as_str()),
+        ("ollama_host", config.ollama_host.as_str()),
+        ("lmstudio_host", config.lmstudio_host.as_str()),
         ("stt_remote_host", config.stt_remote_host.as_str()),
     ] {
         // Empty host means "use default" — defer enforcement until the user
@@ -71,14 +73,14 @@ pub fn save_settings(
         if host.is_empty() {
             continue;
         }
-        medical_core::endpoint_policy::validate_local_endpoint(
-            host,
-            config.allow_public_endpoint,
-        )
-        .map_err(|e| AppError::invalid_endpoint_for(e, field))?;
+        medical_core::endpoint_policy::validate_local_endpoint(host, config.allow_public_endpoint)
+            .map_err(|e| AppError::invalid_endpoint_for(e, field))?;
     }
 
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     SettingsRepo::save_config(&conn, &config).map_err(|e| AppError::Database(e.to_string()))
 }
 
@@ -173,15 +175,6 @@ pub fn set_api_key(
     state
         .keys
         .store_key(&provider, &key)
-        .map_err(|e| AppError::Security(e.to_string()))
-}
-
-/// List all provider names that have stored API keys.
-#[tauri::command]
-pub fn list_api_keys(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
-    state
-        .keys
-        .list_providers()
         .map_err(|e| AppError::Security(e.to_string()))
 }
 

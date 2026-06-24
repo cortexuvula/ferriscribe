@@ -15,9 +15,12 @@ pub fn export_pdf(
 ) -> AppResult<Vec<u8>> {
     let uuid = Uuid::parse_str(&recording_id)
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-    let recording = RecordingsRepo::get_by_id(&conn, &uuid)
+    let conn = state
+        .db
+        .conn()
         .map_err(|e| AppError::Database(e.to_string()))?;
+    let recording =
+        RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))?;
 
     match export_type.as_str() {
         "soap" => PdfExporter::export_soap(&recording).map_err(|e| AppError::Export(e.to_string())),
@@ -39,9 +42,12 @@ pub fn export_docx(
 ) -> AppResult<Vec<u8>> {
     let uuid = Uuid::parse_str(&recording_id)
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-    let recording = RecordingsRepo::get_by_id(&conn, &uuid)
+    let conn = state
+        .db
+        .conn()
         .map_err(|e| AppError::Database(e.to_string()))?;
+    let recording =
+        RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))?;
 
     match export_type.as_str() {
         "soap" => {
@@ -58,16 +64,20 @@ pub fn export_docx(
 }
 
 #[tauri::command]
-pub fn export_fhir(
-    state: tauri::State<'_, AppState>,
-    recording_id: String,
-) -> AppResult<Vec<u8>> {
+pub fn export_fhir(state: tauri::State<'_, AppState>, recording_id: String) -> AppResult<Vec<u8>> {
     let uuid = Uuid::parse_str(&recording_id)
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-    let recording = RecordingsRepo::get_by_id(&conn, &uuid)
+    let conn = state
+        .db
+        .conn()
         .map_err(|e| AppError::Database(e.to_string()))?;
+    let recording =
+        RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))?;
 
-    FhirExporter::export_bundle(&recording, PatientInfo::default(), PractitionerInfo::default())
-        .map_err(|e| AppError::Export(e.to_string()))
+    FhirExporter::export_bundle(
+        &recording,
+        PatientInfo::default(),
+        PractitionerInfo::default(),
+    )
+    .map_err(|e| AppError::Export(e.to_string()))
 }

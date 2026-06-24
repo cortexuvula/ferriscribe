@@ -32,7 +32,10 @@ pub fn upsert_into(
     name: String,
     body: String,
 ) -> ContextTemplate {
-    let entry = ContextTemplate { name: name.clone(), body: body.clone() };
+    let entry = ContextTemplate {
+        name: name.clone(),
+        body: body.clone(),
+    };
     if let Some(existing) = templates.iter_mut().find(|t| t.name == name) {
         existing.body = body;
     } else {
@@ -99,7 +102,9 @@ enum ImportShape {
 pub fn parse_import_json(content: &str) -> AppResult<Vec<ContextTemplate>> {
     let shape: ImportShape = serde_json::from_str(content)?;
     Ok(match shape {
-        ImportShape::Wrapped { custom_context_templates } => custom_context_templates
+        ImportShape::Wrapped {
+            custom_context_templates,
+        } => custom_context_templates
             .into_iter()
             .map(|(name, body)| ContextTemplate { name, body })
             .collect(),
@@ -114,10 +119,7 @@ pub fn parse_import_json(content: &str) -> AppResult<Vec<ContextTemplate>> {
 /// Apply imported entries into an existing template list.  Skips empty-name
 /// or empty-body entries.  Existing names are overwritten (upsert).  Returns
 /// the count actually applied.
-pub fn apply_import(
-    templates: &mut Vec<ContextTemplate>,
-    imported: Vec<ContextTemplate>,
-) -> u32 {
+pub fn apply_import(templates: &mut Vec<ContextTemplate>, imported: Vec<ContextTemplate>) -> u32 {
     let mut count = 0u32;
     for entry in imported {
         let name = entry.name.trim().to_string();
@@ -146,7 +148,10 @@ pub fn export_json(templates: &[ContextTemplate]) -> AppResult<String> {
 fn load_config(
     state: &tauri::State<'_, AppState>,
 ) -> AppResult<medical_core::types::settings::AppConfig> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     let mut config =
         SettingsRepo::load_config(&conn).map_err(|e| AppError::Database(e.to_string()))?;
     config.migrate();
@@ -157,7 +162,10 @@ fn save_config(
     state: &tauri::State<'_, AppState>,
     config: &medical_core::types::settings::AppConfig,
 ) -> AppResult<()> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     SettingsRepo::save_config(&conn, config).map_err(|e| AppError::Database(e.to_string()))
 }
 
@@ -185,10 +193,14 @@ pub async fn upsert_context_template(
     let name = name.trim().to_string();
     let body = body.trim().to_string();
     if name.is_empty() {
-        return Err(AppError::Config("Template name cannot be empty".to_string()));
+        return Err(AppError::Config(
+            "Template name cannot be empty".to_string(),
+        ));
     }
     if body.is_empty() {
-        return Err(AppError::Config("Template body cannot be empty".to_string()));
+        return Err(AppError::Config(
+            "Template body cannot be empty".to_string(),
+        ));
     }
     if let Some((conn, bearer)) = paired_templates_target() {
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
@@ -212,7 +224,9 @@ pub async fn rename_context_template(
 ) -> AppResult<ContextTemplate> {
     let new_name = new_name.trim().to_string();
     if new_name.is_empty() {
-        return Err(AppError::Config("Template name cannot be empty".to_string()));
+        return Err(AppError::Config(
+            "Template name cannot be empty".to_string(),
+        ));
     }
     if let Some((conn, bearer)) = paired_templates_target() {
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
@@ -306,17 +320,32 @@ mod tests {
 
     fn sample() -> Vec<ContextTemplate> {
         vec![
-            ContextTemplate { name: "Follow-up".into(), body: "Follow-up visit.".into() },
-            ContextTemplate { name: "Telehealth".into(), body: "Video consult.".into() },
+            ContextTemplate {
+                name: "Follow-up".into(),
+                body: "Follow-up visit.".into(),
+            },
+            ContextTemplate {
+                name: "Telehealth".into(),
+                body: "Video consult.".into(),
+            },
         ]
     }
 
     #[test]
     fn sort_is_case_insensitive_alphabetical() {
         let mut v = vec![
-            ContextTemplate { name: "zebra".into(), body: "z".into() },
-            ContextTemplate { name: "Apple".into(), body: "a".into() },
-            ContextTemplate { name: "banana".into(), body: "b".into() },
+            ContextTemplate {
+                name: "zebra".into(),
+                body: "z".into(),
+            },
+            ContextTemplate {
+                name: "Apple".into(),
+                body: "a".into(),
+            },
+            ContextTemplate {
+                name: "banana".into(),
+                body: "b".into(),
+            },
         ];
         sort_templates(&mut v);
         assert_eq!(v[0].name, "Apple");
@@ -413,9 +442,18 @@ mod tests {
     fn apply_import_skips_empty_and_trims() {
         let mut v: Vec<ContextTemplate> = Vec::new();
         let imported = vec![
-            ContextTemplate { name: "  Keep  ".into(), body: "  yes  ".into() },
-            ContextTemplate { name: "".into(), body: "skip".into() },
-            ContextTemplate { name: "skip".into(), body: "".into() },
+            ContextTemplate {
+                name: "  Keep  ".into(),
+                body: "  yes  ".into(),
+            },
+            ContextTemplate {
+                name: "".into(),
+                body: "skip".into(),
+            },
+            ContextTemplate {
+                name: "skip".into(),
+                body: "".into(),
+            },
         ];
         let count = apply_import(&mut v, imported);
         assert_eq!(count, 1);

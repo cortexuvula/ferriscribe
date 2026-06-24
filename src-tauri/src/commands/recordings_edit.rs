@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use medical_core::error::{AppError, AppResult};
+use medical_db::Connection;
 use medical_db::generations::GenerationsRepo;
 use medical_db::recordings::RecordingsRepo;
-use medical_db::Connection;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -31,7 +31,10 @@ pub async fn save_recording_field(
     field: String,
     value: String,
 ) -> AppResult<()> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     let cfg = medical_db::settings::SettingsRepo::load_config(&conn).unwrap_or_default();
     save_recording_field_inner(
         state.db.clone(),
@@ -70,8 +73,8 @@ pub fn save_recording_field_inner(
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
 
     // Load → mutate → persist.
-    let mut recording = RecordingsRepo::get_by_id(conn, &id)
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    let mut recording =
+        RecordingsRepo::get_by_id(conn, &id).map_err(|e| AppError::Database(e.to_string()))?;
 
     // Empty string means "clear the field".
     let owned_value = if value.is_empty() {
@@ -94,8 +97,7 @@ pub fn save_recording_field_inner(
         }
     }
 
-    RecordingsRepo::update(conn, &recording)
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    RecordingsRepo::update(conn, &recording).map_err(|e| AppError::Database(e.to_string()))?;
 
     // Training-corpus finalize hook. Only applies to soap_note (v1 captures
     // only SOAP). Best-effort — failures are logged but never returned to
@@ -127,11 +129,11 @@ pub fn save_recording_field_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use medical_core::types::recording::{ProcessingStatus, Recording};
+    use medical_db::Connection;
     use medical_db::generations::{GenerationInsert, GenerationsRepo};
     use medical_db::migrations::MigrationEngine;
     use medical_db::recordings::RecordingsRepo;
-    use medical_db::Connection;
-    use medical_core::types::recording::{ProcessingStatus, Recording};
     use std::path::PathBuf;
 
     fn in_memory_db() -> Connection {
@@ -245,10 +247,12 @@ mod tests {
         let rec_id = insert_recording(&conn);
         let db = std::sync::Arc::new(medical_db::Database::open_in_memory().unwrap());
 
-        save_recording_field_inner(db, &conn, &rec_id.to_string(), "soap_note", "", false)
-            .unwrap();
+        save_recording_field_inner(db, &conn, &rec_id.to_string(), "soap_note", "", false).unwrap();
 
         let refreshed = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
-        assert!(refreshed.soap_note.is_none(), "empty value should clear the field");
+        assert!(
+            refreshed.soap_note.is_none(),
+            "empty value should clear the field"
+        );
     }
 }

@@ -83,9 +83,7 @@ impl RecordingState {
                 elapsed_before_pause,
                 ..
             } => {
-                let segment = started_at
-                    .map(|t| t.elapsed())
-                    .unwrap_or(Duration::ZERO);
+                let segment = started_at.map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
                 *elapsed_before_pause + segment
             }
             RecordingState::Paused {
@@ -175,9 +173,7 @@ impl StateMachine {
                 device_name,
                 elapsed_before_pause,
             } => {
-                let segment = started_at
-                    .map(|t| t.elapsed())
-                    .unwrap_or(Duration::ZERO);
+                let segment = started_at.map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
                 self.state = RecordingState::Paused {
                     paused_at: Some(Instant::now()),
                     file_path,

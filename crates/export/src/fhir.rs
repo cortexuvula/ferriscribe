@@ -18,7 +18,7 @@ use base64::Engine;
 use chrono::Utc;
 use medical_core::types::recording::Recording;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{ExportError, ExportResult};
@@ -153,10 +153,15 @@ impl FhirExporter {
             patient_resource["identifier"] = json!([{ "value": ident }]);
         }
 
-        entries.push(BundleEntry { resource: patient_resource });
+        entries.push(BundleEntry {
+            resource: patient_resource,
+        });
 
         // ── Practitioner ─────────────────────────────────────────────────────
-        let prac_name = practitioner.name.clone().unwrap_or_else(|| "Unknown".to_string());
+        let prac_name = practitioner
+            .name
+            .clone()
+            .unwrap_or_else(|| "Unknown".to_string());
         let mut prac_resource = json!({
             "resourceType": "Practitioner",
             "id": practitioner_id,
@@ -172,7 +177,9 @@ impl FhirExporter {
             }]);
         }
 
-        entries.push(BundleEntry { resource: prac_resource });
+        entries.push(BundleEntry {
+            resource: prac_resource,
+        });
 
         // ── Encounter ────────────────────────────────────────────────────────
         let encounter_resource = json!({
@@ -190,7 +197,9 @@ impl FhirExporter {
             }],
             "period": { "start": recording.created_at.to_rfc3339() }
         });
-        entries.push(BundleEntry { resource: encounter_resource });
+        entries.push(BundleEntry {
+            resource: encounter_resource,
+        });
 
         // ── SOAP DocumentReference (LOINC 11506-3) ───────────────────────────
         if let Some(soap) = &recording.soap_note {

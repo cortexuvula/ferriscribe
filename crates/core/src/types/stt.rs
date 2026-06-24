@@ -135,7 +135,10 @@ mod tests {
             channels: 1,
         };
         let duration = audio.duration_seconds();
-        assert!((duration - 1.0).abs() < 1e-6, "expected ~1.0s, got {duration}");
+        assert!(
+            (duration - 1.0).abs() < 1e-6,
+            "expected ~1.0s, got {duration}"
+        );
     }
 
     #[test]
@@ -146,7 +149,10 @@ mod tests {
             channels: 2,
         };
         let duration = audio.duration_seconds();
-        assert!((duration - 1.0).abs() < 1e-6, "expected ~1.0s, got {duration}");
+        assert!(
+            (duration - 1.0).abs() < 1e-6,
+            "expected ~1.0s, got {duration}"
+        );
     }
 
     #[test]

@@ -25,11 +25,11 @@ use tokio::sync::{Mutex, RwLock};
 use medical_core::{
     error::{AppError, AppResult},
     traits::AiProvider,
+    types::endpoint::http_url,
     types::{
         CompletionRequest, CompletionResponse, ModelInfo, RemoteEndpoint, StreamChunk,
         ToolCompletionResponse, ToolDef,
     },
-    types::endpoint::http_url,
 };
 
 use crate::http_client::RetryConfig;
@@ -97,10 +97,14 @@ impl OllamaProvider {
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(300))
             .build()
-            .map_err(|e| AppError::AiProvider(format!("Failed to build Ollama HTTP client: {e}")))?;
+            .map_err(|e| {
+                AppError::AiProvider(format!("Failed to build Ollama HTTP client: {e}"))
+            })?;
         Ok(Self {
             static_base_url: base_url.clone(),
-            client: Mutex::new(OpenAiCompatibleClient::new_with_bearer_and_name(http, base_url, policy, bearer, "Ollama")),
+            client: Mutex::new(OpenAiCompatibleClient::new_with_bearer_and_name(
+                http, base_url, policy, bearer, "Ollama",
+            )),
             endpoint: RwLock::new(None),
             url_cache: Mutex::new(None),
         })
@@ -127,10 +131,14 @@ impl OllamaProvider {
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(300))
             .build()
-            .map_err(|e| AppError::AiProvider(format!("Failed to build Ollama HTTP client: {e}")))?;
+            .map_err(|e| {
+                AppError::AiProvider(format!("Failed to build Ollama HTTP client: {e}"))
+            })?;
         Ok(Self {
             static_base_url: base_url.clone(),
-            client: Mutex::new(OpenAiCompatibleClient::new_with_bearer_and_name(http, base_url, policy, bearer, "Ollama")),
+            client: Mutex::new(OpenAiCompatibleClient::new_with_bearer_and_name(
+                http, base_url, policy, bearer, "Ollama",
+            )),
             endpoint: RwLock::new(ep),
             url_cache: Mutex::new(None),
         })
@@ -155,10 +163,9 @@ impl OllamaProvider {
             ] {
                 if let Some(h) = opt_host {
                     medical_core::endpoint_policy::validate_local_endpoint(h, allow_public)
-                        .map_err(|err| AppError::invalid_endpoint_for(
-                            err,
-                            format!("ollama_host.{label}"),
-                        ))?;
+                        .map_err(|err| {
+                            AppError::invalid_endpoint_for(err, format!("ollama_host.{label}"))
+                        })?;
                 }
             }
         }
@@ -193,28 +200,25 @@ impl OllamaProvider {
                 }
             }
             // Slow path: probe the network with no locks held.
-            let resolved = ep
-                .resolve_base_url()
-                .await
-                .ok_or_else(|| {
-                    use medical_core::error::{OfflineReason, ServiceKind};
-                    // RemoteEndpoint probed LAN then Tailscale and both failed. Pick
-                    // the LAN URL as the representative endpoint; if LAN isn't set,
-                    // fall back to Tailscale; if neither is set, this is a config
-                    // error and "(unresolved)" surfaces clearly in the dialog.
-                    let endpoint = ep
-                        .lan
-                        .as_deref()
-                        .map(|h| http_url(h, ep.port))
-                        .or_else(|| ep.tailscale.as_deref().map(|h| http_url(h, ep.port)))
-                        .unwrap_or_else(|| "(unresolved)".into());
-                    AppError::EndpointOffline {
-                        service: ServiceKind::AiProvider,
-                        endpoint,
-                        reason: OfflineReason::Timeout,
-                        provider_name: "Ollama".into(),
-                    }
-                })?;
+            let resolved = ep.resolve_base_url().await.ok_or_else(|| {
+                use medical_core::error::{OfflineReason, ServiceKind};
+                // RemoteEndpoint probed LAN then Tailscale and both failed. Pick
+                // the LAN URL as the representative endpoint; if LAN isn't set,
+                // fall back to Tailscale; if neither is set, this is a config
+                // error and "(unresolved)" surfaces clearly in the dialog.
+                let endpoint = ep
+                    .lan
+                    .as_deref()
+                    .map(|h| http_url(h, ep.port))
+                    .or_else(|| ep.tailscale.as_deref().map(|h| http_url(h, ep.port)))
+                    .unwrap_or_else(|| "(unresolved)".into());
+                AppError::EndpointOffline {
+                    service: ServiceKind::AiProvider,
+                    endpoint,
+                    reason: OfflineReason::Timeout,
+                    provider_name: "Ollama".into(),
+                }
+            })?;
             let url = format!("{}/v1", resolved);
             *self.url_cache.lock().await = Some(ResolvedCache {
                 url: url.clone(),
@@ -228,7 +232,9 @@ impl OllamaProvider {
 
     /// Ensure the inner client's base_url matches the current resolved URL.
     /// Acquires the Mutex on `client`; callers must hold it for the full request.
-    async fn sync_client_url(&self) -> AppResult<tokio::sync::MutexGuard<'_, OpenAiCompatibleClient>> {
+    async fn sync_client_url(
+        &self,
+    ) -> AppResult<tokio::sync::MutexGuard<'_, OpenAiCompatibleClient>> {
         let url = self.current_base_url().await?;
         let mut client = self.client.lock().await;
         client.base_url = url;
@@ -304,7 +310,8 @@ mod tests {
 
     #[test]
     fn creates_with_default_host() {
-        let p = OllamaProvider::new(None, false, None, RetryConfig::default()).expect("build default provider");
+        let p = OllamaProvider::new(None, false, None, RetryConfig::default())
+            .expect("build default provider");
         assert_eq!(p.static_base_url, "http://localhost:11434/v1");
     }
 
@@ -322,14 +329,8 @@ mod tests {
 
     #[test]
     fn stores_bearer_token() {
-        use std::future::Future;
-        let p = OllamaProvider::new(
-            None,
-            false,
-            Some("tok_test".into()),
-            RetryConfig::default(),
-        )
-        .expect("build provider with bearer");
+        let p = OllamaProvider::new(None, false, Some("tok_test".into()), RetryConfig::default())
+            .expect("build provider with bearer");
         // Bearer is on the inner client; block to read it.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -375,12 +376,15 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
 
         let p = OllamaProvider::new(None, false, None, RetryConfig::default()).expect("build");
-        p.set_endpoint(Some(RemoteEndpoint {
-            lan: Some("127.0.0.1".to_string()),
-            tailscale: None,
-            port,
-            bearer: None,
-        }), false)
+        p.set_endpoint(
+            Some(RemoteEndpoint {
+                lan: Some("127.0.0.1".to_string()),
+                tailscale: None,
+                port,
+                bearer: None,
+            }),
+            false,
+        )
         .await
         .expect("set endpoint");
 
@@ -393,7 +397,10 @@ mod tests {
 
         // Second call immediately after: cache should still return the URL.
         let url2 = p.current_base_url().await.expect("cached resolve");
-        assert_eq!(url1, url2, "cache should return same URL without re-probing");
+        assert_eq!(
+            url1, url2,
+            "cache should return same URL without re-probing"
+        );
     }
 
     #[test]
@@ -432,7 +439,12 @@ mod tests {
             Some("http://100.64.0.1:11434"),
             Some("http://clinic.local:11434"),
         ] {
-            let r = OllamaProvider::new(host, /* allow_public */ false, None, RetryConfig::default());
+            let r = OllamaProvider::new(
+                host,
+                /* allow_public */ false,
+                None,
+                RetryConfig::default(),
+            );
             assert!(r.is_ok(), "expected Ok for {host:?}");
         }
     }
@@ -504,12 +516,15 @@ mod offline_tests {
         let port = dead_port();
 
         let p = OllamaProvider::new(None, false, None, RetryConfig::default()).expect("build");
-        p.set_endpoint(Some(RemoteEndpoint {
-            lan: Some("127.0.0.1".to_string()),
-            tailscale: None,
-            port,
-            bearer: None,
-        }), false)
+        p.set_endpoint(
+            Some(RemoteEndpoint {
+                lan: Some("127.0.0.1".to_string()),
+                tailscale: None,
+                port,
+                bearer: None,
+            }),
+            false,
+        )
         .await
         .expect("set endpoint");
 

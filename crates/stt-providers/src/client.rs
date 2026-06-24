@@ -1,8 +1,8 @@
 //! HTTP client for Whisper STT API communication.
 
 use reqwest::{
-    multipart::{Form, Part},
     Client, StatusCode,
+    multipart::{Form, Part},
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -116,12 +116,17 @@ pub async fn post_audio(
         // that case; fall back to a generic auth-failure message otherwise.
         // The header values are a contract with the proxy; do not change
         // without coordinating the producer side.
-        let reason = resp.headers().get("x-auth-reason").and_then(|v| v.to_str().ok());
+        let reason = resp
+            .headers()
+            .get("x-auth-reason")
+            .and_then(|v| v.to_str().ok());
         let msg = match reason {
             Some("unknown-token") => {
                 "Office server no longer recognizes this client \u{2014} please re-pair (Settings \u{2192} Sharing \u{2192} Unpair, then scan a fresh code from the office machine)."
             }
-            _ => "Whisper server rejected authentication \u{2014} re-pair the client if the office server was reinstalled.",
+            _ => {
+                "Whisper server rejected authentication \u{2014} re-pair the client if the office server was reinstalled."
+            }
         };
         return Err(AppError::SttProvider(msg.to_string()));
     }
@@ -147,8 +152,7 @@ pub async fn post_audio(
             .and_then(|v| v.to_str().ok())
             && reason == "backend-unreachable"
         {
-            let body =
-                medical_core::http_error_body::read_error_body(resp, 200).await;
+            let body = medical_core::http_error_body::read_error_body(resp, 200).await;
             let msg = if body.trim().is_empty() {
                 "Office Whisper server is down \u{2014} restart Sharing on the office machine (Settings \u{2192} Sharing \u{2192} Stop, then Start).".to_string()
             } else {
@@ -232,9 +236,7 @@ mod tests {
         // so it discriminates "en\r\n" from "en-US\r\n".
         Mock::given(method("POST"))
             .and(path("/v1/audio/transcriptions"))
-            .and(body_string_contains(
-                "name=\"language\"\r\n\r\nen\r\n",
-            ))
+            .and(body_string_contains("name=\"language\"\r\n\r\nen\r\n"))
             .respond_with(ResponseTemplate::new(200).set_body_json(verbose_body()))
             .mount(&server)
             .await;
@@ -265,9 +267,7 @@ mod tests {
         let neg_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/audio/transcriptions"))
-            .and(body_string_contains(
-                "name=\"language\"\r\n\r\nen-US\r\n",
-            ))
+            .and(body_string_contains("name=\"language\"\r\n\r\nen-US\r\n"))
             .respond_with(ResponseTemplate::new(200).set_body_json(verbose_body()))
             .mount(&neg_server)
             .await;
@@ -326,8 +326,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/audio/transcriptions"))
             .respond_with(
-                ResponseTemplate::new(401)
-                    .insert_header("x-auth-reason", "unknown-token"),
+                ResponseTemplate::new(401).insert_header("x-auth-reason", "unknown-token"),
             )
             .mount(&server)
             .await;
@@ -374,7 +373,11 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         let err_msg = err.to_string();
-        assert!(err_msg.contains("rejected authentication"), "got: {}", err_msg);
+        assert!(
+            err_msg.contains("rejected authentication"),
+            "got: {}",
+            err_msg
+        );
     }
 
     #[tokio::test]
@@ -429,7 +432,11 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
         assert!(err_msg.contains("500"), "status code missing: {}", err_msg);
-        assert!(err_msg.contains("model load failed"), "body missing: {}", err_msg);
+        assert!(
+            err_msg.contains("model load failed"),
+            "body missing: {}",
+            err_msg
+        );
     }
 
     #[tokio::test]

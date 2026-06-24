@@ -57,12 +57,14 @@ impl Agent for ChatAgent {
             },
             ToolDef {
                 name: "search_knowledge_base".into(),
-                description: "Search the medical knowledge base for relevant clinical evidence".into(),
+                description: "Search the medical knowledge base for relevant clinical evidence"
+                    .into(),
                 parameters: json!({"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer", "default": 5}}, "required": ["query"]}),
             },
             ToolDef {
                 name: "generate_checklist".into(),
-                description: "Generate a clinical checklist for a procedure or encounter type".into(),
+                description: "Generate a clinical checklist for a procedure or encounter type"
+                    .into(),
                 parameters: json!({"type": "object", "properties": {"procedure": {"type": "string"}, "context": {"type": "string"}}, "required": ["procedure"]}),
             },
         ]

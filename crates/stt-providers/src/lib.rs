@@ -28,14 +28,14 @@
 //! | [`models`] | Model catalog, download/delete, path helpers |
 
 pub mod audio_prep;
-pub mod models;
-pub mod whisper;
-pub mod diarization;
-pub mod merge;
-pub mod local_provider;
-pub mod remote_provider;
-pub mod endpoint;
 pub mod client;
+pub mod diarization;
+pub mod endpoint;
+pub mod local_provider;
+pub mod merge;
+pub mod models;
+pub mod remote_provider;
+pub mod whisper;
 
 pub use local_provider::LocalSttProvider;
 

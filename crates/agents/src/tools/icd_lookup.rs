@@ -23,16 +23,40 @@ pub struct IcdLookupTool;
 ///
 /// Each entry is `(code, description, keyword_synonyms)`.
 const ICD10_CODES: &[(&str, &str, &str)] = &[
-    ("I10", "Essential (primary) hypertension", "hypertension high blood pressure"),
-    ("E11", "Type 2 diabetes mellitus", "diabetes type 2 blood sugar glucose"),
-    ("J06.9", "Acute upper respiratory infection, unspecified", "upper respiratory infection URI cold"),
+    (
+        "I10",
+        "Essential (primary) hypertension",
+        "hypertension high blood pressure",
+    ),
+    (
+        "E11",
+        "Type 2 diabetes mellitus",
+        "diabetes type 2 blood sugar glucose",
+    ),
+    (
+        "J06.9",
+        "Acute upper respiratory infection, unspecified",
+        "upper respiratory infection URI cold",
+    ),
     ("M54.5", "Low back pain", "back pain lumbar"),
     ("R51.9", "Headache, unspecified", "headache pain head"),
     ("J45", "Asthma", "asthma wheezing bronchospasm"),
-    ("K21.0", "Gastro-esophageal reflux disease with oesophagitis", "GERD reflux heartburn acid"),
-    ("F41.1", "Generalized anxiety disorder", "GAD anxiety generalized"),
+    (
+        "K21.0",
+        "Gastro-esophageal reflux disease with oesophagitis",
+        "GERD reflux heartburn acid",
+    ),
+    (
+        "F41.1",
+        "Generalized anxiety disorder",
+        "GAD anxiety generalized",
+    ),
     ("G43", "Migraine", "migraine headache aura"),
-    ("N39.0", "Urinary tract infection, site not specified", "UTI urinary tract infection"),
+    (
+        "N39.0",
+        "Urinary tract infection, site not specified",
+        "UTI urinary tract infection",
+    ),
 ];
 
 #[async_trait]
@@ -74,7 +98,9 @@ impl Tool for IcdLookupTool {
         let mut results = Vec::new();
         for (code, description, keywords) in ICD10_CODES {
             let searchable = format!("{} {} {}", code, description, keywords).to_lowercase();
-            if searchable.contains(&query) || query.split_whitespace().any(|w| searchable.contains(w)) {
+            if searchable.contains(&query)
+                || query.split_whitespace().any(|w| searchable.contains(w))
+            {
                 results.push(json!({
                     "code": code,
                     "description": description,
@@ -106,7 +132,10 @@ mod tests {
     #[tokio::test]
     async fn lookup_hypertension_finds_i10() {
         let tool = IcdLookupTool;
-        let result = tool.execute(json!({"query": "hypertension"})).await.unwrap();
+        let result = tool
+            .execute(json!({"query": "hypertension"}))
+            .await
+            .unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("I10"));
     }
@@ -121,8 +150,7 @@ mod tests {
         assert!(!result.is_error);
         // Should indicate no results found
         assert!(
-            result.content.contains("No ICD-10 codes found")
-                || result.content.contains("results")
+            result.content.contains("No ICD-10 codes found") || result.content.contains("results")
         );
     }
 

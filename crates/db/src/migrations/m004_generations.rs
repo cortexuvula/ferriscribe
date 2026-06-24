@@ -84,9 +84,7 @@ mod tests {
         let conn = migrated();
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(generations)").unwrap();
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(1))
-                .unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
             rows.filter_map(|r| r.ok()).collect()
         };
         for required in &[
@@ -134,11 +132,19 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute("DELETE FROM recordings WHERE id='rec1'", []).unwrap();
+        conn.execute("DELETE FROM recordings WHERE id='rec1'", [])
+            .unwrap();
 
         let remaining: i64 = conn
-            .query_row("SELECT count(*) FROM generations WHERE id='gen1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM generations WHERE id='gen1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(remaining, 0, "generation should cascade-delete with its parent recording");
+        assert_eq!(
+            remaining, 0,
+            "generation should cascade-delete with its parent recording"
+        );
     }
 }

@@ -26,14 +26,14 @@
 //! [`RagError`] covers search, embedding, ingestion, and database failures.
 //! [`RagResult<T>`] is the crate-level convenience alias.
 
+pub mod bm25;
+pub mod embeddings;
+pub mod fusion;
+pub mod graph_search;
+pub mod ingestion;
+pub mod mmr;
 pub mod query_expander;
 pub mod vector_store;
-pub mod bm25;
-pub mod graph_search;
-pub mod fusion;
-pub mod mmr;
-pub mod embeddings;
-pub mod ingestion;
 
 use thiserror::Error;
 

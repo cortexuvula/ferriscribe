@@ -25,10 +25,10 @@ impl RecordingsRepo {
     /// Returns [`DbError::Sqlite`] on constraint
     /// violation (e.g. duplicate ID) or serialisation failure.
     pub fn insert(conn: &Connection, recording: &Recording) -> DbResult<()> {
-        let status_json =
-            serde_json::to_string(&recording.status).map_err(|e| DbError::Migration(e.to_string()))?;
-        let tags_json =
-            serde_json::to_string(&recording.tags).map_err(|e| DbError::Migration(e.to_string()))?;
+        let status_json = serde_json::to_string(&recording.status)
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let tags_json = serde_json::to_string(&recording.tags)
+            .map_err(|e| DbError::Migration(e.to_string()))?;
         let metadata_json = recording.metadata.to_string();
 
         conn.execute(
@@ -120,10 +120,10 @@ impl RecordingsRepo {
     ///
     /// Returns [`DbError::NotFound`] if the recording does not exist.
     pub fn update(conn: &Connection, recording: &Recording) -> DbResult<()> {
-        let status_json =
-            serde_json::to_string(&recording.status).map_err(|e| DbError::Migration(e.to_string()))?;
-        let tags_json =
-            serde_json::to_string(&recording.tags).map_err(|e| DbError::Migration(e.to_string()))?;
+        let status_json = serde_json::to_string(&recording.status)
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let tags_json = serde_json::to_string(&recording.tags)
+            .map_err(|e| DbError::Migration(e.to_string()))?;
         let metadata_json = recording.metadata.to_string();
 
         let rows = conn.execute(
@@ -178,10 +178,7 @@ impl RecordingsRepo {
     ///
     /// Returns [`DbError::NotFound`] if the recording does not exist.
     pub fn delete(conn: &Connection, id: &Uuid) -> DbResult<()> {
-        let rows = conn.execute(
-            "DELETE FROM recordings WHERE id = ?1",
-            [id.to_string()],
-        )?;
+        let rows = conn.execute("DELETE FROM recordings WHERE id = ?1", [id.to_string()])?;
         if rows == 0 {
             return Err(DbError::NotFound(format!("recording {id}")));
         }
@@ -208,8 +205,7 @@ impl RecordingsRepo {
     ///
     /// Useful for pagination UI without fetching full rows.
     pub fn count(conn: &Connection) -> DbResult<u32> {
-        let n: i64 =
-            conn.query_row("SELECT COUNT(*) FROM recordings", [], |r| r.get(0))?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM recordings", [], |r| r.get(0))?;
         Ok(n as u32)
     }
 
@@ -254,8 +250,10 @@ impl RecordingsRepo {
              FROM recordings WHERE id IN ({placeholders})"
         );
         let id_strings: Vec<String> = ids.iter().map(|u| u.to_string()).collect();
-        let params: Vec<&dyn rusqlite::ToSql> =
-            id_strings.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let params: Vec<&dyn rusqlite::ToSql> = id_strings
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params.as_slice(), Self::row_to_recording)?
@@ -468,10 +466,14 @@ mod tests {
 
         // One Processing, one Pending, one already Completed.
         let mut stuck = new_rec();
-        stuck.status = ProcessingStatus::Processing { started_at: Utc::now() };
+        stuck.status = ProcessingStatus::Processing {
+            started_at: Utc::now(),
+        };
         let pending = new_rec();
         let mut done = new_rec();
-        done.status = ProcessingStatus::Completed { completed_at: Utc::now() };
+        done.status = ProcessingStatus::Completed {
+            completed_at: Utc::now(),
+        };
 
         RecordingsRepo::insert(&conn, &stuck).unwrap();
         RecordingsRepo::insert(&conn, &pending).unwrap();

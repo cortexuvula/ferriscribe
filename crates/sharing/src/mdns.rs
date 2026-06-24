@@ -84,13 +84,8 @@ impl MdnsAdvertiser {
     /// and version are published as TXT records. The advertised listener
     /// port is `ports.pairing` (falling back to 11436) since that's the
     /// endpoint clients need to contact first.
-    pub fn start(
-        instance_name: &str,
-        ports: &ServerPorts,
-        version: &str,
-    ) -> crate::Result<Self> {
-        let daemon = ServiceDaemon::new()
-            .map_err(|e| crate::SharingError::Mdns(e.to_string()))?;
+    pub fn start(instance_name: &str, ports: &ServerPorts, version: &str) -> crate::Result<Self> {
+        let daemon = ServiceDaemon::new().map_err(|e| crate::SharingError::Mdns(e.to_string()))?;
         let host = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "localhost".to_string());
@@ -127,7 +122,8 @@ impl MdnsAdvertiser {
         )
         .map_err(|e| crate::SharingError::Mdns(e.to_string()))?
         .enable_addr_auto();
-        daemon.register(info.clone())
+        daemon
+            .register(info.clone())
             .map_err(|e| crate::SharingError::Mdns(e.to_string()))?;
         Ok(Self {
             daemon,
@@ -153,11 +149,21 @@ impl MdnsAdvertiser {
             format!("{host}.local.")
         };
         let mut props: HashMap<String, String> = HashMap::new();
-        if let Some(p) = ports.ollama { props.insert("ollama".into(), p.to_string()); }
-        if let Some(p) = ports.whisper { props.insert("whisper".into(), p.to_string()); }
-        if let Some(p) = ports.lmstudio { props.insert("lmstudio".into(), p.to_string()); }
-        if let Some(p) = ports.pairing { props.insert("pairing".into(), p.to_string()); }
-        if let Some(p) = ports.vocab { props.insert("vocab".into(), p.to_string()); }
+        if let Some(p) = ports.ollama {
+            props.insert("ollama".into(), p.to_string());
+        }
+        if let Some(p) = ports.whisper {
+            props.insert("whisper".into(), p.to_string());
+        }
+        if let Some(p) = ports.lmstudio {
+            props.insert("lmstudio".into(), p.to_string());
+        }
+        if let Some(p) = ports.pairing {
+            props.insert("pairing".into(), p.to_string());
+        }
+        if let Some(p) = ports.vocab {
+            props.insert("vocab".into(), p.to_string());
+        }
         props.insert("version".into(), self.version.clone());
         let advertise_port = ports.pairing.unwrap_or(11436);
         let info = match ServiceInfo::new(
@@ -207,8 +213,7 @@ impl MdnsAdvertiser {
 /// # Ok::<(), medical_sharing::SharingError>(())
 /// ```
 pub fn browse(timeout: Duration) -> crate::Result<mpsc::Receiver<DiscoveredServer>> {
-    let daemon = ServiceDaemon::new()
-        .map_err(|e| crate::SharingError::Mdns(e.to_string()))?;
+    let daemon = ServiceDaemon::new().map_err(|e| crate::SharingError::Mdns(e.to_string()))?;
     let receiver = daemon
         .browse(SERVICE_TYPE)
         .map_err(|e| crate::SharingError::Mdns(e.to_string()))?;
@@ -224,11 +229,7 @@ pub fn browse(timeout: Duration) -> crate::Result<mpsc::Receiver<DiscoveredServe
                     let server = DiscoveredServer {
                         instance_name: info.get_fullname().to_string(),
                         host: info.get_hostname().trim_end_matches('.').to_string(),
-                        addresses: info
-                            .get_addresses()
-                            .iter()
-                            .map(|a| a.to_string())
-                            .collect(),
+                        addresses: info.get_addresses().iter().map(|a| a.to_string()).collect(),
                         tailscale_addresses: Vec::new(),
                         ports: ServerPorts {
                             ollama: parse_port("ollama"),
@@ -323,6 +324,10 @@ mod tests {
         }
         adv.stop();
         let d = found.expect("did not discover own advertisement after update");
-        assert_eq!(d.ports.lmstudio, Some(1235), "lmstudio port must appear after update_ports");
+        assert_eq!(
+            d.ports.lmstudio,
+            Some(1235),
+            "lmstudio port must appear after update_ports"
+        );
     }
 }

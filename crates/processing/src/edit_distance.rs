@@ -43,7 +43,11 @@ pub fn word_edit_distance(a: &str, b: &str) -> (usize, f64) {
     }
 
     // Two-row DP, O(min(m,n)) memory after the swap.
-    let (short, long) = if m <= n { (&a_words, &b_words) } else { (&b_words, &a_words) };
+    let (short, long) = if m <= n {
+        (&a_words, &b_words)
+    } else {
+        (&b_words, &a_words)
+    };
     let s_len = short.len();
     let l_len = long.len();
 
@@ -54,9 +58,9 @@ pub fn word_edit_distance(a: &str, b: &str) -> (usize, f64) {
         curr[0] = i;
         for j in 1..=s_len {
             let cost = if long[i - 1] == short[j - 1] { 0 } else { 1 };
-            curr[j] = (curr[j - 1] + 1)         // insertion
-                .min(prev[j] + 1)               // deletion
-                .min(prev[j - 1] + cost);       // substitution
+            curr[j] = (curr[j - 1] + 1) // insertion
+                .min(prev[j] + 1) // deletion
+                .min(prev[j - 1] + cost); // substitution
         }
         std::mem::swap(&mut prev, &mut curr);
     }

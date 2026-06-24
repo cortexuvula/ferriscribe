@@ -11,7 +11,7 @@ use crate::state::AppState;
 use super::helpers::{
     build_completion_request, load_recording_and_settings, persist_recording, resolve_provider,
 };
-use super::{format_progress_error, GenerationProgress, MAX_TRANSCRIPT_CHARS};
+use super::{GenerationProgress, MAX_TRANSCRIPT_CHARS, format_progress_error};
 
 /// Generate a peer discussion note from a recording's transcript.
 ///
@@ -27,9 +27,7 @@ pub async fn generate_peer_discussion(
     reason: String,
 ) -> AppResult<String> {
     if physician_name.trim().is_empty() {
-        return Err(AppError::Other(
-            "Physician name is required.".to_string(),
-        ));
+        return Err(AppError::Other("Physician name is required.".to_string()));
     }
     if reason.trim().is_empty() {
         return Err(AppError::Other(
@@ -46,14 +44,9 @@ pub async fn generate_peer_discussion(
         },
     );
 
-    let result = generate_peer_discussion_inner(
-        &state,
-        &recording_id,
-        &physician_name,
-        &specialty,
-        &reason,
-    )
-    .await;
+    let result =
+        generate_peer_discussion_inner(&state, &recording_id, &physician_name, &specialty, &reason)
+            .await;
 
     match &result {
         Ok(_) => {
@@ -104,7 +97,9 @@ async fn generate_peer_discussion_inner(
         .as_deref()
         .filter(|t| !t.is_empty())
         .ok_or_else(|| {
-            AppError::Processing("Recording has no transcript. Run transcription first.".to_string())
+            AppError::Processing(
+                "Recording has no transcript. Run transcription first.".to_string(),
+            )
         })?;
 
     if transcript.len() > MAX_TRANSCRIPT_CHARS {
@@ -132,12 +127,8 @@ async fn generate_peer_discussion_inner(
     };
 
     let system_prompt = peer_discussion::build_peer_discussion_prompt(&prompt_config);
-    let user_prompt = peer_discussion::build_user_prompt(
-        transcript,
-        physician_name,
-        specialty,
-        reason,
-    );
+    let user_prompt =
+        peer_discussion::build_user_prompt(transcript, physician_name, specialty, reason);
 
     debug!(
         "generate_peer_discussion: provider='{}', recording='{}'",
@@ -153,16 +144,13 @@ async fn generate_peer_discussion_inner(
         None,
     );
 
-    let response = provider
-        .complete(request)
-        .await
-        .map_err(|e| match e {
-            AppError::EndpointOffline { .. } => e,
-            _ => AppError::AiProvider(format!(
-                "AI completion failed: {}",
-                crate::commands::unwrap_app_error_message(e)
-            )),
-        })?;
+    let response = provider.complete(request).await.map_err(|e| match e {
+        AppError::EndpointOffline { .. } => e,
+        _ => AppError::AiProvider(format!(
+            "AI completion failed: {}",
+            crate::commands::unwrap_app_error_message(e)
+        )),
+    })?;
 
     let discussion_text = response.content;
     if discussion_text.is_empty() {
@@ -193,8 +181,8 @@ async fn generate_peer_discussion_inner(
 
 #[cfg(test)]
 mod preflight_tests {
-    use super::*;
     use super::super::test_helpers::build_test_state_with_recording;
+    use super::*;
     use medical_core::error::{AppError, OfflineReason, ServiceKind};
     use medical_core::types::settings::AppConfig;
 
@@ -206,11 +194,8 @@ mod preflight_tests {
         config.ollama_port = 11434;
         config.ai_model = "llama3".to_string();
 
-        let (state, recording_id) = build_test_state_with_recording(
-            config,
-            "Patient reports headache and fatigue.",
-        )
-        .await;
+        let (state, recording_id) =
+            build_test_state_with_recording(config, "Patient reports headache and fatigue.").await;
 
         let start = std::time::Instant::now();
         let result = generate_peer_discussion_inner(

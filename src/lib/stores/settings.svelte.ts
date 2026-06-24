@@ -63,19 +63,31 @@ class SettingsStore {
    *  successful reload. */
   loadError = $state(false);
   private saveQueue: Promise<void> = Promise.resolve();
+  /**
+   * Svelte-store-compatible subscribers. We use an explicit Set + manual
+   * notification instead of `$effect.root` so `subscribe()` is safe to call
+   * from any context (component effects OR plain module code like
+   * endpointHealth's startPolling). The previous `$effect.root` shim leaked a
+   * root scope per subscriber if the caller didn't invoke the teardown inside
+   * a reactive context — this cannot leak, because notification is driven by
+   * the explicit `notify()` calls on each state mutation below.
+   */
+  private subscribers = new Set<(value: AppConfig) => void>();
 
   /**
-   * Svelte-store-compatible subscribe, backed by $effect.root so that
-   * reactive consumers (e.g. endpointHealth) can track state changes.
-   * Returns an unsubscribe function.
+   * Svelte-store-compatible subscribe: emit the current value immediately,
+   * then on every subsequent state change. Returns an unsubscribe function.
    */
   subscribe(cb: (value: AppConfig) => void): () => void {
+    this.subscribers.add(cb);
     cb(this.state); // emit current value immediately (store contract)
-    return $effect.root(() => {
-      $effect(() => {
-        cb(this.state);
-      });
-    });
+    return () => { this.subscribers.delete(cb); };
+  }
+
+  /** Notify all subscribers of the current state. Called after every mutation
+   *  that replaces `this.state`. */
+  private notify(): void {
+    for (const cb of this.subscribers) cb(this.state);
   }
 
   async load(): Promise<void> {
@@ -84,6 +96,7 @@ class SettingsStore {
       this.state = config;
       this.loaded = true;
       this.loadError = false;
+      this.notify();
     } catch (err) {
       console.error('Failed to load settings:', err);
       // Mark the failure so the UI can surface a retryable error instead of
@@ -99,6 +112,7 @@ class SettingsStore {
       return;
     }
     this.state = config;
+    this.notify();
     const prev = this.saveQueue;
     this.saveQueue = (async () => {
       await prev.catch(() => {});
@@ -109,6 +123,7 @@ class SettingsStore {
         try {
           const latest = await getSettings();
           this.state = latest;
+          this.notify();
         } catch (_reloadErr) {
           // If reload also fails, leave local state as-is.
         }
@@ -128,6 +143,7 @@ class SettingsStore {
     }
     const next = { ...this.state, [key]: value };
     this.state = next;
+    this.notify();
     const prev = this.saveQueue;
     this.saveQueue = (async () => {
       await prev.catch(() => {});
@@ -138,6 +154,7 @@ class SettingsStore {
         try {
           const latest = await getSettings();
           this.state = latest;
+          this.notify();
         } catch (_reloadErr) {
           // If reload also fails, leave local state as-is.
         }

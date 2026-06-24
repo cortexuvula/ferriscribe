@@ -39,7 +39,9 @@ impl Agent for WorkflowAgent {
     fn available_tools(&self) -> Vec<ToolDef> {
         vec![ToolDef {
             name: "generate_checklist".into(),
-            description: "Generate a step-by-step clinical checklist for a procedure or encounter type".into(),
+            description:
+                "Generate a step-by-step clinical checklist for a procedure or encounter type"
+                    .into(),
             parameters: json!({"type": "object", "properties": {"procedure": {"type": "string"}, "context": {"type": "string"}}, "required": ["procedure"]}),
         }]
     }

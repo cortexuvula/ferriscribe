@@ -19,10 +19,7 @@ pub fn rms(samples: &[f32]) -> f32 {
 ///
 /// Returns `0.0` for an empty slice.
 pub fn peak(samples: &[f32]) -> f32 {
-    samples
-        .iter()
-        .map(|s| s.abs())
-        .fold(0.0f32, f32::max)
+    samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max)
 }
 
 /// Convert a linear amplitude to decibels (dB).

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, error, instrument, warn};
+use tracing::{error, info, instrument, warn};
 use uuid::Uuid;
 
 use medical_core::error::{AppError, AppResult};
@@ -53,7 +53,9 @@ pub async fn process_recording(
     // stages and interrupt in-flight provider work.
     let cancel = CancellationToken::new();
     {
-        let mut guard = state.pipeline_cancels.lock()
+        let mut guard = state
+            .pipeline_cancels
+            .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("pipeline_cancels: {e}")))?;
         guard.insert(recording_id.clone(), cancel.clone());
     }
@@ -162,10 +164,13 @@ pub async fn process_recording(
             );
 
             // Emit a dedicated notification event for the toast
-            let _ = app.emit("pipeline-complete", serde_json::json!({
-                "recording_id": rid,
-                "display_name": display_name,
-            }));
+            let _ = app.emit(
+                "pipeline-complete",
+                serde_json::json!({
+                    "recording_id": rid,
+                    "display_name": display_name,
+                }),
+            );
 
             Ok(soap_text)
         }
@@ -247,10 +252,7 @@ impl Drop for CancelGuard {
 /// - Stage transitions: the pipeline checks the token between transcription
 ///   and SOAP generation and bails if cancelled.
 #[tauri::command]
-pub fn cancel_pipeline(
-    state: tauri::State<'_, AppState>,
-    recording_id: String,
-) -> AppResult<bool> {
+pub fn cancel_pipeline(state: tauri::State<'_, AppState>, recording_id: String) -> AppResult<bool> {
     let guard = state
         .pipeline_cancels
         .lock()

@@ -31,11 +31,11 @@ impl Player {
     ///
     /// The sink starts in a paused state.
     pub fn new() -> AudioResult<Self> {
-        let (_stream, stream_handle) = OutputStream::try_default()
-            .map_err(|e| AudioError::Playback(e.to_string()))?;
+        let (_stream, stream_handle) =
+            OutputStream::try_default().map_err(|e| AudioError::Playback(e.to_string()))?;
 
-        let sink = Sink::try_new(&stream_handle)
-            .map_err(|e| AudioError::Playback(e.to_string()))?;
+        let sink =
+            Sink::try_new(&stream_handle).map_err(|e| AudioError::Playback(e.to_string()))?;
 
         // Start paused — callers call play_file() which un-pauses as needed.
         sink.pause();
@@ -51,10 +51,9 @@ impl Player {
 
     /// Open `path`, decode it, append it to the sink, and start playing.
     pub fn play_file(&self, path: &Path) -> AudioResult<()> {
-        let file = File::open(path)
-            .map_err(AudioError::Io)?;
-        let source = Decoder::new(BufReader::new(file))
-            .map_err(|e| AudioError::Playback(e.to_string()))?;
+        let file = File::open(path).map_err(AudioError::Io)?;
+        let source =
+            Decoder::new(BufReader::new(file)).map_err(|e| AudioError::Playback(e.to_string()))?;
         self.sink.append(source);
         self.sink.play();
         Ok(())

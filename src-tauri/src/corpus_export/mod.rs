@@ -8,8 +8,8 @@ pub mod jsonl_writer;
 pub mod manifest;
 pub mod readme;
 
-use medical_db::generations::{Generation, GenerationsRepo};
 use medical_db::Connection;
+use medical_db::generations::{Generation, GenerationsRepo};
 use medical_security::phi_redactor::datetime::build_datetime_extension;
 use medical_security::phi_redactor::names::build_patient_name_extension;
 use medical_security::phi_redactor::{Extension, PhiRedactor};
@@ -71,10 +71,8 @@ pub fn export(conn: &Connection, opts: ExportOptions) -> Result<ExportResult, St
 
         let user_input = format_user_input(row);
         let redacted_user = PhiRedactor::redact_with(&user_input, &extensions);
-        let redacted_final = PhiRedactor::redact_with(
-            row.final_text.as_deref().unwrap_or(""),
-            &extensions,
-        );
+        let redacted_final =
+            PhiRedactor::redact_with(row.final_text.as_deref().unwrap_or(""), &extensions);
 
         if PhiRedactor::contains_phi_with(&redacted_user, &extensions)
             || PhiRedactor::contains_phi_with(&redacted_final, &extensions)
@@ -161,10 +159,7 @@ pub fn export(conn: &Connection, opts: ExportOptions) -> Result<ExportResult, St
     })
 }
 
-fn fetch_promoted(
-    conn: &Connection,
-    model_filter: &[String],
-) -> Result<Vec<Generation>, String> {
+fn fetch_promoted(conn: &Connection, model_filter: &[String]) -> Result<Vec<Generation>, String> {
     // Page all promoted rows; v1 expects at most a few thousand so
     // a single paginated loop with limit 200 is sufficient.
     let mut all: Vec<Generation> = Vec::new();
@@ -183,9 +178,7 @@ fn fetch_promoted(
     let filtered: Vec<Generation> = all
         .into_iter()
         .filter(|g| g.final_text.is_some())
-        .filter(|g| {
-            model_filter.is_empty() || model_filter.iter().any(|m| m == &g.ai_model)
-        })
+        .filter(|g| model_filter.is_empty() || model_filter.iter().any(|m| m == &g.ai_model))
         .collect();
     Ok(filtered)
 }
@@ -205,11 +198,12 @@ fn format_user_input(row: &Generation) -> String {
     // For v1: concatenate transcript + context_json. The fine-tune
     // sees the same input shape as the SOAP generation pipeline.
     let mut s = row.input_transcript.clone();
-    if let Some(ctx) = &row.input_context_json {
-        if !ctx.trim().is_empty() && ctx != "null" {
-            s.push_str("\n\n[Context]\n");
-            s.push_str(ctx);
-        }
+    if let Some(ctx) = &row.input_context_json
+        && !ctx.trim().is_empty()
+        && ctx != "null"
+    {
+        s.push_str("\n\n[Context]\n");
+        s.push_str(ctx);
     }
     s
 }

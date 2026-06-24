@@ -12,8 +12,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -140,8 +140,14 @@ impl WhisperSupervisor {
         // A null `url` means whisper.cpp does not publish a prebuilt server binary
         // for this platform. Office-server admins must build from source:
         // https://github.com/ggml-org/whisper.cpp#server
-        let url = entry.url.as_deref().ok_or(WhisperError::UnsupportedPlatform)?;
-        let archive = entry.archive.as_deref().ok_or(WhisperError::UnsupportedPlatform)?;
+        let url = entry
+            .url
+            .as_deref()
+            .ok_or(WhisperError::UnsupportedPlatform)?;
+        let archive = entry
+            .archive
+            .as_deref()
+            .ok_or(WhisperError::UnsupportedPlatform)?;
 
         let bin_path = self.binary_dir.join(&entry.binary_name);
         let lock_path = self.binary_dir.join(".whisper-manifest-version");
@@ -252,7 +258,10 @@ impl WhisperSupervisor {
         //  2. Something unhealthy on the port → kill it, then spawn.
         //  3. Nothing on the port → spawn as usual.
         if self.is_port_healthy().await {
-            info!(port = self.port, "whisper-server already healthy on port; reusing, no spawn");
+            info!(
+                port = self.port,
+                "whisper-server already healthy on port; reusing, no spawn"
+            );
             // We have no Child handle for a reused process, so we can't
             // supervise/kill it later. That's acceptable: a reused instance
             // is unmanaged and will be killed on next start's reclaim path
@@ -307,7 +316,11 @@ impl WhisperSupervisor {
         if pids.is_empty() {
             return;
         }
-        info!(port = self.port, count = pids.len(), "reclaiming port from stale processes");
+        info!(
+            port = self.port,
+            count = pids.len(),
+            "reclaiming port from stale processes"
+        );
         for pid in &pids {
             let _ = kill_pid(*pid).await;
         }
@@ -324,7 +337,9 @@ impl WhisperSupervisor {
                 return;
             }
             let mut guard = self.child.lock().await;
-            let Some(mut c) = guard.take() else { return; };
+            let Some(mut c) = guard.take() else {
+                return;
+            };
             drop(guard);
             tokio::select! {
                 _ = c.wait() => {
@@ -361,7 +376,11 @@ impl WhisperSupervisor {
 
     fn binary_name_for_platform(&self) -> &'static str {
         // Defaults that match the manifest.
-        if cfg!(target_os = "windows") { "whisper-server.exe" } else { "whisper-server" }
+        if cfg!(target_os = "windows") {
+            "whisper-server.exe"
+        } else {
+            "whisper-server"
+        }
     }
 
     async fn spawn_once_at(&self, bin: &Path) -> Result<Child> {
@@ -418,7 +437,10 @@ impl WhisperSupervisor {
                         info!("whisper-server: {line}");
                     } else {
                         // Non-diagnostic line; log only its length, never content.
-                        tracing::debug!(len = line.len(), "whisper-server stderr line (not logged)");
+                        tracing::debug!(
+                            len = line.len(),
+                            "whisper-server stderr line (not logged)"
+                        );
                     }
                 }
             });
@@ -426,7 +448,9 @@ impl WhisperSupervisor {
                 match stderr_task.await {
                     Ok(()) => tracing::debug!("whisper stderr-forwarding task exited normally"),
                     Err(e) if e.is_cancelled() => tracing::debug!("whisper stderr task cancelled"),
-                    Err(e) if e.is_panic() => tracing::error!(error = %e, "whisper stderr task panicked; stderr output lost"),
+                    Err(e) if e.is_panic() => {
+                        tracing::error!(error = %e, "whisper stderr task panicked; stderr output lost")
+                    }
                     Err(e) => tracing::error!(error = %e, "whisper stderr task failed"),
                 }
             });
@@ -611,8 +635,8 @@ mod tests {
     }
 
     fn build_tar_gz_with(binary_name: &str, body: &[u8]) -> Vec<u8> {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         let gz = GzEncoder::new(Vec::new(), Compression::default());
         let mut tar = tar::Builder::new(gz);
         let mut header = tar::Header::new_gnu();
@@ -697,9 +721,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(http_method("GET"))
             .and(http_path("/binary.zip"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_bytes(zip_bytes.clone()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(zip_bytes.clone()))
             .mount(&server)
             .await;
 
@@ -721,9 +743,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(http_method("GET"))
             .and(http_path("/binary.zip"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_bytes(zip_bytes.clone()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(zip_bytes.clone()))
             .mount(&server)
             .await;
 
@@ -750,9 +770,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(http_method("GET"))
             .and(http_path("/binary.zip"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_bytes(zip_bytes.clone()),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(zip_bytes.clone()))
             .mount(&server)
             .await;
 

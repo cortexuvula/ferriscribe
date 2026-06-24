@@ -20,6 +20,11 @@ use crate::types::settings::AppConfig;
 /// doesn't visibly stall the UI.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Pinned, boxed, Send future returned by each preflight probe. Factored into
+/// a type alias so the `Vec` holding the pending probes stays readable.
+pub type PreflightFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>>;
+
 /// Classify a failed reqwest send into the user-facing [`OfflineReason`].
 ///
 /// Returns `None` if the error is something other than a connection /
@@ -44,7 +49,8 @@ pub fn classify_reqwest_error(err: &reqwest::Error) -> Option<OfflineReason> {
             if s_str.contains("dns") || s_str.contains("failed to lookup") {
                 return Some(OfflineReason::DnsFailure);
             }
-            if s_str.contains("tls") || s_str.contains("handshake") || s_str.contains("certificate") {
+            if s_str.contains("tls") || s_str.contains("handshake") || s_str.contains("certificate")
+            {
                 return Some(OfflineReason::TlsFailure);
             }
             source = StdError::source(s);
@@ -181,7 +187,7 @@ pub async fn preflight_for_command(
     kind: CommandKind,
     settings: &AppConfig,
 ) -> Result<(), AppError> {
-    let mut futs: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>>> = Vec::new();
+    let mut futs: Vec<PreflightFuture> = Vec::new();
 
     let ai_needed = matches!(
         kind,
@@ -194,15 +200,11 @@ pub async fn preflight_for_command(
     );
     let stt_needed = matches!(kind, CommandKind::Transcribe);
 
-    if ai_needed {
-        if let Some(probe) = build_ai_probe(settings) {
-            futs.push(Box::pin(probe));
-        }
+    if ai_needed && let Some(probe) = build_ai_probe(settings) {
+        futs.push(Box::pin(probe));
     }
-    if stt_needed {
-        if let Some(probe) = build_stt_probe(settings) {
-            futs.push(Box::pin(probe));
-        }
+    if stt_needed && let Some(probe) = build_stt_probe(settings) {
+        futs.push(Box::pin(probe));
     }
 
     if futs.is_empty() {
@@ -329,7 +331,10 @@ mod tests {
     async fn preflight_skips_localhost_lmstudio() {
         let cfg = settings_pointing_at("lmstudio", "localhost", 1);
         let result = preflight_for_command(CommandKind::GenerateSoap, &cfg).await;
-        assert!(result.is_ok(), "localhost should be skipped; got {result:?}");
+        assert!(
+            result.is_ok(),
+            "localhost should be skipped; got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -338,7 +343,10 @@ mod tests {
         // We treat empty host as loopback for skip purposes.
         let cfg = settings_pointing_at("lmstudio", "", 1);
         let result = preflight_for_command(CommandKind::GenerateSoap, &cfg).await;
-        assert!(result.is_ok(), "empty host should be skipped; got {result:?}");
+        assert!(
+            result.is_ok(),
+            "empty host should be skipped; got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -376,9 +384,18 @@ mod tests {
         assert!(!is_loopback_host("192.168.1.10"));
         assert!(!is_loopback_host("ollama.local"));
         assert!(!is_loopback_host("10.0.0.1"));
-        assert!(is_loopback_host("[::1]"), "bracketed IPv6 loopback must be skipped");
-        assert!(is_loopback_host("[127.0.0.1]"), "bracketed IPv4 loopback also handled");
-        assert!(!is_loopback_host("[::ffff:192.168.1.10]"), "bracketed non-loopback IPv6 stays a probe");
+        assert!(
+            is_loopback_host("[::1]"),
+            "bracketed IPv6 loopback must be skipped"
+        );
+        assert!(
+            is_loopback_host("[127.0.0.1]"),
+            "bracketed IPv4 loopback also handled"
+        );
+        assert!(
+            !is_loopback_host("[::ffff:192.168.1.10]"),
+            "bracketed non-loopback IPv6 stays a probe"
+        );
     }
 
     #[tokio::test]
@@ -437,14 +454,8 @@ mod tests {
         drop(listener);
         let base = format!("http://127.0.0.1:{port}");
 
-        let result = probe_endpoint(
-            ServiceKind::AiProvider,
-            "Ollama",
-            &base,
-            "/api/tags",
-            None,
-        )
-        .await;
+        let result =
+            probe_endpoint(ServiceKind::AiProvider, "Ollama", &base, "/api/tags", None).await;
 
         let err = result.expect_err("must error when port is closed");
         match err {
@@ -467,10 +478,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/tags"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(Duration::from_secs(10)),
-            )
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
             .mount(&server)
             .await;
 
@@ -508,7 +516,10 @@ mod tests {
         match err {
             AppError::EndpointOffline { reason, .. } => {
                 assert!(
-                    matches!(reason, OfflineReason::DnsFailure | OfflineReason::ConnectionRefused),
+                    matches!(
+                        reason,
+                        OfflineReason::DnsFailure | OfflineReason::ConnectionRefused
+                    ),
                     "DNS failure preferred, but ConnectionRefused acceptable if the platform's \
                      resolver error doesn't include 'dns' in its source chain; got {reason:?}"
                 );
@@ -536,7 +547,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "bearer-protected 200 should be Ok; got {result:?}");
+        assert!(
+            result.is_ok(),
+            "bearer-protected 200 should be Ok; got {result:?}"
+        );
     }
 
     #[tokio::test]

@@ -264,7 +264,12 @@ mod tests {
         assert!(!exhausted.can_retry());
 
         assert!(!ProcessingStatus::Pending.can_retry());
-        assert!(!ProcessingStatus::Completed { completed_at: Utc::now() }.can_retry());
+        assert!(
+            !ProcessingStatus::Completed {
+                completed_at: Utc::now()
+            }
+            .can_retry()
+        );
     }
 
     #[test]
@@ -310,15 +315,25 @@ mod tests {
     fn status_labels() {
         assert_eq!(ProcessingStatus::Pending.status_label(), "Pending");
         assert_eq!(
-            ProcessingStatus::Processing { started_at: Utc::now() }.status_label(),
+            ProcessingStatus::Processing {
+                started_at: Utc::now()
+            }
+            .status_label(),
             "Processing"
         );
         assert_eq!(
-            ProcessingStatus::Completed { completed_at: Utc::now() }.status_label(),
+            ProcessingStatus::Completed {
+                completed_at: Utc::now()
+            }
+            .status_label(),
             "Completed"
         );
         assert_eq!(
-            ProcessingStatus::Failed { error: "e".into(), retry_count: 0 }.status_label(),
+            ProcessingStatus::Failed {
+                error: "e".into(),
+                retry_count: 0
+            }
+            .status_label(),
             "Failed"
         );
     }

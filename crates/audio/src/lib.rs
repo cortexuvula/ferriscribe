@@ -33,12 +33,12 @@
 //! handle.stop(); // finalize WAV and join drain thread
 //! ```
 
+pub mod capture;
 pub mod convert;
 pub mod device;
-pub mod state;
-pub mod capture;
-pub mod waveform;
 pub mod playback;
+pub mod state;
+pub mod waveform;
 
 use thiserror::Error;
 

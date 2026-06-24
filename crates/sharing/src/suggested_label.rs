@@ -84,6 +84,9 @@ mod tests {
         // We can't predict the host's actual hostname, but the function
         // must always return at least one character (either real or "laptop").
         let label = suggested_client_label();
-        assert!(!label.is_empty(), "label must never be empty; got {label:?}");
+        assert!(
+            !label.is_empty(),
+            "label must never be empty; got {label:?}"
+        );
     }
 }

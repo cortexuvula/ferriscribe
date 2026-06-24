@@ -42,7 +42,6 @@ pub enum Theme {
     Light,
 }
 
-
 /// ICD coding version used when generating SOAP notes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,7 +52,6 @@ pub enum IcdVersion {
     Icd10,
     Both,
 }
-
 
 /// The SOAP note template style.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,7 +66,6 @@ pub enum SoapTemplate {
     Pediatric,
     Geriatric,
 }
-
 
 // ---------------------------------------------------------------------------
 // ContextTemplate
@@ -91,17 +88,9 @@ pub struct ContextTemplate {
 // ---------------------------------------------------------------------------
 
 /// ICD coding settings for SOAP generation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SoapNoteSettings {
     pub icd_code_version: IcdVersion,
-}
-
-impl Default for SoapNoteSettings {
-    fn default() -> Self {
-        Self {
-            icd_code_version: IcdVersion::default(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -634,8 +623,14 @@ mod tests {
     fn context_template_round_trip() {
         let mut config = AppConfig::default();
         config.custom_context_templates = vec![
-            ContextTemplate { name: "Follow-up".into(), body: "Follow-up visit.".into() },
-            ContextTemplate { name: "Telehealth".into(), body: "Video consult.".into() },
+            ContextTemplate {
+                name: "Follow-up".into(),
+                body: "Follow-up visit.".into(),
+            },
+            ContextTemplate {
+                name: "Telehealth".into(),
+                body: "Video consult.".into(),
+            },
         ];
         let json = serde_json::to_string(&config).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
@@ -673,7 +668,10 @@ mod tests {
             let json = format!(r#"{{"ai_provider": "{legacy}"}}"#);
             let mut config: AppConfig = serde_json::from_str(&json).unwrap();
             config.migrate();
-            assert_eq!(config.ai_provider, "lmstudio", "Expected '{legacy}' to migrate");
+            assert_eq!(
+                config.ai_provider, "lmstudio",
+                "Expected '{legacy}' to migrate"
+            );
         }
     }
 
@@ -710,7 +708,8 @@ mod tests {
     fn capture_for_training_defaults_to_false_in_older_configs() {
         // Simulate an older config JSON missing the new field.
         let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
-        let cfg: AppConfig = serde_json::from_str(old_json).expect("should parse with serde defaults");
+        let cfg: AppConfig =
+            serde_json::from_str(old_json).expect("should parse with serde defaults");
         assert!(!cfg.capture_for_training, "default must be false");
     }
 
@@ -728,5 +727,4 @@ mod tests {
         let cfg: AppConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.allow_public_endpoint);
     }
-
 }

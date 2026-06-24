@@ -70,8 +70,7 @@ impl VectorsRepo {
         chunk_index: i64,
         metadata: &str,
     ) -> DbResult<()> {
-        let blob: Option<Vec<u8>> =
-            embedding.map(|e| bytemuck::cast_slice(e).to_vec());
+        let blob: Option<Vec<u8>> = embedding.map(|e| bytemuck::cast_slice(e).to_vec());
 
         conn.execute(
             "INSERT OR REPLACE INTO document_chunks
@@ -103,9 +102,7 @@ impl VectorsRepo {
                 let document_id: String = row.get(1)?;
                 let content: String = row.get(2)?;
                 let blob: Vec<u8> = row.get(3)?;
-                let embedding: Vec<f32> = bytemuck::try_cast_slice(&blob)
-                    .unwrap_or(&[])
-                    .to_vec();
+                let embedding: Vec<f32> = bytemuck::try_cast_slice(&blob).unwrap_or(&[]).to_vec();
                 Ok(EmbeddingRecord {
                     id,
                     document_id,
@@ -120,10 +117,7 @@ impl VectorsRepo {
 
     /// Retrieve all chunks belonging to a given document, ordered by
     /// `chunk_index ASC`.
-    pub fn get_by_document(
-        conn: &Connection,
-        document_id: &str,
-    ) -> DbResult<Vec<DocumentChunk>> {
+    pub fn get_by_document(conn: &Connection, document_id: &str) -> DbResult<Vec<DocumentChunk>> {
         let mut stmt = conn.prepare(
             "SELECT id, document_id, content, embedding, chunk_index, metadata, created_at
              FROM document_chunks
@@ -157,11 +151,7 @@ impl VectorsRepo {
 
     /// Total number of rows in `document_chunks` (with or without embeddings).
     pub fn count(conn: &Connection) -> DbResult<u32> {
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM document_chunks",
-            [],
-            |r| r.get(0),
-        )?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM document_chunks", [], |r| r.get(0))?;
         Ok(n as u32)
     }
 
@@ -169,11 +159,7 @@ impl VectorsRepo {
     ///
     /// Returns up to `top_k` results ranked by BM25 relevance. The `rank`
     /// field in [`FtsResult`] is negated so higher values = better matches.
-    pub fn search_fts(
-        conn: &Connection,
-        query: &str,
-        top_k: u32,
-    ) -> DbResult<Vec<FtsResult>> {
+    pub fn search_fts(conn: &Connection, query: &str, top_k: u32) -> DbResult<Vec<FtsResult>> {
         let mut stmt = conn.prepare(
             "SELECT dc.id, dc.content, f.rank
              FROM chunks_fts f
@@ -240,8 +226,13 @@ mod tests {
         assert_eq!(VectorsRepo::count(&conn).unwrap(), 0);
 
         VectorsRepo::insert_chunk(
-            &conn, "c1", "doc1", "Hello world",
-            Some(&[1.0, 2.0, 3.0]), 0, "{}",
+            &conn,
+            "c1",
+            "doc1",
+            "Hello world",
+            Some(&[1.0, 2.0, 3.0]),
+            0,
+            "{}",
         )
         .unwrap();
 
@@ -253,11 +244,8 @@ mod tests {
         let conn = migrated_conn();
         let emb = vec![0.1_f32, 0.2, 0.3, 0.4];
 
-        VectorsRepo::insert_chunk(
-            &conn, "c1", "doc1", "test content",
-            Some(&emb), 0, "{}",
-        )
-        .unwrap();
+        VectorsRepo::insert_chunk(&conn, "c1", "doc1", "test content", Some(&emb), 0, "{}")
+            .unwrap();
 
         let all = VectorsRepo::get_all_embeddings(&conn).unwrap();
         assert_eq!(all.len(), 1);
@@ -272,15 +260,16 @@ mod tests {
 
         // Insert one with embedding, one without.
         VectorsRepo::insert_chunk(
-            &conn, "c1", "doc1", "has embedding",
-            Some(&[1.0, 2.0]), 0, "{}",
+            &conn,
+            "c1",
+            "doc1",
+            "has embedding",
+            Some(&[1.0, 2.0]),
+            0,
+            "{}",
         )
         .unwrap();
-        VectorsRepo::insert_chunk(
-            &conn, "c2", "doc1", "no embedding",
-            None, 1, "{}",
-        )
-        .unwrap();
+        VectorsRepo::insert_chunk(&conn, "c2", "doc1", "no embedding", None, 1, "{}").unwrap();
 
         let all = VectorsRepo::get_all_embeddings(&conn).unwrap();
         assert_eq!(all.len(), 1);
@@ -292,16 +281,8 @@ mod tests {
         let conn = migrated_conn();
 
         // Insert out of order.
-        VectorsRepo::insert_chunk(
-            &conn, "c2", "doc1", "second chunk",
-            None, 1, "{}",
-        )
-        .unwrap();
-        VectorsRepo::insert_chunk(
-            &conn, "c1", "doc1", "first chunk",
-            None, 0, "{}",
-        )
-        .unwrap();
+        VectorsRepo::insert_chunk(&conn, "c2", "doc1", "second chunk", None, 1, "{}").unwrap();
+        VectorsRepo::insert_chunk(&conn, "c1", "doc1", "first chunk", None, 0, "{}").unwrap();
 
         let chunks = VectorsRepo::get_by_document(&conn, "doc1").unwrap();
         assert_eq!(chunks.len(), 2);
@@ -315,18 +296,9 @@ mod tests {
     fn delete_by_document() {
         let conn = migrated_conn();
 
-        VectorsRepo::insert_chunk(
-            &conn, "c1", "doc1", "chunk a", None, 0, "{}",
-        )
-        .unwrap();
-        VectorsRepo::insert_chunk(
-            &conn, "c2", "doc1", "chunk b", None, 1, "{}",
-        )
-        .unwrap();
-        VectorsRepo::insert_chunk(
-            &conn, "c3", "doc2", "other doc", None, 0, "{}",
-        )
-        .unwrap();
+        VectorsRepo::insert_chunk(&conn, "c1", "doc1", "chunk a", None, 0, "{}").unwrap();
+        VectorsRepo::insert_chunk(&conn, "c2", "doc1", "chunk b", None, 1, "{}").unwrap();
+        VectorsRepo::insert_chunk(&conn, "c3", "doc2", "other doc", None, 0, "{}").unwrap();
 
         let deleted = VectorsRepo::delete_by_document(&conn, "doc1").unwrap();
         assert_eq!(deleted, 2);
@@ -345,18 +317,33 @@ mod tests {
         let conn = migrated_conn();
 
         VectorsRepo::insert_chunk(
-            &conn, "c1", "doc1", "the patient has diabetes mellitus",
-            None, 0, "{}",
+            &conn,
+            "c1",
+            "doc1",
+            "the patient has diabetes mellitus",
+            None,
+            0,
+            "{}",
         )
         .unwrap();
         VectorsRepo::insert_chunk(
-            &conn, "c2", "doc1", "hypertension treatment protocol",
-            None, 1, "{}",
+            &conn,
+            "c2",
+            "doc1",
+            "hypertension treatment protocol",
+            None,
+            1,
+            "{}",
         )
         .unwrap();
         VectorsRepo::insert_chunk(
-            &conn, "c3", "doc2", "diabetes management guidelines",
-            None, 0, "{}",
+            &conn,
+            "c3",
+            "doc2",
+            "diabetes management guidelines",
+            None,
+            0,
+            "{}",
         )
         .unwrap();
 
@@ -375,11 +362,7 @@ mod tests {
         for i in 0..5 {
             let id = format!("c{i}");
             let content = format!("medical record number {i}");
-            VectorsRepo::insert_chunk(
-                &conn, &id, "doc1", &content,
-                None, i, "{}",
-            )
-            .unwrap();
+            VectorsRepo::insert_chunk(&conn, &id, "doc1", &content, None, i, "{}").unwrap();
         }
 
         let results = VectorsRepo::search_fts(&conn, "medical", 2).unwrap();
@@ -390,17 +373,9 @@ mod tests {
     fn insert_or_replace_overwrites() {
         let conn = migrated_conn();
 
-        VectorsRepo::insert_chunk(
-            &conn, "c1", "doc1", "original",
-            Some(&[1.0]), 0, "{}",
-        )
-        .unwrap();
+        VectorsRepo::insert_chunk(&conn, "c1", "doc1", "original", Some(&[1.0]), 0, "{}").unwrap();
 
-        VectorsRepo::insert_chunk(
-            &conn, "c1", "doc1", "updated",
-            Some(&[2.0]), 0, "{}",
-        )
-        .unwrap();
+        VectorsRepo::insert_chunk(&conn, "c1", "doc1", "updated", Some(&[2.0]), 0, "{}").unwrap();
 
         assert_eq!(VectorsRepo::count(&conn).unwrap(), 1);
 

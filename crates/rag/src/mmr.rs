@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use medical_core::types::rag::{RagResult, SearchSource};
+use std::collections::HashSet;
 
 /// Compute the cosine similarity between two embedding vectors.
 ///
@@ -107,8 +107,8 @@ fn mmr_score(results: &[RagResult], idx: usize, selected: &[usize], lambda: f32)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
     use medical_core::types::rag::RagChunkMetadata;
+    use uuid::Uuid;
 
     fn make_result(id: u128, score: f32, content: &str) -> RagResult {
         RagResult {
@@ -191,17 +191,26 @@ mod tests {
         // With lambda < 1.0 the diverse result should be preferred over the duplicate.
         let results = vec![
             make_result(1, 0.9, "hypertension blood pressure heart"),
-            make_result(2, 0.85, "hypertension blood pressure heart"),  // near duplicate of 1
-            make_result(3, 0.7, "diabetes insulin glucose"),             // diverse
+            make_result(2, 0.85, "hypertension blood pressure heart"), // near duplicate of 1
+            make_result(3, 0.7, "diabetes insulin glucose"),           // diverse
         ];
         let reranked = mmr_rerank(&results, 0.5, 3);
         // id=1 selected first (highest score). Next: diversity should prefer id=3 over id=2.
         assert_eq!(reranked.len(), 3);
         assert_eq!(reranked[0].chunk_id, Uuid::from_u128(1));
         // id=3 should rank above id=2 because it's diverse
-        let pos_2 = reranked.iter().position(|r| r.chunk_id == Uuid::from_u128(2)).unwrap();
-        let pos_3 = reranked.iter().position(|r| r.chunk_id == Uuid::from_u128(3)).unwrap();
-        assert!(pos_3 < pos_2, "diverse result (pos {pos_3}) should beat duplicate (pos {pos_2})");
+        let pos_2 = reranked
+            .iter()
+            .position(|r| r.chunk_id == Uuid::from_u128(2))
+            .unwrap();
+        let pos_3 = reranked
+            .iter()
+            .position(|r| r.chunk_id == Uuid::from_u128(3))
+            .unwrap();
+        assert!(
+            pos_3 < pos_2,
+            "diverse result (pos {pos_3}) should beat duplicate (pos {pos_2})"
+        );
     }
 
     #[test]
@@ -211,10 +220,7 @@ mod tests {
 
     #[test]
     fn mmr_top_k_larger_than_results() {
-        let results = vec![
-            make_result(1, 0.9, "alpha"),
-            make_result(2, 0.8, "beta"),
-        ];
+        let results = vec![make_result(1, 0.9, "alpha"), make_result(2, 0.8, "beta")];
         let reranked = mmr_rerank(&results, 0.7, 10);
         assert_eq!(reranked.len(), 2);
     }

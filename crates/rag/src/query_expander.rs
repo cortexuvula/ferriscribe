@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use medical_core::types::rag::ExpandedQuery;
+use std::collections::HashMap;
 
 /// Expands medical queries with abbreviations and synonyms to improve retrieval.
 pub struct QueryExpander {
@@ -112,15 +112,9 @@ fn default_abbreviations() -> HashMap<String, Vec<String>> {
         vec!["myocardial infarction".into(), "heart attack".into()],
     );
     m.insert("afib".into(), vec!["atrial fibrillation".into()]);
-    m.insert(
-        "cad".into(),
-        vec!["coronary artery disease".into()],
-    );
+    m.insert("cad".into(), vec!["coronary artery disease".into()]);
     m.insert("dvt".into(), vec!["deep vein thrombosis".into()]);
-    m.insert(
-        "pe".into(),
-        vec!["pulmonary embolism".into()],
-    );
+    m.insert("pe".into(), vec!["pulmonary embolism".into()]);
 
     // Respiratory
     m.insert(
@@ -159,7 +153,10 @@ fn default_abbreviations() -> HashMap<String, Vec<String>> {
     // Gastrointestinal
     m.insert(
         "gerd".into(),
-        vec!["gastroesophageal reflux disease".into(), "acid reflux".into()],
+        vec![
+            "gastroesophageal reflux disease".into(),
+            "acid reflux".into(),
+        ],
     );
     m.insert("ibs".into(), vec!["irritable bowel syndrome".into()]);
 
@@ -176,16 +173,19 @@ fn default_abbreviations() -> HashMap<String, Vec<String>> {
     m.insert("wbc".into(), vec!["white blood cell count".into()]);
     m.insert("rbc".into(), vec!["red blood cell count".into()]);
     m.insert("hgb".into(), vec!["hemoglobin".into()]);
-    m.insert("plt".into(), vec!["platelet count".into(), "platelets".into()]);
+    m.insert(
+        "plt".into(),
+        vec!["platelet count".into(), "platelets".into()],
+    );
     m.insert("bun".into(), vec!["blood urea nitrogen".into()]);
     m.insert("cr".into(), vec!["creatinine".into()]);
     m.insert("inr".into(), vec!["international normalized ratio".into()]);
-    m.insert(
-        "esr".into(),
-        vec!["erythrocyte sedimentation rate".into()],
-    );
+    m.insert("esr".into(), vec!["erythrocyte sedimentation rate".into()]);
     m.insert("crp".into(), vec!["c-reactive protein".into()]);
-    m.insert("hba1c".into(), vec!["hemoglobin a1c".into(), "glycated hemoglobin".into()]);
+    m.insert(
+        "hba1c".into(),
+        vec!["hemoglobin a1c".into(), "glycated hemoglobin".into()],
+    );
     m.insert("ldl".into(), vec!["low density lipoprotein".into()]);
     m.insert("hdl".into(), vec!["high density lipoprotein".into()]);
 
@@ -204,102 +204,30 @@ fn default_abbreviations() -> HashMap<String, Vec<String>> {
 fn default_synonyms() -> HashMap<String, Vec<String>> {
     let mut m: HashMap<String, Vec<String>> = HashMap::new();
 
-    m.insert(
-        "heart attack".into(),
-        vec!["myocardial infarction".into()],
-    );
-    m.insert(
-        "high blood pressure".into(),
-        vec!["hypertension".into()],
-    );
-    m.insert(
-        "stroke".into(),
-        vec!["cerebrovascular accident".into()],
-    );
-    m.insert(
-        "headache".into(),
-        vec!["cephalgia".into()],
-    );
-    m.insert(
-        "chest pain".into(),
-        vec!["angina".into()],
-    );
-    m.insert(
-        "blood clot".into(),
-        vec!["thrombosis".into()],
-    );
-    m.insert(
-        "broken bone".into(),
-        vec!["fracture".into()],
-    );
-    m.insert(
-        "rash".into(),
-        vec!["dermatitis".into()],
-    );
-    m.insert(
-        "swelling".into(),
-        vec!["edema".into()],
-    );
-    m.insert(
-        "dizziness".into(),
-        vec!["vertigo".into()],
-    );
-    m.insert(
-        "tiredness".into(),
-        vec!["fatigue".into()],
-    );
-    m.insert(
-        "itching".into(),
-        vec!["pruritus".into()],
-    );
-    m.insert(
-        "runny nose".into(),
-        vec!["rhinorrhea".into()],
-    );
-    m.insert(
-        "shortness of breath".into(),
-        vec!["dyspnea".into()],
-    );
-    m.insert(
-        "low blood sugar".into(),
-        vec!["hypoglycemia".into()],
-    );
-    m.insert(
-        "high blood sugar".into(),
-        vec!["hyperglycemia".into()],
-    );
-    m.insert(
-        "kidney failure".into(),
-        vec!["renal failure".into()],
-    );
-    m.insert(
-        "heart failure".into(),
-        vec!["cardiac failure".into()],
-    );
-    m.insert(
-        "difficulty swallowing".into(),
-        vec!["dysphagia".into()],
-    );
-    m.insert(
-        "difficulty breathing".into(),
-        vec!["dyspnea".into()],
-    );
-    m.insert(
-        "joint pain".into(),
-        vec!["arthralgia".into()],
-    );
-    m.insert(
-        "muscle pain".into(),
-        vec!["myalgia".into()],
-    );
-    m.insert(
-        "nausea and vomiting".into(),
-        vec!["emesis".into()],
-    );
-    m.insert(
-        "loss of appetite".into(),
-        vec!["anorexia".into()],
-    );
+    m.insert("heart attack".into(), vec!["myocardial infarction".into()]);
+    m.insert("high blood pressure".into(), vec!["hypertension".into()]);
+    m.insert("stroke".into(), vec!["cerebrovascular accident".into()]);
+    m.insert("headache".into(), vec!["cephalgia".into()]);
+    m.insert("chest pain".into(), vec!["angina".into()]);
+    m.insert("blood clot".into(), vec!["thrombosis".into()]);
+    m.insert("broken bone".into(), vec!["fracture".into()]);
+    m.insert("rash".into(), vec!["dermatitis".into()]);
+    m.insert("swelling".into(), vec!["edema".into()]);
+    m.insert("dizziness".into(), vec!["vertigo".into()]);
+    m.insert("tiredness".into(), vec!["fatigue".into()]);
+    m.insert("itching".into(), vec!["pruritus".into()]);
+    m.insert("runny nose".into(), vec!["rhinorrhea".into()]);
+    m.insert("shortness of breath".into(), vec!["dyspnea".into()]);
+    m.insert("low blood sugar".into(), vec!["hypoglycemia".into()]);
+    m.insert("high blood sugar".into(), vec!["hyperglycemia".into()]);
+    m.insert("kidney failure".into(), vec!["renal failure".into()]);
+    m.insert("heart failure".into(), vec!["cardiac failure".into()]);
+    m.insert("difficulty swallowing".into(), vec!["dysphagia".into()]);
+    m.insert("difficulty breathing".into(), vec!["dyspnea".into()]);
+    m.insert("joint pain".into(), vec!["arthralgia".into()]);
+    m.insert("muscle pain".into(), vec!["myalgia".into()]);
+    m.insert("nausea and vomiting".into(), vec!["emesis".into()]);
+    m.insert("loss of appetite".into(), vec!["anorexia".into()]);
 
     m
 }
@@ -356,7 +284,11 @@ mod tests {
         let e = expander();
         let result = e.expand("sob and htn");
         let terms = &result.expanded_terms;
-        assert!(terms.iter().any(|t| t.contains("shortness of breath") || t.contains("dyspnea")));
+        assert!(
+            terms
+                .iter()
+                .any(|t| t.contains("shortness of breath") || t.contains("dyspnea"))
+        );
         assert!(terms.iter().any(|t| t == "hypertension"));
     }
 

@@ -98,9 +98,18 @@ impl CannedResponseSet {
                 "assessment",
                 "On a scale of 1 to 10, how would you rate your pain?",
                 [
-                    ("es", "En una escala del 1 al 10, ¿cómo calificaría su dolor?"),
-                    ("fr", "Sur une échelle de 1 à 10, comment évalueriez-vous votre douleur?"),
-                    ("de", "Auf einer Skala von 1 bis 10, wie würden Sie Ihre Schmerzen bewerten?"),
+                    (
+                        "es",
+                        "En una escala del 1 al 10, ¿cómo calificaría su dolor?",
+                    ),
+                    (
+                        "fr",
+                        "Sur une échelle de 1 à 10, comment évalueriez-vous votre douleur?",
+                    ),
+                    (
+                        "de",
+                        "Auf einer Skala von 1 bis 10, wie würden Sie Ihre Schmerzen bewerten?",
+                    ),
                     ("zh", "在1到10的范围内，您如何评估您的疼痛？"),
                 ],
             ),
@@ -144,7 +153,10 @@ impl CannedResponseSet {
                 [
                     ("es", "Por favor regrese si sus síntomas empeoran."),
                     ("fr", "Veuillez revenir si vos symptômes s'aggravent."),
-                    ("de", "Bitte kommen Sie zurück, wenn sich Ihre Symptome verschlechtern."),
+                    (
+                        "de",
+                        "Bitte kommen Sie zurück, wenn sich Ihre Symptome verschlechtern.",
+                    ),
                     ("zh", "如果您的症状加重，请回来就诊。"),
                 ],
             ),

@@ -21,8 +21,8 @@ use crate::commands::unwrap_app_error_message;
 use crate::state::AppState;
 
 use super::helpers::{
-    is_repeated_phrase_hallucination, load_wav_to_audio_data, mark_recording_failed,
-    mark_recording_failed_db_only, filter_segment_repetitions, persist_orphaned_transcript,
+    filter_segment_repetitions, is_repeated_phrase_hallucination, load_wav_to_audio_data,
+    mark_recording_failed, mark_recording_failed_db_only, persist_orphaned_transcript,
 };
 
 /// Inner implementation of [`super::transcribe_recording`] that accepts an
@@ -56,13 +56,17 @@ pub async fn transcribe_recording_inner(
     // Step 1: Load AppConfig (needed for pre-flight; no recording mutation yet).
     let app_config = {
         let db_cfg = Arc::clone(&state.db);
-        tokio::task::spawn_blocking(move || -> AppResult<medical_core::types::settings::AppConfig> {
-            let conn = db_cfg.conn().map_err(|e| AppError::Database(e.to_string()))?;
-            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            cfg.migrate();
-            Ok(cfg)
-        })
+        tokio::task::spawn_blocking(
+            move || -> AppResult<medical_core::types::settings::AppConfig> {
+                let conn = db_cfg
+                    .conn()
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                    .map_err(|e| AppError::Database(e.to_string()))?;
+                cfg.migrate();
+                Ok(cfg)
+            },
+        )
         .await
         .map_err(|e| AppError::Other(format!("preflight config load join error: {e}")))??
     };
@@ -89,8 +93,7 @@ pub async fn transcribe_recording_inner(
         recording.status = ProcessingStatus::Processing {
             started_at: Utc::now(),
         };
-        RecordingsRepo::update(&conn, &recording)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        RecordingsRepo::update(&conn, &recording).map_err(|e| AppError::Database(e.to_string()))?;
         Ok::<_, AppError>(recording)
     })
     .await
@@ -112,7 +115,10 @@ pub async fn transcribe_recording_inner(
                     );
                     // Persist the corrected path so future retries work directly.
                     recording.audio_path = candidate.clone();
-                    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+                    let conn = state
+                        .db
+                        .conn()
+                        .map_err(|e| AppError::Database(e.to_string()))?;
                     RecordingsRepo::update(&conn, &recording)
                         .map_err(|e| AppError::Database(e.to_string()))?;
                     candidate
@@ -138,30 +144,33 @@ pub async fn transcribe_recording_inner(
 
     // Load and decode the WAV file on a blocking thread (CPU-intensive for large files).
     let wav_path_clone = wav_path.clone();
-    let audio = match tokio::task::spawn_blocking(move || load_wav_to_audio_data(&wav_path_clone))
-        .await
-    {
-        Ok(Ok(audio)) => audio,
-        Ok(Err(e)) => {
-            let err_msg = unwrap_app_error_message(e);
-            return Err(AppError::Processing(
-                mark_recording_failed(&app, &state.db, recording, err_msg).await,
-            ));
-        }
-        Err(e) => {
-            let err_msg = format!("Task join error: {e}");
-            return Err(AppError::Other(
-                mark_recording_failed(&app, &state.db, recording, err_msg).await,
-            ));
-        }
-    };
+    let audio =
+        match tokio::task::spawn_blocking(move || load_wav_to_audio_data(&wav_path_clone)).await {
+            Ok(Ok(audio)) => audio,
+            Ok(Err(e)) => {
+                let err_msg = unwrap_app_error_message(e);
+                return Err(AppError::Processing(
+                    mark_recording_failed(&app, &state.db, recording, err_msg).await,
+                ));
+            }
+            Err(e) => {
+                let err_msg = format!("Task join error: {e}");
+                return Err(AppError::Other(
+                    mark_recording_failed(&app, &state.db, recording, err_msg).await,
+                ));
+            }
+        };
 
     // Compute audio signal stats to detect silent/corrupt recordings.
     let (peak, rms) = if audio.samples.is_empty() {
         (0.0f32, 0.0f32)
     } else {
         let peak = audio.samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        let sum_sq: f64 = audio.samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+        let sum_sq: f64 = audio
+            .samples
+            .iter()
+            .map(|s| (*s as f64) * (*s as f64))
+            .sum();
         let rms = (sum_sq / audio.samples.len() as f64).sqrt() as f32;
         (peak, rms)
     };
@@ -310,7 +319,8 @@ pub async fn transcribe_recording_inner(
     // Guard: if transcription produced no text, mark as Failed rather than
     // silently storing an empty transcript as "Completed".
     if display_text.trim().is_empty() {
-        let err_msg = "Transcription produced no text — the recording may be silent or too short.".to_string();
+        let err_msg = "Transcription produced no text — the recording may be silent or too short."
+            .to_string();
         tracing::warn!(
             provider = %transcript.provider,
             segments = transcript.segments.len(),
@@ -347,7 +357,10 @@ pub async fn transcribe_recording_inner(
             };
             SettingsRepo::load_config(&conn)
                 .ok()
-                .map(|mut c| { c.migrate(); c.vocabulary_enabled })
+                .map(|mut c| {
+                    c.migrate();
+                    c.vocabulary_enabled
+                })
                 .unwrap_or(true)
         })
         .await
@@ -359,11 +372,13 @@ pub async fn transcribe_recording_inner(
             if let Some(conn) = crate::state::load_paired_connection() {
                 if conn.ports.vocab.is_some() {
                     let bearer = crate::state::load_sharing_bearer();
-                    if let Some(remote) = crate::vocab_remote::VocabRemote::from(&conn, bearer, state.http_client.clone()) {
+                    if let Some(remote) = crate::vocab_remote::VocabRemote::from(
+                        &conn,
+                        bearer,
+                        state.http_client.clone(),
+                    ) {
                         match remote.list(None).await {
-                            Ok(list) => {
-                                Some(list.into_iter().filter(|e| e.enabled).collect())
-                            }
+                            Ok(list) => Some(list.into_iter().filter(|e| e.enabled).collect()),
                             Err(e) => {
                                 tracing::warn!(
                                     "remote vocab fetch failed; skipping corrections: {e}"
@@ -371,10 +386,18 @@ pub async fn transcribe_recording_inner(
                                 None
                             }
                         }
-                    } else { None }
-                } else { None }
-            } else { None }
-        } else { None };
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
     let db_vocab = Arc::clone(&state.db);
     let display_text = match tokio::task::spawn_blocking(move || {
@@ -394,8 +417,7 @@ pub async fn transcribe_recording_inner(
             let conn = db_vocab
                 .conn()
                 .map_err(|e| AppError::Database(e.to_string()))?;
-            VocabularyRepo::list_enabled(&conn)
-                .map_err(|e| AppError::Database(e.to_string()))?
+            VocabularyRepo::list_enabled(&conn).map_err(|e| AppError::Database(e.to_string()))?
         };
         if entries.is_empty() {
             return Ok(display_text);
@@ -429,9 +451,9 @@ pub async fn transcribe_recording_inner(
     // Persist the transcript and mark as Completed — on a blocking thread.
     // If persistence fails, route through mark_recording_failed so the frontend
     // spinner clears and the user sees a real error instead of a stuck
-    // `Processing` state. The transcript text is logged via tracing::error! so
-    // operators can recover it manually from logs.
-    let mut recording = recording;
+    // `Processing` state. The transcript text is written to an orphaned-
+    // transcript recovery file (not the log) so operators can recover it
+    // manually; only the path is logged.
     recording.transcript = Some(display_text.clone());
     recording.stt_provider = Some(transcript.provider.clone());
     recording.status = ProcessingStatus::Completed {
@@ -479,9 +501,8 @@ pub async fn transcribe_recording_inner(
         Ok(Ok(())) => { /* success — fall through to emit */ }
         Ok(Err(db_err)) => {
             let inner = unwrap_app_error_message(db_err);
-            let err_msg = format!(
-                "Transcription succeeded but failed to persist final status: {inner}"
-            );
+            let err_msg =
+                format!("Transcription succeeded but failed to persist final status: {inner}");
             let dir = match app.path().app_data_dir() {
                 Ok(d) => d,
                 Err(_) => std::env::temp_dir(),
@@ -503,9 +524,8 @@ pub async fn transcribe_recording_inner(
             ));
         }
         Err(join_err) => {
-            let err_msg = format!(
-                "Transcription succeeded but DB persist task panicked: {join_err}"
-            );
+            let err_msg =
+                format!("Transcription succeeded but DB persist task panicked: {join_err}");
             let dir = match app.path().app_data_dir() {
                 Ok(d) => d,
                 Err(_) => std::env::temp_dir(),
@@ -622,7 +642,11 @@ mod format_tests {
     use medical_core::types::stt::{Transcript, TranscriptSegment};
 
     fn make_transcript(segments: Vec<TranscriptSegment>) -> Transcript {
-        let text = segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+        let text = segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         Transcript {
             text,
             segments,
@@ -658,8 +682,14 @@ mod format_tests {
         ]);
         let result = super::format_transcript_with_speakers(&t);
         // Each segment gets its own SRT-style block with timestamp + speaker.
-        assert!(result.contains("[Speaker 0]"), "first speaker; got: {result}");
-        assert!(result.contains("[Speaker 1]"), "second speaker; got: {result}");
+        assert!(
+            result.contains("[Speaker 0]"),
+            "first speaker; got: {result}"
+        );
+        assert!(
+            result.contains("[Speaker 1]"),
+            "second speaker; got: {result}"
+        );
         assert!(result.contains("Hi"), "first text; got: {result}");
         assert!(result.contains("Hello"), "third text; got: {result}");
         assert!(result.contains("-->"), "timestamps present; got: {result}");
@@ -669,7 +699,7 @@ mod format_tests {
     fn unlabeled_segments_included_not_dropped() {
         let t = make_transcript(vec![
             seg("Doctor speaking", Some("Speaker 1")),
-            seg("mm-hmm", None),  // unlabeled — must NOT be dropped
+            seg("mm-hmm", None), // unlabeled — must NOT be dropped
             seg("I see", Some("Speaker 2")),
         ]);
         let result = super::format_transcript_with_speakers(&t);
@@ -692,21 +722,33 @@ mod format_tests {
             result.contains("Background noise"),
             "unlabeled prefix must appear; got: {result}"
         );
-        assert!(result.contains("[Speaker 0]"), "labeled segment follows; got: {result}");
+        assert!(
+            result.contains("[Speaker 0]"),
+            "labeled segment follows; got: {result}"
+        );
     }
 
     #[test]
     fn unlabeled_after_speaker_folded_into_that_speaker() {
         let t = make_transcript(vec![
             seg("Take this", Some("Speaker 1")),
-            seg("okay", None),  // should fold into Speaker 0
+            seg("okay", None), // should fold into Speaker 0
             seg("Thanks", Some("Speaker 2")),
         ]);
         let result = super::format_transcript_with_speakers(&t);
         // "okay" appears and is attributed to [Speaker 0] (the last known).
-        assert!(result.contains("okay"), "folded text present; got: {result}");
-        assert!(result.contains("[Speaker 0]"), "folded into speaker 0; got: {result}");
-        assert!(result.contains("[Speaker 1]"), "speaker change after fold; got: {result}");
+        assert!(
+            result.contains("okay"),
+            "folded text present; got: {result}"
+        );
+        assert!(
+            result.contains("[Speaker 0]"),
+            "folded into speaker 0; got: {result}"
+        );
+        assert!(
+            result.contains("[Speaker 1]"),
+            "speaker change after fold; got: {result}"
+        );
     }
 
     #[test]
@@ -726,7 +768,7 @@ mod format_tests {
 #[cfg(test)]
 mod preflight_tests {
     use medical_core::error::{AppError, OfflineReason, ServiceKind};
-    use medical_core::preflight::{preflight_for_command, CommandKind};
+    use medical_core::preflight::{CommandKind, preflight_for_command};
     use medical_core::types::settings::AppConfig;
 
     /// Verify that a non-empty, non-loopback `stt_remote_host` triggers a probe
@@ -745,9 +787,7 @@ mod preflight_tests {
         let err = result.expect_err("unrouteable STT host must fail preflight");
         match err {
             AppError::EndpointOffline {
-                service,
-                reason,
-                ..
+                service, reason, ..
             } => {
                 assert_eq!(service, ServiceKind::RemoteStt);
                 assert!(
@@ -793,8 +833,8 @@ mod preflight_tests {
     #[tokio::test]
     async fn transcribe_preflight_failure_does_not_leave_recording_processing() {
         use medical_core::types::recording::{ProcessingStatus, Recording};
-        use medical_db::recordings::RecordingsRepo;
         use medical_db::Database;
+        use medical_db::recordings::RecordingsRepo;
         use std::path::PathBuf;
 
         // Build an in-memory DB and insert a Pending recording.

@@ -161,7 +161,10 @@ mod tests {
         // credential, so any first read sees NoEntry → our wrapper maps
         // that to Ok(None).
         let result = get_db_key().expect("read");
-        assert!(result.is_none(), "expected None on empty keychain, got Some");
+        assert!(
+            result.is_none(),
+            "expected None on empty keychain, got Some"
+        );
     }
 
     #[test]

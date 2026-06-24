@@ -65,7 +65,12 @@ pub async fn ingest_document(
         .ingestion
         .ingest_text(uuid, title, transcript)
         .await
-        .map_err(|e| AppError::Rag(format!("Ingestion failed: {}", super::unwrap_app_error_message(e))))?;
+        .map_err(|e| {
+            AppError::Rag(format!(
+                "Ingestion failed: {}",
+                super::unwrap_app_error_message(e)
+            ))
+        })?;
 
     Ok(IngestResult {
         recording_id,
@@ -87,11 +92,12 @@ pub async fn search_rag(
     let fetch_k = top_k * 2;
 
     // 1. Embed the query (async — calls embedding API)
-    let query_embedding = state
-        .embedding_generator
-        .embed(&query)
-        .await
-        .map_err(|e| AppError::Rag(format!("Embedding failed: {}", super::unwrap_app_error_message(e))))?;
+    let query_embedding = state.embedding_generator.embed(&query).await.map_err(|e| {
+        AppError::Rag(format!(
+            "Embedding failed: {}",
+            super::unwrap_app_error_message(e)
+        ))
+    })?;
 
     // 2. Vector + BM25 search on blocking threads (both hit SQLite)
     let vs = Arc::clone(&state.vector_store);
@@ -134,17 +140,18 @@ pub async fn search_rag(
 /// Return statistics about the RAG knowledge base.
 #[tauri::command]
 pub fn rag_stats(state: tauri::State<'_, AppState>) -> AppResult<RagStats> {
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
 
     let chunk_count = VectorsRepo::count(&conn).map_err(|e| AppError::Database(e.to_string()))?;
 
     // Count graph entities via a direct query (GraphSearch doesn't expose count)
     let entity_count: u32 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM graph_entities",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
+        .query_row("SELECT COUNT(*) FROM graph_entities", [], |r| {
+            r.get::<_, i64>(0)
+        })
         .unwrap_or(0) as u32;
 
     Ok(RagStats {

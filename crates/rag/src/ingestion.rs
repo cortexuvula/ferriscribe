@@ -3,9 +3,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use medical_core::error::{AppError, AppResult};
-use medical_core::types::rag::{
-    DocumentChunk, EntityType, GraphEntity, RagChunkMetadata,
-};
+use medical_core::types::rag::{DocumentChunk, EntityType, GraphEntity, RagChunkMetadata};
 
 use crate::embeddings::EmbeddingGenerator;
 use crate::graph_search::GraphSearch;
@@ -42,12 +40,7 @@ impl IngestionPipeline {
     /// 4. Extracts medical entities and persists them in the knowledge graph.
     ///
     /// Returns the number of chunks created.
-    pub async fn ingest_text(
-        &self,
-        doc_id: Uuid,
-        title: &str,
-        text: &str,
-    ) -> AppResult<u32> {
+    pub async fn ingest_text(&self, doc_id: Uuid, title: &str, text: &str) -> AppResult<u32> {
         let chunks = chunk_text(text, 200, 50);
         if chunks.is_empty() {
             return Ok(0);

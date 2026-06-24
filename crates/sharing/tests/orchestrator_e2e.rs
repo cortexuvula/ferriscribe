@@ -61,9 +61,7 @@ async fn pair_and_proxy_round_trip() {
     rand::thread_rng().fill_bytes(&mut key);
 
     // 1. Set up token store + pairing state.
-    let store = Arc::new(
-        TokenStore::open(tmp.path().join("tokens.db"), &key).unwrap(),
-    );
+    let store = Arc::new(TokenStore::open(tmp.path().join("tokens.db"), &key).unwrap());
     let pairing = Arc::new(PairingState::new(store.clone()));
 
     // 2. Issue a code, simulate enroll-side trade for a token.

@@ -24,9 +24,9 @@
 //!
 //! [`TranslationProvider`]: medical_core::traits::TranslationProvider
 
-pub mod session;
-pub mod canned_responses;
 pub mod ai_translator;
+pub mod canned_responses;
+pub mod session;
 
 use thiserror::Error;
 

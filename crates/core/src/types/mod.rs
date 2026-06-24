@@ -18,26 +18,26 @@
 //! | [`endpoint`] | [`endpoint::RemoteEndpoint`] with LAN/Tailscale resolution |
 //! | [`letter_audience`] | [`letter_audience::LetterAudience`] for generated letters |
 
-pub mod recording;
-pub mod processing;
 pub mod agent;
 pub mod ai;
-pub mod stt;
-pub mod tts;
-pub mod rag;
-pub mod settings;
-pub mod vocabulary;
 pub mod endpoint;
 pub mod letter_audience;
+pub mod processing;
+pub mod rag;
+pub mod recording;
+pub mod settings;
+pub mod stt;
+pub mod tts;
+pub mod vocabulary;
 
-pub use recording::*;
-pub use processing::*;
 pub use agent::*;
 pub use ai::*;
-pub use stt::*;
-pub use tts::*;
-pub use rag::*;
-pub use settings::*;
-pub use vocabulary::*;
 pub use endpoint::*;
 pub use letter_audience::LetterAudience;
+pub use processing::*;
+pub use rag::*;
+pub use recording::*;
+pub use settings::*;
+pub use stt::*;
+pub use tts::*;
+pub use vocabulary::*;

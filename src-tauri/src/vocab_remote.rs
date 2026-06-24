@@ -36,7 +36,11 @@ impl<'a> VocabRemote<'a> {
         let bearer = bearer?;
         // No vocab_port → office server is older than the vocab-sync feature.
         conn.ports.vocab?;
-        Some(Self { conn, bearer, client })
+        Some(Self {
+            conn,
+            bearer,
+            client,
+        })
     }
 
     fn base_url(&self) -> Option<String> {
@@ -44,7 +48,11 @@ impl<'a> VocabRemote<'a> {
         // Prefer LAN; fall back to Tailscale. We don't probe reachability —
         // the request itself does, and reqwest's connect timeout will surface
         // a useful error.
-        let host = self.conn.lan.as_deref().or(self.conn.tailscale.as_deref())?;
+        let host = self
+            .conn
+            .lan
+            .as_deref()
+            .or(self.conn.tailscale.as_deref())?;
         Some(http_url(host, port))
     }
 
@@ -58,7 +66,8 @@ impl<'a> VocabRemote<'a> {
         if let Some(c) = category {
             url.push_str(&format!("?category={}", urlencoding::encode(c)));
         }
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
@@ -77,7 +86,8 @@ impl<'a> VocabRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/vocabulary/count");
-        let resp = self.client
+        let resp = self
+            .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
@@ -96,7 +106,8 @@ impl<'a> VocabRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/vocabulary");
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
@@ -116,7 +127,8 @@ impl<'a> VocabRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/vocabulary/{id}");
-        let resp = self.client
+        let resp = self
+            .client
             .put(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
@@ -136,7 +148,8 @@ impl<'a> VocabRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/vocabulary/{id}");
-        let resp = self.client
+        let resp = self
+            .client
             .delete(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)
@@ -153,7 +166,8 @@ impl<'a> VocabRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no vocab address".into()))?;
         let url = format!("{base}/v1/vocabulary");
-        let resp = self.client
+        let resp = self
+            .client
             .delete(&url)
             .timeout(std::time::Duration::from_secs(15))
             .bearer_auth(&self.bearer)

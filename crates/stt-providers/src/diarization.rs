@@ -122,8 +122,7 @@ impl SpeakerDiarizer {
     ) -> AppResult<Vec<SpeakerTurn>> {
         info!(
             samples = samples_i16.len(),
-            sample_rate,
-            "Starting speaker diarization"
+            sample_rate, "Starting speaker diarization"
         );
 
         // Stage 1: Voice activity detection — find speech segments
@@ -146,7 +145,10 @@ impl SpeakerDiarizer {
 
         // Stage 2: Extract speaker embeddings for each segment
         let embeddings = self.extract_embeddings(&segments)?;
-        debug!(embeddings = embeddings.len(), "Extracted speaker embeddings");
+        debug!(
+            embeddings = embeddings.len(),
+            "Extracted speaker embeddings"
+        );
 
         // Stage 3: Cluster embeddings into speakers
         let speaker_ids = cluster_speakers(&embeddings, 0.5, max_speakers);
@@ -183,11 +185,17 @@ impl SpeakerDiarizer {
         }
 
         let mut session = Session::builder()
-            .map_err(|e| AppError::SttProvider(format!("Failed to create segmentation session builder: {e}")))?
+            .map_err(|e| {
+                AppError::SttProvider(format!(
+                    "Failed to create segmentation session builder: {e}"
+                ))
+            })?
             .with_intra_threads(1)
             .map_err(|e| AppError::SttProvider(format!("Failed to set intra threads: {e}")))?
             .commit_from_file(&self.segmentation_path)
-            .map_err(|e| AppError::SttProvider(format!("Failed to load segmentation model: {e}")))?;
+            .map_err(|e| {
+                AppError::SttProvider(format!("Failed to load segmentation model: {e}"))
+            })?;
 
         let window_size = (sample_rate * 10) as usize; // 10-second windows
         let frame_size: usize = 270;
@@ -219,19 +227,19 @@ impl SpeakerDiarizer {
             let window_f32: Vec<f32> = window.iter().map(|&s| s as f32).collect();
 
             // Shape: [1, 1, window_size]
-            let input = TensorRef::from_array_view(
-                ([1_usize, 1, window_f32.len()], &*window_f32),
-            )
-            .map_err(|e| AppError::SttProvider(format!("Failed to create input tensor: {e}")))?;
+            let input = TensorRef::from_array_view(([1_usize, 1, window_f32.len()], &*window_f32))
+                .map_err(|e| {
+                    AppError::SttProvider(format!("Failed to create input tensor: {e}"))
+                })?;
 
-            let outputs = session
-                .run(ort::inputs![input])
-                .map_err(|e| AppError::SttProvider(format!("Segmentation inference failed: {e}")))?;
+            let outputs = session.run(ort::inputs![input]).map_err(|e| {
+                AppError::SttProvider(format!("Segmentation inference failed: {e}"))
+            })?;
 
             let output = &outputs[0];
-            let (shape, data) = output
-                .try_extract_tensor::<f32>()
-                .map_err(|e| AppError::SttProvider(format!("Failed to extract segmentation output: {e}")))?;
+            let (shape, data) = output.try_extract_tensor::<f32>().map_err(|e| {
+                AppError::SttProvider(format!("Failed to extract segmentation output: {e}"))
+            })?;
 
             let shape_slice: Vec<usize> = (0..shape.len()).map(|i| shape[i] as usize).collect();
             let view = ArrayViewD::<f32>::from_shape(IxDyn(&shape_slice), data)
@@ -292,12 +300,11 @@ impl SpeakerDiarizer {
     }
 
     /// Stage 2: Extract speaker embedding for each speech segment using the wespeaker model.
-    fn extract_embeddings(
-        &self,
-        segments: &[SpeechSegment],
-    ) -> AppResult<Vec<Vec<f32>>> {
+    fn extract_embeddings(&self, segments: &[SpeechSegment]) -> AppResult<Vec<Vec<f32>>> {
         let mut session = Session::builder()
-            .map_err(|e| AppError::SttProvider(format!("Failed to create embedding session builder: {e}")))?
+            .map_err(|e| {
+                AppError::SttProvider(format!("Failed to create embedding session builder: {e}"))
+            })?
             .with_intra_threads(1)
             .map_err(|e| AppError::SttProvider(format!("Failed to set intra threads: {e}")))?
             .commit_from_file(&self.embedding_path)
@@ -318,18 +325,19 @@ impl SpeakerDiarizer {
             let feat_data = features.into_raw_vec_and_offset().0;
 
             // Reshape to [1, frames, 80] for batch dimension
-            let input = Tensor::from_array(
-                ([1_usize, feat_shape[0], feat_shape[1]], feat_data.into_boxed_slice()),
-            )
+            let input = Tensor::from_array((
+                [1_usize, feat_shape[0], feat_shape[1]],
+                feat_data.into_boxed_slice(),
+            ))
             .map_err(|e| AppError::SttProvider(format!("Failed to create embedding input: {e}")))?;
 
             let outputs = session
                 .run(ort::inputs!["feats" => input])
                 .map_err(|e| AppError::SttProvider(format!("Embedding inference failed: {e}")))?;
 
-            let emb_output = outputs
-                .get("embs")
-                .ok_or_else(|| AppError::SttProvider("Embedding model missing 'embs' output".to_string()))?;
+            let emb_output = outputs.get("embs").ok_or_else(|| {
+                AppError::SttProvider("Embedding model missing 'embs' output".to_string())
+            })?;
 
             let (_, data) = emb_output
                 .try_extract_tensor::<f32>()
@@ -397,7 +405,12 @@ fn cluster_speakers(
                     *c = (*c * n + e) / (n + 1.0);
                 }
                 *count += 1;
-                debug!(segment = idx, speaker = id, similarity = format!("{:.4}", best_sim), "Assigned to existing speaker");
+                debug!(
+                    segment = idx,
+                    speaker = id,
+                    similarity = format!("{:.4}", best_sim),
+                    "Assigned to existing speaker"
+                );
                 id
             }
             None => {
@@ -462,10 +475,8 @@ fn merge_similar_centroids(
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
                 let sim = cosine_similarity(&centroids[&ids[i]], &centroids[&ids[j]]);
-                if sim > merge_threshold {
-                    if best_merge.is_none() || sim > best_merge.unwrap().2 {
-                        best_merge = Some((ids[i], ids[j], sim));
-                    }
+                if sim > merge_threshold && (best_merge.is_none() || sim > best_merge.unwrap().2) {
+                    best_merge = Some((ids[i], ids[j], sim));
                 }
             }
         }
@@ -613,7 +624,11 @@ mod tests {
         ];
         let ids = cluster_speakers(&embeddings, 0.5, Some(2));
         let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
-        assert!(unique.len() <= 2, "Expected at most 2 speakers, got {}", unique.len());
+        assert!(
+            unique.len() <= 2,
+            "Expected at most 2 speakers, got {}",
+            unique.len()
+        );
     }
 
     #[test]

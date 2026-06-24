@@ -144,10 +144,7 @@ impl TtsProvider for ElevenLabsTtsProvider {
     /// Returns [`AppError::TtsProvider`] on network failure, non-2xx HTTP
     /// status, or failure to read the response body.
     async fn synthesize(&self, text: &str, config: TtsConfig) -> AppResult<Vec<u8>> {
-        let voice_id = config
-            .voice
-            .as_deref()
-            .unwrap_or("21m00Tcm4TlvDq8ikWAM");
+        let voice_id = config.voice.as_deref().unwrap_or("21m00Tcm4TlvDq8ikWAM");
         let model = config.model.as_deref().unwrap_or("eleven_flash_v2_5");
         let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{voice_id}");
 

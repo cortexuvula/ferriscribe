@@ -47,9 +47,7 @@ pub async fn list_vocabulary_entries(
                 VocabularyRepo::list_by_category(&conn, &cat)
                     .map_err(|e| AppError::Database(e.to_string()))
             }
-            None => {
-                VocabularyRepo::list_all(&conn).map_err(|e| AppError::Database(e.to_string()))
-            }
+            None => VocabularyRepo::list_all(&conn).map_err(|e| AppError::Database(e.to_string())),
         }
     })
     .await
@@ -127,8 +125,7 @@ pub async fn update_vocabulary_entry(
     priority: Option<i32>,
     enabled: Option<bool>,
 ) -> AppResult<VocabularyEntry> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|e| AppError::Other(format!("Invalid ID: {e}")))?;
+    let uuid = Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("Invalid ID: {e}")))?;
     if let Some((conn, bearer)) = paired_vocab_target() {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
@@ -182,8 +179,7 @@ pub async fn delete_vocabulary_entry(
     state: tauri::State<'_, AppState>,
     id: String,
 ) -> AppResult<()> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|e| AppError::Other(format!("Invalid ID: {e}")))?;
+    let uuid = Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("Invalid ID: {e}")))?;
     if let Some((conn, bearer)) = paired_vocab_target() {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
@@ -200,9 +196,7 @@ pub async fn delete_vocabulary_entry(
 
 /// Delete all vocabulary entries.
 #[tauri::command]
-pub async fn delete_all_vocabulary_entries(
-    state: tauri::State<'_, AppState>,
-) -> AppResult<u32> {
+pub async fn delete_all_vocabulary_entries(state: tauri::State<'_, AppState>) -> AppResult<u32> {
     if let Some((conn, bearer)) = paired_vocab_target() {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
@@ -219,9 +213,7 @@ pub async fn delete_all_vocabulary_entries(
 
 /// Get vocabulary counts as `(total, enabled)`.
 #[tauri::command]
-pub async fn get_vocabulary_count(
-    state: tauri::State<'_, AppState>,
-) -> AppResult<(u32, u32)> {
+pub async fn get_vocabulary_count(state: tauri::State<'_, AppState>) -> AppResult<(u32, u32)> {
     if let Some((conn, bearer)) = paired_vocab_target() {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;

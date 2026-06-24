@@ -32,8 +32,8 @@ use tracing::{info, warn};
 use medical_core::error::{AppError, AppResult};
 use medical_core::traits::SttProvider;
 use medical_core::types::{
-    http_url, AudioData, AudioStream, RemoteEndpoint, SttConfig, Transcript, TranscriptChunk,
-    TranscriptSegment,
+    AudioData, AudioStream, RemoteEndpoint, SttConfig, Transcript, TranscriptChunk,
+    TranscriptSegment, http_url,
 };
 
 use crate::audio_prep;
@@ -173,10 +173,9 @@ impl RemoteSttProvider {
             ] {
                 if let Some(h) = opt_host {
                     medical_core::endpoint_policy::validate_local_endpoint(h, allow_public)
-                        .map_err(|err| AppError::invalid_endpoint_for(
-                            err,
-                            format!("stt_remote_host.{label}"),
-                        ))?;
+                        .map_err(|err| {
+                            AppError::invalid_endpoint_for(err, format!("stt_remote_host.{label}"))
+                        })?;
                 }
             }
         }
@@ -285,7 +284,9 @@ impl SttProvider for RemoteSttProvider {
         // diarize requested) vs. skipped. An empty speaker_turns after a
         // successful run just means a single speaker was detected — that's not
         // a failure and must not trigger a "models missing" warning.
-        let (speaker_turns, diarization_attempted) = if config.diarize && self.diarization_available() {
+        let (speaker_turns, diarization_attempted) = if config.diarize
+            && self.diarization_available()
+        {
             let seg_path = self.segmentation_model_path.clone();
             let emb_path = self.embedding_model_path.clone();
             let audio_for_diarize = samples_i16;
@@ -421,7 +422,11 @@ mod tests {
         let transcript = provider
             .transcribe(
                 dummy_audio(),
-                SttConfig { language: Some("en".into()), diarize: false, ..SttConfig::default() },
+                SttConfig {
+                    language: Some("en".into()),
+                    diarize: false,
+                    ..SttConfig::default()
+                },
                 CancellationToken::new(),
             )
             .await
@@ -483,7 +488,11 @@ mod tests {
         let elapsed = started.elapsed();
 
         // Should have returned an error (cancelled) well under the 5s mock delay.
-        assert!(result.is_err(), "expected Err on cancellation, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "expected Err on cancellation, got {:?}",
+            result
+        );
         assert!(
             elapsed < Duration::from_secs(2),
             "transcribe should return promptly on cancel, took {:?}",
@@ -516,10 +525,18 @@ mod tests {
 
         let provider = provider_at(&server.uri(), None);
         let transcript = provider
-            .transcribe(dummy_audio(), SttConfig::default(), CancellationToken::new())
+            .transcribe(
+                dummy_audio(),
+                SttConfig::default(),
+                CancellationToken::new(),
+            )
             .await
             .expect("transcribe");
-        assert_eq!(transcript.segments.len(), 1, "empty/missing text segments must be filtered");
+        assert_eq!(
+            transcript.segments.len(),
+            1,
+            "empty/missing text segments must be filtered"
+        );
         assert_eq!(transcript.segments[0].text, "Hello.");
     }
 
@@ -543,7 +560,10 @@ mod tests {
         });
 
         p.set_endpoint(None, false).await.expect("clear endpoint");
-        assert!(p.url_cache.lock().await.is_none(), "cache must be cleared on set_endpoint");
+        assert!(
+            p.url_cache.lock().await.is_none(),
+            "cache must be cleared on set_endpoint"
+        );
     }
 
     #[test]

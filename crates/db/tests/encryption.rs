@@ -14,17 +14,24 @@ fn migration_happy_path_preserves_row_counts() {
             "CREATE TABLE recordings (id TEXT, transcript TEXT);
              INSERT INTO recordings VALUES ('r1', 'hello'), ('r2', 'world');
              CREATE TABLE notes (id INTEGER, body TEXT);
-             INSERT INTO notes VALUES (1, 'note one'), (2, 'note two'), (3, 'note three');"
-        ).unwrap();
+             INSERT INTO notes VALUES (1, 'note one'), (2, 'note two'), (3, 'note three');",
+        )
+        .unwrap();
     }
 
     let key = [0xABu8; 32];
     let outcome = migrate_plaintext_to_encrypted(&db_path, &key).expect("migration");
-    assert!(outcome.backup_deleted, "backup should be deleted on success");
+    assert!(
+        outcome.backup_deleted,
+        "backup should be deleted on success"
+    );
     assert_eq!(outcome.encrypted_path, db_path);
 
     // The DB at db_path is now encrypted — its header is no longer "SQLite format 3\0".
-    assert!(!is_plaintext_db(&db_path).unwrap(), "DB should no longer be plaintext");
+    assert!(
+        !is_plaintext_db(&db_path).unwrap(),
+        "DB should no longer be plaintext"
+    );
 
     // Backup should be gone.
     let mut backup = db_path.as_os_str().to_owned();
@@ -46,7 +53,11 @@ fn migration_happy_path_preserves_row_counts() {
 
     // Verify a row's content too — make sure we're not just counting empty rows.
     let transcript: String = conn
-        .query_row("SELECT transcript FROM recordings WHERE id = 'r1'", [], |row| row.get(0))
+        .query_row(
+            "SELECT transcript FROM recordings WHERE id = 'r1'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(transcript, "hello");
 }
@@ -60,7 +71,8 @@ fn migration_is_idempotent_check_via_is_plaintext_db() {
 
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch("CREATE TABLE t (x); INSERT INTO t VALUES (1);").unwrap();
+        conn.execute_batch("CREATE TABLE t (x); INSERT INTO t VALUES (1);")
+            .unwrap();
     }
 
     let key = [0xABu8; 32];
@@ -83,8 +95,9 @@ fn migration_preserves_indices_and_views() {
             "CREATE TABLE recordings (id TEXT PRIMARY KEY, transcript TEXT);
              CREATE INDEX idx_recordings_transcript ON recordings(transcript);
              CREATE VIEW recordings_view AS SELECT id FROM recordings;
-             INSERT INTO recordings VALUES ('r1', 'hello world');"
-        ).unwrap();
+             INSERT INTO recordings VALUES ('r1', 'hello world');",
+        )
+        .unwrap();
     }
 
     let key = [0xABu8; 32];
@@ -94,12 +107,18 @@ fn migration_preserves_indices_and_views() {
     apply_pragma_key(&conn, &key).unwrap();
 
     // Index survived — query plan check.
-    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='recordings'").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='recordings'")
+        .unwrap();
     let indices: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(0)).unwrap()
-        .collect::<Result<Vec<_>, _>>().unwrap();
-    assert!(indices.iter().any(|n| n == "idx_recordings_transcript"),
-        "index should survive migration; got: {indices:?}");
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        indices.iter().any(|n| n == "idx_recordings_transcript"),
+        "index should survive migration; got: {indices:?}"
+    );
 
     // View survived.
     let view_count: i64 = conn

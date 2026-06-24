@@ -5,15 +5,15 @@
 //! file and emits downsampled waveform snapshots for UI visualization.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, StreamTrait};
-use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
+use ringbuf::traits::{Consumer, Producer, Split};
 
 use crate::{AudioError, AudioResult};
 
@@ -139,14 +139,7 @@ fn negotiate_stream_config(
     };
 
     // Rates to try, in priority order: requested rate first, then common rates.
-    let candidate_rates: &[u32] = &[
-        desired.sample_rate,
-        48_000,
-        44_100,
-        16_000,
-        22_050,
-        96_000,
-    ];
+    let candidate_rates: &[u32] = &[desired.sample_rate, 48_000, 44_100, 16_000, 22_050, 96_000];
 
     for &rate in candidate_rates {
         for range in &pool {
@@ -190,7 +183,10 @@ pub fn start_capture(
 
     tracing::info!(
         "Audio capture: requested {}Hz {}ch, using {}Hz {}ch",
-        config.sample_rate, config.channels, actual_rate, actual_channels
+        config.sample_rate,
+        config.channels,
+        actual_rate,
+        actual_channels
     );
 
     // ── Ring buffer (2 seconds of audio) ─────────────────────────────────────
@@ -392,7 +388,15 @@ mod tests {
         // target_len = 2 → chunk_size = 3
         let result = downsample_waveform(&samples, 2);
         assert_eq!(result.len(), 2);
-        assert!((result[0] - 0.9).abs() < 1e-6, "first peak should be 0.9, got {}", result[0]);
-        assert!((result[1] - 0.4).abs() < 1e-6, "second peak should be 0.4, got {}", result[1]);
+        assert!(
+            (result[0] - 0.9).abs() < 1e-6,
+            "first peak should be 0.9, got {}",
+            result[0]
+        );
+        assert!(
+            (result[1] - 0.4).abs() < 1e-6,
+            "second peak should be 0.4, got {}",
+            result[1]
+        );
     }
 }

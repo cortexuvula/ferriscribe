@@ -97,11 +97,7 @@ impl ProcessingQueueRepo {
     /// # Errors
     ///
     /// Returns [`DbError::NotFound`] if no task with the given ID exists.
-    pub fn update_status(
-        conn: &Connection,
-        task_id: &Uuid,
-        status: &str,
-    ) -> DbResult<()> {
+    pub fn update_status(conn: &Connection, task_id: &Uuid, status: &str) -> DbResult<()> {
         let rows = conn.execute(
             "UPDATE processing_queue SET status = ?1 WHERE id = ?2",
             rusqlite::params![status, task_id.to_string()],
@@ -114,10 +110,7 @@ impl ProcessingQueueRepo {
 
     /// Retrieve all tasks associated with a given recording, ordered by
     /// `created_at ASC`.
-    pub fn get_by_recording(
-        conn: &Connection,
-        recording_id: &Uuid,
-    ) -> DbResult<Vec<QueueTask>> {
+    pub fn get_by_recording(conn: &Connection, recording_id: &Uuid) -> DbResult<Vec<QueueTask>> {
         let mut stmt = conn.prepare(
             "SELECT id, recording_id, task_type, priority, status,
                     created_at, started_at, completed_at, error_count,
@@ -152,10 +145,20 @@ impl ProcessingQueueRepo {
         let id_str: String = row.get(0)?;
         let rec_id_str: String = row.get(1)?;
         Ok(QueueTask {
-            id: Uuid::parse_str(&id_str)
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))?,
-            recording_id: Uuid::parse_str(&rec_id_str)
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+            id: Uuid::parse_str(&id_str).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
+            recording_id: Uuid::parse_str(&rec_id_str).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
             task_type: row.get(2)?,
             priority: row.get(3)?,
             status: row.get(4)?,
@@ -218,17 +221,23 @@ mod tests {
         let high = ProcessingQueueRepo::enqueue(&conn, &rec_id, "high_task", 1).unwrap();
 
         // Dequeue should return the high-priority task
-        let task = ProcessingQueueRepo::dequeue(&conn).unwrap().expect("should return a task");
+        let task = ProcessingQueueRepo::dequeue(&conn)
+            .unwrap()
+            .expect("should return a task");
         assert_eq!(task.id, high);
         assert_eq!(task.task_type, "high_task");
         assert_eq!(task.status, "processing");
 
         // Dequeue again — should return normal
-        let task2 = ProcessingQueueRepo::dequeue(&conn).unwrap().expect("should return a task");
+        let task2 = ProcessingQueueRepo::dequeue(&conn)
+            .unwrap()
+            .expect("should return a task");
         assert_eq!(task2.task_type, "normal_task");
 
         // And then low
-        let task3 = ProcessingQueueRepo::dequeue(&conn).unwrap().expect("should return a task");
+        let task3 = ProcessingQueueRepo::dequeue(&conn)
+            .unwrap()
+            .expect("should return a task");
         assert_eq!(task3.task_type, "low_task");
 
         // Queue should now be empty

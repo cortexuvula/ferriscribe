@@ -32,14 +32,14 @@
 //! 10-point self-check checklist to enforce this. If you modify the SOAP prompt,
 //! run the full `soap_generator` test suite — it encodes dozens of invariants.
 
-pub mod pipeline;
 pub mod batch;
+pub mod document_generator;
+pub mod edit_distance;
+pub mod peer_discussion;
+pub mod pipeline;
 pub mod prompt_resolver;
 pub mod soap_generator;
-pub mod document_generator;
-pub mod peer_discussion;
 pub mod vocabulary_corrector;
-pub mod edit_distance;
 
 use thiserror::Error;
 

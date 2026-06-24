@@ -25,45 +25,46 @@ fn paired_dict_target() -> Option<(crate::commands::sharing::PairedConnection, S
 }
 
 #[tauri::command]
-pub async fn user_dict_list(
-    state: tauri::State<'_, AppState>,
-) -> AppResult<Vec<String>> {
+pub async fn user_dict_list(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
     if let Some((conn, bearer)) = paired_dict_target() {
         let remote = UserDictRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired dict target unavailable".into()))?;
         return remote.list().await;
     }
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     medical_db::user_dictionary::UserDictionaryRepo::list(&conn)
         .map_err(|e| AppError::Database(e.to_string()))
 }
 
 #[tauri::command]
-pub async fn user_dict_add(
-    state: tauri::State<'_, AppState>,
-    word: String,
-) -> AppResult<bool> {
+pub async fn user_dict_add(state: tauri::State<'_, AppState>, word: String) -> AppResult<bool> {
     if let Some((conn, bearer)) = paired_dict_target() {
         let remote = UserDictRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired dict target unavailable".into()))?;
         return remote.add(&word).await;
     }
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     medical_db::user_dictionary::UserDictionaryRepo::add(&conn, &word)
         .map_err(|e| AppError::Database(e.to_string()))
 }
 
 #[tauri::command]
-pub async fn user_dict_remove(
-    state: tauri::State<'_, AppState>,
-    word: String,
-) -> AppResult<bool> {
+pub async fn user_dict_remove(state: tauri::State<'_, AppState>, word: String) -> AppResult<bool> {
     if let Some((conn, bearer)) = paired_dict_target() {
         let remote = UserDictRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired dict target unavailable".into()))?;
         return remote.remove(&word).await;
     }
-    let conn = state.db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state
+        .db
+        .conn()
+        .map_err(|e| AppError::Database(e.to_string()))?;
     medical_db::user_dictionary::UserDictionaryRepo::remove(&conn, &word)
         .map_err(|e| AppError::Database(e.to_string()))
 }

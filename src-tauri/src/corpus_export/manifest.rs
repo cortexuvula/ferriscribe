@@ -5,12 +5,12 @@ use serde::Serialize;
 #[derive(Serialize, Clone)]
 pub struct Manifest {
     pub schema_version: u32,
-    pub exported_at: String,               // RFC3339
+    pub exported_at: String, // RFC3339
     pub ferri_scribe_version: String,
     pub corpus_size: CorpusSize,
     pub base_model_filter: Vec<String>,
     pub prompt_template_filter: Vec<String>,
-    pub redaction_strictness: String,      // 'standard' | 'aggressive'
+    pub redaction_strictness: String, // 'standard' | 'aggressive'
     pub redaction_rules_applied: Vec<String>,
     pub warnings: Vec<Warning>,
 }

@@ -19,9 +19,9 @@
 //!
 //! [`Recording`]: medical_core::types::recording::Recording
 
-pub mod pdf;
 pub mod docx;
 pub mod fhir;
+pub mod pdf;
 
 use thiserror::Error;
 

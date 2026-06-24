@@ -34,21 +34,21 @@
 //! See `state::AppState` for the managed state type and the `commands`
 //! module for the full command inventory.
 
-mod state;
 mod commands;
 pub mod corpus_export;
 mod sharing_vocab_api;
-mod vocab_remote;
-mod user_dict_remote;
+mod state;
 mod templates_remote;
+mod user_dict_remote;
+mod vocab_remote;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use state::{AppState, InitError, RecoveryState};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 /// Resolve the log directory inside the app data folder.
 ///
@@ -79,7 +79,7 @@ pub fn run() {
              medical_ai_providers=info,\
              medical_audio=info,\
              medical_processing=debug,\
-             info"
+             info",
         )
     });
 
@@ -92,8 +92,7 @@ pub fn run() {
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     // Console layer — compact format for terminal
-    let console_layer = tracing_subscriber::fmt::layer()
-        .compact();
+    let console_layer = tracing_subscriber::fmt::layer().compact();
 
     // File layer — full timestamps, structured fields, no ANSI colors
     let file_layer = tracing_subscriber::fmt::layer()
@@ -187,9 +186,7 @@ pub fn run() {
     if app_state_managed {
         builder = builder.setup(|app| {
             if let Some(cfg) = crate::state::load_server_config() {
-                tracing::info!(
-                    "auto-resuming office-server mode from saved config"
-                );
+                tracing::info!("auto-resuming office-server mode from saved config");
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     use tauri::Manager;
@@ -251,7 +248,6 @@ pub fn run() {
             commands::settings::set_onboarding_started,
             commands::settings::get_api_key,
             commands::settings::set_api_key,
-            commands::settings::list_api_keys,
             commands::settings::get_default_prompt,
             commands::export::export_pdf,
             commands::export::export_docx,
@@ -343,8 +339,8 @@ pub fn run() {
 
 /// Remove log files older than `keep_days`.
 fn cleanup_old_logs(dir: &std::path::Path, keep_days: u64) {
-    let cutoff = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(keep_days * 24 * 3600);
+    let cutoff =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(keep_days * 24 * 3600);
 
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -368,10 +364,11 @@ fn cleanup_old_logs(dir: &std::path::Path, keep_days: u64) {
         }
         if let Ok(meta) = path.metadata()
             && let Ok(modified) = meta.modified()
-                && modified < cutoff {
-                    tracing::debug!(file = %path.display(), "Removing old log file");
-                    let _ = std::fs::remove_file(&path);
-                }
+            && modified < cutoff
+        {
+            tracing::debug!(file = %path.display(), "Removing old log file");
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 

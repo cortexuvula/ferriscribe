@@ -53,9 +53,25 @@ mod tests {
     fn redacts_phi_in_log_details() {
         let input = "User action: looked up SSN 123-45-6789 for patient john@example.com";
         let output = AuditLogger::redact_for_log(input);
-        assert!(!output.contains("123-45-6789"), "SSN should be redacted: {}", output);
-        assert!(!output.contains("john@example.com"), "email should be redacted: {}", output);
-        assert!(output.contains("[SSN]"), "expected [SSN] placeholder: {}", output);
-        assert!(output.contains("[EMAIL]"), "expected [EMAIL] placeholder: {}", output);
+        assert!(
+            !output.contains("123-45-6789"),
+            "SSN should be redacted: {}",
+            output
+        );
+        assert!(
+            !output.contains("john@example.com"),
+            "email should be redacted: {}",
+            output
+        );
+        assert!(
+            output.contains("[SSN]"),
+            "expected [SSN] placeholder: {}",
+            output
+        );
+        assert!(
+            output.contains("[EMAIL]"),
+            "expected [EMAIL] placeholder: {}",
+            output
+        );
     }
 }

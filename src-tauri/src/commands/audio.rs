@@ -3,17 +3,17 @@ use std::time::Instant;
 
 use serde::Serialize;
 use tauri::Emitter;
-use tracing::{info, warn, instrument};
+use tracing::{info, instrument, warn};
 use uuid::Uuid;
 
 use medical_audio::capture::CaptureConfig;
-use medical_audio::device::{get_input_device, list_input_devices, AudioDevice};
+use medical_audio::device::{AudioDevice, get_input_device, list_input_devices};
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::recording::{ProcessingStatus, Recording};
 use medical_db::recordings::RecordingsRepo;
 
-use crate::state::{AppState, CurrentRecording, SendCaptureHandle};
 use super::resolve_recordings_dir;
+use crate::state::{AppState, CurrentRecording, SendCaptureHandle};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 1. list_audio_devices
@@ -96,7 +96,9 @@ pub async fn start_recording(
     });
 
     // Capture values for logging before they move into closures.
-    let device_name_for_log = input_device_name.clone().unwrap_or_else(|| "default".to_string());
+    let device_name_for_log = input_device_name
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
     let wav_path_for_log = wav_path.display().to_string();
 
     // Start capture on a dedicated std::thread so the !Send CaptureHandle
@@ -133,14 +135,18 @@ pub async fn start_recording(
 
     // Store capture handle in AppState.
     {
-        let mut handle_lock = state.capture_handle.lock()
+        let mut handle_lock = state
+            .capture_handle
+            .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
         *handle_lock = send_handle;
     }
 
     // Store current recording info.
     {
-        let mut rec_lock = state.current_recording.lock()
+        let mut rec_lock = state
+            .current_recording
+            .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
         *rec_lock = Some(CurrentRecording {
             id: recording_id.to_string(),
@@ -189,14 +195,14 @@ pub async fn start_recording(
 /// recording ID.
 #[tauri::command]
 #[instrument(skip(state), name = "audio::stop_recording")]
-pub async fn stop_recording(
-    state: tauri::State<'_, AppState>,
-) -> AppResult<String> {
+pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<String> {
     // Take the CaptureHandle out of AppState as a SendCaptureHandle (which is
     // Send+Sync).  We must NOT hold a bare CaptureHandle across an .await
     // because CaptureHandle is !Send.
     let wrapper = {
-        let mut handle_lock = state.capture_handle.lock()
+        let mut handle_lock = state
+            .capture_handle
+            .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
         let inner = handle_lock.0.take();
         SendCaptureHandle(inner)
@@ -209,9 +215,7 @@ pub async fn stop_recording(
             let mut active = state.recording_active.lock().await;
             *active = false;
         }
-        return Err(AppError::Audio(
-            "No active recording to stop".to_string(),
-        ));
+        return Err(AppError::Audio("No active recording to stop".to_string()));
     }
 
     // Drop the wrapper on a blocking worker so CaptureHandle::drop (which
@@ -228,13 +232,15 @@ pub async fn stop_recording(
 
     // Take the current recording info.
     let current = {
-        let mut rec_lock = state.current_recording.lock()
+        let mut rec_lock = state
+            .current_recording
+            .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
         rec_lock.take()
     };
 
-    let current = current
-        .ok_or_else(|| AppError::Audio("No current recording info found".to_string()))?;
+    let current =
+        current.ok_or_else(|| AppError::Audio("No current recording info found".to_string()))?;
 
     // Compute duration from elapsed time.
     let duration_secs = current.started_at.elapsed().as_secs_f64();
@@ -292,12 +298,12 @@ pub async fn stop_recording(
 
 /// Cancel the current recording, discarding the audio file without saving.
 #[tauri::command]
-pub async fn cancel_recording(
-    state: tauri::State<'_, AppState>,
-) -> AppResult<()> {
+pub async fn cancel_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
     // Take the CaptureHandle out of AppState.
     let wrapper = {
-        let mut handle_lock = state.capture_handle.lock()
+        let mut handle_lock = state
+            .capture_handle
+            .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
         let inner = handle_lock.0.take();
         SendCaptureHandle(inner)
@@ -312,13 +318,13 @@ pub async fn cancel_recording(
         }
         // Also clear any stale current_recording slot.
         {
-            let mut rec_lock = state.current_recording.lock()
+            let mut rec_lock = state
+                .current_recording
+                .lock()
                 .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
             *rec_lock = None;
         }
-        return Err(AppError::Audio(
-            "No active recording to cancel".to_string(),
-        ));
+        return Err(AppError::Audio("No active recording to cancel".to_string()));
     }
 
     // Drop the capture handle on a blocking worker so its drop (which joins
@@ -335,15 +341,18 @@ pub async fn cancel_recording(
 
     // Take the current recording info and delete the WAV file.
     let current = {
-        let mut rec_lock = state.current_recording.lock()
+        let mut rec_lock = state
+            .current_recording
+            .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
         rec_lock.take()
     };
 
     if let Some(current) = current
-        && current.wav_path.exists() {
-            let _ = std::fs::remove_file(&current.wav_path);
-        }
+        && current.wav_path.exists()
+    {
+        let _ = std::fs::remove_file(&current.wav_path);
+    }
 
     Ok(())
 }
@@ -358,16 +367,16 @@ pub async fn cancel_recording(
 /// `resume_recording` is called.
 #[tauri::command]
 pub fn pause_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
-    let handle_lock = state.capture_handle.lock()
+    let handle_lock = state
+        .capture_handle
+        .lock()
         .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
     match &handle_lock.0 {
         Some(handle) => {
             handle.pause();
             Ok(())
         }
-        None => Err(AppError::Audio(
-            "No active recording to pause".to_string(),
-        )),
+        None => Err(AppError::Audio("No active recording to pause".to_string())),
     }
 }
 
@@ -378,16 +387,16 @@ pub fn pause_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
 /// Resume a previously paused recording.
 #[tauri::command]
 pub fn resume_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
-    let handle_lock = state.capture_handle.lock()
+    let handle_lock = state
+        .capture_handle
+        .lock()
         .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
     match &handle_lock.0 {
         Some(handle) => {
             handle.resume();
             Ok(())
         }
-        None => Err(AppError::Audio(
-            "No active recording to resume".to_string(),
-        )),
+        None => Err(AppError::Audio("No active recording to resume".to_string())),
     }
 }
 
@@ -415,7 +424,9 @@ pub async fn get_recording_state(
 ) -> AppResult<RecordingStateSnapshot> {
     let active = *state.recording_active.lock().await;
     let current = {
-        let guard = state.current_recording.lock()
+        let guard = state
+            .current_recording
+            .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
         guard.as_ref().map(|c| (c.id.clone(), c.started_at))
     };
@@ -512,8 +523,8 @@ fn compute_audio_levels(path: &std::path::Path) -> AppResult<RecordingAudioLevel
             let mut sum_sq = 0.0f64;
             let mut count: u64 = 0;
             for sample in reader.into_samples::<f32>() {
-                let s = sample
-                    .map_err(|e| AppError::Processing(format!("Corrupt WAV sample: {e}")))?;
+                let s =
+                    sample.map_err(|e| AppError::Processing(format!("Corrupt WAV sample: {e}")))?;
                 let abs = s.abs();
                 if abs > peak {
                     peak = abs;
@@ -529,8 +540,8 @@ fn compute_audio_levels(path: &std::path::Path) -> AppResult<RecordingAudioLevel
             let mut sum_sq = 0.0f64;
             let mut count: u64 = 0;
             for sample in reader.into_samples::<i32>() {
-                let raw = sample
-                    .map_err(|e| AppError::Processing(format!("Corrupt WAV sample: {e}")))?;
+                let raw =
+                    sample.map_err(|e| AppError::Processing(format!("Corrupt WAV sample: {e}")))?;
                 let s = raw as f32 / max_val;
                 let abs = s.abs();
                 if abs > peak {

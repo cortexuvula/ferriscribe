@@ -1,6 +1,6 @@
+use medical_core::types::rag::RagResult;
 use std::collections::HashMap;
 use uuid::Uuid;
-use medical_core::types::rag::RagResult;
 
 /// Combine multiple ranked result sets using Reciprocal Rank Fusion.
 ///
@@ -27,7 +27,11 @@ pub fn reciprocal_rank_fusion(result_sets: &[Vec<RagResult>], k: f32) -> Vec<Rag
         })
         .collect();
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results
 }
 
@@ -68,7 +72,11 @@ pub fn weighted_fusion(
         })
         .collect();
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results
 }
 
@@ -96,14 +104,8 @@ mod tests {
     #[test]
     fn rrf_combines_two_sets() {
         // Result with id=1 appears at rank 0 in both sets — should have highest score
-        let set_a = vec![
-            make_result(1, 1.0, "doc 1"),
-            make_result(2, 0.8, "doc 2"),
-        ];
-        let set_b = vec![
-            make_result(1, 0.9, "doc 1"),
-            make_result(3, 0.7, "doc 3"),
-        ];
+        let set_a = vec![make_result(1, 1.0, "doc 1"), make_result(2, 0.8, "doc 2")];
+        let set_b = vec![make_result(1, 0.9, "doc 1"), make_result(3, 0.7, "doc 3")];
 
         let fused = reciprocal_rank_fusion(&[set_a, set_b], 60.0);
         assert!(!fused.is_empty());
@@ -137,7 +139,10 @@ mod tests {
     fn weighted_combines_overlapping() {
         // id=1 appears in both vector and bm25
         let vector = vec![make_result(1, 0.8, "overlap doc")];
-        let bm25 = vec![make_result(1, 0.6, "overlap doc"), make_result(2, 1.0, "other")];
+        let bm25 = vec![
+            make_result(1, 0.6, "overlap doc"),
+            make_result(2, 1.0, "other"),
+        ];
         let graph: Vec<RagResult> = vec![];
 
         let fused = weighted_fusion(&vector, &bm25, &graph, 0.5, 0.5, 0.0);

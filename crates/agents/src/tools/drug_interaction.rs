@@ -26,44 +26,52 @@ pub struct DrugInteractionTool;
 /// matches the pattern "nsaid".
 const KNOWN_INTERACTIONS: &[(&str, &str, &str, &str)] = &[
     (
-        "warfarin", "aspirin",
+        "warfarin",
+        "aspirin",
         "MAJOR",
-        "Concurrent use of warfarin and aspirin significantly increases bleeding risk. Monitor INR closely."
+        "Concurrent use of warfarin and aspirin significantly increases bleeding risk. Monitor INR closely.",
     ),
     (
-        "metformin", "contrast",
+        "metformin",
+        "contrast",
         "MAJOR",
-        "Iodinated contrast media can cause lactic acidosis when combined with metformin. Hold metformin 48h before/after contrast."
+        "Iodinated contrast media can cause lactic acidosis when combined with metformin. Hold metformin 48h before/after contrast.",
     ),
     (
-        "ssri", "maoi",
+        "ssri",
+        "maoi",
         "CONTRAINDICATED",
-        "SSRIs and MAOIs together can cause life-threatening serotonin syndrome. Do not combine; allow washout period."
+        "SSRIs and MAOIs together can cause life-threatening serotonin syndrome. Do not combine; allow washout period.",
     ),
     (
-        "ace", "potassium",
+        "ace",
+        "potassium",
         "MODERATE",
-        "ACE inhibitors combined with potassium supplements or potassium-sparing diuretics can cause hyperkalemia."
+        "ACE inhibitors combined with potassium supplements or potassium-sparing diuretics can cause hyperkalemia.",
     ),
     (
-        "statin", "grapefruit",
+        "statin",
+        "grapefruit",
         "MODERATE",
-        "Grapefruit inhibits CYP3A4 metabolism of certain statins (lovastatin, simvastatin, atorvastatin), increasing myopathy risk."
+        "Grapefruit inhibits CYP3A4 metabolism of certain statins (lovastatin, simvastatin, atorvastatin), increasing myopathy risk.",
     ),
     (
-        "methotrexate", "nsaid",
+        "methotrexate",
+        "nsaid",
         "MAJOR",
-        "NSAIDs reduce renal clearance of methotrexate, increasing toxicity risk. Avoid combination or monitor closely."
+        "NSAIDs reduce renal clearance of methotrexate, increasing toxicity risk. Avoid combination or monitor closely.",
     ),
     (
-        "lithium", "nsaid",
+        "lithium",
+        "nsaid",
         "MAJOR",
-        "NSAIDs reduce renal clearance of lithium, potentially causing lithium toxicity. Monitor lithium levels."
+        "NSAIDs reduce renal clearance of lithium, potentially causing lithium toxicity. Monitor lithium levels.",
     ),
     (
-        "warfarin", "nsaid",
+        "warfarin",
+        "nsaid",
         "MAJOR",
-        "NSAIDs combined with warfarin increase bleeding risk through platelet inhibition and GI irritation."
+        "NSAIDs combined with warfarin increase bleeding risk through platelet inhibition and GI irritation.",
     ),
 ];
 
@@ -109,11 +117,17 @@ impl Tool for DrugInteractionTool {
                 .filter_map(|v| v.as_str())
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>(),
-            None => return Ok(ToolOutput::error("medications parameter must be an array of strings")),
+            None => {
+                return Ok(ToolOutput::error(
+                    "medications parameter must be an array of strings",
+                ));
+            }
         };
 
         if medications.len() < 2 {
-            return Ok(ToolOutput::error("At least 2 medications are required to check for interactions"));
+            return Ok(ToolOutput::error(
+                "At least 2 medications are required to check for interactions",
+            ));
         }
 
         let mut interactions_found = Vec::new();

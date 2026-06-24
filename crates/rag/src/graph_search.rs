@@ -38,9 +38,9 @@ impl GraphSearch {
     /// and consistently reported on every subsequent call (instead of silently
     /// returning `Ok` like `std::sync::Once` would).
     fn ensure_tables(&self) -> Result<(), RagError> {
-        let result = self.initialized.get_or_init(|| {
-            self.create_tables().map_err(|e| e.to_string())
-        });
+        let result = self
+            .initialized
+            .get_or_init(|| self.create_tables().map_err(|e| e.to_string()));
         match result {
             Ok(()) => Ok(()),
             Err(msg) => Err(RagError::Database(msg.clone())),
@@ -48,7 +48,10 @@ impl GraphSearch {
     }
 
     fn create_tables(&self) -> Result<(), RagError> {
-        let conn = self.db.conn().map_err(|e| RagError::Database(e.to_string()))?;
+        let conn = self
+            .db
+            .conn()
+            .map_err(|e| RagError::Database(e.to_string()))?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS graph_entities (
@@ -91,7 +94,10 @@ impl GraphSearch {
 
         self.ensure_tables()?;
 
-        let conn = self.db.conn().map_err(|e| RagError::Database(e.to_string()))?;
+        let conn = self
+            .db
+            .conn()
+            .map_err(|e| RagError::Database(e.to_string()))?;
         let pattern = format!("%{}%", query.to_lowercase());
 
         // Step 1: Find entities matching the query by name
@@ -165,7 +171,10 @@ impl GraphSearch {
                 .map_err(|e| RagError::Database(e.to_string()))?;
 
             for (rel_id, rel_name, rel_type, _rel_props, relation_type) in &outgoing {
-                let content = format!("{} --[{}]--> {} ({})", name, relation_type, rel_name, rel_type);
+                let content = format!(
+                    "{} --[{}]--> {} ({})",
+                    name, relation_type, rel_name, rel_type
+                );
                 let rel_chunk_id = Uuid::parse_str(rel_id).unwrap_or(Uuid::nil());
 
                 results.push(RagResult {
@@ -209,7 +218,10 @@ impl GraphSearch {
                 .map_err(|e| RagError::Database(e.to_string()))?;
 
             for (rel_id, rel_name, rel_type, _rel_props, relation_type) in &incoming {
-                let content = format!("{} ({}) --[{}]--> {}", rel_name, rel_type, relation_type, name);
+                let content = format!(
+                    "{} ({}) --[{}]--> {}",
+                    rel_name, rel_type, relation_type, name
+                );
                 let rel_chunk_id = Uuid::parse_str(rel_id).unwrap_or(Uuid::nil());
 
                 results.push(RagResult {
@@ -229,7 +241,11 @@ impl GraphSearch {
         }
 
         // Sort by score descending and truncate to top_k
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(top_k);
 
         Ok(results)
@@ -239,7 +255,10 @@ impl GraphSearch {
     pub fn store_entity(&self, entity: &GraphEntity) -> Result<(), RagError> {
         self.ensure_tables()?;
 
-        let conn = self.db.conn().map_err(|e| RagError::Database(e.to_string()))?;
+        let conn = self
+            .db
+            .conn()
+            .map_err(|e| RagError::Database(e.to_string()))?;
 
         let entity_type = format!("{:?}", entity.entity_type).to_lowercase();
 
@@ -262,7 +281,10 @@ impl GraphSearch {
     pub fn store_relation(&self, relation: &GraphRelation) -> Result<(), RagError> {
         self.ensure_tables()?;
 
-        let conn = self.db.conn().map_err(|e| RagError::Database(e.to_string()))?;
+        let conn = self
+            .db
+            .conn()
+            .map_err(|e| RagError::Database(e.to_string()))?;
 
         let relation_type = format!("{:?}", relation.relation_type).to_lowercase();
 
@@ -342,9 +364,15 @@ mod tests {
         let db = make_db();
         let graph = GraphSearch::new(db);
 
-        graph.store_entity(&make_entity(1, "Metformin", EntityType::Drug)).unwrap();
-        graph.store_entity(&make_entity(2, "Metoprolol", EntityType::Drug)).unwrap();
-        graph.store_entity(&make_entity(3, "Ibuprofen", EntityType::Drug)).unwrap();
+        graph
+            .store_entity(&make_entity(1, "Metformin", EntityType::Drug))
+            .unwrap();
+        graph
+            .store_entity(&make_entity(2, "Metoprolol", EntityType::Drug))
+            .unwrap();
+        graph
+            .store_entity(&make_entity(3, "Ibuprofen", EntityType::Drug))
+            .unwrap();
 
         let results = graph.search("Met", 10).expect("search");
         assert_eq!(results.len(), 2);
@@ -367,7 +395,11 @@ mod tests {
         let results = graph.search("Aspirin", 10).expect("search");
 
         // Should have the entity itself + the related entity (outgoing)
-        assert!(results.len() >= 2, "expected >= 2 results, got {}", results.len());
+        assert!(
+            results.len() >= 2,
+            "expected >= 2 results, got {}",
+            results.len()
+        );
 
         // One result should mention Headache (the related entity)
         assert!(
@@ -421,7 +453,9 @@ mod tests {
         let db = make_db();
         let graph = GraphSearch::new(db);
 
-        graph.store_entity(&make_entity(1, "Test", EntityType::Drug)).unwrap();
+        graph
+            .store_entity(&make_entity(1, "Test", EntityType::Drug))
+            .unwrap();
 
         let results = graph.search("", 10).expect("search");
         assert!(results.is_empty());
@@ -432,7 +466,9 @@ mod tests {
         let db = make_db();
         let graph = GraphSearch::new(db);
 
-        graph.store_entity(&make_entity(1, "Aspirin", EntityType::Drug)).unwrap();
+        graph
+            .store_entity(&make_entity(1, "Aspirin", EntityType::Drug))
+            .unwrap();
 
         let results = graph.search("xyznonexistent", 10).expect("search");
         assert!(results.is_empty());
@@ -460,8 +496,12 @@ mod tests {
         let db = make_db();
         let graph = GraphSearch::new(db);
 
-        graph.store_entity(&make_entity(1, "Aspirin", EntityType::Drug)).unwrap();
-        graph.store_entity(&make_entity(2, "Headache", EntityType::Condition)).unwrap();
+        graph
+            .store_entity(&make_entity(1, "Aspirin", EntityType::Drug))
+            .unwrap();
+        graph
+            .store_entity(&make_entity(2, "Headache", EntityType::Condition))
+            .unwrap();
 
         let rel = make_relation(1, 2, RelationType::Treats);
         graph.store_relation(&rel).expect("store");
@@ -471,7 +511,10 @@ mod tests {
 
         let results = graph.search("Aspirin", 10).expect("search");
         // Should have entity + one related, not duplicated
-        let headache_count = results.iter().filter(|r| r.content.contains("Headache")).count();
+        let headache_count = results
+            .iter()
+            .filter(|r| r.content.contains("Headache"))
+            .count();
         assert_eq!(headache_count, 1, "relation should not be duplicated");
     }
 }

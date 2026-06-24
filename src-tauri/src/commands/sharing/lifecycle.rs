@@ -9,9 +9,7 @@ use tauri::State;
 
 use crate::state::AppState;
 
-use super::{
-    delete_server_config, write_server_config, ServerConfig, SharingStatusDto,
-};
+use super::{ServerConfig, SharingStatusDto, delete_server_config, write_server_config};
 
 #[tauri::command]
 pub async fn start_sharing(
@@ -22,7 +20,10 @@ pub async fn start_sharing(
     start_sharing_inner(&state, friendly_name.clone(), Some(app_handle)).await?;
     // Persist after a successful start so a crash mid-start doesn't leave a
     // stale config that would auto-resume into a half-built service.
-    write_server_config(&ServerConfig { version: 1, friendly_name })?;
+    write_server_config(&ServerConfig {
+        version: 1,
+        friendly_name,
+    })?;
     Ok(())
 }
 
@@ -109,7 +110,7 @@ pub async fn start_sharing_inner(
     // sharing so that a missing ollama binary or write-protected
     // LaunchAgents directory doesn't block the in-process services.
     use medical_sharing::service_installer::{
-        install_persistent_ollama, ollama_service_state, ServiceState,
+        ServiceState, install_persistent_ollama, ollama_service_state,
     };
     if matches!(ollama_service_state(), ServiceState::Missing) {
         // install_persistent_ollama logs its own outcome (installed vs.
@@ -125,7 +126,10 @@ pub async fn start_sharing_inner(
     // bearer needed. Ports are the upstream ports (Ollama 11434, LM Studio 1234,
     // whisper.cpp 8080), NOT the proxy ports (11435 / 8081).
     let allow_public = {
-        let conn = state.db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+        let conn = state
+            .db
+            .conn()
+            .map_err(|e| AppError::Other(e.to_string()))?;
         let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
             .map_err(|e| AppError::Other(e.to_string()))?;
         cfg.migrate();
@@ -153,29 +157,29 @@ pub async fn start_sharing_inner(
 
     {
         let guard = state.ollama_provider.read().await;
-        if let Some(ref p) = *guard {
-            if let Err(e) = p.set_endpoint(local_ollama, allow_public).await {
-                let _ = service.stop().await;
-                return Err(e);
-            }
+        if let Some(ref p) = *guard
+            && let Err(e) = p.set_endpoint(local_ollama, allow_public).await
+        {
+            let _ = service.stop().await;
+            return Err(e);
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
-        if let Some(ref p) = *guard {
-            if let Err(e) = p.set_endpoint(local_lmstudio, allow_public).await {
-                let _ = service.stop().await;
-                return Err(e);
-            }
+        if let Some(ref p) = *guard
+            && let Err(e) = p.set_endpoint(local_lmstudio, allow_public).await
+        {
+            let _ = service.stop().await;
+            return Err(e);
         }
     }
     {
         let guard = state.remote_stt_provider.read().await;
-        if let Some(ref p) = *guard {
-            if let Err(e) = p.set_endpoint(local_whisper, allow_public).await {
-                let _ = service.stop().await;
-                return Err(e);
-            }
+        if let Some(ref p) = *guard
+            && let Err(e) = p.set_endpoint(local_whisper, allow_public).await
+        {
+            let _ = service.stop().await;
+            return Err(e);
         }
     }
 
@@ -205,21 +209,43 @@ pub async fn stop_sharing_inner(state: &AppState) -> AppResult<()> {
     // If this machine is also paired as a client to another server, restore the
     // paired endpoint; otherwise revert to None (local-only mode).
     let allow_public = {
-        let conn = state.db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+        let conn = state
+            .db
+            .conn()
+            .map_err(|e| AppError::Other(e.to_string()))?;
         let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
             .map_err(|e| AppError::Other(e.to_string()))?;
         cfg.migrate();
         cfg.allow_public_endpoint
     };
     let paired = crate::state::load_paired_connection();
-    let bearer = if paired.is_some() { crate::state::load_sharing_bearer() } else { None };
+    let bearer = if paired.is_some() {
+        crate::state::load_sharing_bearer()
+    } else {
+        None
+    };
 
     use medical_core::types::RemoteEndpoint;
     let (ollama_ep, lmstudio_ep, whisper_ep) = if let Some(ref p) = paired {
         (
-            Some(RemoteEndpoint { lan: p.lan.clone(), tailscale: p.tailscale.clone(), port: p.ports.ollama, bearer: bearer.clone() }),
-            p.ports.lmstudio.map(|lp| RemoteEndpoint { lan: p.lan.clone(), tailscale: p.tailscale.clone(), port: lp, bearer: bearer.clone() }),
-            Some(RemoteEndpoint { lan: p.lan.clone(), tailscale: p.tailscale.clone(), port: p.ports.whisper, bearer }),
+            Some(RemoteEndpoint {
+                lan: p.lan.clone(),
+                tailscale: p.tailscale.clone(),
+                port: p.ports.ollama,
+                bearer: bearer.clone(),
+            }),
+            p.ports.lmstudio.map(|lp| RemoteEndpoint {
+                lan: p.lan.clone(),
+                tailscale: p.tailscale.clone(),
+                port: lp,
+                bearer: bearer.clone(),
+            }),
+            Some(RemoteEndpoint {
+                lan: p.lan.clone(),
+                tailscale: p.tailscale.clone(),
+                port: p.ports.whisper,
+                bearer,
+            }),
         )
     } else {
         (None, None, None)
@@ -264,9 +290,7 @@ pub async fn sharing_status(state: State<'_, AppState>) -> AppResult<SharingStat
     }
 }
 
-async fn build_sharing_config(
-    friendly_name: String,
-) -> AppResult<SharingConfig> {
+async fn build_sharing_config(friendly_name: String) -> AppResult<SharingConfig> {
     use medical_security::keychain;
     use rand::RngCore;
 

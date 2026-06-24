@@ -54,7 +54,10 @@ impl VocabularyRepo {
     }
 
     /// List entries belonging to a specific category.
-    pub fn list_by_category(conn: &Connection, category: &VocabularyCategory) -> DbResult<Vec<VocabularyEntry>> {
+    pub fn list_by_category(
+        conn: &Connection,
+        category: &VocabularyCategory,
+    ) -> DbResult<Vec<VocabularyEntry>> {
         let mut stmt = conn.prepare(
             "SELECT id, find_text, replacement, category, case_sensitive, priority, enabled, created_at, updated_at
              FROM vocabulary_entries
@@ -195,11 +198,8 @@ impl VocabularyRepo {
 
     /// Return `(total, enabled)` counts for the vocabulary table.
     pub fn count(conn: &Connection) -> DbResult<(u32, u32)> {
-        let total: u32 = conn.query_row(
-            "SELECT COUNT(*) FROM vocabulary_entries",
-            [],
-            |r| r.get(0),
-        )?;
+        let total: u32 =
+            conn.query_row("SELECT COUNT(*) FROM vocabulary_entries", [], |r| r.get(0))?;
         let enabled: u32 = conn.query_row(
             "SELECT COUNT(*) FROM vocabulary_entries WHERE enabled = 1",
             [],

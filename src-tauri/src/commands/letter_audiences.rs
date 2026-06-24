@@ -56,10 +56,7 @@ pub async fn upsert_letter_audience(
 }
 
 #[tauri::command]
-pub async fn delete_letter_audience(
-    state: tauri::State<'_, AppState>,
-    id: Uuid,
-) -> AppResult<()> {
+pub async fn delete_letter_audience(state: tauri::State<'_, AppState>, id: Uuid) -> AppResult<()> {
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
         let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;

@@ -32,9 +32,9 @@
 //! // orchestrator.execute(&ChatAgent, context, &provider, model, temp, cancel).await
 //! ```
 
+pub mod agents;
 pub mod orchestrator;
 pub mod tools;
-pub mod agents;
 
 use thiserror::Error;
 

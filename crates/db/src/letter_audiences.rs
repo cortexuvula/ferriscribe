@@ -25,7 +25,7 @@ impl LetterAudiencesRepo {
         let mut stmt = conn.prepare(
             "SELECT id, name, system_prompt, user_template, is_builtin, created_at, updated_at
              FROM letter_audiences
-             ORDER BY is_builtin DESC, name"
+             ORDER BY is_builtin DESC, name",
         )?;
         let rows = stmt.query_map([], Self::row_to_audience)?;
         let mut audiences = Vec::new();
@@ -198,11 +198,7 @@ mod tests {
     #[test]
     fn delete_custom_succeeds() {
         let conn = fresh_conn();
-        let audience = LetterAudience::new(
-            "To Delete",
-            "Delete me",
-            None,
-        );
+        let audience = LetterAudience::new("To Delete", "Delete me", None);
         let id = audience.id;
 
         LetterAudiencesRepo::upsert(&conn, &audience).expect("upsert");
@@ -235,11 +231,8 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let conn = db.conn().unwrap();
 
-        let mut audience = LetterAudience::new(
-            "Original".to_string(),
-            "Original prompt".to_string(),
-            None,
-        );
+        let mut audience =
+            LetterAudience::new("Original".to_string(), "Original prompt".to_string(), None);
         LetterAudiencesRepo::upsert(&conn, &audience).unwrap();
 
         audience.name = "Updated".to_string();

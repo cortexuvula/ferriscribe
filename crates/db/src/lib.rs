@@ -23,20 +23,20 @@
 //! that checked it out. SQLite WAL mode allows concurrent readers with one
 //! writer; `busy_timeout=5000` mitigates transient write contention.
 
-pub mod pool;
+pub mod audit;
 pub mod encryption;
+pub mod letter_audiences;
 pub mod migrations;
-pub mod recordings;
+pub mod pool;
 pub mod processing_queue;
 pub mod recipients;
-pub mod settings;
-pub mod audit;
+pub mod recordings;
 pub mod search;
+pub mod settings;
 pub mod vocabulary;
-pub mod letter_audiences;
 pub use letter_audiences::LetterAudiencesRepo;
-pub mod vectors;
 pub mod generations;
+pub mod vectors;
 pub use generations::{Generation, GenerationInsert, GenerationsRepo};
 pub mod user_dictionary;
 pub use user_dictionary::UserDictionaryRepo;
@@ -161,9 +161,7 @@ mod tests {
     fn opens_in_memory() {
         let db = Database::open_in_memory().expect("open in-memory");
         let conn = db.conn().expect("conn");
-        let v: i64 = conn
-            .query_row("SELECT 1", [], |r| r.get(0))
-            .expect("query");
+        let v: i64 = conn.query_row("SELECT 1", [], |r| r.get(0)).expect("query");
         assert_eq!(v, 1);
     }
 
@@ -206,8 +204,8 @@ mod tests {
         assert_eq!(val, "test_value");
 
         // Write an audit entry
-        let id = AuditRepo::append(&conn, "insert", "system", "recording", None)
-            .expect("audit append");
+        let id =
+            AuditRepo::append(&conn, "insert", "system", "recording", None).expect("audit append");
         assert!(id > 0);
 
         // Verify everything is queryable

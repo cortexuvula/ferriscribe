@@ -36,11 +36,10 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Path, Query, State as AxumState},
     http::{HeaderMap, StatusCode},
     routing::{get, put},
-    Json,
 };
 use chrono::Utc;
 use medical_core::types::settings::ContextTemplate;
@@ -73,18 +72,42 @@ pub async fn spawn(
 ) -> Result<JoinHandle<()>, String> {
     let state = ApiState { db, tokens };
     let app = Router::new()
-        .route("/v1/vocabulary", get(list_handler).post(insert_handler).delete(delete_all_handler))
+        .route(
+            "/v1/vocabulary",
+            get(list_handler)
+                .post(insert_handler)
+                .delete(delete_all_handler),
+        )
         .route("/v1/vocabulary/count", get(count_handler))
-        .route("/v1/vocabulary/{id}", put(update_handler).delete(delete_handler))
+        .route(
+            "/v1/vocabulary/{id}",
+            put(update_handler).delete(delete_handler),
+        )
         .route("/v1/context-templates", get(templates_list_handler))
-        .route("/v1/context-templates/upsert", axum::routing::post(templates_upsert_handler))
-        .route("/v1/context-templates/rename", axum::routing::post(templates_rename_handler))
-        .route("/v1/context-templates/delete", axum::routing::post(templates_delete_handler))
-        .route("/v1/user-dictionary", get(dict_list_handler).post(dict_add_handler))
-        .route("/v1/user-dictionary/{word}", axum::routing::delete(dict_remove_handler))
+        .route(
+            "/v1/context-templates/upsert",
+            axum::routing::post(templates_upsert_handler),
+        )
+        .route(
+            "/v1/context-templates/rename",
+            axum::routing::post(templates_rename_handler),
+        )
+        .route(
+            "/v1/context-templates/delete",
+            axum::routing::post(templates_delete_handler),
+        )
+        .route(
+            "/v1/user-dictionary",
+            get(dict_list_handler).post(dict_add_handler),
+        )
+        .route(
+            "/v1/user-dictionary/{word}",
+            axum::routing::delete(dict_remove_handler),
+        )
         .with_state(state);
 
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}").parse()
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
+        .parse()
         .map_err(|e: std::net::AddrParseError| format!("vocab_api bind addr parse: {e}"))?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -98,7 +121,10 @@ pub async fn spawn(
 }
 
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {
-    let v = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+    let v = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
     v.strip_prefix("Bearer ").map(|s| s.trim().to_string())
 }
 
@@ -205,7 +231,10 @@ async fn insert_handler(
         warn!("vocab_api insert failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    info!(find_len = entry.find_text.len(), "vocab_api: inserted entry");
+    info!(
+        find_len = entry.find_text.len(),
+        "vocab_api: inserted entry"
+    );
     Ok(Json(entry))
 }
 
@@ -232,7 +261,9 @@ async fn update_handler(
         find_text: body.find_text,
         replacement: body.replacement,
         category: VocabularyCategory::from_str(
-            &body.category.unwrap_or_else(|| existing.category.as_str().to_string()),
+            &body
+                .category
+                .unwrap_or_else(|| existing.category.as_str().to_string()),
         ),
         case_sensitive: body.case_sensitive.unwrap_or(existing.case_sensitive),
         priority: body.priority.unwrap_or(existing.priority),
@@ -352,7 +383,10 @@ async fn templates_upsert_handler(
         let conn = db.conn().map_err(|e| e.to_string())?;
         let mut cfg = SettingsRepo::load_config(&conn).map_err(|e| e.to_string())?;
         cfg.migrate();
-        let entry = ContextTemplate { name: name.clone(), body: body_text.clone() };
+        let entry = ContextTemplate {
+            name: name.clone(),
+            body: body_text.clone(),
+        };
         if let Some(existing) = cfg
             .custom_context_templates
             .iter_mut()
@@ -389,43 +423,48 @@ async fn templates_rename_handler(
     }
     let old_name = body.old_name;
     let db = Arc::clone(&state.db);
-    let entry = tokio::task::spawn_blocking(move || -> Result<ContextTemplate, (StatusCode, String)> {
-        let conn = db
-            .conn()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let mut cfg = SettingsRepo::load_config(&conn)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        cfg.migrate();
-        if old_name == new_name {
-            return cfg
+    let entry =
+        tokio::task::spawn_blocking(move || -> Result<ContextTemplate, (StatusCode, String)> {
+            let conn = db
+                .conn()
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let mut cfg = SettingsRepo::load_config(&conn)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            cfg.migrate();
+            if old_name == new_name {
+                return cfg
+                    .custom_context_templates
+                    .iter()
+                    .find(|t| t.name == old_name)
+                    .cloned()
+                    .ok_or((StatusCode::NOT_FOUND, format!("'{old_name}' not found")));
+            }
+            if cfg
                 .custom_context_templates
                 .iter()
-                .find(|t| t.name == old_name)
-                .cloned()
-                .ok_or((StatusCode::NOT_FOUND, format!("'{old_name}' not found")));
-        }
-        if cfg.custom_context_templates.iter().any(|t| t.name == new_name) {
-            return Err((StatusCode::CONFLICT, format!("'{new_name}' already exists")));
-        }
-        let idx = cfg
-            .custom_context_templates
-            .iter()
-            .position(|t| t.name == old_name)
-            .ok_or((StatusCode::NOT_FOUND, format!("'{old_name}' not found")))?;
-        cfg.custom_context_templates[idx].name = new_name.clone();
-        let renamed = cfg.custom_context_templates[idx].clone();
-        cfg.custom_context_templates
-            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        SettingsRepo::save_config(&conn, &cfg)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        Ok(renamed)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|(code, msg)| {
-        warn!("templates rename: {msg}");
-        code
-    })?;
+                .any(|t| t.name == new_name)
+            {
+                return Err((StatusCode::CONFLICT, format!("'{new_name}' already exists")));
+            }
+            let idx = cfg
+                .custom_context_templates
+                .iter()
+                .position(|t| t.name == old_name)
+                .ok_or((StatusCode::NOT_FOUND, format!("'{old_name}' not found")))?;
+            cfg.custom_context_templates[idx].name = new_name.clone();
+            let renamed = cfg.custom_context_templates[idx].clone();
+            cfg.custom_context_templates
+                .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            SettingsRepo::save_config(&conn, &cfg)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(renamed)
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|(code, msg)| {
+            warn!("templates rename: {msg}");
+            code
+        })?;
     Ok(Json(entry))
 }
 
@@ -483,8 +522,7 @@ async fn dict_list_handler(
     let db = Arc::clone(&state.db);
     let words = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
         let conn = db.conn().map_err(|e| e.to_string())?;
-        medical_db::user_dictionary::UserDictionaryRepo::list(&conn)
-            .map_err(|e| e.to_string())
+        medical_db::user_dictionary::UserDictionaryRepo::list(&conn).map_err(|e| e.to_string())
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -542,4 +580,3 @@ async fn dict_remove_handler(
     info!(word_len, removed, "dict_api: remove");
     Ok(Json(removed))
 }
-

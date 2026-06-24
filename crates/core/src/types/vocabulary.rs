@@ -10,6 +10,7 @@ use uuid::Uuid;
 /// them in sections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum VocabularyCategory {
     /// Doctor / clinician names.
     DoctorNames,
@@ -20,13 +21,8 @@ pub enum VocabularyCategory {
     /// Medical abbreviations and acronyms.
     Abbreviations,
     /// Uncategorized entries.
+    #[default]
     General,
-}
-
-impl Default for VocabularyCategory {
-    fn default() -> Self {
-        Self::General
-    }
 }
 
 impl VocabularyCategory {
@@ -45,6 +41,11 @@ impl VocabularyCategory {
     /// aliases (e.g. `"medications"`, `"meds"` → `MedicationNames`).
     /// Falls back to [`General`](VocabularyCategory::General) for
     /// unrecognized input.
+    ///
+    /// Not implemented as `std::str::FromStr` because this never fails — it
+    /// falls back to `General` for unknown input, whereas `FromStr` requires a
+    /// `Result`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
             "doctor_names" | "doctors" | "doctor" => Self::DoctorNames,

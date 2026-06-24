@@ -162,8 +162,11 @@ mod tests {
     fn returns_64_char_hex() {
         let id = get_machine_id().expect("get_machine_id failed");
         assert_eq!(id.len(), 64, "Expected 64 hex chars, got: {}", id);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()),
-            "Expected only hex chars, got: {}", id);
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "Expected only hex chars, got: {}",
+            id
+        );
     }
 
     #[test]
@@ -177,7 +180,11 @@ mod tests {
     fn fallback_works() {
         let id = fallback_id();
         // Must contain ':'
-        assert!(id.contains(':'), "fallback_id should be 'user:home', got: {}", id);
+        assert!(
+            id.contains(':'),
+            "fallback_id should be 'user:home', got: {}",
+            id
+        );
         // Hashing the fallback should also produce a 64-char hex
         let hashed = sha256_hex(id.as_bytes());
         assert_eq!(hashed.len(), 64);

@@ -176,17 +176,14 @@ impl AgentOrchestrator {
                 let start = Instant::now();
 
                 let tool_result = match self.tool_registry.get(&tool_call.name) {
-                    Some(tool) => {
-                        tool.execute(tool_call.arguments.clone()).await.unwrap_or_else(|e| {
-                            medical_core::types::ToolOutput::error(e.to_string())
-                        })
-                    }
-                    None => {
-                        medical_core::types::ToolOutput::error(format!(
-                            "Tool '{}' not found in registry",
-                            tool_call.name
-                        ))
-                    }
+                    Some(tool) => tool
+                        .execute(tool_call.arguments.clone())
+                        .await
+                        .unwrap_or_else(|e| medical_core::types::ToolOutput::error(e.to_string())),
+                    None => medical_core::types::ToolOutput::error(format!(
+                        "Tool '{}' not found in registry",
+                        tool_call.name
+                    )),
                 };
 
                 let duration_ms = start.elapsed().as_millis() as u64;
@@ -257,10 +254,7 @@ fn build_messages(context: &AgentContext) -> Vec<Message> {
             ));
         }
         if !patient.allergies.is_empty() {
-            patient_text.push_str(&format!(
-                "- Allergies: {}\n",
-                patient.allergies.join(", ")
-            ));
+            patient_text.push_str(&format!("- Allergies: {}\n", patient.allergies.join(", ")));
         }
         if !patient.prior_soap_notes.is_empty() {
             patient_text.push_str(&format!(
@@ -287,7 +281,10 @@ fn build_messages(context: &AgentContext) -> Vec<Message> {
 
         messages.push(Message {
             role: Role::System,
-            content: MessageContent::Text(format!("Relevant knowledge base excerpts:\n\n{}", rag_text)),
+            content: MessageContent::Text(format!(
+                "Relevant knowledge base excerpts:\n\n{}",
+                rag_text
+            )),
             tool_calls: vec![],
         });
     }
@@ -394,8 +391,12 @@ mod tests {
 
     #[async_trait]
     impl AiProvider for ModelCapturingProvider {
-        fn name(&self) -> &str { "capturing" }
-        async fn available_models(&self) -> AppResult<Vec<ModelInfo>> { Ok(vec![]) }
+        fn name(&self) -> &str {
+            "capturing"
+        }
+        async fn available_models(&self) -> AppResult<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
         async fn complete(&self, _req: CompletionRequest) -> AppResult<CompletionResponse> {
             unreachable!("orchestrator uses complete_with_tools")
         }
@@ -410,7 +411,10 @@ mod tests {
             request: CompletionRequest,
             _tools: Vec<ToolDef>,
         ) -> AppResult<ToolCompletionResponse> {
-            self.captured_models.lock().unwrap().push(request.model.clone());
+            self.captured_models
+                .lock()
+                .unwrap()
+                .push(request.model.clone());
             self.captured_temperatures
                 .lock()
                 .unwrap()

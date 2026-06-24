@@ -27,7 +27,9 @@ pub fn to_16k_mono_f32(audio: &AudioData) -> Vec<f32> {
     }
     let channels = audio.channels.max(1) as usize;
     let mono: Vec<f32> = if channels > 1 {
-        audio.samples.chunks_exact(channels)
+        audio
+            .samples
+            .chunks_exact(channels)
             .map(|frame| frame.iter().sum::<f32>() / channels as f32)
             .collect()
     } else {
@@ -79,7 +81,8 @@ pub fn to_16k_mono_f32(audio: &AudioData) -> Vec<f32> {
 
 /// Convert f32 PCM samples to i16 (for diarization APIs that expect i16 input).
 pub fn f32_to_i16(samples: &[f32]) -> Vec<i16> {
-    samples.iter()
+    samples
+        .iter()
         .map(|&s| (s * 32_767.0).clamp(-32_768.0, 32_767.0) as i16)
         .collect()
 }
@@ -170,7 +173,9 @@ mod tests {
     #[test]
     fn stereo_to_mono() {
         // L=1.0, R=0.0 interleaved: [1.0, 0.0, 1.0, 0.0, ...]
-        let samples: Vec<f32> = (0..20).map(|i| if i % 2 == 0 { 1.0 } else { 0.0 }).collect();
+        let samples: Vec<f32> = (0..20)
+            .map(|i| if i % 2 == 0 { 1.0 } else { 0.0 })
+            .collect();
         let audio = AudioData {
             samples,
             sample_rate: 16_000,
@@ -227,9 +232,15 @@ mod tests {
             channels: 1,
         };
         let resampled = to_16k_mono_f32(&audio);
-        assert!(resampled.is_empty(), "expected empty output for empty input");
+        assert!(
+            resampled.is_empty(),
+            "expected empty output for empty input"
+        );
 
         let converted = f32_to_i16(&[]);
-        assert!(converted.is_empty(), "expected empty i16 output for empty input");
+        assert!(
+            converted.is_empty(),
+            "expected empty i16 output for empty input"
+        );
     }
 }

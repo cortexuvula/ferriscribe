@@ -12,11 +12,9 @@ pub struct SettingsRepo;
 impl SettingsRepo {
     /// Return the stored value for `key`, or `None` if it is not present.
     pub fn get(conn: &Connection, key: &str) -> DbResult<Option<String>> {
-        let result = conn.query_row(
-            "SELECT value FROM settings WHERE key = ?1",
-            [key],
-            |row| row.get(0),
-        );
+        let result = conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+            row.get(0)
+        });
         match result {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -77,8 +75,7 @@ impl SettingsRepo {
 
     /// Serialise `config` to JSON and upsert it under the key `"app_config"`.
     pub fn save_config(conn: &Connection, config: &AppConfig) -> DbResult<()> {
-        let json =
-            serde_json::to_string(config).map_err(|e| DbError::Migration(e.to_string()))?;
+        let json = serde_json::to_string(config).map_err(|e| DbError::Migration(e.to_string()))?;
         Self::set(conn, "app_config", &json)
     }
 }

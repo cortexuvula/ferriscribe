@@ -33,7 +33,10 @@ pub fn resolve_recordings_dir(db: &Database, data_dir: &Path) -> AppResult<PathB
     let dir = if let Ok(conn) = db.conn() {
         medical_db::settings::SettingsRepo::load_config(&conn)
             .ok()
-            .map(|mut c| { c.migrate(); c })
+            .map(|mut c| {
+                c.migrate();
+                c
+            })
             .and_then(|cfg| cfg.storage_path.filter(|s| !s.is_empty()))
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("recordings"))
@@ -116,10 +119,7 @@ mod tests {
             unwrap_app_error_message(AppError::Database("db down".to_string())),
             "db down"
         );
-        assert_eq!(
-            unwrap_app_error_message(AppError::Cancelled),
-            "Cancelled"
-        );
+        assert_eq!(unwrap_app_error_message(AppError::Cancelled), "Cancelled");
     }
 
     #[test]

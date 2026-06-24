@@ -29,7 +29,7 @@ pub mod endpoint_policy;
 pub mod error;
 pub mod http_error_body;
 pub mod preflight;
-pub mod types;
 pub mod traits;
+pub mod types;
 
-pub use error::{AppError, AppResult, ErrorSeverity, ErrorContext};
+pub use error::{AppError, AppResult, ErrorContext, ErrorSeverity};

@@ -15,9 +15,9 @@
 //! - **Whisper**: `base` (~148 MB), `small` (~488 MB), `medium` (~1.5 GB), `large-v3-turbo` (~1.6 GB)
 //! - **Pyannote**: `segmentation-3.0.onnx` (~6 MB), `wespeaker_en_voxceleb_CAM++.onnx` (~28 MB)
 
-use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 use crate::SttError;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // WhisperModelId
@@ -51,6 +51,10 @@ impl WhisperModelId {
 
     /// Parse a string identifier into a `WhisperModelId`. Returns `None` for
     /// unrecognized strings.
+    ///
+    /// Not implemented as `std::str::FromStr` because this returns `Option`,
+    /// not `Result`. Named `from_str` for call-site readability.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "base" => Some(WhisperModelId::Base),
@@ -252,7 +256,10 @@ pub fn check_required_models(app_data_dir: &Path, whisper_model_id: &str) -> Vec
     // Pyannote stub models (diarization — currently not available but reserved)
     let pyannote_stubs = [
         ("segmentation-3.0.onnx", "Pyannote segmentation model"),
-        ("wespeaker_en_voxceleb_CAM++.onnx", "Pyannote speaker embedding model"),
+        (
+            "wespeaker_en_voxceleb_CAM++.onnx",
+            "Pyannote speaker embedding model",
+        ),
     ];
     for (filename, description) in &pyannote_stubs {
         let path = pyannote_model_path(app_data_dir, filename);
@@ -275,11 +282,7 @@ pub fn check_required_models(app_data_dir: &Path, whisper_model_id: &str) -> Vec
 ///
 /// The `on_progress` callback receives `(downloaded_bytes, total_bytes)` and
 /// is called after each chunk is written to disk.
-pub async fn download_model<F>(
-    url: &str,
-    dest_path: &Path,
-    on_progress: F,
-) -> Result<(), SttError>
+pub async fn download_model<F>(url: &str, dest_path: &Path, on_progress: F) -> Result<(), SttError>
 where
     F: Fn(u64, u64) + Send + 'static,
 {

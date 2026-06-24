@@ -67,10 +67,7 @@ pub fn supported_configs(device: &cpal::Device) -> (Vec<u32>, Vec<u16>) {
     rates.sort();
     rates.dedup();
 
-    let mut channels: Vec<u16> = ranges
-        .iter()
-        .map(|r| r.channels())
-        .collect();
+    let mut channels: Vec<u16> = ranges.iter().map(|r| r.channels()).collect();
     channels.sort();
     channels.dedup();
 
@@ -100,9 +97,7 @@ fn device_to_audio_device(
 /// List all input (microphone) devices.
 pub fn list_input_devices() -> AudioResult<Vec<AudioDevice>> {
     let host = cpal::default_host();
-    let default_name = host
-        .default_input_device()
-        .and_then(|d| d.name().ok());
+    let default_name = host.default_input_device().and_then(|d| d.name().ok());
 
     let devices = host
         .input_devices()
@@ -125,9 +120,7 @@ pub fn list_input_devices() -> AudioResult<Vec<AudioDevice>> {
 /// List all output (speaker/headphone) devices.
 pub fn list_output_devices() -> AudioResult<Vec<AudioDevice>> {
     let host = cpal::default_host();
-    let default_name = host
-        .default_output_device()
-        .and_then(|d| d.name().ok());
+    let default_name = host.default_output_device().and_then(|d| d.name().ok());
 
     let devices = host
         .output_devices()
@@ -152,9 +145,7 @@ pub fn list_output_devices() -> AudioResult<Vec<AudioDevice>> {
 pub fn get_input_device(name: Option<&str>) -> AudioResult<cpal::Device> {
     let host = cpal::default_host();
     match name {
-        None => host
-            .default_input_device()
-            .ok_or(AudioError::NoInputDevice),
+        None => host.default_input_device().ok_or(AudioError::NoInputDevice),
         Some(wanted) => {
             let mut devices = host
                 .input_devices()
@@ -197,13 +188,21 @@ mod tests {
     fn list_input_returns_vec() {
         // May be empty in a headless CI environment — just assert it doesn't panic.
         let result = list_input_devices();
-        assert!(result.is_ok(), "list_input_devices returned Err: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "list_input_devices returned Err: {:?}",
+            result
+        );
     }
 
     #[test]
     fn list_output_returns_vec() {
         let result = list_output_devices();
-        assert!(result.is_ok(), "list_output_devices returned Err: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "list_output_devices returned Err: {:?}",
+            result
+        );
     }
 
     #[test]

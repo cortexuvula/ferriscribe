@@ -27,13 +27,13 @@
 //! - The internal `file_lock` mutex serializes writes; reads are lock-free.
 //!   A poisoned mutex surfaces as `SecurityError::Other`.
 
-use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
-    Aes256Gcm, Key, Nonce,
-};
 use aes_gcm::aead::rand_core::RngCore;
-use base64::engine::general_purpose::STANDARD;
+use aes_gcm::{
+    Aes256Gcm, Key, Nonce,
+    aead::{Aead, KeyInit, OsRng},
+};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use chrono::Utc;
 use pbkdf2::pbkdf2_hmac;
 use serde::{Deserialize, Serialize};
@@ -42,8 +42,8 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 
-use crate::{SecurityError, SecurityResult};
 use crate::machine_id::get_machine_id;
+use crate::{SecurityError, SecurityResult};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -133,9 +133,10 @@ impl KeyStorage {
     /// - [`SecurityError::Io`] on filesystem failure.
     /// - [`SecurityError::Other`] if the internal mutex is poisoned.
     pub fn store_key(&self, provider: &str, api_key: &str) -> SecurityResult<()> {
-        let _lock = self.file_lock.lock().map_err(|e| {
-            SecurityError::Other(format!("mutex poisoned in store_key: {e}"))
-        })?;
+        let _lock = self
+            .file_lock
+            .lock()
+            .map_err(|e| SecurityError::Other(format!("mutex poisoned in store_key: {e}")))?;
         let mut nonce_bytes = [0u8; NONCE_LENGTH];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -208,9 +209,10 @@ impl KeyStorage {
     /// - [`SecurityError::Io`] on filesystem failure.
     /// - [`SecurityError::Other`] if the internal mutex is poisoned.
     pub fn remove_key(&self, provider: &str) -> SecurityResult<bool> {
-        let _lock = self.file_lock.lock().map_err(|e| {
-            SecurityError::Other(format!("mutex poisoned in remove_key: {e}"))
-        })?;
+        let _lock = self
+            .file_lock
+            .lock()
+            .map_err(|e| SecurityError::Other(format!("mutex poisoned in remove_key: {e}")))?;
         let mut file = self.load_file()?;
         let existed = file.keys.remove(provider).is_some();
         if existed {
@@ -267,11 +269,7 @@ fn derive_master_key(salt: &[u8]) -> SecurityResult<[u8; 32]> {
 /// Testable core of `derive_master_key`: accepts injectable env-var and
 /// machine-id resolvers so the two error paths can be exercised without
 /// touching process state or OS calls.
-fn derive_master_key_from<E, M>(
-    salt: &[u8],
-    env_var: E,
-    machine_id: M,
-) -> SecurityResult<[u8; 32]>
+fn derive_master_key_from<E, M>(salt: &[u8], env_var: E, machine_id: M) -> SecurityResult<[u8; 32]>
 where
     E: FnOnce() -> Option<String>,
     M: FnOnce() -> SecurityResult<String>,
@@ -350,7 +348,10 @@ mod tests {
         let (_dir, ks) = open_temp_store();
         ks.store_key("provider", "first_key").unwrap();
         ks.store_key("provider", "second_key").unwrap();
-        assert_eq!(ks.get_key("provider").unwrap(), Some("second_key".to_string()));
+        assert_eq!(
+            ks.get_key("provider").unwrap(),
+            Some("second_key".to_string())
+        );
     }
 
     #[test]
@@ -409,12 +410,12 @@ mod tests {
         let result = derive_master_key_from(
             &[0u8; 16],
             || None,
-            || Err(SecurityError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "simulated",
-            ))),
+            || Err(SecurityError::Io(std::io::Error::other("simulated"))),
         );
-        assert!(matches!(result, Err(SecurityError::MasterKeyUnavailable { .. })));
+        assert!(matches!(
+            result,
+            Err(SecurityError::MasterKeyUnavailable { .. })
+        ));
     }
 
     #[test]
@@ -442,7 +443,10 @@ mod tests {
         let (_dir, ks) = open_temp_store();
         poison_mutex(&ks);
         let result = ks.store_key("provider", "key");
-        assert!(result.is_err(), "store_key should return Err on poisoned mutex");
+        assert!(
+            result.is_err(),
+            "store_key should return Err on poisoned mutex"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("mutex poisoned") || err_msg.contains("poisoned"),
@@ -456,7 +460,10 @@ mod tests {
         ks.store_key("provider", "key").unwrap();
         poison_mutex(&ks);
         let result = ks.remove_key("provider");
-        assert!(result.is_err(), "remove_key should return Err on poisoned mutex");
+        assert!(
+            result.is_err(),
+            "remove_key should return Err on poisoned mutex"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("mutex poisoned") || err_msg.contains("poisoned"),
