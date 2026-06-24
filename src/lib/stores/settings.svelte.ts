@@ -48,6 +48,7 @@ const defaults: AppConfig = {
   allow_public_endpoint: false,
   onboarding_completed: false,
   auto_update_check: true,
+  custom_conditions: [],
 };
 
 class SettingsStore {

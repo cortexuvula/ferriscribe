@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ConditionChips from '../../components/ConditionChips.svelte';
+
   type Props = {
     medicationsText: string;
     allergiesText: string;
@@ -10,27 +12,8 @@
     conditionsText = $bindable(''),
   }: Props = $props();
 
-  // Common chronic conditions for one-click add. Clicking a chip appends the
-  // condition as a new line (no-op if already present, matched
-  // case-insensitively against existing lines so the user can't double-add).
-  const COMMON_CONDITIONS = [
-    'Hypertension',
-    'Type 2 diabetes',
-    'Hyperlipidemia',
-    'Asthma',
-    'COPD',
-    'Hypothyroidism',
-    'Atrial fibrillation',
-    'Coronary artery disease',
-    'CKD (chronic kidney disease)',
-    'GERD',
-    'Anxiety',
-    'Depression',
-    'Osteoarthritis',
-    'Obesity',
-    'Sleep apnea',
-  ];
-
+  // Append a condition to the textarea (called by the shared ConditionChips
+  // component). No-op if already present (case-insensitive line match).
   function addCondition(condition: string) {
     const existing = conditionsText
       .split('\n')
@@ -63,18 +46,7 @@
   ></textarea>
 
   <label class="field-label" for="rt-conditions">Known conditions (one per line)</label>
-  <div class="condition-chips" role="group" aria-label="Common conditions quick-add">
-    {#each COMMON_CONDITIONS as condition}
-      <button
-        class="condition-chip"
-        type="button"
-        onclick={() => addCondition(condition)}
-        title={`Add "${condition}" to the list`}
-      >
-        {condition}
-      </button>
-    {/each}
-  </div>
+  <ConditionChips onAdd={addCondition} />
   <textarea
     id="rt-conditions"
     class="context-textarea structured"
@@ -100,30 +72,6 @@
     margin-top: 8px;
     margin-bottom: 4px;
     display: block;
-  }
-
-  .condition-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
-    margin-bottom: 6px;
-  }
-
-  .condition-chip {
-    padding: 3px 9px;
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--success, #22c55e);
-    background-color: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--success, #22c55e) 30%, transparent);
-    border-radius: 12px;
-    cursor: pointer;
-    transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-  }
-
-  .condition-chip:hover {
-    background-color: color-mix(in srgb, var(--success, #22c55e) 20%, transparent);
-    border-color: var(--success, #22c55e);
   }
 
   .context-textarea {

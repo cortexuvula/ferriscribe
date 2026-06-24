@@ -126,6 +126,8 @@ export interface AppConfig {
   onboarding_completed: boolean;
   // Updates
   auto_update_check: boolean;
+  // Quick-add condition chips
+  custom_conditions: string[];
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

@@ -116,6 +116,29 @@ fn default_true() -> bool {
     true
 }
 
+fn default_conditions() -> Vec<String> {
+    [
+        "Hypertension",
+        "Type 2 diabetes",
+        "Hyperlipidemia",
+        "Asthma",
+        "COPD",
+        "Hypothyroidism",
+        "Atrial fibrillation",
+        "Coronary artery disease",
+        "CKD (chronic kidney disease)",
+        "GERD",
+        "Anxiety",
+        "Depression",
+        "Osteoarthritis",
+        "Obesity",
+        "Sleep apnea",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 fn default_sample_rate() -> u32 {
     44100
 }
@@ -456,6 +479,15 @@ pub struct AppConfig {
     /// anonymous GET for latest.json — no PHI transmitted.
     #[serde(default = "default_true")]
     pub auto_update_check: bool,
+
+    // Quick-add condition chips
+    /// User-customizable list of conditions shown as clickable chips under
+    /// "Known conditions" in both the Record tab sidebar and the Generate tab.
+    /// Default is a set of common chronic conditions; the user can add/remove
+    /// to match their practice. Empty vec for fresh installs is backfilled by
+    /// the frontend when the list is empty (see default_conditions).
+    #[serde(default = "default_conditions")]
+    pub custom_conditions: Vec<String>,
 
     // Training corpus
     /// When true, every successful SOAP generation is captured into the
