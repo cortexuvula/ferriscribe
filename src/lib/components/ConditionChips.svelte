@@ -125,42 +125,58 @@
     flex-wrap: wrap;
     gap: 5px;
     margin-bottom: 6px;
+    /* Guarantee the chip row can wrap fully without being clipped by a
+       flex parent that has a fixed/min width. */
+    width: 100%;
+    box-sizing: border-box;
   }
 
+  /* The pill background lives on the wrapper so the chip always looks like a
+     complete capsule — even when the remove button's × is hidden. Previously
+     the background was split across two buttons and the invisible remove
+     button left a flat-edged gap, making every chip look "cut off". */
   .condition-chip-wrapper {
     display: inline-flex;
-    align-items: stretch;
+    align-items: center;
+    max-width: 100%;
     border-radius: 12px;
+    background-color: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--success, #22c55e) 30%, transparent);
     overflow: hidden;
   }
 
+  .condition-chip-wrapper:hover {
+    background-color: color-mix(in srgb, var(--success, #22c55e) 18%, transparent);
+    border-color: color-mix(in srgb, var(--success, #22c55e) 45%, transparent);
+  }
+
   .condition-chip {
-    padding: 3px 9px;
+    /* Label fills the available width so long condition names wrap/truncate
+       cleanly instead of pushing the × off the edge of the sidebar. */
+    min-width: 0;
+    padding: 3px 8px;
     font-size: 11px;
     font-weight: 500;
+    line-height: 1.4;
     color: var(--success, #22c55e);
-    background-color: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--success, #22c55e) 30%, transparent);
-    border-right: none;
-    border-radius: 12px 0 0 12px;
+    background: none;
+    border: none;
     cursor: pointer;
-    transition: background-color 0.15s ease;
+    transition: color 0.15s ease;
   }
 
-  .condition-chip:hover {
-    background-color: color-mix(in srgb, var(--success, #22c55e) 20%, transparent);
-  }
-
+  /* The × is the only thing that fades — the pill itself stays intact. It
+    starts faintly visible so the chip reads as removable even without hover. */
   .chip-remove {
-    padding: 3px 6px;
-    font-size: 12px;
+    flex: 0 0 auto;
+    padding: 3px 7px 3px 4px;
+    font-size: 13px;
     line-height: 1;
-    color: var(--text-muted);
-    background-color: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--success, #22c55e) 30%, transparent);
-    border-radius: 0 12px 12px 0;
+    color: var(--success, #22c55e);
+    background: none;
+    border: none;
     cursor: pointer;
-    opacity: 0;
+    opacity: 0.45;
     transition: opacity 0.15s ease, color 0.15s ease;
   }
 

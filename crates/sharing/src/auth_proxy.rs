@@ -34,9 +34,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use reqwest::Client;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::token_store::TokenStore;
+
+/// Cheap-clone byte buffer type returned by `axum::body::to_bytes`. We need to
+/// be able to clone the buffered request body so the proxy can retry the
+/// upstream send after a transient connection failure.
+type BodyBytes = axum::body::Bytes;
 
 /// Configuration for a single auth proxy instance.
 ///
@@ -195,25 +200,46 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
         .unwrap_or("/");
     let upstream_url = format!("{}{}", state.config.backend_url.trim_end_matches('/'), path_query);
 
-    let mut req_builder = state
-        .client
-        .request(parts.method.clone(), &upstream_url)
-        .body(body_bytes);
-
-    for (k, v) in parts.headers.iter() {
-        if k == reqwest::header::HOST || k == reqwest::header::AUTHORIZATION {
-            continue;
+    let build_upstream = |body_bytes: BodyBytes| {
+        let mut req_builder = state
+            .client
+            .request(parts.method.clone(), &upstream_url)
+            .body(body_bytes);
+        for (k, v) in parts.headers.iter() {
+            if k == reqwest::header::HOST || k == reqwest::header::AUTHORIZATION {
+                continue;
+            }
+            req_builder = req_builder.header(k.clone(), v.clone());
         }
-        req_builder = req_builder.header(k.clone(), v.clone());
-    }
-    if let Some(api_key) = &state.config.inject_api_key {
-        req_builder = req_builder.bearer_auth(api_key);
-    }
+        if let Some(api_key) = &state.config.inject_api_key {
+            req_builder = req_builder.bearer_auth(api_key);
+        }
+        req_builder
+    };
 
-    let upstream = req_builder.send().await.map_err(|e| {
-        warn!("proxy upstream error: {e}");
-        (StatusCode::BAD_GATEWAY, "").into_response()
-    })?;
+    // First attempt.
+    let upstream = match build_upstream(body_bytes.clone()).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "proxy upstream error on first attempt; will retry once");
+            // The backend (whisper-server / ollama / lmstudio) is likely down.
+            // Give the supervisor a moment to restart it (its first backoff is
+            // 1s) and try once more before surfacing the failure. This closes
+            // the "bound proxy keeps 502-ing forever after a transient crash"
+            // gap left by the gate-then-self-heal design.
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            match build_upstream(body_bytes.clone()).send().await {
+                Ok(r) => {
+                    info!("proxy upstream recovered on retry");
+                    r
+                }
+                Err(e2) => {
+                    warn!(error = %e2, "proxy upstream still down after retry; returning 502");
+                    return Err(gateway_down_response());
+                }
+            }
+        }
+    };
 
     let status = upstream.status();
     let mut resp_headers = HeaderMap::new();
@@ -232,6 +258,26 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
     *resp.status_mut() = status;
     *resp.headers_mut() = resp_headers;
     Ok(resp)
+}
+
+/// 502 response with a plain-text body that tells the operator exactly what to
+/// do. Previously the proxy returned an empty 502 on a dead upstream, which
+/// the client surfaced as a generic "502 Bad Gateway" — leaving the user with
+/// no clue that the office-side backend (not their machine) was the problem.
+fn gateway_down_response() -> Response {
+    let body = "Backend service is down. Restart Sharing on the office machine \
+        (Settings \u{2192} Sharing \u{2192} Stop, then Start) so it relaunches \
+        the local whisper-server.";
+    let mut resp = (StatusCode::BAD_GATEWAY, body).into_response();
+    resp.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    // Tag the failure mode so the client side can craft a tailored message if
+    // it ever wants to (contract with crates/stt-providers/src/client.rs).
+    resp.headers_mut()
+        .insert("x-proxy-reason", HeaderValue::from_static("backend-unreachable"));
+    resp
 }
 
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {
@@ -445,5 +491,131 @@ mod tests {
             .expect("send");
         assert_eq!(resp.status(), 502);
         handle.abort();
+    }
+
+    /// A persistently-down backend must surface the new actionable 502 body
+    /// and the `x-proxy-reason` tag so the client can tailor its message.
+    #[tokio::test]
+    async fn proxy_502_carries_clear_body_and_reason_header() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("a").expect("issue");
+        // Port 1 refuses connections → both attempts fail → gateway_down_response().
+        let (port, handle) =
+            spawn_test_proxy(store, "http://127.0.0.1:1".to_string(), None).await;
+
+        let resp = reqwest::Client::new()
+            .get(&format!("http://127.0.0.1:{port}/anything"))
+            .bearer_auth(&issued.token)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 502);
+        assert_eq!(
+            resp.headers().get("x-proxy-reason").and_then(|v| v.to_str().ok()),
+            Some("backend-unreachable"),
+        );
+        let body = resp.text().await.expect("text");
+        assert!(
+            body.contains("Restart Sharing on the office machine"),
+            "502 body should tell the operator what to do; got: {body}",
+        );
+        handle.abort();
+    }
+
+    /// When the backend refuses the first attempt but comes up within the
+    /// 3s backoff window, the proxy's retry must succeed and stream a 200 back
+    /// to the client. This is the core self-healing behavior.
+    #[tokio::test]
+    async fn proxy_retries_and_succeeds_when_backend_comes_up() {
+        let (store, _dir) = fresh_store();
+        let issued = store.issue("a").expect("issue");
+
+        // Start a wiremock that answers 200 to the upstream path.
+        let upstream = MockServer::start().await;
+        Mock::given(http_method("GET"))
+            .and(http_path("/anything"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok-body"))
+            .mount(&upstream)
+            .await;
+
+        // Point the proxy at a closed port first, then flip it to the live
+        // upstream before the retry fires. We can't reconfigure a running
+        // proxy's backend_url, so instead we use a tiny TCP relay we control:
+        // it refuses (port closed) for the first connection, then accepts and
+        // forwards to the wiremock thereafter.
+        let upstream_uri = upstream.uri();
+        let relay_port = ephemeral_port().await;
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        let gate_clone = gate.clone();
+        let relay_handle = tokio::spawn(async move {
+            // First bind is deliberately delayed until notified, so the first
+            // incoming connection from the proxy gets refused (nothing
+            // listening yet).
+            gate_clone.notified().await;
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", relay_port))
+                .await
+                .expect("relay bind");
+            // Accept and blindly forward all subsequent connections to the
+            // wiremock upstream. Simplest correct forwarder: act as a dumb
+            // byte pipe (we don't parse HTTP here).
+            loop {
+                let (mut client, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                let upstream_uri = upstream_uri.clone();
+                tokio::spawn(async move {
+                    let (host, port) = upstream_uri
+                        .trim_start_matches("http://")
+                        .split_once(':')
+                        .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap()))
+                        .unwrap();
+                    let mut up = tokio::net::TcpStream::connect((host, port))
+                        .await
+                        .expect("connect upstream");
+                    tokio::io::copy_bidirectional(&mut client, &mut up)
+                        .await
+                        .ok();
+                });
+            }
+        });
+
+        let (port, handle) = spawn_test_proxy(
+            store,
+            format!("http://127.0.0.1:{relay_port}"),
+            None,
+        )
+        .await;
+
+        // Fire the request from a task so we can open the relay gate while
+        // it's in flight (during the 3s backoff).
+        let url = format!("http://127.0.0.1:{port}/anything");
+        let token = issued.token.clone();
+        let req_task = tokio::spawn(async move {
+            reqwest::Client::new()
+                .get(&url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("send")
+        });
+
+        // Let the proxy's first attempt fail (relay not listening yet), then
+        // open the gate so the bind completes before the retry after the 3s
+        // backoff. The retry will then connect through the relay to wiremock.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        gate.notify_waiters();
+
+        let resp = req_task.await.expect("task");
+        assert_eq!(
+            resp.status(),
+            200,
+            "retry should succeed after backend comes up",
+        );
+        let body = resp.text().await.expect("text");
+        assert_eq!(body, "ok-body");
+
+        handle.abort();
+        relay_handle.abort();
     }
 }

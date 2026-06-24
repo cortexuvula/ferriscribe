@@ -128,6 +128,27 @@ pub async fn post_audio(
     }
 
     if status.is_server_error() {
+        // The auth proxy (crates/sharing/src/auth_proxy.rs) tags its
+        // backend-unreachable 502s with `x-proxy-reason: backend-unreachable`
+        // and a plain-text body that tells the operator to restart Sharing on
+        // the office machine. Surface that verbatim so the user gets an
+        // actionable hint instead of a cryptic "502 Bad Gateway". The header
+        // is a contract with the proxy; do not change without coordinating.
+        if let Some(reason) = resp
+            .headers()
+            .get("x-proxy-reason")
+            .and_then(|v| v.to_str().ok())
+            && reason == "backend-unreachable"
+        {
+            let body =
+                medical_core::http_error_body::read_error_body(resp, 200).await;
+            let msg = if body.trim().is_empty() {
+                "Office Whisper server is down \u{2014} restart Sharing on the office machine (Settings \u{2192} Sharing \u{2192} Stop, then Start).".to_string()
+            } else {
+                body
+            };
+            return Err(AppError::SttProvider(msg));
+        }
         let body = medical_core::http_error_body::read_error_body(resp, 200).await;
         return Err(AppError::SttProvider(format!(
             "Whisper server internal error: {} {}",
