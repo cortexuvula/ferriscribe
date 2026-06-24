@@ -66,6 +66,11 @@
   // flips this reactive and reveals the app shell. Existing users never see it
   // (the backend auto-marks onboarding_completed when a config already existed).
   const onboardingComplete = $derived(settings.state.onboarding_completed);
+  // The store initializes with default config where onboarding_completed=false.
+  // Before settings.load() resolves, that default would flash the onboarding
+  // wizard at returning users. Gate the whole wizard-vs-shell branch on the
+  // store having loaded the real config so nothing renders prematurely.
+  const settingsLoaded = $derived(settings.loaded);
 
   // Intercept settings tab — open modal instead of navigating
   $effect(() => {
@@ -218,6 +223,10 @@
 
 {#if recoveryReason}
   <DatabaseRecoveryDialog reason={recoveryReason} />
+{:else if !settingsLoaded}
+  <!-- Blank while the real settings haven't loaded yet. The store's default
+       config has onboarding_completed=false; rendering on it before load()
+       completes would flash the onboarding wizard at returning users. -->
 {:else if !onboardingComplete}
   <OnboardingWizard />
 {:else}

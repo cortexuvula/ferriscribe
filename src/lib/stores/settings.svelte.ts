@@ -53,7 +53,11 @@ const defaults: AppConfig = {
 
 class SettingsStore {
   state = $state<AppConfig>({ ...defaults });
-  private loaded = false;
+  /** Reactive load flag. False until the backend returns the real config.
+   *  Consumers gate on this to avoid flashing default-derived UI before the
+   *  real values arrive (e.g. onboarding wizard before onboarding_completed
+   *  is known to be true). */
+  loaded = $state(false);
   private saveQueue: Promise<void> = Promise.resolve();
 
   /**
