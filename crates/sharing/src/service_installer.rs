@@ -78,6 +78,10 @@ fn find_ollama_binary() -> Option<PathBuf> {
 }
 
 /// Escape characters that are special in XML attribute values and text content.
+/// Only used by the macOS launchd plist and Windows service XML generators;
+/// gated so Linux (which has no XML-based service format) doesn't flag it as
+/// dead code under `-D warnings`.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -328,6 +332,7 @@ pub fn ollama_service_state() -> ServiceState {
 }
 
 #[cfg(test)]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod tests {
     use super::*;
 
