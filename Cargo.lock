@@ -3673,7 +3673,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
- "hmac",
  "keyring",
  "lazy_static",
  "machine-uid",
@@ -3703,8 +3702,6 @@ dependencies = [
  "futures-util",
  "hex",
  "hostname",
- "hyper",
- "hyper-util",
  "keyring",
  "mdns-sd",
  "medical-core",
@@ -3732,7 +3729,6 @@ name = "medical-stt-providers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "eyre",
  "futures-core",
  "hound",
  "knf-rs",
@@ -5630,7 +5626,7 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.20.9"
+version = "0.21.0"
 dependencies = [
  "axum",
  "chrono",

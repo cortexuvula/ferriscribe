@@ -36,13 +36,13 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 - **Secure Key Storage** — API keys encrypted at rest with AES-256-GCM; the master cipher key is derived via PBKDF2-HMAC-SHA256 (600 000 iterations) from an optional `MEDICAL_ASSISTANT_MASTER_KEY` env var or a per-machine identifier.
 
 ### Platform
-- **Cross-Platform** — macOS (Metal-accelerated STT), Windows, and Linux.
+- **Cross-Platform** — macOS (Apple Silicon; Metal-accelerated STT), Windows, and Linux. Note: Windows builds are produced by CI but excluded from the automated test matrix (cpal audio-device enumeration crashes on headless runners); macOS installers are Apple-Silicon-only.
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Svelte 5, SvelteKit, TypeScript, Vite |
+| Frontend | Svelte 5 (runes mode), TypeScript, Vite |
 | Backend | Rust (edition 2024), Tauri v2 |
 | STT | whisper-rs (whisper.cpp), ort (ONNX Runtime), knf-rs, rubato |
 | Database | SQLite (via rusqlite) |
@@ -52,7 +52,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 
 ## Architecture
 
-FerriScribe is organized as a Cargo workspace with 12 crates:
+FerriScribe is organized as a Cargo workspace with 13 crates:
 
 ```
 crates/
@@ -68,6 +68,7 @@ crates/
   processing/     — transcription pipeline orchestration
   export/         — PDF, DOCX, FHIR export
   translation/    — text translation
+  sharing/        — office-server sharing, mDNS, auth proxy, whisper supervisor
 src-tauri/        — Tauri app shell, commands, state management
 src/              — Svelte 5 frontend
 ```

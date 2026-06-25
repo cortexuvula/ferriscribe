@@ -27,10 +27,13 @@ function createLetterAudiencesStore() {
     try {
       const updated = await apiUpsert(audience);
       const index = audiences.findIndex((a) => a.id === updated.id);
+      // Reassign (not in-place mutate) for consistency with sibling stores
+      // (recordings, pipeline, chat) that all reassign a new array. Svelte 5
+      // tracks deep mutations, but the inconsistency is a maintenance trap.
       if (index >= 0) {
-        audiences[index] = updated;
+        audiences = [...audiences.slice(0, index), updated, ...audiences.slice(index + 1)];
       } else {
-        audiences.push(updated);
+        audiences = [...audiences, updated];
       }
       return updated;
     } catch (e) {

@@ -199,8 +199,17 @@ pub(super) async fn mark_recording_failed_db_only(
     };
     let db = Arc::clone(db);
     let _ = tokio::task::spawn_blocking(move || {
-        if let Ok(conn) = db.conn() {
-            let _ = RecordingsRepo::update(&conn, &recording);
+        if let Ok(conn) = db.conn()
+            && let Err(e) = RecordingsRepo::update(&conn, &recording)
+        {
+            // The failure-marker write itself failed. The recording will stay
+            // stuck in `Processing` in the DB; surface this in the log so it's
+            // debuggable instead of silently dropping the error.
+            tracing::warn!(
+                error = %e,
+                rec = %recording.id,
+                "failed to mark recording Failed in DB"
+            );
         }
     })
     .await;

@@ -73,8 +73,15 @@ pub fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> AppRes
         .conn()
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-    // Get the recording first so we can clean up the WAV file
-    let recording = RecordingsRepo::get_by_id(&conn, &uuid).ok();
+    // Get the recording first so we can clean up the WAV file. Distinguish a
+    // genuine DB error (propagate) from "not found" (proceed — the caller's
+    // intent is to delete, so an already-absent row is a no-op success). The
+    // old `.ok()` swallowed DB errors as None, silently orphaning the WAV.
+    let recording = match RecordingsRepo::get_by_id(&conn, &uuid) {
+        Ok(r) => Some(r),
+        Err(medical_db::DbError::NotFound(_)) => None,
+        Err(e) => return Err(AppError::Database(e.to_string())),
+    };
 
     // Delete the vectors and the recording row atomically: if either fails,
     // rolling back leaves the user in a consistent "still present" state they

@@ -18,6 +18,8 @@ export interface Spellchecker {
   readonly ready: boolean;
   /** Number of bundled medical terms loaded (0 until load() completes). */
   readonly medicalTermCount: number;
+  /** Load the dictionary (idempotent; safe to call multiple times). */
+  load(): Promise<void>;
   /** Returns true when the word is in the dictionary OR user wordlist
    *  OR session ignore list OR (when enabled) the bundled medical wordlist. */
   check(word: string): boolean;
@@ -110,7 +112,7 @@ let singleton: SpellcheckerImpl | null = null;
  * the async dictionary load; subsequent calls return the same instance.
  * Use `.ready` to gate UI that depends on the dictionary being loaded.
  */
-export function getSpellchecker(): Spellchecker & { load(): Promise<void> } {
+export function getSpellchecker(): Spellchecker {
   if (!singleton) singleton = new SpellcheckerImpl();
-  return singleton as unknown as Spellchecker & { load(): Promise<void> };
+  return singleton;
 }

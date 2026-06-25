@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { settings } from '../../stores/settings.svelte';
   import { getDefaultPrompt, type DocType } from '../../api/prompts';
 
@@ -61,6 +62,13 @@
   let promptDirty = $state<boolean>(false);
   let promptLoading = $state<boolean>(false);
   let promptSaveStatus = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  // Handle for the "saved → idle" status timer; tracked so it can be cleared
+  // on unmount and on rapid re-saves instead of firing on a stale closure.
+  let promptStatusTimer: ReturnType<typeof setTimeout> | null = null;
+
+  onDestroy(() => {
+    if (promptStatusTimer) clearTimeout(promptStatusTimer);
+  });
 
   async function loadPromptEditor(docType: DocType) {
     promptLoading = true;
@@ -101,7 +109,12 @@
       promptIsCustom = true;
       promptDirty = false;
       promptSaveStatus = 'saved';
-      setTimeout(() => { promptSaveStatus = 'idle'; }, 1500);
+      // Clear any prior pending timer so rapid saves don't stack callbacks.
+      if (promptStatusTimer) clearTimeout(promptStatusTimer);
+      promptStatusTimer = setTimeout(() => {
+        promptSaveStatus = 'idle';
+        promptStatusTimer = null;
+      }, 1500);
     } catch (e) {
       console.error('Failed to save custom prompt:', e);
       promptSaveStatus = 'error';

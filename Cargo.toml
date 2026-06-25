@@ -18,6 +18,12 @@ members = [
 ]
 
 [workspace.package]
+# This is the version of the 13 medical-* library crates (all pre-1.0). The
+# application version (currently 0.20.x) is tracked separately in
+# src-tauri/Cargo.toml, package.json, and src-tauri/tauri.conf.json — those
+# three MUST stay in sync (enforced by scripts/check-version-sync.mjs in CI),
+# but they intentionally do NOT inherit from here, because the library crates
+# version independently of the app release cadence.
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
