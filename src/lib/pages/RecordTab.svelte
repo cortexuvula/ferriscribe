@@ -26,7 +26,7 @@
   type Props = {
     onopenSettings?: (target: 'models' | 'audio') => void;
   };
-  let { onopenSettings = () => {} }: Props = $props();
+  const { onopenSettings = () => {} }: Props = $props();
 
   // Patient-context text state — owned here because buildPatientContext(...) needs them at pipeline-launch time.
   let contextText = $state('');

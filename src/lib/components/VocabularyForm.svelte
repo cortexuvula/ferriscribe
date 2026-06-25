@@ -17,7 +17,7 @@
     onCancel: () => void;
   }
 
-  let { editing, categories, onSave, onCancel }: Props = $props();
+  const { editing, categories, onSave, onCancel }: Props = $props();
 
   let formFind = $state('');
   let formReplace = $state('');

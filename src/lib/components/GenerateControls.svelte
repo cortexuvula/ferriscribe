@@ -30,7 +30,7 @@
     onLetterTypeChange: (type: string) => void;
   }
 
-  let {
+  const {
     recording,
     generationState,
     copyStatus,

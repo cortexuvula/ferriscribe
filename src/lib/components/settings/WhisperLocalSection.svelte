@@ -13,7 +13,7 @@
     formatBytes: (bytes: number) => string;
   }
 
-  let {
+  const {
     whisperModels,
     modelsRefreshing,
     downloadingModel,

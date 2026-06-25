@@ -10,7 +10,7 @@
     promotedCount: number;
     availableModels: string[]; // distinct ai_model values seen in promoted rows
   };
-  let { onclose, onsuccess, promotedCount, availableModels }: Props = $props();
+  const { onclose, onsuccess, promotedCount, availableModels }: Props = $props();
 
   let outputDir = $state<string | null>(null);
   // Pre-select the first available model. The intent is initial-only — once

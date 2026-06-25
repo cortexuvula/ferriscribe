@@ -1,6 +1,6 @@
 <script lang="ts">
   interface Props { onContinue: () => void; }
-  let { onContinue }: Props = $props();
+  const { onContinue }: Props = $props();
 </script>
 
 <div class="welcome">

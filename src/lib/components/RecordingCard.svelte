@@ -10,7 +10,7 @@
     onRetry?: (() => void) | null;
   }
 
-  let { recording, selected = false, onClick = () => {}, onDelete = null, onRetry = null }: Props = $props();
+  const { recording, selected = false, onClick = () => {}, onDelete = null, onRetry = null }: Props = $props();
 
   function statusIcon(status: RecordingSummary['status']): string {
     switch (status.status) {

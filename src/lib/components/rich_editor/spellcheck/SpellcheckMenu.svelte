@@ -19,7 +19,7 @@
     onClose: () => void;
   }
 
-  let { editor, request, onClose }: Props = $props();
+  const { editor, request, onClose }: Props = $props();
 
   let menuEl = $state<HTMLDivElement | null>(null);
 

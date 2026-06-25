@@ -7,7 +7,7 @@
     onFindClick?: () => void;
   }
 
-  let { editor, onFindClick = () => {} }: Props = $props();
+  const { editor, onFindClick = () => {} }: Props = $props();
 
   // Reactive flag bag so buttons show "active" state. Tiptap doesn't expose
   // a built-in store; we poll via a tiny $effect on selection changes.

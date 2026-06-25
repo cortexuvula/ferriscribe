@@ -4,7 +4,7 @@
   interface Props {
     onNavigate?: (tab: string, recordingId: string) => void;
   }
-  let { onNavigate }: Props = $props();
+  const { onNavigate }: Props = $props();
 
   function handleView(toast: Toast) {
     if (toast.recordingId && onNavigate) {

@@ -23,7 +23,7 @@
     mode: Mode;
     onchange?: () => void;
   };
-  let { mode, onchange }: Props = $props();
+  const { mode, onchange }: Props = $props();
 
   let items: Generation[] = $state([]);
   let total = $state(0);
@@ -33,11 +33,11 @@
   let error: string | null = $state(null);
   const PAGE_SIZE = 50;
 
-  let cursorIndex = $derived(
+  const cursorIndex = $derived(
     selectedId ? items.findIndex((g) => g.id === selectedId) : -1
   );
-  let selected = $derived(items.find((g) => g.id === selectedId) ?? null);
-  let position = $derived(
+  const selected = $derived(items.find((g) => g.id === selectedId) ?? null);
+  const position = $derived(
     cursorIndex >= 0 && total > 0
       ? { index: offset + cursorIndex, total }
       : null

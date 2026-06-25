@@ -14,7 +14,7 @@
     onclose: () => void;
   }
 
-  let { open, onclose }: Props = $props();
+  const { open, onclose }: Props = $props();
 
   // Escape-to-close is handled by the onEscape action (see <svelte:window>
   // below). The open guard prevents close when the dialog is hidden.

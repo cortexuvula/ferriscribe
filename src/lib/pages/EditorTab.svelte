@@ -11,7 +11,7 @@
   import { formatError } from '../types/errors';
   import { extractIcdCodes } from '../rsvp/engine';
 
-  let { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' | 'peer_discussion' } = $props();
+  const { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' | 'peer_discussion' } = $props();
 
   type TabConfig = { field: keyof Recording; label: string };
 

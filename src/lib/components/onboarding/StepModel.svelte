@@ -6,7 +6,7 @@
   import type { ModelInfo } from '../../api/models';
 
   interface Props { onNext: () => void; onSkip: () => void; }
-  let { onNext, onSkip }: Props = $props();
+  const { onNext, onSkip }: Props = $props();
 
   let models = $state<ModelInfo[]>([]);
   let selected = $state(settings.state.whisper_model);

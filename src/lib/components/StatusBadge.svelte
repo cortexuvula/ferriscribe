@@ -35,14 +35,14 @@
     if (pollHandle) clearInterval(pollHandle);
   });
 
-  let color = $derived(
+  const color = $derived(
     conn === 'lan' || conn === 'local' ? '#0a0' :
     conn === 'tailscale' ? '#0a8' :
     conn === 'reconnecting' ? '#fa0' :
     '#c00'
   );
 
-  let label = $derived(
+  const label = $derived(
     mode === 'off' ? '' :
     mode === 'server' ? 'Office server' :
     conn === 'lan' ? 'Connected (LAN)' :

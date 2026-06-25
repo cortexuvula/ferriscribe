@@ -17,7 +17,7 @@
     selected: boolean;
     onclick: () => void;
   };
-  let { generation, selected, onclick }: Props = $props();
+  const { generation, selected, onclick }: Props = $props();
 
   function editChip(): { label: string; cls: string } {
     if (generation.final_text === null) return { label: 'no save', cls: 'chip-red' };
@@ -35,8 +35,8 @@
       + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   }
 
-  let chip = $derived(editChip());
-  let snippet = $derived(firstChangeSnippet(generation.draft_text, generation.final_text));
+  const chip = $derived(editChip());
+  const snippet = $derived(firstChangeSnippet(generation.draft_text, generation.final_text));
 </script>
 
 <button class="master-row" class:selected type="button" aria-pressed={selected} {onclick}>

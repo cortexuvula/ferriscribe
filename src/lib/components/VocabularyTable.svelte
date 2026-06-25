@@ -12,7 +12,7 @@
     onToggleEnabled: (entry: VocabularyEntry) => void;
   }
 
-  let { entries, loading, searchText, categoryLabel, onEdit, onDelete, onToggleEnabled }: Props = $props();
+  const { entries, loading, searchText, categoryLabel, onEdit, onDelete, onToggleEnabled }: Props = $props();
 
   const filtered = $derived(filterVocabularyEntries(entries, searchText));
 </script>

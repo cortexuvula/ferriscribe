@@ -16,7 +16,7 @@
   let vocabDialogOpen = $state(false);
   let vocabCount = $state<[number, number]>([0, 0]);
   let ctxTemplateDialogOpen = $state(false);
-  let ctxTemplateCount = $derived(contextTemplates.list.length);
+  const ctxTemplateCount = $derived(contextTemplates.list.length);
   let dictDialogOpen = $state(false);
   let dictCount = $state(0);
   let encryptionState = $state<'no-database' | 'plaintext' | 'encrypted' | 'unknown'>('unknown');

@@ -9,7 +9,7 @@
     onClose: () => void;
   }
 
-  let { editor, open, readonly = false, onClose }: Props = $props();
+  const { editor, open, readonly = false, onClose }: Props = $props();
 
   let findText = $state('');
   let replaceText = $state('');

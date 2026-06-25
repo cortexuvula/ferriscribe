@@ -39,6 +39,8 @@ jobs:
         run: npm ci
       - name: Type-check (svelte-check)
         run: npm run check
+      - name: Lint (eslint)
+        run: npm run lint
       - name: Frontend tests (vitest)
         run: npx vitest run
 

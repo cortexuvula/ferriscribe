@@ -10,7 +10,7 @@
     onNewRecording?: () => void;
     onopenSettings?: (target: 'models' | 'audio') => void;
   }
-  let { onStart, onStop, onNewRecording, onopenSettings = () => {} }: Props = $props();
+  const { onStart, onStop, onNewRecording, onopenSettings = () => {} }: Props = $props();
 
   function handleStart() {
     if (onStart) {

@@ -22,7 +22,7 @@
     position: { index: number; total: number } | null;
     onAction: (id: string, action: Action) => void;
   };
-  let { generation, mode, loading, position, onAction }: Props = $props();
+  const { generation, mode, loading, position, onAction }: Props = $props();
 
   function fullDate(iso: string): string {
     return new Date(iso).toLocaleString();
@@ -41,13 +41,13 @@
   // Compute the diff for the currently selected generation. final_text being
   // null shouldn't happen in `candidate` mode after Task 3, but `promoted`
   // and `rejected` may still have it — show draft only in that case.
-  let diff = $derived.by(() => {
+  const diff = $derived.by(() => {
     if (!generation) return [];
     if (generation.final_text === null) return [];
     return diffLines(generation.draft_text, generation.final_text);
   });
 
-  let chipInfo = $derived(generation ? chip(generation) : { label: '', cls: '' });
+  const chipInfo = $derived(generation ? chip(generation) : { label: '', cls: '' });
 </script>
 
 {#if !generation}

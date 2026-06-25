@@ -6,7 +6,7 @@
   import { formatError } from '../../types/errors';
 
   interface Props { onNext: () => void; onSkip: () => void; }
-  let { onNext, onSkip }: Props = $props();
+  const { onNext, onSkip }: Props = $props();
 
   // Mirrors the Discovered / PairPorts types from ClientPair.svelte — the
   // shape of the sharing discovery commands' return values.
@@ -37,7 +37,7 @@
   // Dedupe by instance_name (mDNS fires per-interface) and merge addresses,
   // recomputing whenever the raw discovered list changes. $derived (not
   // $effect) so there's no chance of a stale write or feedback loop.
-  let deduped = $derived.by(() => {
+  const deduped = $derived.by(() => {
     const seen = new Map<string, Discovered>();
     for (const d of discovered) {
       const ex = seen.get(d.instance_name);

@@ -168,15 +168,15 @@ onDestroy(() => {
   clearAutoStart();
 });
 
-let stageFont = $derived(
+const stageFont = $derived(
   (settings.state.rsvp_font_size ?? 48) - ((settings.state.rsvp_chunk_size ?? 1) > 1 ? 8 : 0),
 );
 
-let progressPct = $derived(
+const progressPct = $derived(
   tokens.length === 0 ? 0 : Math.round((index / tokens.length) * 100),
 );
 
-let etaSecs = $derived(
+const etaSecs = $derived(
   Math.max(
     0,
     Math.round(((tokens.length - index) * 60) / (settings.state.rsvp_wpm || 300)),

@@ -9,7 +9,7 @@
     ai_model: string;
   };
 
-  let { onchange }: { onchange: () => void } = $props();
+  const { onchange }: { onchange: () => void } = $props();
 
   // The toolbar shows distinct models from the promoted set. We do a single
   // separate fetch here (paginated, model field only) — this is cheap and

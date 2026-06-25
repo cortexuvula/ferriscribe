@@ -6,7 +6,7 @@
     resetSignal: number;
   }
 
-  let { resetSignal }: Props = $props();
+  const { resetSignal }: Props = $props();
 
   let testInput = $state('');
   let testResult = $state<CorrectionResult | null>(null);

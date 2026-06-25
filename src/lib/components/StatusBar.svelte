@@ -9,7 +9,7 @@
   type Props = {
     onopenSettings: (target: 'models' | 'audio') => void;
   };
-  let { onopenSettings }: Props = $props();
+  const { onopenSettings }: Props = $props();
 
   type SharingStatus = {
     enabled: boolean;

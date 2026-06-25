@@ -5,7 +5,7 @@
   type Props = {
     onopenSettings: (target: 'models' | 'audio') => void;
   };
-  let { onopenSettings }: Props = $props();
+  const { onopenSettings }: Props = $props();
 
   let health = $state<EndpointHealthState>({
     ai: 'skipped', stt: 'skipped', lastCheckedAt: null, overall: 'hidden',

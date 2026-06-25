@@ -12,7 +12,7 @@
     onChange?: (v: string) => void;
   }
 
-  let { value = '', segments, placeholder = '', onChange = () => {} }: Props = $props();
+  const { value = '', segments, placeholder = '', onChange = () => {} }: Props = $props();
 
   let editing = $state(false);
   let editText = $state(value);
@@ -25,14 +25,14 @@
   // Parse the transcript into speaker sections.
   // Uses structured segments from metadata when available (more reliable),
   // falls back to regex parsing of "Speaker N: text" formatted text.
-  let sections: SpeakerSection[] = $derived.by(() => {
+  const sections: SpeakerSection[] = $derived.by(() => {
     if (segments && segments.length > 0) {
       return groupSegmentsIntoSections(segments);
     }
     return parseTextSections(value);
   });
 
-  let hasSpeakers = $derived(sections.some((s) => s.speaker !== null));
+  const hasSpeakers = $derived(sections.some((s) => s.speaker !== null));
 
   function groupSegmentsIntoSections(
     segs: Array<{ speaker: string | null; text: string }>,

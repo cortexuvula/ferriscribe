@@ -2,7 +2,7 @@
   interface Props {
     message: string;
   }
-  let { message }: Props = $props();
+  const { message }: Props = $props();
 
   let copied = $state(false);
 

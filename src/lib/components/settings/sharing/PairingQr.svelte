@@ -4,10 +4,10 @@
   type Props = {
     payload: string;
   };
-  let { payload }: Props = $props();
+  const { payload }: Props = $props();
 
   let canvas: HTMLCanvasElement | undefined = $state();
-  let code = $derived(payload.match(/[?&]code=(\d{6})/)?.[1] ?? '');
+  const code = $derived(payload.match(/[?&]code=(\d{6})/)?.[1] ?? '');
 
   $effect(() => {
     if (canvas && payload) QRCode.toCanvas(canvas, payload, { width: 240 });

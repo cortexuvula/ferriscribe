@@ -10,7 +10,7 @@
     onProcessRecording: () => void;
     onUploadAudio: () => Promise<void> | void;
   }
-  let {
+  const {
     importedRecordingId,
     importedFilename,
     importing,

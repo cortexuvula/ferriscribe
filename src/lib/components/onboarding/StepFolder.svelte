@@ -7,7 +7,7 @@
     finishing?: boolean;
     finishError?: string | null;
   }
-  let { onDone, finishing = false, finishError = null }: Props = $props();
+  const { onDone, finishing = false, finishError = null }: Props = $props();
 
   let storagePath = $state(settings.state.storage_path);
 

@@ -9,7 +9,7 @@
   type Props = {
     onopenSettings: (service: ServiceKind) => void;
   };
-  let { onopenSettings }: Props = $props();
+  const { onopenSettings }: Props = $props();
 
   let dialogEl: HTMLDivElement | undefined = $state(undefined);
   let retryBtn: HTMLButtonElement | undefined = $state(undefined);

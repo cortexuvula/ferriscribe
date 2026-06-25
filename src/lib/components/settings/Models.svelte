@@ -13,7 +13,7 @@
 
   let availableModels = $state<ModelInfo[]>([]);
   let modelsLoading = $state(false);
-  let modelMemory = $state<Record<string, string>>({});
+  const modelMemory = $state<Record<string, string>>({});
 
   let lmstudioTestStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
   let lmstudioTestMessage = $state('');

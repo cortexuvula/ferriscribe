@@ -17,7 +17,7 @@
     onChange?: (v: string) => void;
   }
 
-  let { value = '', placeholder = '', readonly = false, onChange = () => {} }: Props = $props();
+  const { value = '', placeholder = '', readonly = false, onChange = () => {} }: Props = $props();
 
   let editorEl: HTMLDivElement;
   // `editor` is $state so the reassignment in onMount flows to child components

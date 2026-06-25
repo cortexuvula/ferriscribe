@@ -3,7 +3,7 @@
     onChoose: (mode: 'local' | 'server') => void;
     onSkip: () => void;
   }
-  let { onChoose, onSkip }: Props = $props();
+  const { onChoose, onSkip }: Props = $props();
 </script>
 
 <h2>How will this computer use FerriScribe?</h2>

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::settings::AppConfig;
 use medical_db::settings::SettingsRepo;
@@ -152,30 +154,40 @@ mod tests {
 /// Retrieve a stored API key for the given provider from the OS keychain.
 ///
 /// Returns `None` if no key is stored. The key value is never logged.
+/// OS keychain calls (macOS Security framework, Windows Credential Manager)
+/// can block for hundreds of ms or prompt the user, so this runs on the
+/// blocking pool instead of the IPC thread.
 #[tauri::command]
-pub fn get_api_key(
+pub async fn get_api_key(
     state: tauri::State<'_, AppState>,
     provider: String,
 ) -> AppResult<Option<String>> {
-    state
-        .keys
-        .get_key(&provider)
-        .map_err(|e| AppError::Security(e.to_string()))
+    let keys = Arc::clone(&state.keys);
+    tokio::task::spawn_blocking(move || {
+        keys.get_key(&provider)
+            .map_err(|e| AppError::Security(e.to_string()))
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("keychain task failed: {e}")))?
 }
 
 /// Store an API key for the given provider in the OS keychain.
 ///
 /// Overwrites any existing key for the same provider.
+/// OS keychain calls can block; runs on the blocking pool.
 #[tauri::command]
-pub fn set_api_key(
+pub async fn set_api_key(
     state: tauri::State<'_, AppState>,
     provider: String,
     key: String,
 ) -> AppResult<()> {
-    state
-        .keys
-        .store_key(&provider, &key)
-        .map_err(|e| AppError::Security(e.to_string()))
+    let keys = Arc::clone(&state.keys);
+    tokio::task::spawn_blocking(move || {
+        keys.store_key(&provider, &key)
+            .map_err(|e| AppError::Security(e.to_string()))
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("keychain task failed: {e}")))?
 }
 
 /// Return the built-in default system prompt for the given document type.

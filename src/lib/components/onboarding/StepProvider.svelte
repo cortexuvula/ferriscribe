@@ -5,7 +5,7 @@
   import { formatError } from '../../types/errors';
 
   interface Props { onNext: () => void; onSkip: () => void; }
-  let { onNext, onSkip }: Props = $props();
+  const { onNext, onSkip }: Props = $props();
 
   // Local copies seeded from settings so the user can edit before saving.
   let provider = $state(settings.state.ai_provider);

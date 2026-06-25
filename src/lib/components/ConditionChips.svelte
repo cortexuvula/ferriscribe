@@ -5,7 +5,7 @@
     /// Called when the user clicks a chip to add it to the conditions textarea.
     onAdd: (condition: string) => void;
   }
-  let { onAdd }: Props = $props();
+  const { onAdd }: Props = $props();
 
   // The default list shown when custom_conditions is empty (fresh install or
   // backend default). If the backend returns values, those take precedence.

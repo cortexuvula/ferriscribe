@@ -1,31 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
-import { fileURLToPath } from 'node:url';
-import type { Plugin } from 'vite';
-
-// Mirror the dictionary-en asset resolver from vite.config.ts so spellcheck
-// tests can vi.mock the same import specifiers without Vite's strict exports
-// check rejecting the deep subpath.
-const dictionaryEnAffPath = fileURLToPath(
-  new URL('./node_modules/dictionary-en/index.aff', import.meta.url),
-);
-const dictionaryEnDicPath = fileURLToPath(
-  new URL('./node_modules/dictionary-en/index.dic', import.meta.url),
-);
-
-function dictionaryEnAssetResolver(): Plugin {
-  return {
-    name: 'dictionary-en-asset-resolver',
-    enforce: 'pre',
-    resolveId(source) {
-      const [bare, query] = source.split('?');
-      const suffix = query ? `?${query}` : '';
-      if (bare === 'dictionary-en/index.aff') return dictionaryEnAffPath + suffix;
-      if (bare === 'dictionary-en/index.dic') return dictionaryEnDicPath + suffix;
-      return null;
-    },
-  };
-}
+import { dictionaryEnAssetResolver } from './vite-plugins/dictionary-en';
 
 export default defineConfig({
   plugins: [dictionaryEnAssetResolver(), svelte({ compilerOptions: { runes: true } })],

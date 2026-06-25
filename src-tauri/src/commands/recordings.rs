@@ -199,8 +199,15 @@ pub fn import_audio_file(
     };
 
     // Read duration and file size from the resulting WAV.
-    let file_size = std::fs::metadata(&dest_path).map(|m| m.len()).ok();
-    let duration = hound::WavReader::open(&dest_path).ok().map(|reader| {
+    // Read duration and file size from the resulting WAV. If the just-written
+    // WAV is unreadable, that's a real signal (corrupt source, converter bug)
+    // — surface it instead of silently setting duration=None.
+    let file_size = std::fs::metadata(&dest_path)
+        .map(|m| m.len())
+        .map_err(|e| AppError::Audio(format!("imported WAV unreadable: {e}")))?;
+    let duration = {
+        let reader = hound::WavReader::open(&dest_path)
+            .map_err(|e| AppError::Audio(format!("imported WAV unreadable: {e}")))?;
         let spec = reader.spec();
         let total_samples = reader.len() as f64;
         if spec.sample_rate > 0 && spec.channels > 0 {
@@ -208,7 +215,7 @@ pub fn import_audio_file(
         } else {
             0.0
         }
-    });
+    };
 
     let dest_filename = dest_path
         .file_name()
@@ -218,8 +225,8 @@ pub fn import_audio_file(
     // Create the Recording entry.
     let mut recording = Recording::new(dest_filename, dest_path);
     recording.id = recording_id;
-    recording.duration_seconds = duration;
-    recording.file_size_bytes = file_size;
+    recording.duration_seconds = Some(duration);
+    recording.file_size_bytes = Some(file_size);
     recording.status = ProcessingStatus::Pending;
 
     let conn = state

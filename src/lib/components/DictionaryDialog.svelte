@@ -10,7 +10,7 @@
     onclose: () => void;
   }
 
-  let { open, onclose }: Props = $props();
+  const { open, onclose }: Props = $props();
 
   let words = $state<string[]>([]);
   let loading = $state(false);

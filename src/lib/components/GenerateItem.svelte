@@ -14,7 +14,7 @@
     onSpeedRead?: () => void;
   }
 
-  let {
+  const {
     title,
     description,
     icon,

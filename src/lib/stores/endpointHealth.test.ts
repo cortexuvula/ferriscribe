@@ -40,7 +40,7 @@ import { endpointHealth } from './endpointHealth.svelte';
 // The vi.mock above replaces settings with a plain object; cast to any so
 // svelte-check doesn't complain that .set() / .update() don't exist on the
 // real settings store type.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 import { settings as _settings } from '../stores/settings.svelte';
 const settings = _settings as any;
 

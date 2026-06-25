@@ -141,8 +141,8 @@
         <details class="la-placeholders">
           <summary>Available placeholders</summary>
           <ul>
-            <li><code>{'{'}letter_type{'}'}</code> — Type of letter being generated (e.g. results, instructions, follow-up)</li>
-            <li><code>{'{'}soap_note{'}'}</code> — The full SOAP note text from the consultation</li>
+            <li><code>{'{'}letter_type}</code> — Type of letter being generated (e.g. results, instructions, follow-up)</li>
+            <li><code>{'{'}soap_note}</code> — The full SOAP note text from the consultation</li>
           </ul>
         </details>
 

@@ -7,7 +7,7 @@
     devicesLoading: boolean;
   }
 
-  let { audioDevices, devicesLoading }: Props = $props();
+  const { audioDevices, devicesLoading }: Props = $props();
 
   async function handleInputDeviceChange(e: Event) {
     const value = (e.target as HTMLSelectElement).value;

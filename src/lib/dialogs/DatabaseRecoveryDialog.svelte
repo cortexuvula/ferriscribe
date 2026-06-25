@@ -5,7 +5,7 @@
   interface Props {
     reason: string;
   }
-  let { reason }: Props = $props();
+  const { reason }: Props = $props();
 
   let busy = $state(false);
   let errorMessage = $state<string | null>(null);

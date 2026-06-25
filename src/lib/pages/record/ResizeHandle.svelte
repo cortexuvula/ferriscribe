@@ -3,7 +3,7 @@
     onResize: (deltaPx: number) => void;
     onResizeEnd: () => void;
   };
-  let { onResize, onResizeEnd }: Props = $props();
+  const { onResize, onResizeEnd }: Props = $props();
 
   let startX = 0;
   let dragging = false;

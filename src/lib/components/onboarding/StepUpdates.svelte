@@ -5,7 +5,7 @@
     onNext: () => void;
     onSkip: () => void;
   }
-  let { onNext, onSkip }: Props = $props();
+  const { onNext, onSkip }: Props = $props();
 
   let choice = $state<'auto' | 'manual'>(settings.state.auto_update_check ? 'auto' : 'manual');
 

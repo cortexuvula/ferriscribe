@@ -8,7 +8,7 @@
     children?: import('svelte').Snippet;
   }
 
-  let { open, title, onClose, children }: Props = $props();
+  const { open, title, onClose, children }: Props = $props();
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && open) {

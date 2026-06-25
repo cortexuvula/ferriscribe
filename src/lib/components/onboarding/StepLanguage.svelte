@@ -5,7 +5,7 @@
     onNext: () => void;
     onSkip: () => void;
   }
-  let { onNext, onSkip }: Props = $props();
+  const { onNext, onSkip }: Props = $props();
 
   // The languages whisper.cpp supports. The value is the BCP-47 code stored in
   // AppConfig.language; whisper.rs extracts the first 2 chars for set_language.

@@ -2,7 +2,7 @@
   import type { ChatMessage } from '../types';
   import { formatTimestamp } from '../utils/format';
 
-  let { message }: { message: ChatMessage } = $props();
+  const { message }: { message: ChatMessage } = $props();
 
   const isUser = $derived(message.role === 'user');
   const roleName = $derived(

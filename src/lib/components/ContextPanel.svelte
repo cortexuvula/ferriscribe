@@ -18,7 +18,7 @@
     onContextChange: (value: string) => void;
   }
 
-  let {
+  const {
     medicationsText,
     allergiesText,
     conditionsText,

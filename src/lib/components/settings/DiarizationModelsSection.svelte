@@ -10,7 +10,7 @@
     formatBytes: (bytes: number) => string;
   }
 
-  let {
+  const {
     pyannoteModels,
     downloadingModel,
     downloadProgress,
