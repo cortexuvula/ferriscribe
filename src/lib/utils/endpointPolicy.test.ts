@@ -25,10 +25,22 @@ describe('classifyEndpoint', () => {
     ['169.254.0.1', 'LinkLocal'],
     ['fe80::1', 'LinkLocal'],
 
-    // Tailscale
+    // Tailscale CGNAT
     ['100.64.0.0', 'Tailscale'],
     ['100.127.255.255', 'Tailscale'],
     ['100.128.0.0', 'Public'],
+
+    // Tailscale MagicDNS (*.ts.net) — regression: these were classifying as
+    // 'Unknown' because the TS mirror didn't have the .ts.net suffix check,
+    // causing false "public address" warnings for remote Tailscale clients.
+    ['mac.tail161478.ts.net', 'Tailscale'],
+    ['server.ts.net', 'Tailscale'],
+    ['MAC.TAILNET.TS.NET', 'Tailscale'],
+    ['mac.tail161478.ts.net.', 'Tailscale'], // trailing dot FQDN
+    // Must NOT false-match these:
+    ['ts.net', 'Unknown'], // bare apex, no leading dot
+    ['fakets.net', 'Unknown'], // ends with "ts.net" not ".ts.net"
+    ['notreally.ts.net.example.com', 'Unknown'], // .ts.net is mid-string
 
     // ULA
     ['fd00::1', 'Ula'],
@@ -71,5 +83,18 @@ describe('isLocalOrAllowed', () => {
 
   it('accepts empty host (skipped)', () => {
     expect(isLocalOrAllowed('', false)).toBe(true);
+  });
+
+  // Regression: remote clients pairing via Tailscale MagicDNS were seeing
+  // a false "public address" warning because *.ts.net classified as Unknown.
+  // Tailscale is a trusted local-network kind — must be allowed without
+  // allowPublic, both for CGNAT IPs and MagicDNS hostnames.
+  it('accepts Tailscale MagicDNS without allow_public', () => {
+    expect(isLocalOrAllowed('mac.tail161478.ts.net', false)).toBe(true);
+    expect(isLocalOrAllowed('server.ts.net', false)).toBe(true);
+  });
+
+  it('accepts Tailscale CGNAT without allow_public', () => {
+    expect(isLocalOrAllowed('100.64.0.1', false)).toBe(true);
   });
 });

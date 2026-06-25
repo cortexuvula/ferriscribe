@@ -79,9 +79,18 @@ export function classifyEndpoint(host: string): EndpointKind {
 
   // Hostname
   const lower = trimmed.toLowerCase();
-  if (lower === 'localhost') return 'Loopback';
+  // Defensive: normalize away any trailing dot(s) so fully-qualified domain
+  // names like "foo.ts.net." still match the suffix checks below. Mirrors the
+  // Rust source of truth in crates/core/src/endpoint_policy.rs.
+  const normalized = lower.replace(/\.+$/, '');
+  if (normalized === 'localhost') return 'Loopback';
+  // Tailscale MagicDNS: <machine>.<tailnet>.ts.net. Match the FQDN suffix
+  // ".ts.net" (with leading dot) so we don't false-positive on things like
+  // "fakets.net". This is a static, DNS-free trust signal.
+  // MUST stay in sync with the Rust classifier — see validate_accepts_tailscale_magicdns_without_allow_public.
+  if (normalized.endsWith('.ts.net')) return 'Tailscale';
   for (const suf of LOCAL_TLD_SUFFIXES) {
-    if (lower.endsWith(suf)) return 'Mdns';
+    if (normalized.endsWith(suf)) return 'Mdns';
   }
   return 'Unknown';
 }
