@@ -264,7 +264,7 @@ impl AiProvider for OllamaProvider {
                 })
                 .collect();
             if !models.is_empty() {
-                models.sort_by(|a, b| a.id.cmp(&b.id));
+                models.sort_by_key(|m| m.id.clone());
                 return Ok(models);
             }
         }

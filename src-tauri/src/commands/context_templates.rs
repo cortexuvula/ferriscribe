@@ -22,7 +22,7 @@ fn paired_templates_target() -> Option<(crate::commands::sharing::PairedConnecti
 
 /// Sort templates alphabetically by name (case-insensitive).
 pub fn sort_templates(templates: &mut [ContextTemplate]) {
-    templates.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    templates.sort_by_key(|a| a.name.to_lowercase());
 }
 
 /// Insert or replace a template in-place.  Case-sensitive name match.

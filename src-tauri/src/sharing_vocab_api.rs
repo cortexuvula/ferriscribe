@@ -346,7 +346,7 @@ fn ctx_templates_load_sorted(db: &Database) -> Result<Vec<ContextTemplate>, Stri
     let mut cfg = SettingsRepo::load_config(&conn).map_err(|e| e.to_string())?;
     cfg.migrate();
     let mut t = cfg.custom_context_templates;
-    t.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    t.sort_by_key(|a| a.name.to_lowercase());
     Ok(t)
 }
 
@@ -397,7 +397,7 @@ async fn templates_upsert_handler(
             cfg.custom_context_templates.push(entry.clone());
         }
         cfg.custom_context_templates
-            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            .sort_by_key(|a| a.name.to_lowercase());
         SettingsRepo::save_config(&conn, &cfg).map_err(|e| e.to_string())?;
         Ok(entry)
     })
@@ -454,7 +454,7 @@ async fn templates_rename_handler(
             cfg.custom_context_templates[idx].name = new_name.clone();
             let renamed = cfg.custom_context_templates[idx].clone();
             cfg.custom_context_templates
-                .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                .sort_by_key(|a| a.name.to_lowercase());
             SettingsRepo::save_config(&conn, &cfg)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             Ok(renamed)
