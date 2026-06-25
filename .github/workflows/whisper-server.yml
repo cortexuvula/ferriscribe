@@ -13,7 +13,7 @@ on:
 
 env:
   WHISPER_TAG: ${{ github.event.inputs.whisper_tag || 'v1.8.4' }}
-  # Opt into Node.js 24 for GitHub Actions (actions/checkout@v4 and others
+  # Opt into Node.js 24 for GitHub Actions (actions/checkout@v7 and others
   # still run on Node.js 20 by default, which is deprecated as of 2026-05-26).
   # Node.js 24 will become the default on 2026-06-02.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -41,7 +41,7 @@ jobs:
 
     steps:
       - name: Checkout whisper.cpp
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ggml-org/whisper.cpp
           ref: ${{ env.WHISPER_TAG }}
