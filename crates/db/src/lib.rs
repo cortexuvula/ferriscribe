@@ -82,6 +82,11 @@ pub enum DbError {
     /// A string could not be parsed as a valid UUID.
     #[error("UUID parse error in {1}: {0}")]
     UuidParse(String, String),
+    /// An I/O error from the filesystem (file copy, migration write, backup).
+    /// Added so these failures get a typed variant instead of being stringified
+    /// into the opaque `Other(String)` catch-all.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
     /// Catch-all for other database errors.
     #[error("{0}")]
     Other(String),

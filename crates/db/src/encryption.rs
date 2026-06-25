@@ -101,8 +101,12 @@ pub fn migrate_plaintext_to_encrypted(
     let encrypting_path = encrypting_path_for(db_path);
 
     // Step 1: backup (must succeed before we touch anything else).
-    std::fs::copy(db_path, &backup_path)
-        .map_err(|e| crate::DbError::Other(format!("backup copy failed: {e}")))?;
+    std::fs::copy(db_path, &backup_path).map_err(|e| {
+        crate::DbError::Io(std::io::Error::new(
+            e.kind(),
+            format!("backup copy failed: {e}"),
+        ))
+    })?;
 
     // Wrap the rest in a closure so we can restore on failure.
     let result: DbResult<()> = (|| {
@@ -136,9 +140,15 @@ pub fn migrate_plaintext_to_encrypted(
         // unwritten pages on power loss).
         std::fs::File::open(&encrypting_path)
             .and_then(|f| f.sync_all())
-            .map_err(|e| crate::DbError::Other(format!("fsync encrypted DB: {e}")))?;
-        std::fs::rename(&encrypting_path, db_path)
-            .map_err(|e| crate::DbError::Other(format!("rename failed: {e}")))?;
+            .map_err(|e| {
+                crate::DbError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("fsync encrypted DB: {e}"),
+                ))
+            })?;
+        std::fs::rename(&encrypting_path, db_path).map_err(|e| {
+            crate::DbError::Io(std::io::Error::new(e.kind(), format!("rename failed: {e}")))
+        })?;
         Ok(())
     })();
 
