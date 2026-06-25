@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import General from './settings/General.svelte';
   import Prompts from './settings/Prompts.svelte';
   import Models from './settings/Models.svelte';
@@ -13,11 +14,13 @@
   let activeSection = $state<Section>('general');
 
   // Consume navigation requests from settingsNav store (e.g. from the
-  // EndpointOfflineDialog "Open Settings" button).
+  // EndpointOfflineDialog "Open Settings" button). The write-back
+  // (settingsNav.clear()) is untracked so this effect doesn't re-trigger
+  // itself by reading and writing the same reactive source.
   $effect(() => {
     if (settingsNav.state.requestedSection) {
       activeSection = settingsNav.state.requestedSection;
-      settingsNav.clear();
+      untrack(() => settingsNav.clear());
     }
   });
 

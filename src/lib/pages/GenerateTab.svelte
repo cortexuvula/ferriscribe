@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { recordings, selectRecording } from '../stores/recordings.svelte';
   import { generateSoap, generateReferral, generateLetter, generatePeerDiscussion } from '../api/generation';
   import { generation } from '../stores/generation.svelte';
@@ -19,7 +20,11 @@
   let specialty = $state('');
   let discussionReason = $state('');
 
-  $effect(() => {
+  // Load letter audiences once on mount. Previously in a $effect, which is a
+  // Svelte 5 footgun: it ran once by luck (no reactive read before the async
+  // call), but any future reactive read added above it would turn it into an
+  // infinite fetch loop.
+  onMount(() => {
     letterAudiences.list();
   });
 

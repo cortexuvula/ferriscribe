@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
   import { getSpellchecker } from './rich_editor/spellcheck/spellchecker';
   import { requestSpellcheckRescan } from './rich_editor/spellcheck/spellcheck_extension';
   import { listUserDict } from '../api/userDictionary';
   import { toasts } from '../stores/toasts.svelte';
+  import { onEscape } from '../actions/onEscape';
 
   interface Props {
     open: boolean;
@@ -18,20 +18,8 @@
   let newWord = $state('');
   let addError = $state('');
 
-  function handleEscape(e: KeyboardEvent) {
-    if (open && e.key === 'Escape') {
-      onclose();
-      e.stopImmediatePropagation();
-    }
-  }
-
-  onMount(() => {
-    window.addEventListener('keydown', handleEscape, { capture: true });
-  });
-
-  onDestroy(() => {
-    window.removeEventListener('keydown', handleEscape, { capture: true });
-  });
+  // Escape-to-close is handled by the onEscape action (see <svelte:window>
+  // below). The open guard prevents close when the dialog is hidden.
 
   async function loadWords() {
     loading = true;
@@ -92,6 +80,8 @@
       : words,
   );
 </script>
+
+<svelte:window use:onEscape={() => open && onclose()} />
 
 {#if open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->

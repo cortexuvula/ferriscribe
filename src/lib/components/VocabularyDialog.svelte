@@ -8,11 +8,12 @@
     type VocabularyEntry,
   } from '../api/vocabulary';
   import { toasts } from '../stores/toasts.svelte';
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import VocabularyForm from './VocabularyForm.svelte';
   import VocabularyTable from './VocabularyTable.svelte';
   import VocabularyTestPanel from './VocabularyTestPanel.svelte';
   import { filterVocabularyEntries } from '../utils/vocabularyFilter';
+  import { onEscape } from '../actions/onEscape';
 
   interface Props {
     open: boolean;
@@ -21,20 +22,8 @@
 
   let { open, onclose }: Props = $props();
 
-  function handleEscape(e: KeyboardEvent) {
-    if (open && e.key === 'Escape') {
-      onclose();
-      e.stopImmediatePropagation();
-    }
-  }
-
-  onMount(() => {
-    window.addEventListener('keydown', handleEscape, { capture: true });
-  });
-
-  onDestroy(() => {
-    window.removeEventListener('keydown', handleEscape, { capture: true });
-  });
+  // Escape-to-close is handled by the onEscape action (see <svelte:window>
+  // below). The open guard prevents close when the dialog is hidden.
 
   let entries = $state<VocabularyEntry[]>([]);
   let loading = $state(false);
@@ -138,6 +127,8 @@
     if (open) loadEntries();
   });
 </script>
+
+<svelte:window use:onEscape={() => open && onclose()} />
 
 {#if open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->

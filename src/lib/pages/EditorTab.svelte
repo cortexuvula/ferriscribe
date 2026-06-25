@@ -39,11 +39,29 @@
 
   // Structured transcript segments from recording metadata (stored by backend
   // during transcription). Used by TranscriptView for rich speaker display.
-  const transcriptSegments = $derived(
-    recordings.selectedRecording?.metadata?.transcript_segments as
-      | Array<{ speaker: string | null; text: string; start: number; end: number }>
-      | undefined
-  );
+  // Validated with a type guard so a malformed payload renders as empty
+  // rather than crashing TranscriptView on an unexpected shape.
+  function isTranscriptSegments(
+    v: unknown,
+  ): v is Array<{ speaker: string | null; text: string; start: number; end: number }> {
+    return (
+      Array.isArray(v) &&
+      v.every(
+        (seg) =>
+          typeof seg === 'object' &&
+          seg !== null &&
+          typeof (seg as Record<string, unknown>).text === 'string' &&
+          typeof (seg as Record<string, unknown>).start === 'number' &&
+          typeof (seg as Record<string, unknown>).end === 'number' &&
+          ((seg as Record<string, unknown>).speaker === null ||
+            typeof (seg as Record<string, unknown>).speaker === 'string'),
+      )
+    );
+  }
+  const transcriptSegments = $derived.by(() => {
+    const raw = recordings.selectedRecording?.metadata?.transcript_segments;
+    return isTranscriptSegments(raw) ? raw : undefined;
+  });
 
   let copyStatus = $state<'idle' | 'copying' | 'copied'>('idle');
   let saveStatus = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
