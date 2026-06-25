@@ -214,15 +214,29 @@ impl WhisperSupervisor {
                 got,
             });
         }
-        Self::extract_archive(&bytes, archive, &self.binary_dir, binary_name)?;
-        let bin_path = self.binary_dir.join(binary_name);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&bin_path)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&bin_path, perms)?;
-        }
+        // The extract + chmod are synchronous CPU/disk work (full archive
+        // decompression, metadata read, permission set). Running them inline
+        // stalls the tokio worker thread for the whole duration — noticeable
+        // on a large whisper-server binary. Offload to the blocking pool,
+        // matching how the STT crate handles CPU-heavy inference
+        // (stt-providers/src/local_provider.rs:113).
+        let out_dir = self.binary_dir.clone();
+        let archive = archive.to_string();
+        let binary_name = binary_name.to_string();
+        let bin_path = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+            Self::extract_archive(&bytes, &archive, &out_dir, &binary_name)?;
+            let bin_path = out_dir.join(&binary_name);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&bin_path)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&bin_path, perms)?;
+            }
+            Ok(bin_path)
+        })
+        .await
+        .map_err(|e| WhisperError::Download(format!("extract task failed: {e}")))??;
         Ok(bin_path)
     }
 

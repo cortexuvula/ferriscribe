@@ -155,6 +155,11 @@ pub fn run() {
     // managed — `Some(reason)` for recovery, `None` for normal boot — so the
     // recovery commands (which don't depend on `AppState`) always have access.
     let recovery_state = Arc::new(RecoveryState::default());
+    // Same pattern for fatal (non-recovery) init errors: we set the message
+    // and let the frontend render a dialog instead of panicking. Under
+    // `panic = "abort"` (release) the old panic was a silent hard exit with
+    // no UI and no recovery path for the user.
+    let fatal_error_state = Arc::new(crate::state::FatalErrorState::default());
 
     let init_result = AppState::initialize();
     let mut builder = tauri::Builder::default();
@@ -170,14 +175,19 @@ pub fn run() {
             // Do not register AppState; do not start the background subsystems.
         }
         Err(InitError::Other(e)) => {
-            // Fatal — match the previous behaviour (panic so the process exits
-            // with a clear error rather than silently failing).
-            panic!("Failed to initialize application state: {e}");
+            // Fatal but not panic-worthy: surface a dialog so the user sees what
+            // went wrong and can quit / copy the error / report it. Previously
+            // this was `panic!`, which under `panic = "abort"` killed the
+            // process with no UI.
+            tracing::error!(error = %e, "Fatal application initialization error");
+            fatal_error_state.set(format!("{e}"));
         }
     }
 
-    // Always managed so `get_database_recovery_state` is always callable.
+    // Always managed so `get_database_recovery_state` / `get_fatal_error` are
+    // always callable, even in the recovery or fatal-error boot branches.
     builder = builder.manage(recovery_state);
+    builder = builder.manage(fatal_error_state);
 
     // Auto-resume office-server mode if the user enabled it in a previous
     // session. We only consider this when AppState was successfully managed
@@ -309,6 +319,7 @@ pub fn run() {
             commands::context_templates::import_context_templates_json,
             commands::context_templates::export_context_templates_json,
             commands::recovery::get_database_recovery_state,
+            commands::recovery::get_fatal_error,
             commands::recovery::recover_database_from_path,
             commands::recovery::recover_database_wipe,
             commands::recovery::database_encryption_status,

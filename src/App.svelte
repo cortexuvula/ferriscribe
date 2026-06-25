@@ -15,6 +15,7 @@
   import StatusBadge from './lib/components/StatusBadge.svelte';
   import SettingsDialog from './lib/dialogs/SettingsDialog.svelte';
   import DatabaseRecoveryDialog from './lib/dialogs/DatabaseRecoveryDialog.svelte';
+  import FatalErrorDialog from './lib/dialogs/FatalErrorDialog.svelte';
   import OnboardingWizard from './lib/components/OnboardingWizard.svelte';
   import EndpointOfflineDialog from './lib/components/EndpointOfflineDialog.svelte';
   import { settingsNav } from './lib/stores/settingsNav.svelte.ts';
@@ -60,6 +61,12 @@
   // `RecoveryState` (Some(reason) on recovery, None on normal boot), so we
   // query it on mount instead of subscribing to a timing-race event.
   let recoveryReason = $state<string | null>(null);
+
+  // Fatal init-error dialog state. The backend registers `FatalErrorState`
+  // (Some(message) on a non-recovery init failure, None otherwise) so a
+  // corrupted-DB / migration / I/O error surfaces a dialog instead of the old
+  // `panic!` (which under `panic = "abort"` was a silent hard exit).
+  let fatalError = $state<string | null>(null);
 
   // First-run onboarding gate. Derived from the settings store after load();
   // the OnboardingWizard sets onboarding_completed=true on Done/Skip-all, which
@@ -123,6 +130,17 @@
       console.error('Failed to query recovery state:', e);
     }
     if (recoveryReason) {
+      return;
+    }
+
+    // Query fatal init-error state next. If set, render the fatal-error
+    // dialog and stop — AppState was not registered.
+    try {
+      fatalError = await invoke<string | null>('get_fatal_error');
+    } catch (e) {
+      console.error('Failed to query fatal error state:', e);
+    }
+    if (fatalError) {
       return;
     }
 
@@ -232,6 +250,8 @@
 
 {#if recoveryReason}
   <DatabaseRecoveryDialog reason={recoveryReason} />
+{:else if fatalError}
+  <FatalErrorDialog message={fatalError} />
 {:else if settingsLoadError}
   <div class="settings-load-error">
     <div class="error-card">

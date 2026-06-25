@@ -108,6 +108,31 @@ impl RecoveryState {
     }
 }
 
+/// Holds a fatal initialization error between boot and the frontend's mount.
+///
+/// Always registered with `app.manage(...)` (regardless of which init branch
+/// fires) so the `get_fatal_error` command can query it without depending on
+/// `AppState`. `Some(message)` means the frontend should render the fatal-error
+/// dialog; `None` means normal boot (or recovery mode — see [`RecoveryState`]).
+///
+/// This exists so a non-recovery init failure (DB corruption, migration error,
+/// I/O error) surfaces a usable dialog instead of panicking the process with no
+/// UI — which under `panic = "abort"` (release profile) was a silent hard exit.
+#[derive(Default)]
+pub struct FatalErrorState(pub std::sync::Mutex<Option<String>>);
+
+impl FatalErrorState {
+    pub fn set(&self, message: String) {
+        if let Ok(mut guard) = self.0.lock() {
+            *guard = Some(message);
+        }
+    }
+
+    pub fn get(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|g| g.clone())
+    }
+}
+
 /// Wrapper to make `CaptureHandle` usable across threads.
 ///
 /// `CaptureHandle` holds a `cpal::Stream`, which cpal marks `!Send` on every

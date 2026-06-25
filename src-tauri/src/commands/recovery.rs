@@ -12,12 +12,21 @@ use std::sync::Arc;
 
 use medical_core::error::{AppError, AppResult};
 
-use crate::state::RecoveryState;
+use crate::state::{FatalErrorState, RecoveryState};
 
 /// Return the current recovery reason. The frontend invokes this on mount;
 /// if `Some`, it renders the recovery dialog.
 #[tauri::command]
 pub fn get_database_recovery_state(state: tauri::State<'_, Arc<RecoveryState>>) -> Option<String> {
+    state.get()
+}
+
+/// Return the fatal initialization error, if any. The frontend invokes this on
+/// mount alongside `get_database_recovery_state`; if `Some`, it renders the
+/// fatal-error dialog. This replaces the old `panic!` on `InitError::Other`,
+/// which under `panic = "abort"` (release) was a silent hard exit.
+#[tauri::command]
+pub fn get_fatal_error(state: tauri::State<'_, Arc<FatalErrorState>>) -> Option<String> {
     state.get()
 }
 
