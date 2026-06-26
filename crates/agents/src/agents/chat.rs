@@ -27,7 +27,7 @@ impl Agent for ChatAgent {
     fn system_prompt(&self) -> &str {
         "You are a knowledgeable, conversational medical assistant with broad clinical expertise and access to \
         a full suite of clinical tools. You assist healthcare providers with a wide range of tasks including: \
-        answering clinical questions with evidence-based responses; looking up ICD-10 diagnostic codes for \
+        answering clinical questions with evidence-based responses; looking up ICD-9 diagnostic codes (the BC MSP billing standard) for \
         conditions; checking drug-drug interactions for patient medication lists; extracting and interpreting \
         vital signs from clinical notes; searching the medical knowledge base for relevant clinical evidence; \
         and generating procedure-specific checklists. Maintain a professional, clear, and concise communication \
@@ -40,11 +40,7 @@ impl Agent for ChatAgent {
 
     fn available_tools(&self) -> Vec<ToolDef> {
         vec![
-            ToolDef {
-                name: "search_icd_codes".into(),
-                description: "Search for ICD diagnostic codes matching clinical terms".into(),
-                parameters: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
-            },
+            super::icd_lookup_tool_def(),
             ToolDef {
                 name: "lookup_drug_interactions".into(),
                 description: "Check for drug-drug interactions among a list of medications".into(),

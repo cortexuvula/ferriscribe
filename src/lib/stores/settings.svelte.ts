@@ -35,6 +35,7 @@ const defaults: AppConfig = {
   custom_letter_prompt: null,
   custom_synopsis_prompt: null,
   custom_peer_discussion_prompt: null,
+  icd_version: 'icd9',
   rsvp_wpm: 300,
   rsvp_font_size: 48,
   rsvp_chunk_size: 1,

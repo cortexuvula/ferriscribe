@@ -41,11 +41,7 @@ impl Agent for MedicationAgent {
                 description: "Check for drug-drug interactions among a list of medications".into(),
                 parameters: json!({"type": "object", "properties": {"medications": {"type": "array", "items": {"type": "string"}}}, "required": ["medications"]}),
             },
-            ToolDef {
-                name: "search_icd_codes".into(),
-                description: "Search for ICD diagnostic codes".into(),
-                parameters: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
-            },
+            super::icd_lookup_tool_def(),
         ]
     }
 

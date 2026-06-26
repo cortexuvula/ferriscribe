@@ -132,9 +132,11 @@ pub fn select_icd9_candidates(
         let mut score = overlap;
 
         // Bonus: the bare code is mentioned verbatim in the source text.
-        // We test the lowercased source as a substring so a dotted code
-        // like "401.9" matches even though tokenization splits it.
-        if !entry.code.is_empty() && source_lower.contains(&entry.code.to_lowercase()) {
+        // Use a word-boundary match so bare 3-digit numeric codes (130, 250,
+        // 401) don't false-positive on lab/dose values (e.g. "glucose 130").
+        // Dotted codes (786.5) and V/alpha codes (V70.0, 01A) are
+        // distinctive enough that a boundary match is reliable.
+        if code_mentioned(&entry.code, &source_lower) {
             score += 3;
         }
 
@@ -203,6 +205,46 @@ fn tokenize(text: &str) -> Vec<String> {
         })
         .map(|s| s.to_lowercase())
         .collect()
+}
+
+/// Tests whether the bare ICD-9 code appears as a word-boundary match in
+/// the lowercased source text.
+///
+/// This guards against false positives where a bare 3-digit numeric code
+/// (e.g. `130` = toxoplasmosis) would match lab/dose values like
+/// "glucose 130" or "metformin 250 mg". Even with word boundaries, a
+/// bare 3-digit number is indistinguishable from a clinical value, so
+/// the bonus is only applied to codes that are **distinctive enough**
+/// to be unambiguous when mentioned verbatim:
+/// - ≥4 characters, OR
+/// - contains a dot (`786.5`, `401.9`), OR
+/// - contains a letter (`V70.0`, `01A`).
+///
+/// Bare 3-digit codes (130, 250, 401) never get the bonus — they rely
+/// entirely on description-token overlap for scoring.
+fn code_mentioned(code: &str, source_lower: &str) -> bool {
+    if code.is_empty() {
+        return false;
+    }
+    // Distinctiveness gate: skip bare short numeric codes that collide
+    // with lab/dose values.
+    let has_dot = code.contains('.');
+    let has_letter = code.chars().any(|c| c.is_ascii_alphabetic());
+    let long_enough = code.len() >= 4;
+    if !(has_dot || has_letter || long_enough) {
+        return false;
+    }
+    let code_lower = code.to_lowercase();
+    // Escape regex-special characters (the `.` in dotted codes) and
+    // require the code to be delimited by non-alphanumeric characters
+    // (or string boundaries) — emulates word boundaries without the
+    // lookahead/lookbehind the `regex` crate lacks.
+    let escaped = regex::escape(&code_lower);
+    let pattern = format!("(?:^|[^0-9a-z]){escaped}(?:$|[^0-9a-z])");
+    match regex::Regex::new(&pattern) {
+        Ok(re) => re.is_match(source_lower),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -377,6 +419,24 @@ mod tests {
         assert!(
             codes.contains(&"786.5"),
             "dotted code 786.5 mentioned verbatim must be scored in: {codes:?}"
+        );
+    }
+
+    // ---- Numeric code-bonus false-positive guard (F2) ----
+
+    #[test]
+    fn numeric_lab_value_does_not_score_bare_numeric_code() {
+        // "130" (toxoplasmosis) must NOT get the +3 bonus from a glucose
+        // reading of 130 mg/dL. A bare-3-digit-code substring match would
+        // have scored it before the word-boundary guard was added.
+        let transcript = "Patient reports glucose 130 this morning, weight 250 pounds.";
+        let selected = select_icd9_candidates(transcript, None, None);
+        let codes: Vec<&str> = selected.iter().map(|e| e.code.as_str()).collect();
+        // 130 (toxoplasmosis) is not in the baseline and should not be
+        // scored in by the numeric value.
+        assert!(
+            !codes.contains(&"130"),
+            "glucose 130 must not score toxoplasmosis (130): {codes:?}"
         );
     }
 }

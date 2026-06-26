@@ -41,15 +41,19 @@ export function normalizedForms(code: string): string[] {
   const forms = [trimmed];
   // Pure-numeric codes: zero-pad the integer part to 3 digits.
   const dotIdx = trimmed.indexOf('.');
+  let padded: string | undefined;
   if (dotIdx > 0) {
     const intPart = trimmed.slice(0, dotIdx);
     const rest = trimmed.slice(dotIdx);
     const n = Number(intPart);
-    if (Number.isInteger(n)) forms.push(String(n).padStart(3, '0') + rest);
+    if (Number.isInteger(n)) padded = String(n).padStart(3, '0') + rest;
   } else {
     const n = Number(trimmed);
-    if (Number.isInteger(n)) forms.push(String(n).padStart(3, '0'));
+    if (Number.isInteger(n)) padded = String(n).padStart(3, '0');
   }
+  // Only include the padded form when it differs — avoids duplicates like
+  // ["780","780"] for already-3-digit numeric codes.
+  if (padded !== undefined && padded !== trimmed) forms.push(padded);
   return forms;
 }
 
@@ -75,20 +79,32 @@ export function validateIcdCode(
   return normalizedForms(bare).some((f) => codeSet.has(f));
 }
 
+/** ICD coding mode — mirrors the Rust IcdVersion enum (snake_case). */
+export type IcdMode = 'icd9' | 'icd10' | 'both';
+
 /**
  * Extract and validate ICD codes from note text.
  *
- * Wraps `extractIcdCodes` so existing call sites can swap one call.
- * Only ICD-9 codes are validated against the MSP ICD-9 set; ICD-10
- * codes (which appear in "both" mode) have no bundled list and render
- * as `valid: null` (neutral).
+ * Mode-aware: in `icd9` mode, ICD-9 codes validate against the MSP set
+ * and any stray ICD-10 codes (model mislabel) render neutral without a
+ * false warning. In `icd10` mode, ICD-10 codes render neutral (no
+ * bundled ICD-10 list) and ICD-9 codes are NOT validated against the
+ * wrong set. In `both` mode, ICD-9 codes validate, ICD-10 codes render
+ * neutral. Defaults to `icd9` (the BC MSP billing standard).
  */
 export function extractIcdCodesValidated(
   text: string,
   codeSet: Set<string> | null,
+  mode: IcdMode = 'icd9',
 ): ValidatedIcdCode[] {
-  return extractIcdCodes(text).map((raw) => ({
-    raw,
-    valid: /ICD-9/i.test(raw) ? validateIcdCode(raw, codeSet) : null,
-  }));
+  const validateIcd9 = mode === 'icd9' || mode === 'both';
+  return extractIcdCodes(text).map((raw) => {
+    const isIcd9 = /ICD-9/i.test(raw);
+    // Only validate ICD-9 codes when we're in a mode that uses ICD-9,
+    // and never validate ICD-10 codes (no bundled list). This prevents
+    // the wrong-set false warning (e.g. an ICD-10 code validated
+    // against the ICD-9 MSP list in pure icd10 mode).
+    if (isIcd9 && validateIcd9) return { raw, valid: validateIcdCode(raw, codeSet) };
+    return { raw, valid: null };
+  });
 }

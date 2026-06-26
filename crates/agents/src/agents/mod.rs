@@ -9,7 +9,7 @@
 //! |---|---|---|
 //! | [`ChatAgent`] | All 5 | General-purpose conversational assistant |
 //! | [`MedicationAgent`] | drug interactions, ICD lookup | Drug safety and pharmacotherapy |
-//! | [`DiagnosticAgent`] | ICD lookup, vitals extraction | Differential diagnosis and ICD-10 coding |
+//! | [`DiagnosticAgent`] | ICD lookup, vitals extraction | Differential diagnosis and ICD-9 coding |
 //! | [`ComplianceAgent`] | checklist | SOAP note auditing and compliance |
 //! | [`DataExtractionAgent`] | vitals extraction | Structured data from unstructured text |
 //! | [`WorkflowAgent`] | checklist | Step-by-step clinical workflow guidance |
@@ -35,6 +35,39 @@ pub use synopsis::SynopsisAgent;
 pub use workflow::WorkflowAgent;
 
 use medical_core::traits::Agent;
+use medical_core::types::ToolDef;
+use serde_json::json;
+
+/// Shared `ToolDef` for the ICD-9 lookup tool, exposing the full
+/// `search_icd_codes` parameter schema (query + version, defaulting to
+/// ICD-9 — the BC MSP billing standard).
+///
+/// All agents that advertise ICD lookup use this so the schema the model
+/// sees matches the tool's real capabilities (the earlier per-agent
+/// ToolDefs stripped the `version` parameter, leaving the model unable to
+/// request ICD-9 explicitly).
+pub(crate) fn icd_lookup_tool_def() -> ToolDef {
+    ToolDef {
+        name: "search_icd_codes".into(),
+        description: "Search for ICD diagnostic codes matching clinical terms. Searches the full BC MSP ICD-9 list (7,122 codes) by default.".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Clinical term, condition, or keyword to search for"
+                },
+                "version": {
+                    "type": "string",
+                    "enum": ["ICD-9", "ICD-10", "both"],
+                    "description": "ICD version to search. Defaults to ICD-9 (BC MSP billing standard).",
+                    "default": "ICD-9"
+                }
+            },
+            "required": ["query"]
+        }),
+    }
+}
 
 /// Returns all 8 medical agents as boxed trait objects.
 ///

@@ -69,7 +69,7 @@ import type { ContextTemplate } from '../api/contextTemplates';
 
 // The Rust AppConfig (crates/core/src/types/settings.rs) defines additional
 // fields the frontend doesn't touch (channels, window_width/height, soap_note_settings,
-// agent_settings, icd_version, soap_template, embedding_model, quick_continue_mode,
+// agent_settings, soap_template, embedding_model, quick_continue_mode,
 // max_background_workers, show_processing_notifications, auto_retry_failed,
 // max_retry_attempts, auto_generate_referral/letter, auto_index_rag). They round-
 // trip through this type without being modeled here; if the frontend ever reads
@@ -108,6 +108,9 @@ export interface AppConfig {
   custom_letter_prompt: string | null;
   custom_synopsis_prompt: string | null;
   custom_peer_discussion_prompt: string | null;
+  // ICD coding version (drives prompt + chip validation behavior).
+  // Mirrors IcdVersion enum in crates/core/src/types/settings.rs (snake_case).
+  icd_version: 'icd9' | 'icd10' | 'both';
   // RSVP speed-reader
   rsvp_wpm: number;
   rsvp_font_size: number;

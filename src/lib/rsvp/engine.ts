@@ -92,7 +92,16 @@ export function tokenize(text: string): Token[] {
 // "ICD-9 Code: V70.0", "ICD-10 Code: Z00.00" (SOAP template output format),
 // and BC MSP-additional alpha-suffix codes like "ICD-9: 01A" (the trailing
 // [A-Z]? captures the suffix that distinguishes 01A from bare 01).
-const ICD_RE = /\s*[\(\[]?\s*ICD-\d+(?:\s+Code)?:?\s*[A-Z]?[\d\.]+[A-Z]?\s*[\)\]]?/giu;
+// Tolerates ICD9 (no hyphen), ICD-9 - 847.2 / ICD-9 — 847.2 (dash/em-dash
+// separator instead of colon), and no-space forms like ICD-9:401.9.
+const ICD_RE = /\s*[\(\[]?\s*ICD[-\s]?\d+(?:\s+Code)?[\s:—–-]+[A-Z]?[\d\.]+[A-Z]?\s*[\)\]]?/giu;
+
+// Strips a full ICD code LINE including any trailing " — <description>"
+// (the format the SOAP prompt teaches). Used by preprocessSoap so the
+// speed-reader doesn't show orphaned description fragments glued together
+// when 3 per-code lines are emitted. ICD_RE alone only consumes the code
+// prefix/body, leaving " — Sprain of lumbar" behind.
+const ICD_LINE_RE = /^[ \t]*ICD[-\s]?\d+(?:\s+Code)?[\s:—–-]+[A-Z]?[\d\.]+[A-Z]?.*$/gimu;
 
 /** Extract all ICD codes from text, returning cleaned-up code strings. */
 export function extractIcdCodes(text: string): string[] {
@@ -109,6 +118,11 @@ const LEADING_BULLET_RE = /^[-•*]\s+/gmu;
  */
 export function preprocessSoap(text: string): string {
   return text
+    // Strip whole ICD code lines first (catches the " — <description>"
+    // suffix that ICD_RE alone would leave orphaned).
+    .replace(ICD_LINE_RE, '')
+    // Then strip any remaining inline ICD fragments (e.g. "(ICD-9: 401.9)"
+    // mid-sentence) that weren't on their own line.
     .replace(ICD_RE, '')
     .replace(NOT_DISCUSSED_LINE_RE, '')
     .replace(LEADING_BULLET_RE, '')

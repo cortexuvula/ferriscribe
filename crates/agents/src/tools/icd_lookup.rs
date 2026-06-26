@@ -115,21 +115,47 @@ impl Tool for IcdLookupTool {
         let search_icd10 = matches!(version, "ICD-10" | "both");
 
         if search_icd9 {
+            // Score each match so generic queries like "pain" surface the
+            // most relevant codes (exact code hit > full-query substring >
+            // token overlap) BEFORE capping — otherwise file-order
+            // iteration fills the 25-slot cap with low-relevance
+            // early-chapter codes before reaching the 780-799 Symptoms
+            // chapter.
+            let query_tokens: Vec<&str> = query.split_whitespace().collect();
+            let mut scored: Vec<(usize, serde_json::Value)> = Vec::new();
             for entry in icd9::entries() {
-                if results.len() >= MAX_ICD9_RESULTS {
-                    break;
-                }
                 let searchable = format!("{} {}", entry.code, entry.description).to_lowercase();
-                if searchable.contains(&query)
-                    || query.split_whitespace().any(|w| searchable.contains(w))
-                {
-                    results.push(json!({
-                        "code": entry.code,
-                        "description": entry.description,
-                        "category": entry.category,
-                        "version": "ICD-9"
-                    }));
+                let mut score: usize = 0;
+                // Exact code match is the strongest signal: the query IS
+                // the code (e.g. "401.9" or "v70.0").
+                if entry.code.to_lowercase() == query {
+                    score += 10;
                 }
+                // Full query as a substring (e.g. "chest pain" in the
+                // description) ranks above individual token hits.
+                if searchable.contains(&query) {
+                    score += 5;
+                }
+                // Token overlap.
+                score += query_tokens
+                    .iter()
+                    .filter(|w| searchable.contains(*w))
+                    .count();
+                if score > 0 {
+                    scored.push((
+                        score,
+                        json!({
+                            "code": entry.code,
+                            "description": entry.description,
+                            "category": entry.category,
+                            "version": "ICD-9"
+                        }),
+                    ));
+                }
+            }
+            scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+            for (_, value) in scored.into_iter().take(MAX_ICD9_RESULTS) {
+                results.push(value);
             }
         }
 

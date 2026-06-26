@@ -2,20 +2,25 @@
   /**
    * A single ICD code chip. Recolors to amber with a tooltip when the
    * code is not on the BC MSP ICD-9 list (the warning variant mirrors
-   * EndpointHealthPill's `.warn` recipe). `valid === null` (set not
-   * loaded, or an ICD-10 code in "both" mode) renders as the neutral
-   * accent style — never a false warning.
+   * EndpointHealthPill's `.warn` recipe). `valid === null` renders as
+   * the neutral accent style with an explanatory tooltip — covers the
+   * ICD-10-code-in-both-mode case ("validation unavailable") and the
+   * store-load-failed case.
    */
   type Props = {
     code: string;
     valid: boolean | null;
+    /** Tooltip shown when valid === null (e.g. ICD-10 code, or set not loaded). */
+    neutralTooltip?: string;
   };
-  let { code, valid }: Props = $props();
+  let { code, valid, neutralTooltip = 'Validation unavailable' }: Props = $props();
 
   const tooltip = $derived(
     valid === false
       ? 'Not in BC MSP ICD-9 list — verify before billing'
-      : '',
+      : valid === null
+        ? neutralTooltip
+        : '',
   );
 </script>
 

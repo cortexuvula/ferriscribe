@@ -159,6 +159,25 @@ describe('preprocessSoap', () => {
     expect(out).not.toMatch(/ICD-10/);
     expect(out).not.toMatch(/Z00/);
   });
+
+  it('strips full 3-code block without leaving orphaned descriptions (F13)', () => {
+    // The prompt now emits up to 3 per-code lines. preprocessSoap must
+    // strip the WHOLE line (including " — <description>") so the RSVP
+    // reader doesn't show orphaned fragments glued together.
+    const block = [
+      'ICD-9 Code: 272.0 — Pure hypercholesterolemia',
+      'ICD-9 Code: 266.2 — Other B-complex deficiencies',
+      'ICD-9 Code: V70.0 — Routine general medical exam',
+      '',
+      'Subjective:',
+      'Chief complaint: cough',
+    ].join('\n');
+    const out = preprocessSoap(block);
+    expect(out).not.toMatch(/ICD-9/);
+    expect(out).not.toMatch(/cholesterol/i);
+    expect(out).not.toMatch(/deficiencies/i);
+    expect(out).toMatch(/Subjective:/);
+  });
 });
 
 describe('extractIcdCodes', () => {
@@ -199,6 +218,19 @@ describe('extractIcdCodes', () => {
     const codes = extractIcdCodes('ICD-9 Code: 01A');
     expect(codes).toContain('ICD-9 Code: 01A');
     expect(codes[0]).toMatch(/01A$/);
+  });
+
+  it('extracts ICD9 without hyphen (F14 robustness)', () => {
+    expect(extractIcdCodes('ICD9: 401.9')).toContain('ICD9: 401.9');
+  });
+
+  it('extracts with dash separator instead of colon (F14 robustness)', () => {
+    expect(extractIcdCodes('ICD-9 - 847.2')).toContain('ICD-9 - 847.2');
+    expect(extractIcdCodes('ICD-9 — 847.2')).toContain('ICD-9 — 847.2');
+  });
+
+  it('extracts with no space after colon (F14 robustness)', () => {
+    expect(extractIcdCodes('ICD-9:401.9')).toContain('ICD-9:401.9');
   });
 });
 

@@ -36,11 +36,7 @@ impl Agent for DiagnosticAgent {
 
     fn available_tools(&self) -> Vec<ToolDef> {
         vec![
-            ToolDef {
-                name: "search_icd_codes".into(),
-                description: "Search for ICD diagnostic codes matching clinical terms".into(),
-                parameters: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
-            },
+            super::icd_lookup_tool_def(),
             ToolDef {
                 name: "extract_vitals".into(),
                 description: "Extract vital signs from clinical text".into(),

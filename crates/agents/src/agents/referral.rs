@@ -4,7 +4,6 @@ use medical_core::{
     traits::Agent,
     types::{AgentContext, AgentResponse, ToolDef},
 };
-use serde_json::json;
 
 /// Agent specializing in generating professional medical referral letters.
 ///
@@ -39,11 +38,7 @@ impl Agent for ReferralAgent {
     }
 
     fn available_tools(&self) -> Vec<ToolDef> {
-        vec![ToolDef {
-            name: "search_icd_codes".into(),
-            description: "Search for ICD-10 codes to include in referral documentation".into(),
-            parameters: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
-        }]
+        vec![super::icd_lookup_tool_def()]
     }
 
     async fn execute(&self, _context: AgentContext) -> AppResult<AgentResponse> {

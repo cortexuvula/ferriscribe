@@ -5,6 +5,7 @@
   import type { GeneratingType } from '../stores/generation.svelte';
   import { extractIcdCodesValidated } from '../icd';
   import { icd9 as icd9Store } from '../stores/icd9.svelte';
+  import { settings } from '../stores/settings.svelte';
 
   interface Props {
     recording: Recording | null;
@@ -77,7 +78,7 @@
         anyGenerating={generationState.generating !== null}
         done={!!recording?.soap_note}
         copyStatus={copyStatus['soap']}
-        icdCodes={recording?.soap_note ? extractIcdCodesValidated(recording.soap_note, icd9Store.codeSet) : undefined}
+        icdCodes={recording?.soap_note ? extractIcdCodesValidated(recording.soap_note, icd9Store.codeSet, settings.state.icd_version) : undefined}
         onGenerate={() => onGenerate('soap')}
         onCopy={() => onCopy('soap')}
         onSpeedRead={() => onSpeedRead('soap')}

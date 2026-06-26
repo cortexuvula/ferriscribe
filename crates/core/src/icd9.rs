@@ -43,57 +43,31 @@ struct Icd9File {
     codes: Vec<Icd9Entry>,
 }
 
-/// All 7,122 ICD-9 entries, parsed once.
+/// All 7,122 ICD-9 entries, parsed once from the bundled JSON.
 ///
 /// The MSP source uses hierarchical descriptions: child codes (e.g.
 /// `847.2`) often carry only a terse fragment ("LUMBAR") that is only
-/// meaningful alongside the parent code (`847` = "SPRAIN OF NECK AND
-/// BACK"). At parse time each child's `description` is enriched to
-/// `"<parent description>: <fragment>"` so keyword search and the prompt
-/// both surface the full clinical meaning.
+/// meaningful alongside the parent code (`847` = "SPRAINS AND STRAINS
+/// OF OTHER AND UNSPECIFIED PARTS OF BACK"). These fragments are stored
+/// verbatim — an earlier version prepended the parent description, but
+/// that pushed the clinically-meaningful fragment past the prompt's
+/// truncation budget (see [`ENTRIES`] for the full rationale).
+/// All 7,122 ICD-9 entries, parsed once from the bundled JSON.
+///
+/// Descriptions are stored verbatim from the MSP source. The MSP file
+/// uses hierarchical fragments for child codes (e.g. `847.2` carries
+/// only `"LUMBAR"`, meaningful alongside parent `847` = "SPRAINS AND
+/// STRAINS..."). An earlier version prepended the parent description,
+/// but that pushed the clinically-meaningful fragment past the prompt's
+/// 57-char truncation (e.g. `041.2` "PNEUMOCOCCUS" became "BACTERIAL
+/// INFECTION IN CONDITIONS CLASSIFIED ELSEWHERE AN…"), corrupting 880
+/// codes. The raw fragments are kept — they are terse but never
+/// truncated, and the LLM generally knows ICD-9 structure well enough
+/// to select from them.
 static ENTRIES: LazyLock<Vec<Icd9Entry>> = LazyLock::new(|| {
     let file: Icd9File = serde_json::from_str(ICD9_JSON).expect("icd9_codes.json must parse");
-    enrich_descriptions(file.codes)
+    file.codes
 });
-
-/// Merges terse child descriptions with their parent (the 3-digit code
-/// immediately above, e.g. `847.2` → parent `847`).
-///
-/// Codes whose integer part has no 3-digit parent in the list, and V/E
-/// codes, are left unchanged.
-fn enrich_descriptions(mut codes: Vec<Icd9Entry>) -> Vec<Icd9Entry> {
-    use std::collections::HashMap;
-    // Collect parent descriptions into owned strings so we can mutate
-    // `codes` afterward.
-    let parent_desc: HashMap<String, String> = codes
-        .iter()
-        .filter(|e| {
-            // Parents are bare 3-digit codes or V/E codes with no dot.
-            !e.code.contains('.') && e.code.len() >= 3
-        })
-        .map(|e| (e.code.clone(), e.description.clone()))
-        .collect();
-
-    for entry in codes.iter_mut() {
-        if let Some(dot) = entry.code.find('.') {
-            let parent_code = &entry.code[..dot];
-            if let Some(parent) = parent_desc.get(parent_code) {
-                // Only enrich if the child has a terse fragment — skip if
-                // it already reads as a complete description.
-                if is_terse_fragment(&entry.description) {
-                    entry.description = format!("{}: {}", parent, entry.description);
-                }
-            }
-        }
-    }
-    codes
-}
-
-/// Heuristic: MSP fragments like "LUMBAR", "ACUTE", "UNSPECIFIED" are
-/// short (1-2 words); enriched descriptions read as full phrases.
-fn is_terse_fragment(desc: &str) -> bool {
-    desc.split_whitespace().count() <= 2
-}
 
 /// Set of bare codes for O(1) membership tests. Uses the code string
 /// verbatim — callers must normalize before lookup if they are stripping
@@ -130,13 +104,21 @@ pub fn normalized_forms(code: &str) -> Vec<String> {
     let trimmed = code.trim();
     let mut forms = vec![trimmed.to_string()];
     // Pure-numeric codes: zero-pad the integer part to 3 digits.
-    if let Some(dot) = trimmed.find('.') {
+    let padded = if let Some(dot) = trimmed.find('.') {
         let (int_part, rest) = trimmed.split_at(dot);
-        if let Ok(n) = int_part.parse::<u32>() {
-            forms.push(format!("{n:03}{rest}"));
-        }
-    } else if let Ok(n) = trimmed.parse::<u32>() {
-        forms.push(format!("{n:03}"));
+        int_part
+            .parse::<u32>()
+            .map(|n| format!("{n:03}{rest}"))
+            .ok()
+    } else {
+        trimmed.parse::<u32>().map(|n| format!("{n:03}")).ok()
+    };
+    // Only push the padded form when it actually differs — avoids
+    // duplicate entries like ["780","780"] for already-3-digit codes.
+    if let Some(p) = padded
+        && p != trimmed
+    {
+        forms.push(p);
     }
     forms
 }
@@ -158,9 +140,9 @@ mod tests {
     #[test]
     fn finds_known_code() {
         let e = find_by_code("847.2").expect("847.2 must exist");
-        // After enrichment: parent "SPRAIN OF NECK AND BACK: LUMBAR".
-        assert!(e.description.contains("LUMBAR"));
-        assert!(e.description.contains("SPRAIN"));
+        // Raw MSP fragment — enrichment was removed (it corrupted 880 codes
+        // by pushing the fragment past prompt truncation).
+        assert_eq!(e.description, "LUMBAR");
     }
 
     #[test]

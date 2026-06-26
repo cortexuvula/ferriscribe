@@ -18,13 +18,21 @@ class Icd9Store {
   private loadPromise: Promise<void> | null = null;
 
   /**
-   * Triggers a load if one hasn't started. Safe to call from multiple
-   * components — returns a shared promise so the command fires once.
+   * Triggers a load if one hasn't started (or the last one failed).
+   * Safe to call from multiple components — returns a shared promise so
+   * the command fires once per pending attempt. After a failure, the
+   * guard is cleared so a caller can retry.
    */
   load(): Promise<void> {
     if (this.loadPromise) return this.loadPromise;
     this.loadPromise = this.doLoad();
     return this.loadPromise;
+  }
+
+  /** Retries the load after a failure (clears the guard first). */
+  retry(): Promise<void> {
+    this.loadPromise = null;
+    return this.load();
   }
 
   private async doLoad(): Promise<void> {
@@ -36,9 +44,11 @@ class Icd9Store {
     } catch (err) {
       console.error('Failed to load ICD-9 code set:', err);
       // Leave codeSet null — validation treats null as "can't validate",
-      // so chips render neutrally rather than as false warnings.
+      // so chips render neutrally rather than as false warnings. Clear the
+      // guard so a caller (or the retry notice) can re-attempt.
       this.loaded = true;
       this.loadError = true;
+      this.loadPromise = null;
     }
   }
 }

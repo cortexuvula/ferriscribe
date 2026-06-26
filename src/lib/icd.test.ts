@@ -123,4 +123,26 @@ describe('extractIcdCodesValidated', () => {
     expect(result).toHaveLength(1);
     expect(result[0].valid).toBeNull();
   });
+
+  it('does not validate ICD-9 codes in pure icd10 mode (wrong-set guard)', () => {
+    // In icd10 mode, ICD-9 codes must NOT be validated against the MSP
+    // ICD-9 set (avoids false "not in list" warnings on a code that may
+    // be correct in an ICD-10 context).
+    const text = 'ICD-9 Code: 401.9';
+    const result = extractIcdCodesValidated(text, mspSet, 'icd10');
+    expect(result).toHaveLength(1);
+    expect(result[0].valid).toBeNull();
+  });
+
+  it('validates ICD-9 codes in both mode', () => {
+    const text = 'ICD-9 Code: 847.2';
+    const result = extractIcdCodesValidated(text, mspSet, 'both');
+    expect(result[0].valid).toBe(true);
+  });
+
+  it('defaults to icd9 mode when no mode given', () => {
+    const text = 'ICD-9 Code: 847.2';
+    const result = extractIcdCodesValidated(text, mspSet);
+    expect(result[0].valid).toBe(true);
+  });
 });

@@ -69,16 +69,27 @@ fn icd_candidates_block(icd_version: &str, candidates: &[Icd9Entry]) -> String {
     out
 }
 
+/// The multi-code complexity-optimized ICD-9 instruction body, shared by
+/// the `ICD-9` and `both` modes so both stay consistent (BC MSP is the
+/// biller in either case). Encodes the CPSBC "up to 3 codes, complexity-
+/// ordered, most-specific available" guidance plus an explicit under-coding
+/// guard so a trivial visit is not padded to reach 3.
+const ICD9_MULTI_CODE_BODY: &str = "ICD-9 Codes (up to 3, one per line, most clinically complex first): [List each code on its own line as \"ICD-9 Code: <code> — <brief description>\". Use the most specific code available (4- or 5-digit preferred over 3-digit) — e.g., 250.40 (diabetes with renal manifestations) rather than 250.00 (diabetes without complication). Include every distinct condition actively addressed, assessed, or managed at this visit — not just the primary complaint. When a chronic condition (diabetes, hypertension, COPD, heart failure, depression, etc.) is managed or reviewed, include its code even if it is not the primary reason for the visit. When a definitive diagnosis is established, use the disease-specific code rather than a symptom code; if workup is still in progress, use the most specific symptom code for the presenting complaint. Do not use 780 (General Symptoms) as a catch-all. Prefer fewer codes for simple visits — a single acute complaint with no comorbidities managed at the visit correctly uses one code; do not pad to reach 3. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0.]";
+
+/// The `both`-mode label: the ICD-9 multi-code body followed by the
+/// single-code ICD-10 line. Pre-composed as a const so the function can
+/// return `&'static str` without allocating.
+const ICD9_AND_10_LABEL: &str = concat!(
+    "ICD-9 Codes (up to 3, one per line, most clinically complex first): [List each code on its own line as \"ICD-9 Code: <code> — <brief description>\". Use the most specific code available (4- or 5-digit preferred over 3-digit) — e.g., 250.40 (diabetes with renal manifestations) rather than 250.00 (diabetes without complication). Include every distinct condition actively addressed, assessed, or managed at this visit — not just the primary complaint. When a chronic condition (diabetes, hypertension, COPD, heart failure, depression, etc.) is managed or reviewed, include its code even if it is not the primary reason for the visit. When a definitive diagnosis is established, use the disease-specific code rather than a symptom code; if workup is still in progress, use the most specific symptom code for the presenting complaint. Do not use 780 (General Symptoms) as a catch-all. Prefer fewer codes for simple visits — a single acute complaint with no comorbidities managed at the visit correctly uses one code; do not pad to reach 3. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0.]",
+    "\nICD-10 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00.]"
+);
+
 fn icd_code_parts(version: &str) -> (&'static str, &'static str) {
     match version {
-        "ICD-9" => (
-            "ICD-9 code",
-            "ICD-9 Codes (up to 3, one per line, most clinically complex first): [List each code on its own line as \"ICD-9 Code: <code> — <brief description>\". Use the most specific code available (4- or 5-digit preferred over 3-digit) — e.g., 250.40 (diabetes with renal manifestations) rather than 250.00 (diabetes without complication). Include every distinct condition actively addressed, assessed, or managed at this visit — not just the primary complaint. When a chronic condition (diabetes, hypertension, COPD, heart failure, depression, etc.) is managed or reviewed, include its code even if it is not the primary reason for the visit. When a definitive diagnosis is established, use the disease-specific code rather than a symptom code; if workup is still in progress, use the most specific symptom code for the presenting complaint. Do not use 780 (General Symptoms) as a catch-all. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0.]",
-        ),
-        "both" => (
-            "both ICD-9 and ICD-10 codes",
-            "ICD-9 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0.]\nICD-10 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00.]",
-        ),
+        "ICD-9" => ("ICD-9 code", ICD9_MULTI_CODE_BODY),
+        // ICD-9 uses the same multi-code complexity body as pure ICD-9
+        // mode (BC MSP bills ICD-9); ICD-10 stays single-code.
+        "both" => ("both ICD-9 and ICD-10 codes", ICD9_AND_10_LABEL),
         _ => (
             "ICD-10 code",
             "ICD-10 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00.]",
@@ -521,7 +532,9 @@ mod tests {
             ..Default::default()
         };
         let prompt = build_soap_prompt(&config);
-        assert!(prompt.contains("ICD-9 Code: [specific code"));
+        // ICD-9 portion now uses the multi-code complexity body (same as
+        // pure ICD-9 mode); ICD-10 stays single-code.
+        assert!(prompt.contains("ICD-9 Codes (up to 3"));
         assert!(prompt.contains("ICD-10 Code: [specific code"));
         assert!(prompt.contains("V70.0"));
         assert!(prompt.contains("Z00.00"));
@@ -577,6 +590,32 @@ mod tests {
         assert!(
             icd9_label.contains("up to 3"),
             "ICD-9 label must carry the multi-code directive: {icd9_label}"
+        );
+        // Over-coding guard: must teach when to use fewer than 3 codes.
+        assert!(
+            prompt.contains("Prefer fewer codes for simple visits"),
+            "must guard against padding trivial visits to 3 codes"
+        );
+    }
+
+    #[test]
+    fn both_mode_icd9_uses_multi_code_consistently() {
+        // F4 guard: the `both` arm must use the SAME multi-code ICD-9 body
+        // as pure ICD-9 mode (no contradiction with the shared self-check,
+        // which describes "ICD-9 mode: up to 3 codes"). ICD-10 stays single.
+        let (_, both_label) = icd_code_parts("both");
+        assert!(
+            both_label.contains("up to 3"),
+            "`both` ICD-9 portion must be multi-code (consistent with self-check): {both_label}"
+        );
+        assert!(
+            both_label.contains("Prefer fewer codes for simple visits"),
+            "`both` ICD-9 portion must carry the over-coding guard: {both_label}"
+        );
+        // ICD-10 line stays single-code.
+        assert!(
+            both_label.contains("ICD-10 Code: [specific code"),
+            "`both` ICD-10 portion must stay single-code: {both_label}"
         );
     }
 

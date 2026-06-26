@@ -2,6 +2,7 @@
   import { pipeline, type PipelineStage } from '../../stores/pipeline.svelte';
   import { extractIcdCodesValidated } from '../../icd';
   import { icd9 as icd9Store } from '../../stores/icd9.svelte';
+  import { settings } from '../../stores/settings.svelte';
   import IcdChip from '../../components/IcdChip.svelte';
 
   type CopyStatus = 'idle' | 'copying' | 'copied';
@@ -29,7 +30,7 @@
 
   // Extract and validate ICD codes from the SOAP note text
   const icdCodes = $derived(
-    soapNoteText ? extractIcdCodesValidated(soapNoteText, icd9Store.codeSet) : []
+    soapNoteText ? extractIcdCodesValidated(soapNoteText, icd9Store.codeSet, settings.state.icd_version) : []
   );
 
   function stageLabel(stage: PipelineStage): string {

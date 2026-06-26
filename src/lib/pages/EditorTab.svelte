@@ -11,6 +11,7 @@
   import { formatError } from '../types/errors';
   import { extractIcdCodesValidated } from '../icd';
   import { icd9 as icd9Store } from '../stores/icd9.svelte';
+  import { settings } from '../stores/settings.svelte';
   import IcdChip from '../components/IcdChip.svelte';
 
   const { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' | 'peer_discussion' } = $props();
@@ -36,7 +37,7 @@
   // Validation is against the BC MSP ICD-9 list; codes not on the list render as amber.
   const icdCodes = $derived(
     tabId === 'soap' && content && typeof content === 'string'
-      ? extractIcdCodesValidated(content, icd9Store.codeSet)
+      ? extractIcdCodesValidated(content, icd9Store.codeSet, settings.state.icd_version)
       : []
   );
 
@@ -218,6 +219,15 @@
             {/each}
           </div>
         {/if}
+        {#if icd9Store.loadError && tabId === 'soap'}
+          <button
+            class="icd-validation-notice"
+            title="The BC MSP ICD-9 code list could not be loaded. Codes are not validated against the billing list."
+            onclick={() => icd9Store.retry()}
+          >
+            ICD-9 validation unavailable — click to retry
+          </button>
+        {/if}
       {/if}
     </div>
   </div>
@@ -378,5 +388,19 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
+  }
+
+  .icd-validation-notice {
+    font-size: 11px;
+    color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+    border-radius: var(--radius-sm, 4px);
+    padding: 2px 8px;
+    cursor: pointer;
+    margin-left: 4px;
+  }
+  .icd-validation-notice:hover {
+    background: color-mix(in srgb, var(--warning) 20%, transparent);
   }
 </style>
