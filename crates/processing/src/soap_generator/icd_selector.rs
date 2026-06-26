@@ -167,7 +167,7 @@ pub fn select_icd9_candidates(
     //    relevance entries that happen to appear early in the 7,122-entry
     //    file would fill the non-baseline slots and push out higher-scoring
     //    codes that appear later (e.g. the 780-799 Symptoms chapter).
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     let mut selected: Vec<(usize, &'static Icd9Entry)> = baseline;
     for (score, entry) in &scored {
         if selected.len() >= MAX_CANDIDATES {
@@ -180,7 +180,7 @@ pub fn select_icd9_candidates(
 
     // 5. Final sort by score desc for prompt presentation (baseline entries
     //    that also scored well float to the top alongside scored matches).
-    selected.sort_by(|a, b| b.0.cmp(&a.0));
+    selected.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
 
     selected.into_iter().map(|(_, e)| e.clone()).collect()
 }
