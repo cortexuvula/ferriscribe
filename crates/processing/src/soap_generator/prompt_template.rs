@@ -52,7 +52,7 @@ fn icd_candidates_block(icd_version: &str, candidates: &[Icd9Entry]) -> String {
         return String::new();
     }
     let mut out = String::with_capacity(candidates.len() * 48);
-    out.push_str("ICD-9 CODE SELECTION — choose the ICD-9 code from this BC MSP-accepted list (use the exact code; if none fits, choose the closest unspecified \".9\" variant, or V70.0 for routine encounters):\n");
+    out.push_str("ICD-9 CODE SELECTION — choose up to 3 ICD-9 codes from this BC MSP-accepted list, one per line, ordered by clinical complexity (most complex first). Use the most specific code available (4- or 5-digit preferred). If none fits, choose the closest unspecified \".9\" variant, or V70.0 for routine encounters:\n");
     for entry in candidates {
         // Truncate long descriptions to keep the prompt lean. Truncate by
         // char count (not byte index) — MSP descriptions contain en-dashes
@@ -73,7 +73,7 @@ fn icd_code_parts(version: &str) -> (&'static str, &'static str) {
     match version {
         "ICD-9" => (
             "ICD-9 code",
-            "ICD-9 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0.]",
+            "ICD-9 Codes (up to 3, one per line, most clinically complex first): [List each code on its own line as \"ICD-9 Code: <code> — <brief description>\". Use the most specific code available (4- or 5-digit preferred over 3-digit) — e.g., 250.40 (diabetes with renal manifestations) rather than 250.00 (diabetes without complication). Include every distinct condition actively addressed, assessed, or managed at this visit — not just the primary complaint. When a chronic condition (diabetes, hypertension, COPD, heart failure, depression, etc.) is managed or reviewed, include its code even if it is not the primary reason for the visit. When a definitive diagnosis is established, use the disease-specific code rather than a symptom code; if workup is still in progress, use the most specific symptom code for the presenting complaint. Do not use 780 (General Symptoms) as a catch-all. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0.]",
         ),
         "both" => (
             "both ICD-9 and ICD-10 codes",
@@ -170,6 +170,8 @@ FORBIDDEN INFERENCES — DO NOT include any of these unless the transcript expli
 - Provider names for referrals. Name the specialty only (e.g., "Referral to cardiology"). Never invent a specific provider's name; if I did not name one, do not include one.
 - Follow-up intervals. If no timeframe was stated, write "Follow-up timing not specified" — do not default to "3 months" or any other interval.
 - Red-flag warnings ("seek urgent care for X"). Only include warnings I actually voiced. Do not add stock warnings such as "chest pain or shortness of breath."
+- ICD codes for conditions not addressed at this visit. Do not include codes for historical conditions, resolved problems, chronic conditions mentioned only in passing, or anything the physician did not actively assess or manage during this interaction. Only code conditions with direct clinical activity at this encounter.
+- 780 (General Symptoms) as a default or catch-all code. Use 780 only when the presenting complaint genuinely has no more specific symptom code. Prefer specific symptom codes (e.g., 786.50 chest pain, 780.60 fever, 784.0 headache). 780 maps to a low-complexity diagnostic group and contributes little to the patient's clinical profile.
 - ICD codes and differential diagnoses are the only two sections where clinical inference is permitted. When a BC MSP-accepted ICD-9 code list is provided above, you MUST select from it; never invent a code outside the list. Render every item as plain text — do NOT append any marker, suffix, qualifier, or annotation such as "(suggested)", "(possible)", "(provisional)", or similar. All other categories above remain strict — do not extend this exception to ANY of them: demographics, past medical conditions, medications, dosages, family history, social history, visit modality, general appearance, referral provider names, follow-up intervals, or red-flag warnings.
 
 EXAMPLE 1 — disciplined extraction from a sparse injury visit:
@@ -184,6 +186,7 @@ Doctor: Sounds like a muscle strain from lifting. I'll order an X-ray to be safe
 Correct extraction (excerpt — full output still requires every standard section):
 
 ICD-9 Code: 847.2 — Sprain of lumbar
+ICD-9 Code: 724.2 — Lumbago
 
 Subjective:
 - Chief complaint: right-sided back pain for three days
@@ -235,7 +238,9 @@ Patient: Thanks, have a good day."
 
 Correct extraction:
 
+ICD-9 Code: 272.0 — Pure hypercholesterolemia
 ICD-9 Code: 266.2 — Other B-complex deficiencies
+ICD-9 Code: V70.0 — Routine general medical examination
 
 Subjective:
 - Chief complaint: Follow-up to review recent lab results
@@ -317,7 +322,7 @@ Objective:
 - Imaging: [from transcript or additional clinical context; otherwise "No imaging discussed"]
 
 Assessment:
-- [ONE cohesive paragraph using findings and reasoning from the transcript and additional clinical context, written in first person ("I assessed…", "I characterized…"). Inline mention of {icd_instruction} is permitted but not required (the canonical location is the ICD line above the Subjective block); if you inline a code, render it as plain text with no marker or qualifier. Do NOT restate past medical history, medications, family history, or social history in the Assessment unless you explicitly tied them to today's reasoning. If the visit is purely a lab review with no clinical examination, the Assessment should describe the lab findings and my stated interpretation — nothing more. Not broken into sub-items.]
+- [ONE cohesive paragraph using findings and reasoning from the transcript and additional clinical context, written in first person ("I assessed…", "I characterized…"). Inline mention of {icd_instruction} is permitted but not required (the canonical location is the ICD lines above the Subjective block); if you inline a code, render it as plain text with no marker or qualifier. Do NOT restate past medical history, medications, family history, or social history in the Assessment unless you explicitly tied them to today's reasoning. If the visit is purely a lab review with no clinical examination, the Assessment should describe the lab findings and my stated interpretation — nothing more. Not broken into sub-items.]
 
 Differential Diagnosis:
 - [List at least three diagnoses, ranked by clinical likelihood given the chief complaint and findings. Render every item as plain text — do NOT append "(suggested)", "(possible)", "(provisional)", or any other marker, qualifier, or annotation, regardless of whether the item was physician-stated or model-inferred. On a paperwork-only / wellness / lab-only visit with no chief complaint, list three plausible items consistent with the encounter type or the labs reviewed, still as plain text.]
@@ -349,7 +354,7 @@ SELF-CHECK BEFORE OUTPUT — for every line you produced, locate the transcript 
 4. Referral check: any specific provider name must have a transcript quote. If only the specialty was discussed, name the specialty only. If no referral was discussed, do not include a referral line.
 5. Follow-up interval check: any duration ("in 3 months", "in 2 weeks") must have a transcript quote. If absent, write "Follow-up timing not specified."
 6. Red-flag check: any "seek urgent care for X" warning must have a transcript quote. If absent, remove the line.
-7. ICD code check: every ICD code is supported by a transcript-named diagnosis or inferred from findings, is rendered as plain text with no marker or qualifier, AND — when a BC MSP-accepted ICD-9 code list is provided above — is chosen from that list. On a paperwork-only / wellness / lab-only visit, use an encounter-type code (e.g. V70.0 / Z00.00) instead of leaving the field blank. Never append "(suggested)" or any similar annotation to the code.
+7. ICD code check: the ICD code section matches the format taught above (ICD-9 mode: up to 3 codes, one per line, complexity-ordered, most-specific 4- or 5-digit available; ICD-10 mode: a single code). Every code represents a distinct condition actively addressed, assessed, or managed at this visit — in ICD-9 mode, chronic conditions managed or reviewed here are included even if not the primary complaint. When a definitive diagnosis is established, the disease-specific code is used rather than a symptom code. No code uses 780 (General Symptoms) as a catch-all. No code references a condition not addressed at this visit. All codes are chosen from the provided BC MSP list when one is supplied. On paperwork/wellness/lab-only visits, encounter-type codes (e.g., V70.0 / Z00.00) are used. Never append "(suggested)" or any similar annotation.
 8. Visit modality check: only call the visit "telehealth" or "in-person" if explicitly stated.
 9. Assessment check: does the Assessment paragraph mention PMH, medications, family history, or social history that I did not tie to today's reasoning? If so, remove those mentions.
 10. Differential Diagnosis count check: the Differential Diagnosis section contains at least three items, all rendered as plain text with no marker or qualifier suffix. If fewer than three are stateable from the transcript, fill the remaining slots with plausible items consistent with the chief complaint or findings — still as plain text, never marked "(suggested)".
@@ -475,7 +480,8 @@ mod tests {
             ..Default::default()
         };
         let prompt = build_soap_prompt(&config);
-        assert!(prompt.contains("ICD-9 Code: [specific code"));
+        // ICD-9 label now teaches multi-code (up to 3) complexity-ordered output.
+        assert!(prompt.contains("ICD-9 Codes (up to 3"));
         assert!(prompt.contains("V70.0"));
         assert!(!prompt.contains("{icd_label}"));
         assert!(!prompt.contains("{icd_instruction}"));
@@ -527,6 +533,96 @@ mod tests {
             !icd_resolved_instruction(&prompt).contains("(suggested)"),
             "resolved ICD instruction must no longer mention (suggested)"
         );
+    }
+
+    #[test]
+    fn default_soap_prompt_icd9_supports_multi_code() {
+        // The ICD-9 label encodes BC's complexity-based billing rules:
+        // up to 3 codes, complexity-ordered, most-specific available,
+        // with explicit guards against the 780 catch-all and the
+        // under-coding of chronic conditions.
+        let prompt = build_soap_prompt(&SoapPromptConfig {
+            icd_version: "ICD-9".into(),
+            ..Default::default()
+        });
+        assert!(prompt.contains("up to 3"), "must teach up-to-3 codes");
+        assert!(
+            prompt.contains("most clinically complex first"),
+            "must teach complexity ordering"
+        );
+        assert!(
+            prompt.contains("4- or 5-digit"),
+            "must teach specificity preference"
+        );
+        assert!(
+            prompt.contains("Do not use 780 (General Symptoms) as a catch-all"),
+            "must warn against the 780 catch-all"
+        );
+        assert!(
+            prompt.contains("chronic condition"),
+            "must teach coding chronic conditions at management visits"
+        );
+
+        // Scope guard: ICD-10 mode must NOT carry the multi-code directive
+        // in its {icd_label} substitution (the OUTPUT FORMAT header). BC
+        // complexity systems consume ICD-9; ICD-10 stays single-code. The
+        // shared self-check legitimately *mentions* "ICD-9 mode: up to 3" as
+        // an explanation, so we scope this assertion to the resolved label.
+        let (_, icd10_label) = icd_code_parts("ICD-10");
+        assert!(
+            !icd10_label.contains("up to 3"),
+            "ICD-10 label must stay single-code: {icd10_label}"
+        );
+        let (_, icd9_label) = icd_code_parts("ICD-9");
+        assert!(
+            icd9_label.contains("up to 3"),
+            "ICD-9 label must carry the multi-code directive: {icd9_label}"
+        );
+    }
+
+    #[test]
+    fn examples_show_per_code_lines() {
+        // Both few-shot examples must demonstrate the per-code-line output
+        // format (one "ICD-9 Code:" line per code) so the model emits codes
+        // the extraction regex can parse — NOT a single "ICD-9 Codes:" header
+        // with a bare list (which would silently break extraction).
+        let prompt = build_soap_prompt(&SoapPromptConfig::default());
+
+        // EXAMPLE 1: acute single-issue visit → 2 codes from same picture.
+        let ex1_idx = prompt.find("EXAMPLE 1").expect("EXAMPLE 1 present");
+        let ex1_end = prompt[ex1_idx..]
+            .find("Subjective:")
+            .expect("Subjective after EXAMPLE 1");
+        let ex1_block = &prompt[ex1_idx..ex1_idx + ex1_end];
+        let ex1_code_lines = ex1_block
+            .lines()
+            .filter(|l| l.starts_with("ICD-9 Code:"))
+            .count();
+        assert_eq!(
+            ex1_code_lines, 2,
+            "EXAMPLE 1 should show 2 per-code lines, found {ex1_code_lines}"
+        );
+
+        // EXAMPLE 2: multi-issue lab review → 3 codes, complexity-ordered.
+        let ex2_idx = prompt.find("EXAMPLE 2").expect("EXAMPLE 2 present");
+        let ex2_end = prompt[ex2_idx..]
+            .find("Subjective:")
+            .expect("Subjective after EXAMPLE 2");
+        let ex2_block = &prompt[ex2_idx..ex2_idx + ex2_end];
+        let ex2_code_lines: Vec<&str> = ex2_block
+            .lines()
+            .filter(|l| l.starts_with("ICD-9 Code:"))
+            .collect();
+        assert_eq!(
+            ex2_code_lines.len(),
+            3,
+            "EXAMPLE 2 should show 3 per-code lines, found {}",
+            ex2_code_lines.len()
+        );
+        // Complexity ordering: chronic (272.0) before acute (266.2) before
+        // encounter (V70.0).
+        assert!(ex2_code_lines[0].contains("272.0"), "most complex first");
+        assert!(ex2_code_lines[2].contains("V70.0"), "encounter code last");
     }
 
     /// Slice the resolved ICD instruction block from the OUTPUT FORMAT section.
@@ -584,10 +680,13 @@ mod tests {
         assert!(prompt.contains("EXAMPLE 1"));
         assert!(prompt.contains("EXAMPLE 2"));
         assert!(prompt.contains("lab-review visit"));
-        // Lab-review example must teach the new always-on ICD as plain text
+        // Lab-review example must teach the multi-code complexity-ordered
+        // output: chronic 272.0 first, then acute 266.2, then encounter V70.0.
         let lab_idx = prompt.find("EXAMPLE 2").expect("EXAMPLE 2 must be present");
         let after_example = &prompt[lab_idx..];
+        assert!(after_example.contains("ICD-9 Code: 272.0"));
         assert!(after_example.contains("ICD-9 Code: 266.2"));
+        assert!(after_example.contains("ICD-9 Code: V70.0"));
         // Lab-review example must teach the "dose not specified" pattern
         assert!(after_example.contains("dose not specified"));
         // Lab-review example must show that a thin visit produces
@@ -673,8 +772,9 @@ mod tests {
             ..Default::default()
         };
         let prompt = build_soap_prompt(&config);
-        // Custom template is used, and placeholders are still resolved
-        assert!(prompt.starts_with("My custom template with ICD-9 Code: [specific code"));
+        // Custom template is used, and placeholders are still resolved.
+        // The ICD-9 label now carries the multi-code complexity guidance.
+        assert!(prompt.starts_with("My custom template with ICD-9 Codes (up to 3"));
         assert!(prompt.contains("V70.0"));
         // ICD instruction no longer carries the (suggested) marker
         assert!(!prompt.contains("(suggested)"));
