@@ -1,4 +1,7 @@
 <script lang="ts">
+  import type { ValidatedIcdCode } from '../icd';
+  import IcdChip from './IcdChip.svelte';
+
   interface Props {
     title: string;
     description: string;
@@ -8,7 +11,7 @@
     anyGenerating: boolean;
     done: boolean;
     copyStatus: 'idle' | 'copying' | 'copied' | undefined;
-    icdCodes?: string[];
+    icdCodes?: ValidatedIcdCode[];
     onGenerate: () => void;
     onCopy: () => void;
     onSpeedRead?: () => void;
@@ -74,7 +77,7 @@
         <div class="icd-codes">
           <span class="icd-label">ICD Codes:</span>
           {#each icdCodes as code}
-            <span class="icd-code">{code}</span>
+            <IcdChip code={code.raw} valid={code.valid} />
           {/each}
         </div>
       {/if}
@@ -249,18 +252,5 @@
     font-size: 12px;
     font-weight: 600;
     color: var(--text-secondary);
-  }
-
-  .icd-code {
-    display: inline-flex;
-    align-items: center;
-    padding: 4px 10px;
-    font-size: 12px;
-    font-weight: 500;
-    font-family: monospace;
-    color: var(--accent);
-    background-color: color-mix(in srgb, var(--accent) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-    border-radius: var(--radius-sm);
   }
 </style>

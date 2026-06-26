@@ -2,6 +2,7 @@
   import './app.css';
   import { onMount, onDestroy } from 'svelte';
   import { settings } from './lib/stores/settings.svelte';
+  import { icd9 as icd9Store } from './lib/stores/icd9.svelte';
   import { theme } from './lib/stores/theme.svelte.ts';
   import { generation } from './lib/stores/generation.svelte';
   import { updater } from './lib/stores/updater.svelte';
@@ -159,6 +160,11 @@
     );
 
     await settings.load();
+
+    // Load the BC MSP ICD-9 code set for post-generation validation of
+    // SOAP-note codes. Non-blocking — chips render neutrally until it
+    // resolves, then re-validate reactively via the store's $state.
+    icd9Store.load();
 
     // Start the auto-update check (if the user has it enabled). The check is
     // an anonymous GET to GitHub Releases — no PHI transmitted.

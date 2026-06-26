@@ -28,6 +28,7 @@
 pub mod endpoint_policy;
 pub mod error;
 pub mod http_error_body;
+pub mod icd9;
 pub mod preflight;
 pub mod traits;
 pub mod types;

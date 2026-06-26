@@ -1,6 +1,8 @@
 <script lang="ts">
   import { pipeline, type PipelineStage } from '../../stores/pipeline.svelte';
-  import { extractIcdCodes } from '../../rsvp/engine';
+  import { extractIcdCodesValidated } from '../../icd';
+  import { icd9 as icd9Store } from '../../stores/icd9.svelte';
+  import IcdChip from '../../components/IcdChip.svelte';
 
   type CopyStatus = 'idle' | 'copying' | 'copied';
 
@@ -25,9 +27,9 @@
     onRegenerate,
   }: Props = $props();
 
-  // Extract ICD codes from the SOAP note text
+  // Extract and validate ICD codes from the SOAP note text
   const icdCodes = $derived(
-    soapNoteText ? extractIcdCodes(soapNoteText) : []
+    soapNoteText ? extractIcdCodesValidated(soapNoteText, icd9Store.codeSet) : []
   );
 
   function stageLabel(stage: PipelineStage): string {
@@ -143,7 +145,7 @@
         <div class="icd-codes">
           <span class="icd-label">ICD Codes:</span>
           {#each icdCodes as code}
-            <span class="icd-code">{code}</span>
+            <IcdChip code={code.raw} valid={code.valid} />
           {/each}
         </div>
       {/if}
@@ -315,18 +317,5 @@
     font-size: 12px;
     font-weight: 600;
     color: var(--text-secondary);
-  }
-
-  .icd-code {
-    display: inline-flex;
-    align-items: center;
-    padding: 3px 8px;
-    font-size: 12px;
-    font-weight: 500;
-    font-family: monospace;
-    color: var(--accent);
-    background-color: color-mix(in srgb, var(--accent) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-    border-radius: var(--radius-sm);
   }
 </style>

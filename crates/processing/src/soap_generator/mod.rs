@@ -25,11 +25,14 @@
 //! tests encode dozens of invariants about prompt structure, section ordering,
 //! and fabrication guards.
 
+use medical_core::icd9::Icd9Entry;
 use medical_core::types::settings::SoapTemplate;
 
 mod postprocess;
 mod prompt_template;
 mod user_prompt;
+
+pub mod icd_selector;
 
 pub use postprocess::postprocess_soap;
 pub use prompt_template::{build_soap_prompt, default_soap_prompt};
@@ -50,6 +53,11 @@ pub struct SoapPromptConfig {
     /// User-supplied override for the entire system prompt. Empty string is
     /// treated as absent and falls back to the default template.
     pub custom_prompt: Option<String>,
+    /// Clinically relevant BC MSP ICD-9 candidates selected from the
+    /// visit's source text. Injected into the prompt as a constrained
+    /// vocabulary so the model selects from accepted codes rather than
+    /// fabricating. Empty for ICD-10-only mode.
+    pub icd9_candidates: Vec<Icd9Entry>,
 }
 
 impl Default for SoapPromptConfig {
@@ -58,6 +66,7 @@ impl Default for SoapPromptConfig {
             template: SoapTemplate::FollowUp,
             icd_version: "ICD-10".into(),
             custom_prompt: None,
+            icd9_candidates: vec![],
         }
     }
 }

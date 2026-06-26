@@ -3,7 +3,8 @@
   import type { LetterAudience } from '../types/letterAudience';
   import type { Recording } from '../types';
   import type { GeneratingType } from '../stores/generation.svelte';
-  import { extractIcdCodes } from '../rsvp/engine';
+  import { extractIcdCodesValidated } from '../icd';
+  import { icd9 as icd9Store } from '../stores/icd9.svelte';
 
   interface Props {
     recording: Recording | null;
@@ -76,7 +77,7 @@
         anyGenerating={generationState.generating !== null}
         done={!!recording?.soap_note}
         copyStatus={copyStatus['soap']}
-        icdCodes={recording?.soap_note ? extractIcdCodes(recording.soap_note) : undefined}
+        icdCodes={recording?.soap_note ? extractIcdCodesValidated(recording.soap_note, icd9Store.codeSet) : undefined}
         onGenerate={() => onGenerate('soap')}
         onCopy={() => onCopy('soap')}
         onSpeedRead={() => onSpeedRead('soap')}

@@ -143,10 +143,31 @@ async fn generate_soap_inner(
     // Build prompts with full config
     let soap_template = template.map(parse_soap_template).unwrap_or_default();
     let model_name = settings.model.clone();
+
+    // Select BC MSP ICD-9 candidates relevant to this visit. Only
+    // computed for ICD-9 / both modes; empty for ICD-10-only. The
+    // selector reads the transcript + context + patient conditions so
+    // the prompt surfaces the most likely billable codes.
+    let icd9_candidates = match settings.icd_version.as_str() {
+        "ICD-9" | "both" => {
+            medical_processing::soap_generator::icd_selector::select_icd9_candidates(
+                transcript,
+                context,
+                patient_context,
+            )
+        }
+        _ => Vec::new(),
+    };
+    info!(
+        icd9_candidates_selected = icd9_candidates.len(),
+        "ICD-9 candidate selection complete"
+    );
+
     let config = SoapPromptConfig {
         template: soap_template,
         icd_version: settings.icd_version,
         custom_prompt: settings.custom_soap_prompt,
+        icd9_candidates,
     };
 
     let system_prompt = soap_generator::build_soap_prompt(&config);

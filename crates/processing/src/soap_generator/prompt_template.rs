@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 
+use medical_core::icd9::Icd9Entry;
 use medical_core::types::settings::SoapTemplate;
 
 use crate::prompt_resolver::resolve_prompt;
@@ -23,15 +24,49 @@ use super::SoapPromptConfig;
 // ---------------------------------------------------------------------------
 
 /// Build the placeholder map for the SOAP template.
-fn soap_placeholders(icd_version: &str, template: &SoapTemplate) -> HashMap<&'static str, String> {
+fn soap_placeholders(
+    icd_version: &str,
+    template: &SoapTemplate,
+    icd9_candidates: &[Icd9Entry],
+) -> HashMap<&'static str, String> {
     let (icd_instruction, icd_label) = icd_code_parts(icd_version);
     let template_guidance = template_guidance_text(template);
+    let icd_candidates = icd_candidates_block(icd_version, icd9_candidates);
 
     let mut map = HashMap::new();
     map.insert("icd_instruction", icd_instruction.to_string());
     map.insert("icd_label", icd_label.to_string());
     map.insert("template_guidance", template_guidance.to_string());
+    map.insert("icd_candidates", icd_candidates);
     map
+}
+
+/// Format the ICD-9 candidate list for prompt injection.
+///
+/// Returns an empty string for ICD-10-only mode (no bundled ICD-10
+/// list) and when the candidate list is empty. The block instructs the
+/// model to select from the provided BC MSP-accepted codes.
+fn icd_candidates_block(icd_version: &str, candidates: &[Icd9Entry]) -> String {
+    let inject_icd9 = matches!(icd_version, "ICD-9" | "both");
+    if !inject_icd9 || candidates.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(candidates.len() * 48);
+    out.push_str("ICD-9 CODE SELECTION — choose the ICD-9 code from this BC MSP-accepted list (use the exact code; if none fits, choose the closest unspecified \".9\" variant, or V70.0 for routine encounters):\n");
+    for entry in candidates {
+        // Truncate long descriptions to keep the prompt lean. Truncate by
+        // char count (not byte index) — MSP descriptions contain en-dashes
+        // and other multi-byte chars that would panic a byte slice.
+        let char_count = entry.description.chars().count();
+        let desc = if char_count > 60 {
+            let head: String = entry.description.chars().take(57).collect();
+            format!("{head}…")
+        } else {
+            entry.description.clone()
+        };
+        out.push_str(&format!("  {} — {}\n", entry.code, desc));
+    }
+    out
 }
 
 fn icd_code_parts(version: &str) -> (&'static str, &'static str) {
@@ -135,7 +170,7 @@ FORBIDDEN INFERENCES — DO NOT include any of these unless the transcript expli
 - Provider names for referrals. Name the specialty only (e.g., "Referral to cardiology"). Never invent a specific provider's name; if I did not name one, do not include one.
 - Follow-up intervals. If no timeframe was stated, write "Follow-up timing not specified" — do not default to "3 months" or any other interval.
 - Red-flag warnings ("seek urgent care for X"). Only include warnings I actually voiced. Do not add stock warnings such as "chest pain or shortness of breath."
-- ICD codes and differential diagnoses are the only two sections where clinical inference is permitted. Render every item as plain text — do NOT append any marker, suffix, qualifier, or annotation such as "(suggested)", "(possible)", "(provisional)", or similar. All other categories above remain strict — do not extend this exception to ANY of them: demographics, past medical conditions, medications, dosages, family history, social history, visit modality, general appearance, referral provider names, follow-up intervals, or red-flag warnings.
+- ICD codes and differential diagnoses are the only two sections where clinical inference is permitted. When a BC MSP-accepted ICD-9 code list is provided above, you MUST select from it; never invent a code outside the list. Render every item as plain text — do NOT append any marker, suffix, qualifier, or annotation such as "(suggested)", "(possible)", "(provisional)", or similar. All other categories above remain strict — do not extend this exception to ANY of them: demographics, past medical conditions, medications, dosages, family history, social history, visit modality, general appearance, referral provider names, follow-up intervals, or red-flag warnings.
 
 EXAMPLE 1 — disciplined extraction from a sparse injury visit:
 
@@ -260,7 +295,7 @@ What this lab-review example deliberately does NOT contain — each would be a f
 OUTPUT FORMAT — plain text only, no markdown:
 
 {icd_label}
-
+{icd_candidates}
 Subjective:
 - Chief complaint: [from transcript]
 - History of present illness: [from transcript]
@@ -314,7 +349,7 @@ SELF-CHECK BEFORE OUTPUT — for every line you produced, locate the transcript 
 4. Referral check: any specific provider name must have a transcript quote. If only the specialty was discussed, name the specialty only. If no referral was discussed, do not include a referral line.
 5. Follow-up interval check: any duration ("in 3 months", "in 2 weeks") must have a transcript quote. If absent, write "Follow-up timing not specified."
 6. Red-flag check: any "seek urgent care for X" warning must have a transcript quote. If absent, remove the line.
-7. ICD code check: every ICD code is supported by a transcript-named diagnosis or inferred from findings, and is rendered as plain text with no marker or qualifier. On a paperwork-only / wellness / lab-only visit, use an encounter-type code (e.g. V70.0 / Z00.00) instead of leaving the field blank. Never append "(suggested)" or any similar annotation to the code.
+7. ICD code check: every ICD code is supported by a transcript-named diagnosis or inferred from findings, is rendered as plain text with no marker or qualifier, AND — when a BC MSP-accepted ICD-9 code list is provided above — is chosen from that list. On a paperwork-only / wellness / lab-only visit, use an encounter-type code (e.g. V70.0 / Z00.00) instead of leaving the field blank. Never append "(suggested)" or any similar annotation to the code.
 8. Visit modality check: only call the visit "telehealth" or "in-person" if explicitly stated.
 9. Assessment check: does the Assessment paragraph mention PMH, medications, family history, or social history that I did not tie to today's reasoning? If so, remove those mentions.
 10. Differential Diagnosis count check: the Differential Diagnosis section contains at least three items, all rendered as plain text with no marker or qualifier suffix. If fewer than three are stateable from the transcript, fill the remaining slots with plausible items consistent with the chief complaint or findings — still as plain text, never marked "(suggested)".
@@ -345,7 +380,11 @@ pub fn build_soap_prompt(config: &SoapPromptConfig) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_soap_prompt());
 
-    let placeholders = soap_placeholders(&config.icd_version, &config.template);
+    let placeholders = soap_placeholders(
+        &config.icd_version,
+        &config.template,
+        &config.icd9_candidates,
+    );
     resolve_prompt(template, &placeholders)
 }
 

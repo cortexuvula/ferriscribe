@@ -3,6 +3,7 @@ pub mod chat;
 pub mod context_templates;
 pub mod export;
 pub mod generation;
+pub mod icd;
 pub mod letter_audiences;
 pub mod logging;
 pub mod models;

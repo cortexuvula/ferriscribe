@@ -89,8 +89,10 @@ export function tokenize(text: string): Token[] {
 }
 
 // Matches: "(ICD-10: X00.0)", "[ICD-9: 250.00]", " ICD-10: J45.909",
-// "ICD-9 Code: V70.0", "ICD-10 Code: Z00.00" (SOAP template output format).
-const ICD_RE = /\s*[\(\[]?\s*ICD-\d+(?:\s+Code)?:?\s*[A-Z]?[\d\.]+\s*[\)\]]?/giu;
+// "ICD-9 Code: V70.0", "ICD-10 Code: Z00.00" (SOAP template output format),
+// and BC MSP-additional alpha-suffix codes like "ICD-9: 01A" (the trailing
+// [A-Z]? captures the suffix that distinguishes 01A from bare 01).
+const ICD_RE = /\s*[\(\[]?\s*ICD-\d+(?:\s+Code)?:?\s*[A-Z]?[\d\.]+[A-Z]?\s*[\)\]]?/giu;
 
 /** Extract all ICD codes from text, returning cleaned-up code strings. */
 export function extractIcdCodes(text: string): string[] {

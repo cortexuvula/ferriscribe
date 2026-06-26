@@ -192,6 +192,14 @@ describe('extractIcdCodes', () => {
     const codes = extractIcdCodes('Subjective:\n- Chief complaint: cough');
     expect(codes).toEqual([]);
   });
+
+  it('extracts BC MSP alpha-suffix codes without dropping the trailing letter', () => {
+    // BUG-3 regression: 01A, 10A etc. must keep the trailing alpha, else
+    // they fail MSP validation and render a false billing warning.
+    const codes = extractIcdCodes('ICD-9 Code: 01A');
+    expect(codes).toContain('ICD-9 Code: 01A');
+    expect(codes[0]).toMatch(/01A$/);
+  });
 });
 
 describe('detectSections', () => {

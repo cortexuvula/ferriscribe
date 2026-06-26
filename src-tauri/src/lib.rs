@@ -293,6 +293,7 @@ pub fn run() {
             commands::letter_audiences::delete_letter_audience,
             commands::generation::synopsis::generate_synopsis,
             commands::generation::peer_discussion::generate_peer_discussion,
+            commands::icd::get_icd9_code_set,
             commands::rag::ingest_document,
             commands::rag::search_rag,
             commands::rag::rag_stats,

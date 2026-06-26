@@ -9,7 +9,9 @@
   import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { formatError } from '../types/errors';
-  import { extractIcdCodes } from '../rsvp/engine';
+  import { extractIcdCodesValidated } from '../icd';
+  import { icd9 as icd9Store } from '../stores/icd9.svelte';
+  import IcdChip from '../components/IcdChip.svelte';
 
   const { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' | 'peer_discussion' } = $props();
 
@@ -30,10 +32,11 @@
       : null
   );
 
-  // Extract ICD codes from SOAP note content (only relevant for soap tab)
+  // Extract and validate ICD codes from SOAP note content (only relevant for soap tab).
+  // Validation is against the BC MSP ICD-9 list; codes not on the list render as amber.
   const icdCodes = $derived(
     tabId === 'soap' && content && typeof content === 'string'
-      ? extractIcdCodes(content)
+      ? extractIcdCodesValidated(content, icd9Store.codeSet)
       : []
   );
 
@@ -211,7 +214,7 @@
           <div class="icd-codes">
             <span class="icd-label">ICD:</span>
             {#each icdCodes as code}
-              <span class="icd-code">{code}</span>
+              <IcdChip code={code.raw} valid={code.valid} />
             {/each}
           </div>
         {/if}
@@ -375,15 +378,5 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
-  }
-
-  .icd-code {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--accent);
-    padding: 2px 6px;
-    background: var(--bg-primary);
-    border-radius: var(--radius-xs);
   }
 </style>
