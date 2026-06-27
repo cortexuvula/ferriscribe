@@ -29,6 +29,17 @@
       default:           return 'var(--text-muted)';
     }
   }
+
+  function statusLabel(status: RecordingSummary['status']): string {
+    switch (status.status) {
+      case 'completed':  return 'Completed';
+      case 'processing': return 'Processing';
+      case 'failed':     return 'Failed';
+      default:           return 'Pending';
+    }
+  }
+
+  const displayName = $derived(recording.patient_name ?? recording.filename);
 </script>
 
 <div
@@ -43,14 +54,19 @@
   }}
   role="button"
   tabindex="0"
+  aria-label="Recording: {displayName}, {statusLabel(recording.status)}"
 >
-  <div class="card-status" style="color: {statusColor(recording.status)}">
+  <div
+    class="card-status"
+    style="color: {statusColor(recording.status)}"
+    aria-hidden="true"
+  >
     {statusIcon(recording.status)}
   </div>
 
   <div class="card-main">
     <div class="card-name truncate">
-      {recording.patient_name ?? recording.filename}
+      {displayName}
     </div>
     <div class="card-meta">
       <span>{formatDate(recording.created_at)}</span>
@@ -59,27 +75,31 @@
     </div>
   </div>
 
-  <div class="card-badges">
+  <span class="sr-only">{statusLabel(recording.status)}</span>
+
+  <div class="card-badges" aria-hidden="false">
     {#if recording.has_transcript}
-      <span class="badge" title="Transcript">T</span>
+      <span class="badge" role="img" aria-label="Has transcript" title="Transcript">T</span>
     {/if}
     {#if recording.has_soap_note}
-      <span class="badge" title="SOAP Note">S</span>
+      <span class="badge" role="img" aria-label="Has SOAP note" title="SOAP Note">S</span>
     {/if}
     {#if recording.has_referral}
-      <span class="badge" title="Referral">R</span>
+      <span class="badge" role="img" aria-label="Has referral" title="Referral">R</span>
     {/if}
     {#if recording.has_letter}
-      <span class="badge" title="Letter">L</span>
+      <span class="badge" role="img" aria-label="Has letter" title="Letter">L</span>
     {/if}
     {#if recording.has_peer_discussion}
-      <span class="badge" title="Peer Discussion">PD</span>
+      <span class="badge" role="img" aria-label="Has peer discussion" title="Peer Discussion">PD</span>
     {/if}
   </div>
 
   {#if onRetry}
     <button
       class="btn-retry"
+      type="button"
+      aria-label="Re-transcribe {displayName}"
       title="Re-transcribe"
       onclick={(e: MouseEvent) => { e.stopPropagation(); onRetry(); }}
     >
@@ -90,6 +110,8 @@
   {#if onDelete}
     <button
       class="btn-delete"
+      type="button"
+      aria-label="Delete {displayName}"
       title="Delete recording"
       onclick={(e: MouseEvent) => { e.stopPropagation(); onDelete!(); }}
     >

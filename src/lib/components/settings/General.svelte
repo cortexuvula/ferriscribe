@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { settings } from '../../stores/settings.svelte';
+  import { toasts } from '../../stores/toasts.svelte';
+  import { formatError } from '../../types/errors';
   import { theme } from '../../stores/theme.svelte.ts';
   import { contextTemplates } from '../../stores/contextTemplates.svelte';
   import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -85,10 +87,10 @@
     if (selected) {
       try {
         const count = await importVocabularyJson(selected as string);
-        alert(`Imported ${count} vocabulary entries.`);
+        toasts.success(`Imported ${count} vocabulary entries`);
         await loadVocabCount();
       } catch (err) {
-        alert(`Import failed: ${err}`);
+        toasts.error(formatError(err));
       }
     }
   }
@@ -102,9 +104,9 @@
     if (selected) {
       try {
         const count = await exportVocabularyJson(selected);
-        alert(`Exported ${count} vocabulary entries.`);
+        toasts.success(`Exported ${count} vocabulary entries`);
       } catch (err) {
-        alert(`Export failed: ${err}`);
+        toasts.error(formatError(err));
       }
     }
   }
@@ -137,10 +139,10 @@
     if (selected) {
       try {
         const count = await importContextTemplatesJson(selected as string);
-        alert(`Imported ${count} context templates.`);
+        toasts.success(`Imported ${count} context templates`);
         await contextTemplates.load();
       } catch (err) {
-        alert(`Import failed: ${err}`);
+        toasts.error(formatError(err));
       }
     }
   }
@@ -154,9 +156,9 @@
     if (selected) {
       try {
         const count = await exportContextTemplatesJson(selected);
-        alert(`Exported ${count} context templates.`);
+        toasts.success(`Exported ${count} context templates`);
       } catch (err) {
-        alert(`Export failed: ${err}`);
+        toasts.error(formatError(err));
       }
     }
   }

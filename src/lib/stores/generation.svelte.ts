@@ -7,6 +7,8 @@ interface GenerationState {
   progressStatus: string | null;
   /** Error message from the last generation attempt. */
   error: string | null;
+  /** The type that was generating when the last error occurred, for retry. */
+  lastFailedType: GeneratingType;
 }
 
 class GenerationStore {
@@ -14,6 +16,7 @@ class GenerationStore {
     generating: null,
     progressStatus: null,
     error: null,
+    lastFailedType: null,
   });
 
   startGenerating(type: 'soap' | 'referral' | 'letter' | 'peer_discussion') {
@@ -25,15 +28,23 @@ class GenerationStore {
   }
 
   setError(error: string) {
-    this.state = { ...this.state, generating: null, progressStatus: null, error };
+    // Preserve the generating type as lastFailedType so the error banner
+    // can offer a "Retry" affordance for the specific document type.
+    this.state = {
+      ...this.state,
+      generating: null,
+      progressStatus: null,
+      error,
+      lastFailedType: this.state.generating,
+    };
   }
 
   finish() {
-    this.state = { ...this.state, generating: null, progressStatus: null };
+    this.state = { ...this.state, generating: null, progressStatus: null, lastFailedType: null };
   }
 
   clearError() {
-    this.state = { ...this.state, error: null };
+    this.state = { ...this.state, error: null, lastFailedType: null };
   }
 }
 

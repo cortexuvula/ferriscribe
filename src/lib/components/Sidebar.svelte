@@ -28,15 +28,16 @@
   <div class="sidebar-top">
     <div class="app-title">FerriScribe</div>
 
-    <nav>
+    <nav aria-label="Main navigation">
       <div class="nav-section-label">Workflow</div>
       {#each workflowNav as item}
         <button
           class="nav-item"
           class:active={activeTab === item.id}
+          aria-current={activeTab === item.id ? 'page' : undefined}
           onclick={() => (activeTab = item.id)}
         >
-          <span class="nav-icon">{item.icon}</span>
+          <span class="nav-icon" aria-hidden="true">{item.icon}</span>
           <span class="nav-label">{item.label}</span>
         </button>
       {/each}
@@ -46,9 +47,10 @@
         <button
           class="nav-item"
           class:active={activeTab === item.id}
+          aria-current={activeTab === item.id ? 'page' : undefined}
           onclick={() => (activeTab = item.id)}
         >
-          <span class="nav-icon">{item.icon}</span>
+          <span class="nav-icon" aria-hidden="true">{item.icon}</span>
           <span class="nav-label">{item.label}</span>
         </button>
       {/each}

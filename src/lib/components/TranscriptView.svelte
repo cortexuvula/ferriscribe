@@ -22,6 +22,23 @@
     editText = value;
   });
 
+  // Debounce the derived parse so typing into the transcript editor doesn't
+  // re-parse the entire transcript on every keystroke. The parent (EditorTab)
+  // optimistically updates `value` per keystroke; without this debounce, a
+  // long transcript would jank the editor. 400ms feels instant to the user
+  // but batches rapid typing.
+  let parseTimer: ReturnType<typeof setTimeout> | null = null;
+  let debouncedValue = $state(value);
+  $effect(() => {
+    // Read `value` inside the effect so the dependency is tracked. Then
+    // defer the assignment into a timeout to batch rapid changes.
+    const current = value;
+    if (parseTimer !== null) clearTimeout(parseTimer);
+    parseTimer = setTimeout(() => {
+      debouncedValue = current;
+    }, 400);
+  });
+
   // Parse the transcript into speaker sections.
   // Uses structured segments from metadata when available (more reliable),
   // falls back to regex parsing of "Speaker N: text" formatted text.
@@ -29,7 +46,7 @@
     if (segments && segments.length > 0) {
       return groupSegmentsIntoSections(segments);
     }
-    return parseTextSections(value);
+    return parseTextSections(debouncedValue);
   });
 
   const hasSpeakers = $derived(sections.some((s) => s.speaker !== null));

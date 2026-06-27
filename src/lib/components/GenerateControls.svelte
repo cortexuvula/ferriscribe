@@ -13,6 +13,7 @@
       generating: GeneratingType;
       progressStatus: string | null;
       error: string | null;
+      lastFailedType: GeneratingType;
     };
     copyStatus: Record<string, 'idle' | 'copying' | 'copied'>;
     selectedAudienceId: string | null;
@@ -55,9 +56,22 @@
 </script>
 
 {#if generationState.error}
-  <div class="error-banner">
+  <div class="error-banner" role="alert">
     <span>{generationState.error}</span>
-    <button class="error-dismiss" onclick={onClearError}>Dismiss</button>
+    <div class="error-actions">
+      {#if generationState.lastFailedType}
+        <button
+          class="error-retry"
+          onclick={() => {
+            onClearError();
+            onGenerate(generationState.lastFailedType!);
+          }}
+        >
+          Retry
+        </button>
+      {/if}
+      <button class="error-dismiss" onclick={onClearError}>Dismiss</button>
+    </div>
   </div>
 {/if}
 
@@ -221,6 +235,11 @@
     color: var(--danger, #ef4444);
   }
 
+  .error-actions {
+    display: flex;
+    gap: 6px;
+  }
+
   .error-dismiss {
     padding: 2px 8px;
     border-radius: var(--radius-sm);
@@ -233,6 +252,21 @@
 
   .error-dismiss:hover {
     background-color: var(--danger, #ef4444);
+    color: white;
+  }
+
+  .error-retry {
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--accent, #3b82f6);
+    border: 1px solid var(--accent, #3b82f6);
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .error-retry:hover {
+    background-color: var(--accent, #3b82f6);
     color: white;
   }
 

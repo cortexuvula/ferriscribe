@@ -24,10 +24,13 @@
 </script>
 
 <div class="search-bar">
+  <label for="search-input" class="sr-only">Search recordings</label>
   <input
+    id="search-input"
     type="text"
     {value}
     {placeholder}
+    aria-label="Search recordings"
     oninput={handleInput}
     class="search-input"
   />

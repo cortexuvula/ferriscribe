@@ -134,7 +134,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="vocab-overlay" onclick={onclose}>
-    <div class="vocab-dialog" onclick={(e) => e.stopPropagation()}>
+    <div class="vocab-dialog" role="dialog" aria-modal="true" tabindex="-1" aria-label="Manage vocabulary" onclick={(e) => e.stopPropagation()}>
       <div class="vocab-header">
         <h2>Manage Vocabulary</h2>
         <button class="btn-close" aria-label="Close" onclick={onclose}>&times;</button>

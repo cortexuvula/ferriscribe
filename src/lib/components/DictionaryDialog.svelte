@@ -87,7 +87,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="dict-overlay" onclick={onclose}>
-    <div class="dict-dialog" onclick={(e) => e.stopPropagation()}>
+    <div class="dict-dialog" role="dialog" aria-modal="true" tabindex="-1" aria-label="Manage dictionary" onclick={(e) => e.stopPropagation()}>
       <div class="dict-header">
         <h2>Manage Dictionary</h2>
         <button class="btn-close" aria-label="Close" onclick={onclose}>&times;</button>

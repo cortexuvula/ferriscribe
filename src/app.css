@@ -162,6 +162,21 @@ body {
 .text-secondary { color: var(--text-secondary); }
 .text-success   { color: var(--success); }
 .text-warning   { color: var(--warning); }
+
+/* Visually-hidden text for screen-reader users. The standard
+   screen-reader-only pattern: clipped, not display:none (which
+   removes from the a11y tree). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .text-danger    { color: var(--danger); }
 .text-info      { color: var(--info); }
 
