@@ -1,13 +1,15 @@
 //! Text-to-speech provider implementations.
 //!
 //! This crate provides concrete implementations of the [`TtsProvider`] trait
-//! (defined in `medical-core`) for two backends:
+//! (defined in `medical-core`) for the OS-native speech engine:
 //!
-//! - [`elevenlabs_tts::ElevenLabsTtsProvider`] — calls the ElevenLabs REST API
-//!   and returns encoded audio bytes (typically MP3).
 //! - [`local_tts::LocalTtsProvider`] — uses the OS-native speech engine
 //!   (feature-gated behind `local-tts`). **Does not return audio bytes**;
 //!   audio is played directly through the system speakers.
+//!
+//! AGENTS.md forbids hosted AI APIs (OpenAI, Anthropic, ElevenLabs, etc.).
+//! A previous cloud TTS provider was removed to comply; only local TTS
+//! remains. Do not reintroduce a remote-provider client here.
 //!
 //! The crate also defines [`TtsError`], used for provider-construction failures
 //! (invalid API-key headers, HTTP client build errors). Runtime synthesis
@@ -15,7 +17,6 @@
 //!
 //! [`TtsProvider`]: medical_core::traits::TtsProvider
 
-pub mod elevenlabs_tts;
 pub mod local_tts;
 
 use thiserror::Error;

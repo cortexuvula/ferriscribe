@@ -11,7 +11,7 @@ use crate::types::{TtsConfig, VoiceInfo};
 /// from [`synthesize`](TtsProvider::synthesize).
 #[async_trait]
 pub trait TtsProvider: Send + Sync {
-    /// The canonical name of this provider (e.g. `"elevenlabs"`).
+    /// The canonical name of this provider (e.g. `"local"`).
     fn name(&self) -> &str;
 
     /// Returns the voices available from this provider.

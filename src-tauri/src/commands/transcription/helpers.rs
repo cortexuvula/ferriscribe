@@ -123,11 +123,16 @@ pub(super) fn filter_segment_repetitions(transcript: &mut medical_core::types::s
 }
 
 /// Write an orphaned transcript (one whose DB persistence failed despite
-/// successful transcription) to a file inside `app_data_dir/orphaned_transcripts/`.
-/// Returns the full path so the caller can log it for manual recovery.
+/// successful transcription) to an **encrypted** file inside
+/// `app_data_dir/orphaned_transcripts/`. Returns the full path so the
+/// caller can log it for manual recovery.
 ///
 /// Lives inside the app data directory (same PHI boundary as the DB itself);
 /// avoids putting raw transcript text into the global tracing pipeline.
+/// Encrypted with the same AES-256-GCM file key as audio recordings so the
+/// plaintext never sits on disk. If encryption fails (keychain unavailable),
+/// falls back to plaintext rather than losing the transcript entirely — the
+/// caller logs the path either way.
 pub(super) fn persist_orphaned_transcript(
     app_data_dir: &std::path::Path,
     recording_id: &uuid::Uuid,
@@ -135,8 +140,23 @@ pub(super) fn persist_orphaned_transcript(
 ) -> std::io::Result<std::path::PathBuf> {
     let dir = app_data_dir.join("orphaned_transcripts");
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{recording_id}.txt"));
-    std::fs::write(&path, transcript)?;
+    let path = dir.join(format!("{recording_id}.enc"));
+    // Best-effort encryption: the transcript is a recovery artifact and
+    // must not be lost, so fall back to plaintext if the keychain is down.
+    match medical_security::file_crypto::encrypt_file(&path, transcript.as_bytes()) {
+        Ok(()) => {}
+        Err(medical_security::file_crypto::FileCryptoError::Keychain(_)) => {
+            // No keychain — write plaintext .txt so the data isn't lost.
+            let plain = dir.join(format!("{recording_id}.txt"));
+            std::fs::write(&plain, transcript)?;
+            return Ok(plain);
+        }
+        Err(e) => {
+            return Err(std::io::Error::other(format!(
+                "encrypt orphaned transcript: {e}"
+            )));
+        }
+    }
     Ok(path)
 }
 
@@ -155,10 +175,43 @@ fn compute_int_max_val(bits_per_sample: u16) -> AppResult<f32> {
     Ok((1u64 << (bits_per_sample - 1)) as f32)
 }
 
+/// Open a recording WAV file for reading, transparently decrypting it if
+/// it's encrypted at rest.
+///
+/// Shared by `load_wav_to_audio_data` (transcription) and
+/// `compute_audio_levels` (audio-level check). Returns a `WavReader` backed
+/// by an in-memory buffer for encrypted files, or a file-backed reader for
+/// legacy plaintext WAVs. Both encrypted and legacy files work uniformly.
+pub(crate) fn open_recording_wav(
+    path: &std::path::Path,
+) -> Result<hound::WavReader<std::io::Cursor<Vec<u8>>>, AppError> {
+    use medical_security::file_crypto::{FileCryptoError, decrypt_file};
+
+    let wav_bytes: Vec<u8> = match decrypt_file(path) {
+        Ok(plaintext) => plaintext,
+        Err(FileCryptoError::NotEncrypted) => {
+            // Legacy plaintext file — read as-is.
+            std::fs::read(path)
+                .map_err(|e| AppError::Processing(format!("Failed to read WAV: {e}")))?
+        }
+        Err(e) => {
+            return Err(AppError::Processing(format!(
+                "Failed to decrypt recording: {e}"
+            )));
+        }
+    };
+
+    hound::WavReader::new(std::io::Cursor::new(wav_bytes))
+        .map_err(|e| AppError::Processing(format!("Failed to open WAV: {e}")))
+}
+
 /// Load a WAV file from disk and convert it into `AudioData` (f32 PCM).
+///
+/// Handles both encrypted recordings (the default since at-rest encryption
+/// shipped) and legacy plaintext WAVs — `file_crypto::decrypt_file` returns
+/// `NotEncrypted` for the latter, in which case we read the file directly.
 pub(super) fn load_wav_to_audio_data(path: &std::path::Path) -> Result<AudioData, AppError> {
-    let reader = hound::WavReader::open(path)
-        .map_err(|e| AppError::Processing(format!("Failed to open WAV: {e}")))?;
+    let reader = open_recording_wav(path)?;
     let spec = reader.spec();
 
     let samples: Vec<f32> = match spec.sample_format {
@@ -355,12 +408,25 @@ mod tests {
         let path = persist_orphaned_transcript(tmp.path(), &id, transcript).expect("persist");
 
         assert!(path.starts_with(tmp.path().join("orphaned_transcripts")));
-        assert_eq!(
-            path.file_name().unwrap().to_string_lossy(),
-            format!("{id}.txt")
-        );
-        let on_disk = fs::read_to_string(&path).expect("read");
-        assert_eq!(on_disk, transcript);
+        let fname = path.file_name().unwrap().to_string_lossy().into_owned();
+        // The file is either encrypted (.enc) or plaintext (.txt fallback
+        // when the keychain is unavailable in this environment).
+        if let Some(stem) = fname.strip_suffix(".enc") {
+            assert_eq!(stem, id.to_string());
+            // Verify it's actually encrypted (magic prefix) and decrypts
+            // back to the original transcript.
+            let bytes = fs::read(&path).expect("read");
+            assert!(bytes.starts_with(medical_security::file_crypto::MAGIC));
+            let decrypted =
+                medical_security::file_crypto::decrypt_bytes(&bytes).expect("decryption roundtrip");
+            assert_eq!(String::from_utf8(decrypted).unwrap(), transcript);
+        } else if let Some(stem) = fname.strip_suffix(".txt") {
+            // Plaintext fallback (no keychain in this test env).
+            assert_eq!(stem, id.to_string());
+            assert_eq!(fs::read_to_string(&path).expect("read"), transcript);
+        } else {
+            panic!("unexpected filename: {fname}");
+        }
     }
 
     #[test]

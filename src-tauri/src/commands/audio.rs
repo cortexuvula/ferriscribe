@@ -257,6 +257,26 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
         tracing::warn!(path = %current.wav_path.display(), "WAV file is empty — audio may not have been captured");
     }
 
+    // Encrypt the recording at rest. Audio is the most sensitive artifact
+    // (patient voice); the DB is already SQLCipher-encrypted, but WAVs sat
+    // plaintext on disk. Best-effort: if the keychain is unavailable, keep
+    // the plaintext file (recording the encounter matters more) and warn.
+    // encrypt_file_in_place is atomic (temp+rename) so a failure leaves the
+    // original WAV intact.
+    if file_size > 0 {
+        match medical_security::file_crypto::encrypt_file_in_place(&current.wav_path) {
+            Ok(()) => {
+                tracing::debug!(path = %current.wav_path.display(), "Recording encrypted at rest");
+            }
+            Err(medical_security::file_crypto::FileCryptoError::Keychain(e)) => {
+                tracing::warn!(error = %e, "Could not encrypt recording (keychain unavailable); storing plaintext");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %current.wav_path.display(), "Could not encrypt recording; storing plaintext");
+            }
+        }
+    }
+
     let recording_uuid = Uuid::parse_str(&current.id)
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
 
@@ -495,8 +515,8 @@ pub async fn check_recording_audio_levels(
 }
 
 fn compute_audio_levels(path: &std::path::Path) -> AppResult<RecordingAudioLevels> {
-    let reader = hound::WavReader::open(path)
-        .map_err(|e| AppError::Processing(format!("Failed to open WAV: {e}")))?;
+    // Decrypt-then-open: handles encrypted recordings AND legacy plaintext.
+    let reader = crate::commands::transcription::helpers::open_recording_wav(path)?;
     let spec = reader.spec();
 
     // Guard against malformed WAVs where bits_per_sample is 0. Without this

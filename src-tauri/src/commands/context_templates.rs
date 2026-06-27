@@ -206,13 +206,19 @@ pub async fn upsert_context_template(
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         let entry = remote.upsert(&name, &body).await?;
-        info!(name = %entry.name, "Upserted context template (remote)");
+        info!(
+            name_len = entry.name.chars().count(),
+            "Upserted context template (remote)"
+        );
         return Ok(entry);
     }
     let mut config = load_config(&state)?;
     let result = upsert_into(&mut config.custom_context_templates, name, body);
     save_config(&state, &config)?;
-    info!(name = %result.name, "Upserted context template");
+    info!(
+        name_len = result.name.chars().count(),
+        "Upserted context template"
+    );
     Ok(result)
 }
 
@@ -232,14 +238,19 @@ pub async fn rename_context_template(
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         let entry = remote.rename(&old_name, &new_name).await?;
-        info!(old = %old_name, new = %entry.name, "Renamed context template (remote)");
+        info!(
+            name_len = entry.name.chars().count(),
+            "Renamed context template (remote)"
+        );
         return Ok(entry);
     }
-    let old_name_log = old_name.clone();
     let mut config = load_config(&state)?;
     let result = rename_in(&mut config.custom_context_templates, &old_name, new_name)?;
     save_config(&state, &config)?;
-    info!(old_name = %old_name_log, new_name = %result.name, "Renamed context template");
+    info!(
+        name_len = result.name.chars().count(),
+        "Renamed context template"
+    );
     Ok(result)
 }
 
@@ -252,13 +263,13 @@ pub async fn delete_context_template(
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         remote.delete(&name).await?;
-        info!(%name, "Deleted context template (remote)");
+        info!("Deleted context template (remote)");
         return Ok(());
     }
     let mut config = load_config(&state)?;
     delete_in(&mut config.custom_context_templates, &name)?;
     save_config(&state, &config)?;
-    info!(name, "Deleted context template");
+    info!("Deleted context template");
     Ok(())
 }
 

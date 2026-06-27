@@ -75,7 +75,13 @@ impl IngestionPipeline {
         let entities = extract_medical_entities(text);
         for entity in &entities {
             if let Err(e) = self.graph_search.store_entity(entity) {
-                tracing::warn!("Failed to store entity '{}': {e}", entity.name);
+                // PHI guardrail: log the entity type + name length only,
+                // never the name itself (it's medical text from the document).
+                tracing::warn!(
+                    entity_type = ?entity.entity_type,
+                    name_len = entity.name.chars().count(),
+                    "Failed to store medical entity: {e}"
+                );
             }
         }
 

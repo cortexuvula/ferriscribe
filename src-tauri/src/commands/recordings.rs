@@ -217,6 +217,23 @@ pub fn import_audio_file(
         }
     };
 
+    // Encrypt the imported recording at rest (same as captured recordings).
+    // Best-effort: a keychain failure falls back to plaintext so the import
+    // isn't lost, matching the capture path's behavior.
+    if file_size > 0
+        && let Err(e) = medical_security::file_crypto::encrypt_file_in_place(&dest_path)
+    {
+        use medical_security::file_crypto::FileCryptoError;
+        match e {
+            FileCryptoError::Keychain(e) => {
+                tracing::warn!(error = %e, "import: could not encrypt (keychain unavailable); storing plaintext")
+            }
+            e => {
+                tracing::warn!(error = %e, path = %dest_path.display(), "import: could not encrypt; storing plaintext")
+            }
+        }
+    }
+
     let dest_filename = dest_path
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())

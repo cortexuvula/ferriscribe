@@ -51,7 +51,13 @@ pub async fn upsert_letter_audience(
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
-    info!(id = %audience.id, name = %audience.name, "Upserted letter audience");
+    // PHI guardrail: audience names are physician-authored free text that
+    // could embed a recipient name; log the id + name length only.
+    info!(
+        id = %audience.id,
+        name_len = audience.name.chars().count(),
+        "Upserted letter audience"
+    );
     Ok(audience)
 }
 

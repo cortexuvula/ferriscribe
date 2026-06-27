@@ -36,6 +36,7 @@
 //! section for the full list.
 
 pub mod audit_logger;
+pub mod file_crypto;
 pub mod input_sanitizer;
 pub mod key_storage;
 pub mod keychain;

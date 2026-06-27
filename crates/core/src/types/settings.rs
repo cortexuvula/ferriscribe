@@ -28,6 +28,10 @@ pub enum SttMode {
 /// `"lmstudio"` and `"ollama"` are valid.
 pub const SUPPORTED_AI_PROVIDERS: &[&str] = &["lmstudio", "ollama"];
 
+/// Supported TTS provider names. Only local TTS is supported — AGENTS.md
+/// forbids hosted AI APIs, so cloud providers (e.g. ElevenLabs) were removed.
+pub const SUPPORTED_TTS_PROVIDERS: &[&str] = &["local"];
+
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
@@ -149,7 +153,7 @@ fn default_whisper_model() -> String {
 }
 
 fn default_tts_provider() -> String {
-    "elevenlabs".into()
+    "local".into()
 }
 
 fn default_tts_voice() -> String {
@@ -508,6 +512,18 @@ impl AppConfig {
             );
             self.ai_provider = "lmstudio".into();
         }
+
+        // Migrate the removed cloud TTS provider to local. AGENTS.md forbids
+        // hosted AI APIs; the ElevenLabs provider was deleted, so any config
+        // still naming it (or any non-local value) is migrated via a positive
+        // allowlist (mirrors the ai_provider migration pattern).
+        if !SUPPORTED_TTS_PROVIDERS.contains(&self.tts_provider.as_str()) {
+            tracing::warn!(
+                stale = %self.tts_provider,
+                "tts_provider migrated to 'local' (cloud TTS providers are no longer supported)"
+            );
+            self.tts_provider = "local".into();
+        }
     }
 }
 
@@ -525,7 +541,7 @@ mod tests {
         assert_eq!(config.ai_provider, "lmstudio");
         assert_eq!(config.ai_model, "gpt-4o");
         assert_eq!(config.whisper_model, "large-v3-turbo");
-        assert_eq!(config.tts_provider, "elevenlabs");
+        assert_eq!(config.tts_provider, "local");
         assert_eq!(config.tts_voice, "default");
         assert!((config.temperature - 0.2).abs() < f32::EPSILON);
         assert!(!config.auto_generate_referral);
@@ -580,7 +596,7 @@ mod tests {
         // Defaults still in place
         assert_eq!(config.language, "en-US");
         assert_eq!(config.sample_rate, 44100);
-        assert_eq!(config.tts_provider, "elevenlabs");
+        assert_eq!(config.tts_provider, "local");
     }
 
     #[test]

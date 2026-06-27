@@ -20,6 +20,26 @@ use crate::state::AppState;
 /// patient_name, tags, metadata get their own commands.
 const EDITABLE_FIELDS: &[&str] = &["transcript", "soap_note", "referral", "letter", "chat"];
 
+/// Per-field character caps for edited content. Mirrors the generation
+/// pipeline's `MAX_*_CHARS` bounds so a misbehaving/compromised frontend
+/// can't store multi-megabyte strings that would later be re-fed to AI
+/// providers or bloat the DB. Empty values (field-clear) bypass the cap.
+/// Per-field character caps for edited content. Mirrors the generation
+/// pipeline's `MAX_*_CHARS` bounds so a misbehaving/compromised frontend
+/// can't store multi-megabyte strings that would later be re-fed to AI
+/// providers or bloat the DB. Empty values (field-clear) bypass the cap.
+///
+/// The `_` arm is a fallback for forward-compat; the
+/// `every_editable_field_has_explicit_cap` test guards that adding a field
+/// to `EDITABLE_FIELDS` without an explicit cap here fails the test.
+fn max_chars_for_field(field: &str) -> usize {
+    match field {
+        "transcript" => 500_000,
+        "soap_note" | "referral" | "letter" | "chat" => 500_000,
+        _ => 50_000,
+    }
+}
+
 /// Save a clinician-edited text field on a recording.
 ///
 /// Thinly wraps [`save_recording_field_inner`] so the inner logic can be
@@ -66,6 +86,17 @@ pub fn save_recording_field_inner(
     if !EDITABLE_FIELDS.contains(&field) {
         return Err(AppError::Other(format!(
             "field '{field}' is not editable; allowed: {EDITABLE_FIELDS:?}"
+        )));
+    }
+
+    // Length cap: defend against unbounded text (defense-in-depth — the
+    // frontend shouldn't send megabytes, but don't trust it). Empty values
+    // (clearing a field) are allowed through.
+    let max_chars = max_chars_for_field(field);
+    if !value.is_empty() && value.chars().count() > max_chars {
+        return Err(AppError::Other(format!(
+            "field '{field}' value exceeds {max_chars} character limit (got {})",
+            value.chars().count()
         )));
     }
 
@@ -192,6 +223,40 @@ mod tests {
     }
 
     #[test]
+    fn rejects_value_exceeding_length_cap() {
+        let conn = in_memory_db();
+        let rec_id = insert_recording(&conn);
+        let db = std::sync::Arc::new(medical_db::Database::open_in_memory().unwrap());
+        // 500_001 chars — one over the cap.
+        let oversized = "x".repeat(500_001);
+        let result = save_recording_field_inner(
+            db,
+            &conn,
+            &rec_id.to_string(),
+            "soap_note",
+            &oversized,
+            false,
+        );
+        assert!(result.is_err(), "oversized value should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("character limit"),
+            "error should mention limit: {msg}"
+        );
+    }
+
+    #[test]
+    fn accepts_value_at_length_cap_boundary() {
+        let conn = in_memory_db();
+        let rec_id = insert_recording(&conn);
+        let db = std::sync::Arc::new(medical_db::Database::open_in_memory().unwrap());
+        // Exactly 500_000 chars — the cap (should pass).
+        let at_cap = "x".repeat(500_000);
+        save_recording_field_inner(db, &conn, &rec_id.to_string(), "soap_note", &at_cap, false)
+            .expect("value at the cap boundary should be accepted");
+    }
+
+    #[test]
     fn updates_soap_note_field_in_recording() {
         let conn = in_memory_db();
         let rec_id = insert_recording(&conn);
@@ -254,5 +319,22 @@ mod tests {
             refreshed.soap_note.is_none(),
             "empty value should clear the field"
         );
+    }
+
+    #[test]
+    fn every_editable_field_has_explicit_cap() {
+        // Guard: if a field is added to EDITABLE_FIELDS without an explicit
+        // arm in max_chars_for_field, it silently falls into the _ => 50_000
+        // fallback. This test catches that by asserting every whitelisted
+        // field gets the intended 500_000 cap (the large-doc limit matching
+        // the generation pipeline). A new field must be added to both the
+        // match and this assertion.
+        for field in EDITABLE_FIELDS {
+            assert_eq!(
+                max_chars_for_field(field),
+                500_000,
+                "field '{field}' is in EDITABLE_FIELDS but max_chars_for_field returned the 50_000 fallback — add an explicit cap arm"
+            );
+        }
     }
 }

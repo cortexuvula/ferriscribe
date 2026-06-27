@@ -174,6 +174,14 @@ pub fn run() {
             recovery_state.set(reason);
             // Do not register AppState; do not start the background subsystems.
         }
+        Err(InitError::EncryptionUnavailable { reason }) => {
+            // Patient data exists but can't be encrypted — do NOT silently
+            // fall back to plaintext. Surface as a recovery condition so the
+            // clinician sees a clear message and can act (grant keychain
+            // access, free disk space, contact support).
+            tracing::error!(%reason, "Database encryption unavailable");
+            recovery_state.set(reason);
+        }
         Err(InitError::Other(e)) => {
             // Fatal but not panic-worthy: surface a dialog so the user sees what
             // went wrong and can quit / copy the error / report it. Previously

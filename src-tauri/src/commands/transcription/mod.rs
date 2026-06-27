@@ -8,7 +8,7 @@ use medical_core::error::AppResult;
 
 use crate::state::AppState;
 
-mod helpers;
+pub(crate) mod helpers;
 mod inner;
 
 // `transcribe_recording_inner` is a regular async fn (not a Tauri command),

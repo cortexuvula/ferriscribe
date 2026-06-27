@@ -7,7 +7,7 @@ const defaults: AppConfig = {
   ai_provider: 'lmstudio',
   ai_model: '',
   whisper_model: 'large-v3-turbo',
-  tts_provider: 'elevenlabs',
+  tts_provider: 'local',
   tts_voice: 'default',
   temperature: 0.2,
   input_device: null,

@@ -42,6 +42,11 @@ pub enum InitError {
     /// The caller should emit a `database-recovery-needed` event and skip the
     /// rest of normal app initialization.
     DatabaseRecoveryNeeded { reason: String },
+    /// Encryption is unavailable (keychain failure, migration failure) but a
+    /// database with patient data exists. The app must NOT silently fall back
+    /// to plaintext — surface this so the clinician knows PHI is at risk and
+    /// can take action (e.g. grant keychain access, restore a backup).
+    EncryptionUnavailable { reason: String },
     /// Any other initialization error (treated as fatal).
     Other(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -51,6 +56,12 @@ impl std::fmt::Display for InitError {
         match self {
             InitError::DatabaseRecoveryNeeded { reason } => {
                 write!(f, "database recovery needed: {reason}")
+            }
+            InitError::EncryptionUnavailable { reason } => {
+                write!(
+                    f,
+                    "database encryption is unavailable: {reason}. Patient data cannot be opened safely."
+                )
             }
             InitError::Other(e) => write!(f, "{e}"),
         }
@@ -582,39 +593,71 @@ impl AppState {
                             Some(key)
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, "DB encryption migration failed; continuing on plaintext");
-                            None
+                            // Migration failed with existing patient data — do NOT
+                            // silently fall back to plaintext. Surface the error so
+                            // the clinician can resolve it (free disk space, fix
+                            // permissions) rather than using an unencrypted DB.
+                            tracing::error!(error = %e, "DB encryption migration failed");
+                            return Err(InitError::EncryptionUnavailable {
+                                reason: format!(
+                                    "could not encrypt the existing database: {e}. \
+                                     The database contains patient data and must be encrypted \
+                                     before FerriScribe can open it."
+                                ),
+                            });
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Could not access OS keychain; running on plaintext DB");
-                    None
+                    // Keychain inaccessible with existing patient data — do NOT
+                    // silently fall back to plaintext.
+                    tracing::error!(error = %e, "Could not access OS keychain for DB key");
+                    return Err(InitError::EncryptionUnavailable {
+                        reason: format!(
+                            "could not access the OS keychain to store the database key: {e}. \
+                             Grant FerriScribe keychain access so the database can be encrypted."
+                        ),
+                    });
                 }
             },
 
             // Plaintext DB exists but a key is also present (user replaced the file?).
-            // Run on plaintext for this boot; warn loudly. A re-encryption flow
-            // could be a follow-up.
+            // This is ambiguous and potentially unsafe — surface it rather than
+            // silently opening plaintext.
             (true, Ok(Some(_)), _) => {
-                tracing::warn!(
-                    "Plaintext DB found but a keychain key exists; running on plaintext for safety"
+                tracing::error!(
+                    "Plaintext DB found but a keychain key exists; refusing to open plaintext"
                 );
-                None
+                return Err(InitError::EncryptionUnavailable {
+                    reason:
+                        "an unencrypted database was found alongside an existing encryption key. \
+                             This may indicate the database was replaced. Contact support before \
+                             proceeding — FerriScribe will not open patient data unencrypted."
+                            .into(),
+                });
             }
 
-            // Plaintext DB but keychain access failed: run on plaintext, warn.
+            // Plaintext DB but keychain access failed: existing patient data,
+            // can't encrypt — surface the error.
             (true, Err(e), _) => {
-                tracing::warn!(error = %e, "Keychain access failed while plaintext DB exists; running on plaintext");
-                None
+                tracing::error!(error = %e, "Keychain access failed while plaintext DB exists");
+                return Err(InitError::EncryptionUnavailable {
+                    reason: format!(
+                        "could not access the OS keychain while an unencrypted database exists: {e}. \
+                         Grant keychain access so the database can be encrypted."
+                    ),
+                });
             }
 
             // No DB at all (fresh install): generate key, store it; a fresh
-            // encrypted DB will be created.
+            // encrypted DB will be created. If the keychain is unavailable on
+            // a truly fresh install (no patient data yet), it's acceptable to
+            // proceed plaintext — there's nothing sensitive to protect. We
+            // retry encryption on the next launch once the keychain is fixed.
             (_, _, false) => match medical_security::keychain::get_or_create_db_key() {
                 Ok(key) => Some(key),
                 Err(e) => {
-                    tracing::warn!(error = %e, "Fresh install: could not store DB key in keychain; using plaintext");
+                    tracing::warn!(error = %e, "Fresh install: could not store DB key in keychain; using plaintext (no patient data yet)");
                     None
                 }
             },
