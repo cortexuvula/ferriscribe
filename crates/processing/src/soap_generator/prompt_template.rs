@@ -1099,4 +1099,163 @@ mod tests {
             &sc_block[..sc_block.len().min(2000)]
         );
     }
+
+    // ---- icd_candidates_block coverage ----
+    //
+    // This function is the prompt's constrained-vocabulary injection — the
+    // most billing-critical formatting path — yet was previously untested
+    // because every test passed an empty candidate list.
+
+    fn entry(code: &str, desc: &str) -> Icd9Entry {
+        Icd9Entry {
+            code: code.into(),
+            description: desc.into(),
+            category: "Test".into(),
+        }
+    }
+
+    #[test]
+    fn icd_candidates_block_empty_for_empty_list() {
+        let block = icd_candidates_block("ICD-9", &[]);
+        assert!(
+            block.is_empty(),
+            "empty candidate list must produce no block"
+        );
+    }
+
+    #[test]
+    fn icd_candidates_block_empty_for_icd10_mode() {
+        // Candidates must never be injected into an ICD-10 prompt — even
+        // if the selector erroneously passed some (it only runs for
+        // ICD-9/both, but this guard is the safety net).
+        let cands = vec![entry("401.9", "HYPERTENSION")];
+        let block = icd_candidates_block("ICD-10", &cands);
+        assert!(
+            block.is_empty(),
+            "ICD-10 mode must never inject ICD-9 candidates"
+        );
+    }
+
+    #[test]
+    fn icd_candidates_block_formats_entries() {
+        let cands = vec![entry("847.2", "LUMBAR"), entry("V70.0", "ROUTINE EXAM")];
+        let block = icd_candidates_block("ICD-9", &cands);
+        assert!(block.contains("ICD-9 CODE SELECTION"), "header present");
+        assert!(block.contains("847.2 — LUMBAR"), "first entry formatted");
+        assert!(
+            block.contains("V70.0 — ROUTINE EXAM"),
+            "second entry formatted"
+        );
+    }
+
+    #[test]
+    fn icd_candidates_block_truncates_long_descriptions() {
+        // 61 chars (including spaces) — must truncate to 57 chars + "…".
+        let long_desc = "THIS IS A VERY LONG DESCRIPTION THAT EXCEEDS SIXTY CHARACTERS";
+        assert!(
+            long_desc.chars().count() > 60,
+            "test setup: desc must be >60 chars"
+        );
+        let cands = vec![entry("999.9", long_desc)];
+        let block = icd_candidates_block("ICD-9", &cands);
+        assert!(
+            block.contains("…"),
+            "long description must be truncated with ellipsis"
+        );
+        // The full untruncated description must NOT appear.
+        assert!(
+            !block.contains(long_desc),
+            "untruncated long description must not appear in the prompt"
+        );
+    }
+
+    #[test]
+    fn icd_candidates_block_keeps_short_descriptions_intact() {
+        // Exactly 60 chars — must NOT be truncated (the boundary is >60).
+        let exact_60 = "EXACTLY SIXTY CHARACTERS LONG DESCRIPTION HERE FOR TEST!!"; // 58 chars — under, should be intact
+        let cands = vec![entry("401.9", exact_60)];
+        let block = icd_candidates_block("ICD-9", &cands);
+        assert!(
+            block.contains(exact_60),
+            "description under 60 chars must appear verbatim"
+        );
+        assert!(
+            !block.contains("…"),
+            "short description must not be truncated"
+        );
+    }
+
+    #[test]
+    fn icd_candidates_block_handles_multibyte_description() {
+        // MSP descriptions contain en-dashes (–, 3 bytes) and the output
+        // uses em-dashes (—, 3 bytes). A byte-index truncation would panic
+        // or corrupt; char-based truncation must handle this cleanly.
+        // 65 chars including en-dashes near the 57-char boundary.
+        let multibyte = "DIABETES WITH NEUROLOGICAL MANIFESTATIONS – TYPE II UNSPECIFIED";
+        assert!(multibyte.chars().count() > 60, "test setup");
+        let cands = vec![entry("250.60", multibyte)];
+        let block = icd_candidates_block("ICD-9", &cands);
+        // Must not panic (the test reaching this assertion is the guard)
+        // and must contain the ellipsis.
+        assert!(
+            block.contains("…"),
+            "multibyte long description must truncate safely"
+        );
+        assert!(block.contains("250.60"), "code present");
+    }
+
+    #[test]
+    fn icd_candidates_block_injected_for_both_mode() {
+        // `both` mode should also inject ICD-9 candidates (BC MSP bills ICD-9).
+        let cands = vec![entry("401.9", "HYPERTENSION")];
+        let block = icd_candidates_block("both", &cands);
+        assert!(
+            !block.is_empty(),
+            "`both` mode must inject ICD-9 candidates"
+        );
+    }
+
+    #[test]
+    fn icd_candidates_placeholder_resolves_in_full_prompt() {
+        // End-to-end: build_soap_prompt with non-empty candidates must
+        // resolve the {icd_candidates} placeholder (no leftover token) and
+        // include the candidate block.
+        let config = SoapPromptConfig {
+            icd_version: "ICD-9".into(),
+            icd9_candidates: vec![entry("847.2", "LUMBAR"), entry("V70.0", "ROUTINE")],
+            ..Default::default()
+        };
+        let prompt = build_soap_prompt(&config);
+        assert!(
+            !prompt.contains("{icd_candidates}"),
+            "placeholder must be resolved"
+        );
+        assert!(
+            prompt.contains("847.2 — LUMBAR"),
+            "candidate appears in full prompt"
+        );
+        assert!(
+            prompt.contains("ICD-9 CODE SELECTION"),
+            "selection header in prompt"
+        );
+    }
+
+    #[test]
+    fn icd_candidates_placeholder_empty_for_icd10_prompt() {
+        // Even with candidates present, ICD-10 mode must not inject them.
+        let config = SoapPromptConfig {
+            icd_version: "ICD-10".into(),
+            icd9_candidates: vec![entry("401.9", "HYPERTENSION")],
+            ..Default::default()
+        };
+        let prompt = build_soap_prompt(&config);
+        assert!(
+            !prompt.contains("401.9 — HYPERTENSION"),
+            "ICD-10 mode must not inject ICD-9 candidates"
+        );
+        assert!(
+            !prompt.contains("ICD-9 CODE SELECTION"),
+            "ICD-10 mode must not show the selection header"
+        );
+    }
 }

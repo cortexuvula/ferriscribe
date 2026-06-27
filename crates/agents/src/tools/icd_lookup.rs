@@ -306,4 +306,107 @@ mod tests {
         let tool = IcdLookupTool;
         assert_eq!(tool.definition().name, "search_icd_codes");
     }
+
+    #[tokio::test]
+    async fn lookup_exact_code_match_ranks_first() {
+        // Querying a bare code should match it exactly (+10 score) and
+        // return it as the first result.
+        let tool = IcdLookupTool;
+        let result = tool
+            .execute(json!({"query": "401.9", "version": "ICD-9"}))
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        let parsed: serde_json::Value = serde_json::from_str(&result.content).unwrap_or_default();
+        let results = parsed.get("results").and_then(|v| v.as_array());
+        assert!(results.is_some(), "results array present");
+        let first = results.unwrap().first();
+        assert!(
+            first.is_some_and(|r| r.get("code").and_then(|c| c.as_str()) == Some("401.9")),
+            "exact code 401.9 must rank first: {first:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_case_insensitive_code_match() {
+        // A V-code queried as "V70.0" (already lowercase in the tool) must
+        // match the stored "V70.0" case-insensitively.
+        let tool = IcdLookupTool;
+        let result = tool
+            .execute(json!({"query": "v70.0", "version": "ICD-9"}))
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result.content).unwrap_or_default();
+        let codes: Vec<&str> = parsed
+            .get("results")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r.get("code").and_then(|c| c.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            codes.contains(&"V70.0"),
+            "V70.0 must match case-insensitively: {codes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_chest_pain_ranks_symptom_chapter_first() {
+        // Sort-before-cap guard: "chest pain" must surface 786.x (Symptoms
+        // chapter, late in the file) ahead of low-relevance early-chapter
+        // codes. If the sort-before-cap fix regressed to file-order, the
+        // 780-799 chapter codes would be starved by earlier chapters.
+        let tool = IcdLookupTool;
+        let result = tool
+            .execute(json!({"query": "chest pain", "version": "ICD-9"}))
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result.content).unwrap_or_default();
+        let codes: Vec<&str> = parsed
+            .get("results")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r.get("code").and_then(|c| c.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            codes.iter().any(|c| c.starts_with("786")),
+            "chest pain must surface 786.x (Symptoms chapter) in results: {codes:?}"
+        );
+        // The first result should be a 786 code (highest relevance for
+        // "chest pain").
+        assert!(
+            codes.first().is_some_and(|c| c.starts_with("786")),
+            "786.x should rank first for 'chest pain': got {:?}",
+            codes.first()
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_missing_query_field_returns_error() {
+        // No "query" key at all (None → unwrap_or("") → error).
+        let tool = IcdLookupTool;
+        let result = tool.execute(json!({"version": "ICD-9"})).await.unwrap();
+        assert!(result.is_error, "missing query field must error");
+    }
+
+    #[tokio::test]
+    async fn lookup_icd10_keyword_synonym_match() {
+        // "wheezing" should match J45 (asthma) via its keyword synonyms,
+        // not just the description.
+        let tool = IcdLookupTool;
+        let result = tool
+            .execute(json!({"query": "wheezing", "version": "ICD-10"}))
+            .await
+            .unwrap();
+        assert!(
+            result.content.contains("J45"),
+            "wheezing should match J45 (asthma) via synonyms: {}",
+            result.content
+        );
+    }
 }

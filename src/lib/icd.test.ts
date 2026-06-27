@@ -145,4 +145,66 @@ describe('extractIcdCodesValidated', () => {
     const result = extractIcdCodesValidated(text, mspSet);
     expect(result[0].valid).toBe(true);
   });
+
+  // ---- Edge cases (F-coverage gap fill) ----
+
+  it('stripIcdPrefix handles empty and whitespace-only', () => {
+    expect(stripIcdPrefix('')).toBe('');
+    expect(stripIcdPrefix('   ')).toBe('');
+  });
+
+  it('stripIcdPrefix leaves a bare code (no prefix) intact', () => {
+    // No "ICD-N" prefix → the regex doesn't match → bare code returned.
+    expect(stripIcdPrefix('401.9')).toBe('401.9');
+    expect(stripIcdPrefix('V70.0')).toBe('V70.0');
+  });
+
+  it('normalizedForms does not produce duplicate for already-3-digit code', () => {
+    // F3 dedup guard: "780" is already 3 digits → no duplicate form.
+    expect(normalizedForms('780')).toEqual(['780']);
+  });
+
+  it('normalizedForms handles trailing-zero difference as distinct (documents behavior)', () => {
+    // The MSP list uses specific trailing-zero forms (e.g. 250.00 exists,
+    // 250.0 exists as a parent). normalizedForms does NOT reconcile
+    // trailing zeros — 250.00 and 250.0 are treated as distinct. This
+    // test documents that behavior so a future change is intentional.
+    const forms00 = normalizedForms('250.00');
+    const forms0 = normalizedForms('250.0');
+    expect(forms00).not.toEqual(forms0);
+  });
+
+  it('validateIcdCode returns null for whitespace-only raw', () => {
+    expect(validateIcdCode('   ', mspSet)).toBeNull();
+  });
+
+  it('validateIcdCode returns null for alpha-only body with no digit', () => {
+    // Stray-prose guard: "ICD-9: ABC" has no digit in the code body.
+    expect(validateIcdCode('ICD-9: ABC', mspSet)).toBeNull();
+  });
+
+  it('extractIcdCodesValidated returns [] for empty text', () => {
+    expect(extractIcdCodesValidated('', mspSet)).toEqual([]);
+    expect(extractIcdCodesValidated('no codes here', mspSet)).toEqual([]);
+  });
+
+  it('mixed ICD-9 and ICD-10 in both mode: only ICD-9 validates', () => {
+    // In both mode, ICD-9 codes validate against the MSP set; ICD-10
+    // codes render neutral. Both appear in the result array.
+    const text = 'ICD-9 Code: 847.2\nICD-10 Code: Z00.00';
+    const result = extractIcdCodesValidated(text, mspSet, 'both');
+    expect(result).toHaveLength(2);
+    const icd9 = result.find((r) => /ICD-9/.test(r.raw));
+    const icd10 = result.find((r) => /ICD-10/.test(r.raw));
+    expect(icd9?.valid).toBe(true);
+    expect(icd10?.valid).toBeNull();
+  });
+
+  it('pure icd10 mode: ICD-10 codes render neutral, ICD-9 codes also neutral', () => {
+    // Wrong-set guard: in icd10 mode neither validates (ICD-10 has no
+    // bundled list; ICD-9 must not be checked against the ICD-9 set).
+    const text = 'ICD-9 Code: 401.9\nICD-10 Code: I10';
+    const result = extractIcdCodesValidated(text, mspSet, 'icd10');
+    expect(result.every((r) => r.valid === null)).toBe(true);
+  });
 });

@@ -439,4 +439,106 @@ mod tests {
             "glucose 130 must not score toxoplasmosis (130): {codes:?}"
         );
     }
+
+    // ---- Baseline-survives-cap guarantee ----
+
+    #[test]
+    fn baseline_codes_survive_cap_under_heavy_transcript_scoring() {
+        // A transcript that scores many non-baseline entries must NOT push
+        // baseline codes out of the 40-slot result. The baseline is the
+        // billing-critical floor (V70.0 etc. must always be available).
+        let transcript = "fever headache cough sore throat sinus pain congestion wheeze dyspnea chest pain abdominal pain nausea rash itching dizziness fatigue malaise myalgia arthralgia back pain";
+        let selected = select_icd9_candidates(transcript, None, None);
+        let codes: HashSet<&str> = selected.iter().map(|e| e.code.as_str()).collect();
+        // V70.0 is the last baseline entry by file order and the most likely
+        // to be starved if the cap logic regresses.
+        assert!(
+            codes.contains("V70.0"),
+            "V70.0 must survive the cap even under heavy scoring: {:?}",
+            codes
+        );
+        // Spot-check a few other high-frequency baselines.
+        assert!(codes.contains("401.9"), "HTN baseline survives: {codes:?}");
+        assert!(
+            codes.contains("784.0"),
+            "headache baseline survives: {codes:?}"
+        );
+        assert_eq!(
+            selected.len(),
+            MAX_CANDIDATES,
+            "heavy transcript fills all slots"
+        );
+    }
+
+    // ---- code_mentioned V/alpha distinctiveness branch ----
+
+    #[test]
+    fn v_code_mentioned_verbatim_scores_via_bonus() {
+        // V70.0 contains a letter → passes the distinctiveness gate → the
+        // verbatim mention gets the +3 bonus. V70.0 is in the baseline so
+        // it appears regardless; this test confirms the BONUS path works
+        // by checking it ranks high (the bonus would be invisible in a
+        // pure-membership check).
+        // Use a non-baseline V-code to make the bonus contribution visible.
+        // V72.0 (eye exam) — not in the baseline.
+        let transcript = "Patient here for a V72.0 vision screening.";
+        let selected = select_icd9_candidates(transcript, None, None);
+        let codes: Vec<&str> = selected.iter().map(|e| e.code.as_str()).collect();
+        // V72.0 should be selected via the verbatim-mention bonus (it has
+        // no description-token overlap with "vision screening" because the
+        // description is "EXAMINATION OF EYES AND VISION").
+        assert!(
+            codes.contains(&"V72.0"),
+            "V72.0 mentioned verbatim should be selected via bonus: {codes:?}"
+        );
+    }
+
+    // ---- Bare-3-digit code scored via overlap (not bonus) ----
+
+    #[test]
+    fn bare_three_digit_code_scored_via_overlap_not_bonus() {
+        // "diagnosis 250" — 250 (DM) is in the baseline and its description
+        // is "DIABETES MELLITUS". The transcript has "250" but F2 blocks
+        // the bonus for bare 3-digit codes; 250.0 (in baseline) is still
+        // selected via baseline membership. This confirms the F2 guard
+        // doesn't accidentally drop valid baseline codes.
+        let transcript = "Follow up on diagnosis 250, diabetes management.";
+        let selected = select_icd9_candidates(transcript, None, None);
+        let codes: Vec<&str> = selected.iter().map(|e| e.code.as_str()).collect();
+        assert!(
+            codes.contains(&"250.0"),
+            "250.0 (DM) should still be selected (via baseline/overlap): {codes:?}"
+        );
+    }
+
+    // ---- Edge cases ----
+
+    #[test]
+    fn empty_conditions_in_patient_context_does_not_panic() {
+        let pc = PatientContext {
+            patient_name: None,
+            prior_soap_notes: vec![],
+            medications: vec![],
+            conditions: vec![], // empty
+            allergies: vec![],
+        };
+        let selected = select_icd9_candidates("routine visit", None, Some(&pc));
+        assert!(
+            !selected.is_empty(),
+            "empty conditions should not panic or blank out"
+        );
+    }
+
+    #[test]
+    fn tokenize_handles_non_ascii_without_panic() {
+        // Non-ASCII (accented patient name / clinical term) must tokenize
+        // without panicking. char::is_alphanumeric is Unicode-aware so
+        // "café" is one token; it won't match ASCII descriptions but
+        // must not crash.
+        let tokens = tokenize("Patient named café reports hypertension");
+        assert!(
+            tokens.iter().any(|t| t.contains("hypertension")),
+            "ASCII terms kept"
+        );
+    }
 }

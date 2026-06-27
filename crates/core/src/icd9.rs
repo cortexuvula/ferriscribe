@@ -170,6 +170,37 @@ mod tests {
     }
 
     #[test]
+    fn normalized_forms_zero_pads_integer_no_dot() {
+        // The else branch: a pure-integer code with no decimal point.
+        // "42" → ["42", "042"]. This mirrors the TS port's behavior.
+        let forms = normalized_forms("42");
+        assert!(
+            forms.contains(&"042".to_string()),
+            "42 must zero-pad to 042: {forms:?}"
+        );
+        assert!(forms.contains(&"42".to_string()), "original form retained");
+    }
+
+    #[test]
+    fn normalized_forms_dedups_already_padded_codes() {
+        // "780" is already 3 digits → the padded form equals the original
+        // → no duplicate entry (F3 dedup guard).
+        let forms = normalized_forms("780");
+        assert_eq!(
+            forms.len(),
+            1,
+            "already-3-digit code must not produce a duplicate: {forms:?}"
+        );
+        assert_eq!(forms[0], "780");
+    }
+
+    #[test]
+    fn normalized_forms_handles_empty_and_whitespace() {
+        assert_eq!(normalized_forms(""), vec!["".to_string()]);
+        assert_eq!(normalized_forms("   "), vec!["".to_string()]);
+    }
+
+    #[test]
     fn normalized_forms_preserves_alpha_suffix() {
         let forms = normalized_forms("01A");
         assert!(forms.contains(&"01A".to_string()));

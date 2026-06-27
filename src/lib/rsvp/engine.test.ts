@@ -178,6 +178,47 @@ describe('preprocessSoap', () => {
     expect(out).not.toMatch(/deficiencies/i);
     expect(out).toMatch(/Subjective:/);
   });
+
+  it('strips mixed ICD-9 and ICD-10 code lines together', () => {
+    // Both versions must be stripped by preprocessSoap — a regression
+    // where ICD_LINE_RE matched only one version would leak the other.
+    const text = [
+      'ICD-9 Code: 401.9',
+      'ICD-10 Code: I10',
+      '',
+      'Subjective: HTN',
+    ].join('\n');
+    const out = preprocessSoap(text);
+    expect(out).not.toMatch(/ICD-9/);
+    expect(out).not.toMatch(/ICD-10/);
+    expect(out).not.toMatch(/401/);
+    expect(out).not.toMatch(/I10/);
+  });
+
+  it('strips indented ICD code lines', () => {
+    // ICD_LINE_RE tolerates leading whitespace/indentation.
+    const out = preprocessSoap('  ICD-9 Code: 401.9 — Hypertension\n\nSubjective:');
+    expect(out).not.toMatch(/ICD-9/);
+    expect(out).not.toMatch(/401/);
+  });
+
+  it('extracts code followed immediately by newline', () => {
+    // The regex trailing \s* is greedy and could consume the newline;
+    // extraction must still return the code cleanly.
+    const codes = extractIcdCodes('ICD-9: 401.9\nSubjective');
+    expect(codes).toHaveLength(1);
+    expect(codes[0]).toMatch(/401\.9/);
+  });
+
+  it('extracts multiple codes on one line', () => {
+    const codes = extractIcdCodes('Codes: ICD-9: 401.9 ICD-9: 250.0 done');
+    expect(codes.length).toBe(2);
+  });
+
+  it('handles empty string input', () => {
+    expect(extractIcdCodes('')).toEqual([]);
+    expect(preprocessSoap('')).toBe('');
+  });
 });
 
 describe('extractIcdCodes', () => {
