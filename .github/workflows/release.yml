@@ -102,3 +102,21 @@ jobs:
           # a beta to stable by tagging the same commit vX.Y.Z.
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: --target ${{ matrix.target }}
+
+  # Prune old releases after a successful build, keeping only the 5 newest
+  # (by semver). Deletes both the release assets and the git tag. Only
+  # matches FerriScribe version tags (vX.Y.Z); leaves whisper-server-* and
+  # other non-version tags untouched. Runs once after all platform builds.
+  prune:
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Prune to 5 newest releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/prune-old-releases.mjs
