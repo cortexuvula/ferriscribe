@@ -25,6 +25,8 @@
 //! [`TranslationProvider`]: medical_core::traits::TranslationProvider
 
 pub mod ai_translator;
+/// Canned responses — not yet wired into production; tests-only until integrated.
+#[cfg(test)]
 pub mod canned_responses;
 pub mod session;
 

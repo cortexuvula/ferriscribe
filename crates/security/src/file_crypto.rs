@@ -239,4 +239,53 @@ mod tests {
         assert_ne!(MAGIC.as_slice(), b"RIFF"); // not confused with WAV
         assert_ne!(MAGIC.as_slice(), b"ID3"); // not confused with MP3
     }
+
+    // ---- encrypt_file_in_place (the production PHI-at-rest path) ----
+
+    #[test]
+    fn encrypt_file_in_place_roundtrips() {
+        // This is the exact path called by audio capture + import:
+        // read a plaintext file, encrypt it atomically (temp+rename),
+        // then decrypt to verify the round-trip.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("recording.wav");
+        let original = b"RIFF\x00\x00\x00\x00WAVEfmt fake-audio-data-PHI";
+        std::fs::write(&path, original).unwrap();
+
+        match encrypt_file_in_place(&path) {
+            Ok(()) => {
+                // The file should now have the FE1 magic (encrypted).
+                assert!(
+                    is_encrypted(&path),
+                    "file should be encrypted after in-place"
+                );
+                // Decrypting should recover the original plaintext.
+                let decrypted = decrypt_file(&path).expect("decryption must roundtrip");
+                assert_eq!(decrypted, original);
+            }
+            Err(FileCryptoError::Keychain(_)) => {
+                eprintln!("skipping: keychain unavailable in this environment");
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    #[test]
+    fn encrypt_file_in_place_preserves_original_on_read_failure() {
+        // encrypt_file_in_place reads the file first. If the read fails
+        // (e.g. file doesn't exist), the original must NOT be destroyed —
+        // the function should return an error and leave nothing behind.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.wav");
+        let result = encrypt_file_in_place(&path);
+        assert!(
+            result.is_err(),
+            "encrypting a nonexistent file should error"
+        );
+        // No temp file should be left behind.
+        assert!(
+            !dir.path().join("nonexistent.wav.enc.tmp").exists(),
+            "temp file should be cleaned up on failure"
+        );
+    }
 }

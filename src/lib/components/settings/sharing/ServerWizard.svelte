@@ -1,19 +1,22 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { createEventDispatcher } from 'svelte';
   import { formatError } from '../../../types/errors';
-  const dispatch = createEventDispatcher();
 
-  let friendlyName = 'Clinic Server';
-  let busy = false;
-  let error: string | null = null;
+  type Props = {
+    ondone?: () => void;
+  };
+  let { ondone }: Props = $props();
+
+  let friendlyName = $state('Clinic Server');
+  let busy = $state(false);
+  let error = $state<string | null>(null);
 
   async function start() {
     busy = true;
     error = null;
     try {
       await invoke('start_sharing', { friendlyName });
-      dispatch('done');
+      ondone?.();
     } catch (e) {
       error = formatError(e);
     } finally {
@@ -36,7 +39,7 @@
     <li>Your operating system may ask permission for FerriScribe to accept
         incoming connections. Click <b>Allow</b>.</li>
   </ol>
-  <button class="btn btn-primary" disabled={busy} on:click={start}>
+  <button class="btn btn-primary" disabled={busy} onclick={start}>
     {busy ? 'Setting up…' : 'Start sharing'}
   </button>
   {#if error}<div class="error">{error}</div>{/if}

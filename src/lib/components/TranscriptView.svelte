@@ -22,34 +22,50 @@
     editText = value;
   });
 
-  // Debounce the derived parse so typing into the transcript editor doesn't
-  // re-parse the entire transcript on every keystroke. The parent (EditorTab)
-  // optimistically updates `value` per keystroke; without this debounce, a
-  // long transcript would jank the editor. 400ms feels instant to the user
-  // but batches rapid typing.
+  // Debounce the transcript parse so typing into the editor doesn't
+  // re-parse the entire transcript on every keystroke. The parent
+  // (EditorTab) optimistically updates `value` per keystroke; without
+  // this debounce, a long transcript would jank the editor.
+  //
+  // We use a non-reactive cache (`parseCache`) updated by a timer, NOT
+  // `$state` — writing `$state` inside a `$effect` that feeds a `$derived`
+  // is a Svelte 5 anti-pattern (effect-writes-state-it-reads). Instead, a
+  // `$state` version counter (`parseVersion`) bumps when the timer fires,
+  // and `$derived.by` reads both `value` (tracked) and `parseCache`
+  // (untracked) gated on `parseVersion` (tracked) to re-run only when the
+  // debounce window elapses.
+  const DEBOUNCE_MS = 400;
   let parseTimer: ReturnType<typeof setTimeout> | null = null;
-  let debouncedValue = $state(value);
+  let parseCache = value; // non-reactive — read inside $derived but not tracked
+  let parseVersion = $state(0);
+
   $effect(() => {
-    // Read `value` inside the effect so the dependency is tracked. Then
-    // defer the assignment into a timeout to batch rapid changes.
+    // Track `value` so the effect re-runs when it changes.
     const current = value;
     if (parseTimer !== null) clearTimeout(parseTimer);
     parseTimer = setTimeout(() => {
-      debouncedValue = current;
-    }, 400);
+      parseCache = current;
+      parseVersion++; // bump triggers the $derived to re-parse
+    }, DEBOUNCE_MS);
+    // Cleanup on re-run or unmount: clear the pending timer.
+    return () => {
+      if (parseTimer !== null) clearTimeout(parseTimer);
+    };
   });
 
   // Parse the transcript into speaker sections.
   // Uses structured segments from metadata when available (more reliable),
   // falls back to regex parsing of "Speaker N: text" formatted text.
+  // Reads `parseVersion` (tracked — re-runs on debounce tick) and
+  // `parseCache` (untracked — the debounced value).
   const sections: SpeakerSection[] = $derived.by(() => {
+    // Touch parseVersion so this re-runs when the debounce fires.
+    parseVersion;
     if (segments && segments.length > 0) {
       return groupSegmentsIntoSections(segments);
     }
-    return parseTextSections(debouncedValue);
-  });
-
-  const hasSpeakers = $derived(sections.some((s) => s.speaker !== null));
+    return parseTextSections(parseCache);
+  });  const hasSpeakers = $derived(sections.some((s) => s.speaker !== null));
 
   function groupSegmentsIntoSections(
     segs: Array<{ speaker: string | null; text: string }>,

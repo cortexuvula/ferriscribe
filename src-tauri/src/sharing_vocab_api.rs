@@ -69,7 +69,7 @@ pub async fn spawn(
     db: Arc<Database>,
     tokens: Arc<TokenStore>,
     port: u16,
-) -> Result<JoinHandle<()>, String> {
+) -> Result<JoinHandle<()>, medical_core::error::AppError> {
     let state = ApiState { db, tokens };
     let app = Router::new()
         .route(
@@ -151,16 +151,21 @@ async fn list_handler(
 ) -> Result<Json<Vec<VocabularyEntry>>, StatusCode> {
     let _ = authorize(&state, &headers)?;
     let db = Arc::clone(&state.db);
-    let entries = tokio::task::spawn_blocking(move || -> Result<Vec<VocabularyEntry>, String> {
-        let conn = db.conn().map_err(|e| e.to_string())?;
-        match q.category {
-            Some(cat) => {
-                let cat = VocabularyCategory::from_str(&cat);
-                VocabularyRepo::list_by_category(&conn, &cat).map_err(|e| e.to_string())
+    let entries = tokio::task::spawn_blocking(
+        move || -> Result<Vec<VocabularyEntry>, medical_core::error::AppError> {
+            let conn = db.conn()?;
+            match q.category {
+                Some(cat) => {
+                    let cat = VocabularyCategory::from_str(&cat);
+                    VocabularyRepo::list_by_category(&conn, &cat)
+                        .map_err(medical_core::error::AppError::from)
+                }
+                None => {
+                    VocabularyRepo::list_all(&conn).map_err(medical_core::error::AppError::from)
+                }
             }
-            None => VocabularyRepo::list_all(&conn).map_err(|e| e.to_string()),
-        }
-    })
+        },
+    )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|e| {
@@ -177,10 +182,12 @@ async fn count_handler(
 ) -> Result<Json<(u32, u32)>, StatusCode> {
     let _ = authorize(&state, &headers)?;
     let db = Arc::clone(&state.db);
-    let counts = tokio::task::spawn_blocking(move || -> Result<(u32, u32), String> {
-        let conn = db.conn().map_err(|e| e.to_string())?;
-        VocabularyRepo::count(&conn).map_err(|e| e.to_string())
-    })
+    let counts = tokio::task::spawn_blocking(
+        move || -> Result<(u32, u32), medical_core::error::AppError> {
+            let conn = db.conn()?;
+            VocabularyRepo::count(&conn).map_err(medical_core::error::AppError::from)
+        },
+    )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -221,9 +228,9 @@ async fn insert_handler(
     };
     let db = Arc::clone(&state.db);
     let entry_clone = entry.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let conn = db.conn().map_err(|e| e.to_string())?;
-        VocabularyRepo::insert(&conn, &entry_clone).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || -> Result<(), medical_core::error::AppError> {
+        let conn = db.conn()?;
+        VocabularyRepo::insert(&conn, &entry_clone).map_err(medical_core::error::AppError::from)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -248,10 +255,12 @@ async fn update_handler(
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let db = Arc::clone(&state.db);
     let db2 = Arc::clone(&state.db);
-    let existing = tokio::task::spawn_blocking(move || -> Result<VocabularyEntry, String> {
-        let conn = db.conn().map_err(|e| e.to_string())?;
-        VocabularyRepo::get_by_id(&conn, &uuid).map_err(|e| e.to_string())
-    })
+    let existing = tokio::task::spawn_blocking(
+        move || -> Result<VocabularyEntry, medical_core::error::AppError> {
+            let conn = db.conn()?;
+            VocabularyRepo::get_by_id(&conn, &uuid).map_err(medical_core::error::AppError::from)
+        },
+    )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -272,9 +281,9 @@ async fn update_handler(
         updated_at: Utc::now(),
     };
     let entry_clone = entry.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let conn = db2.conn().map_err(|e| e.to_string())?;
-        VocabularyRepo::update(&conn, &entry_clone).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || -> Result<(), medical_core::error::AppError> {
+        let conn = db2.conn()?;
+        VocabularyRepo::update(&conn, &entry_clone).map_err(medical_core::error::AppError::from)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -290,9 +299,9 @@ async fn delete_handler(
     let _ = authorize(&state, &headers)?;
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let db = Arc::clone(&state.db);
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let conn = db.conn().map_err(|e| e.to_string())?;
-        VocabularyRepo::delete(&conn, &uuid).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || -> Result<(), medical_core::error::AppError> {
+        let conn = db.conn()?;
+        VocabularyRepo::delete(&conn, &uuid).map_err(medical_core::error::AppError::from)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -306,9 +315,9 @@ async fn delete_all_handler(
 ) -> Result<Json<u32>, StatusCode> {
     let _ = authorize(&state, &headers)?;
     let db = Arc::clone(&state.db);
-    let n = tokio::task::spawn_blocking(move || -> Result<u32, String> {
-        let conn = db.conn().map_err(|e| e.to_string())?;
-        VocabularyRepo::delete_all(&conn).map_err(|e| e.to_string())
+    let n = tokio::task::spawn_blocking(move || -> Result<u32, medical_core::error::AppError> {
+        let conn = db.conn()?;
+        VocabularyRepo::delete_all(&conn).map_err(medical_core::error::AppError::from)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -341,9 +350,11 @@ struct TemplateDeleteBody {
     name: String,
 }
 
-fn ctx_templates_load_sorted(db: &Database) -> Result<Vec<ContextTemplate>, String> {
-    let conn = db.conn().map_err(|e| e.to_string())?;
-    let mut cfg = SettingsRepo::load_config(&conn).map_err(|e| e.to_string())?;
+fn ctx_templates_load_sorted(
+    db: &Database,
+) -> Result<Vec<ContextTemplate>, medical_core::error::AppError> {
+    let conn = db.conn()?;
+    let mut cfg = SettingsRepo::load_config(&conn)?;
     cfg.migrate();
     let mut t = cfg.custom_context_templates;
     t.sort_by_key(|a| a.name.to_lowercase());
@@ -379,28 +390,30 @@ async fn templates_upsert_handler(
         return Err(StatusCode::BAD_REQUEST);
     }
     let db = Arc::clone(&state.db);
-    let entry = tokio::task::spawn_blocking(move || -> Result<ContextTemplate, String> {
-        let conn = db.conn().map_err(|e| e.to_string())?;
-        let mut cfg = SettingsRepo::load_config(&conn).map_err(|e| e.to_string())?;
-        cfg.migrate();
-        let entry = ContextTemplate {
-            name: name.clone(),
-            body: body_text.clone(),
-        };
-        if let Some(existing) = cfg
-            .custom_context_templates
-            .iter_mut()
-            .find(|t| t.name == name)
-        {
-            existing.body = body_text;
-        } else {
-            cfg.custom_context_templates.push(entry.clone());
-        }
-        cfg.custom_context_templates
-            .sort_by_key(|a| a.name.to_lowercase());
-        SettingsRepo::save_config(&conn, &cfg).map_err(|e| e.to_string())?;
-        Ok(entry)
-    })
+    let entry = tokio::task::spawn_blocking(
+        move || -> Result<ContextTemplate, medical_core::error::AppError> {
+            let conn = db.conn()?;
+            let mut cfg = SettingsRepo::load_config(&conn)?;
+            cfg.migrate();
+            let entry = ContextTemplate {
+                name: name.clone(),
+                body: body_text.clone(),
+            };
+            if let Some(existing) = cfg
+                .custom_context_templates
+                .iter_mut()
+                .find(|t| t.name == name)
+            {
+                existing.body = body_text;
+            } else {
+                cfg.custom_context_templates.push(entry.clone());
+            }
+            cfg.custom_context_templates
+                .sort_by_key(|a| a.name.to_lowercase());
+            SettingsRepo::save_config(&conn, &cfg)?;
+            Ok(entry)
+        },
+    )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|e| {
@@ -520,10 +533,13 @@ async fn dict_list_handler(
 ) -> Result<Json<Vec<String>>, StatusCode> {
     let _ = authorize(&state, &headers)?;
     let db = Arc::clone(&state.db);
-    let words = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
-        let conn = db.conn().map_err(|e| e.to_string())?;
-        medical_db::user_dictionary::UserDictionaryRepo::list(&conn).map_err(|e| e.to_string())
-    })
+    let words = tokio::task::spawn_blocking(
+        move || -> Result<Vec<String>, medical_core::error::AppError> {
+            let conn = db.conn()?;
+            medical_db::user_dictionary::UserDictionaryRepo::list(&conn)
+                .map_err(medical_core::error::AppError::from)
+        },
+    )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|e| {
@@ -543,17 +559,18 @@ async fn dict_add_handler(
     let db = Arc::clone(&state.db);
     let word = body.word;
     let word_len = word.len();
-    let added = tokio::task::spawn_blocking(move || -> Result<bool, String> {
-        let conn = db.conn().map_err(|e| e.to_string())?;
-        medical_db::user_dictionary::UserDictionaryRepo::add(&conn, &word)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|e| {
-        warn!("dict_api add failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let added =
+        tokio::task::spawn_blocking(move || -> Result<bool, medical_core::error::AppError> {
+            let conn = db.conn()?;
+            medical_db::user_dictionary::UserDictionaryRepo::add(&conn, &word)
+                .map_err(medical_core::error::AppError::from)
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            warn!("dict_api add failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     info!(word_len, added, "dict_api: add");
     Ok(Json(added))
 }
@@ -566,17 +583,18 @@ async fn dict_remove_handler(
     let _ = authorize(&state, &headers)?;
     let db = Arc::clone(&state.db);
     let word_len = word.len();
-    let removed = tokio::task::spawn_blocking(move || -> Result<bool, String> {
-        let conn = db.conn().map_err(|e| e.to_string())?;
-        medical_db::user_dictionary::UserDictionaryRepo::remove(&conn, &word)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|e| {
-        warn!("dict_api remove failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let removed =
+        tokio::task::spawn_blocking(move || -> Result<bool, medical_core::error::AppError> {
+            let conn = db.conn()?;
+            medical_db::user_dictionary::UserDictionaryRepo::remove(&conn, &word)
+                .map_err(medical_core::error::AppError::from)
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            warn!("dict_api remove failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     info!(word_len, removed, "dict_api: remove");
     Ok(Json(removed))
 }

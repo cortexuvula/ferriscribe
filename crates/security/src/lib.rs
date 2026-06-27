@@ -35,13 +35,19 @@
 //! one side without the other. See the README "Cross-Crate Contracts"
 //! section for the full list.
 
+/// Audit logger — not yet wired into production; tests-only until integrated.
+#[cfg(test)]
 pub mod audit_logger;
 pub mod file_crypto;
+/// Input sanitizer — not yet wired into production; tests-only until integrated.
+#[cfg(test)]
 pub mod input_sanitizer;
 pub mod key_storage;
 pub mod keychain;
 pub mod machine_id;
 pub mod phi_redactor;
+/// Rate limiter — not yet wired into production; tests-only until integrated.
+#[cfg(test)]
 pub mod rate_limiter;
 
 use thiserror::Error;

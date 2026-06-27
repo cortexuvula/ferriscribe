@@ -96,3 +96,16 @@ jobs:
           # Only Linux runners exercise the mDNS smoke test.
           FERRISCRIBE_MDNS_TEST: ${{ runner.os == 'Linux' && '1' || '0' }}
         run: cargo test -p medical-sharing
+
+  # Security advisory scan — catches RustSec advisories on the dependency
+  # tree. For a HIPAA-adjacent app this is important: known CVEs in crypto,
+  # network, or archive crates must not ship silently.
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Cargo audit
+        run: cargo audit

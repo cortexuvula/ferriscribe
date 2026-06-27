@@ -1,11 +1,15 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { onMount, createEventDispatcher, tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import PairingQr from './PairingQr.svelte';
   import { renameClient } from '../../../api/sharing';
   import { formatError } from '../../../types/errors';
-  const dispatch = createEventDispatcher();
+
+  type Props = {
+    onstopped?: () => void;
+  };
+  let { onstopped }: Props = $props();
 
   type SharingStatus = {
     enabled: boolean;
@@ -93,7 +97,7 @@
 
   async function stop() {
     await invoke('stop_sharing');
-    dispatch('stopped');
+    onstopped?.();
   }
 
   onMount(() => {
@@ -158,7 +162,7 @@
     <div>
       <h4>Pairing</h4>
       <PairingQr payload={qrPayload} />
-      <button class="btn" on:click={regenQr}>New code</button>
+      <button class="btn" onclick={regenQr}>New code</button>
     </div>
     <div>
       <h4>Connected clients ({clients.length})</h4>
@@ -175,28 +179,28 @@
                   class="edit-input"
                   bind:this={editInputEl}
                   bind:value={draftLabel}
-                  on:keydown={onEditKeydown}
+                  onkeydown={onEditKeydown}
                   aria-label="Rename client"
                 />
                 <button
                   class="btn btn-icon"
                   title="Save"
                   aria-label="Save"
-                  on:click={commitEdit}>✓</button>
+                  onclick={commitEdit}>✓</button>
                 <button
                   class="btn btn-icon"
                   title="Cancel"
                   aria-label="Cancel"
-                  on:click={cancelEdit}>✕</button>
+                  onclick={cancelEdit}>✕</button>
               {:else}
                 <span class="client-label">{c.label}</span>
                 <button
                   class="btn btn-icon"
                   title="Rename"
                   aria-label="Rename {c.label}"
-                  on:click={() => startEdit(c)}>✎</button>
+                  onclick={() => startEdit(c)}>✎</button>
               {/if}
-              <button class="btn btn-revoke" on:click={() => revoke(c.id)}>Revoke</button>
+              <button class="btn btn-revoke" onclick={() => revoke(c.id)}>Revoke</button>
             </li>
             {#if editingId === c.id && editError}
               <li class="edit-error">{editError}</li>
@@ -206,7 +210,7 @@
       {/if}
     </div>
   </div>
-  <button class="btn btn-danger" on:click={stop}>Stop sharing</button>
+  <button class="btn btn-danger" onclick={stop}>Stop sharing</button>
 </section>
 
 <style>

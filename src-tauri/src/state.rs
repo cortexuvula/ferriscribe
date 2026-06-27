@@ -15,18 +15,12 @@ use medical_core::types::RemoteEndpoint;
 use medical_core::types::settings::AppConfig;
 
 use medical_agents::orchestrator::AgentOrchestrator;
-use medical_agents::tools::{RagSearchTool, ToolRegistry};
+use medical_agents::tools::ToolRegistry;
 
 use medical_audio::capture::CaptureHandle;
 
 use medical_db::Database;
 use medical_db::recordings::RecordingsRepo;
-
-use medical_rag::bm25::Bm25Search;
-use medical_rag::embeddings::EmbeddingGenerator;
-use medical_rag::graph_search::GraphSearch;
-use medical_rag::ingestion::IngestionPipeline;
-use medical_rag::vector_store::VectorStore;
 
 use medical_security::key_storage::KeyStorage;
 
@@ -246,21 +240,6 @@ pub struct AppState {
     /// `cancel_pipeline` calls `.cancel()` to signal in-flight tasks and
     /// poll points to bail out.
     pub pipeline_cancels: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>>,
-    // RAG subsystem
-    /// Embedding generator for vector-store ingestion and similarity search.
-    pub embedding_generator: Arc<EmbeddingGenerator>,
-    /// Vector store for semantic search over ingested documents.
-    pub vector_store: Arc<VectorStore>,
-    /// BM25 index for keyword search over ingested documents.
-    pub bm25_search: Arc<Bm25Search>,
-    /// Graph search over the knowledge graph. Currently consumed only by
-    /// `IngestionPipeline`; held here so future Tauri commands can issue
-    /// direct graph queries.
-    #[allow(dead_code)]
-    pub graph_search: Arc<GraphSearch>,
-    /// Document ingestion pipeline. Parses, chunks, embeds, and indexes
-    /// documents into the RAG subsystem.
-    pub ingestion: Arc<IngestionPipeline>,
     /// Lazy-initialized sharing service. `None` until `start_sharing` is called.
     pub sharing: Arc<RwLock<Option<Arc<medical_sharing::SharingService>>>>,
     /// JoinHandle for the vocab CRUD HTTP API task spawned alongside the
@@ -749,39 +728,10 @@ impl AppState {
         let lmstudio_provider = RwLock::new(ai_handles.lmstudio.take());
         let remote_stt_provider = RwLock::new(stt_handles.remote.clone());
 
-        // --- RAG subsystem ---
-        let embedding_host = if config_ref.ollama_host.is_empty() {
-            "localhost".to_string()
-        } else {
-            config_ref.ollama_host.clone()
-        };
-        let embedding_url = format!("http://{}:{}", embedding_host, config_ref.ollama_port);
-        info!(url = %embedding_url, model = %config_ref.embedding_model, "RAG: using Ollama embeddings");
-        let embedding_generator = Arc::new(EmbeddingGenerator::new_ollama(
-            Some(&embedding_url),
-            Some(&config_ref.embedding_model),
-        )?);
-
-        let vector_store = Arc::new(VectorStore::new(Arc::clone(&db)));
-        let bm25_search = Arc::new(Bm25Search::new(Arc::clone(&db)));
-        let graph_search = Arc::new(GraphSearch::new(Arc::clone(&db)));
-        let ingestion = Arc::new(IngestionPipeline::new(
-            Arc::clone(&embedding_generator),
-            Arc::clone(&vector_store),
-            Arc::clone(&graph_search),
-        ));
-
-        info!("RAG subsystem initialized");
-
-        // Initialize the agent orchestrator with tools, including RAG-connected search
-        let mut tool_registry = ToolRegistry::with_defaults();
-        // Replace the default unconfigured RagSearchTool with a real one
-        let rag_tool = RagSearchTool::with_rag(
-            Arc::clone(&embedding_generator),
-            Arc::clone(&vector_store),
-            Arc::clone(&bm25_search),
-        );
-        tool_registry.register(Arc::new(rag_tool));
+        // Initialize the agent orchestrator. RAG tools (RagSearchTool) are
+        // instantiated lazily by chat.rs when the user invokes a RAG-dependent
+        // agent flow — no eager RAG subsystem initialization needed here.
+        let tool_registry = ToolRegistry::with_defaults();
         let orchestrator = AgentOrchestrator::new(tool_registry);
 
         Ok(Self {
@@ -795,11 +745,6 @@ impl AppState {
             capture_handle: Arc::new(std::sync::Mutex::new(SendCaptureHandle(None))),
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            embedding_generator,
-            vector_store,
-            bm25_search,
-            graph_search,
-            ingestion,
             sharing: Arc::new(RwLock::new(None)),
             vocab_api: RwLock::new(None),
             ollama_provider,

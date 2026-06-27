@@ -9,7 +9,6 @@ pub mod logging;
 pub mod models;
 pub mod pipeline;
 pub mod providers;
-pub mod rag;
 pub mod recordings;
 pub mod recordings_edit;
 pub mod recovery;

@@ -59,9 +59,9 @@
   {/if}
 
   {#if mode === 'server' && !sharingOn}
-    <ServerWizard on:done={refresh} />
+    <ServerWizard ondone={refresh} />
   {:else if mode === 'server' && sharingOn}
-    <ServerStatus on:stopped={refresh} />
+    <ServerStatus onstopped={refresh} />
   {:else if mode === 'client'}
     <ClientPair />
   {/if}

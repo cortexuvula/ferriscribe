@@ -196,3 +196,34 @@ impl Default for LocalTtsProvider {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stub_provider_construction_succeeds() {
+        // The stub (feature disabled) must construct without error so
+        // downstream code can reference the type unconditionally.
+        let _provider = LocalTtsProvider::new();
+    }
+
+    #[cfg(feature = "local-tts")]
+    #[tokio::test]
+    async fn feature_gated_provider_name_is_local() {
+        use medical_core::traits::TtsProvider;
+        let provider = LocalTtsProvider::new();
+        assert_eq!(provider.name(), "local");
+    }
+
+    #[cfg(feature = "local-tts")]
+    #[tokio::test]
+    async fn feature_gated_provider_handles_missing_engine_gracefully() {
+        // On a headless CI runner, the OS TTS engine may not be available.
+        // The provider must not panic — it should return errors on use.
+        use medical_core::traits::TtsProvider;
+        let provider = LocalTtsProvider::new();
+        // available_voices should either return voices or an error, never panic.
+        let _ = provider.available_voices().await;
+    }
+}

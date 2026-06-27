@@ -32,6 +32,8 @@ pub mod fusion;
 pub mod graph_search;
 pub mod ingestion;
 pub mod mmr;
+/// Query expander — not yet wired into production; tests-only until integrated.
+#[cfg(test)]
 pub mod query_expander;
 pub mod vector_store;
 

@@ -561,18 +561,6 @@ mod preflight_tests {
         let keys =
             medical_security::key_storage::KeyStorage::open(&config_dir).expect("KeyStorage::open");
 
-        let embedding_generator = Arc::new(
-            medical_rag::embeddings::EmbeddingGenerator::new_ollama(None, None)
-                .expect("reqwest client build in test"),
-        );
-        let vector_store = Arc::new(medical_rag::vector_store::VectorStore::new(Arc::clone(&db)));
-        let bm25_search = Arc::new(medical_rag::bm25::Bm25Search::new(Arc::clone(&db)));
-        let graph_search = Arc::new(medical_rag::graph_search::GraphSearch::new(Arc::clone(&db)));
-        let ingestion = Arc::new(medical_rag::ingestion::IngestionPipeline::new(
-            Arc::clone(&embedding_generator),
-            Arc::clone(&vector_store),
-            Arc::clone(&graph_search),
-        ));
         let tool_registry = medical_agents::tools::ToolRegistry::with_defaults();
         let orchestrator = Arc::new(medical_agents::orchestrator::AgentOrchestrator::new(
             tool_registry,
@@ -590,11 +578,6 @@ mod preflight_tests {
             capture_handle: Arc::new(std::sync::Mutex::new(crate::state::SendCaptureHandle(None))),
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            embedding_generator,
-            vector_store,
-            bm25_search,
-            graph_search,
-            ingestion,
             sharing: Arc::new(RwLock::new(None)),
             vocab_api: RwLock::new(None),
             ollama_provider: RwLock::new(None),

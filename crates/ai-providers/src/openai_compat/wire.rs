@@ -154,3 +154,118 @@ pub(super) struct ApiModelEntry {
     #[serde(default)]
     pub owned_by: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_non_streaming_response() {
+        // A typical Ollama/LM Studio non-streaming chat completion response.
+        let json = serde_json::json!({
+            "model": "llama3:8b",
+            "choices": [{
+                "message": {
+                    "content": "Hello, world!",
+                    "tool_calls": null
+                },
+                "delta": null,
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 3,
+                "total_tokens": 13
+            }
+        });
+        let resp: ChatResponse = serde_json::from_value(json).expect("must deserialize");
+        assert_eq!(resp.model.as_deref(), Some("llama3:8b"));
+        assert_eq!(resp.choices.len(), 1);
+        let msg = resp.choices[0].message.as_ref().expect("message present");
+        assert_eq!(msg.content.as_deref(), Some("Hello, world!"));
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+        let usage = resp.usage.expect("usage present");
+        assert_eq!(usage.total_tokens, 13);
+    }
+
+    #[test]
+    fn deserialize_streaming_delta() {
+        // A single SSE delta chunk from a streaming response.
+        let json = serde_json::json!({
+            "model": "llama3:8b",
+            "choices": [{
+                "message": null,
+                "delta": {
+                    "content": "Hello",
+                    "tool_calls": null
+                },
+                "finish_reason": null
+            }],
+            "usage": null
+        });
+        let resp: ChatResponse = serde_json::from_value(json).expect("must deserialize");
+        let delta = resp.choices[0].delta.as_ref().expect("delta present");
+        assert_eq!(delta.content.as_deref(), Some("Hello"));
+        assert!(resp.usage.is_none());
+    }
+
+    #[test]
+    fn deserialize_tool_call_delta() {
+        // A streaming chunk with a partial tool call delta.
+        let json = serde_json::json!({
+            "model": "llama3:8b",
+            "choices": [{
+                "delta": {
+                    "content": null,
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "search_icd_codes",
+                            "arguments": "{\"query\":\"hype"
+                        }
+                    }]
+                }
+            }],
+            "usage": null
+        });
+        let resp: ChatResponse = serde_json::from_value(json).expect("must deserialize");
+        let delta = resp.choices[0].delta.as_ref().expect("delta present");
+        let tc = delta.tool_calls.as_ref().expect("tool_calls present");
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0].id.as_deref(), Some("call_abc123"));
+        let func = tc[0].function.as_ref().expect("function present");
+        assert!(func.arguments.as_deref().unwrap().starts_with("{\"query"));
+    }
+
+    #[test]
+    fn deserialize_empty_content_field() {
+        // Some providers send content: null instead of omitting it.
+        let json = serde_json::json!({
+            "model": "llama3:8b",
+            "choices": [{
+                "message": { "content": null },
+                "finish_reason": "stop"
+            }],
+            "usage": null
+        });
+        let resp: ChatResponse = serde_json::from_value(json).expect("must deserialize");
+        assert!(resp.choices[0].message.as_ref().unwrap().content.is_none());
+    }
+
+    #[test]
+    fn deserialize_models_list() {
+        let json = serde_json::json!({
+            "data": [
+                { "id": "llama3:8b", "owned_by": "meta" },
+                { "id": "qwen2.5:7b" }
+            ]
+        });
+        let resp: ModelsListResponse = serde_json::from_value(json).expect("must deserialize");
+        assert_eq!(resp.data.len(), 2);
+        assert_eq!(resp.data[0].id, "llama3:8b");
+        assert_eq!(resp.data[0].owned_by.as_deref(), Some("meta"));
+        assert!(resp.data[1].owned_by.is_none()); // #[serde(default)]
+    }
+}

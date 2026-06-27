@@ -56,7 +56,6 @@ dependency arrow points one way.
 | `commands::export` | `export_pdf`, `export_docx`, `export_fhir`. |
 | `commands::vocabulary` | CRUD for the vocabulary correction list, plus JSON import/export and test-correction. |
 | `commands::context_templates` | CRUD for context templates, plus JSON import/export. |
-| `commands::rag` | `ingest_document`, `search_rag`, `rag_stats`. |
 | `commands::models` | `list_whisper_models`, `list_pyannote_models`, `download_model`, `delete_model`. |
 | `commands::sharing` | Office-server lifecycle (`start_sharing`, `stop_sharing`, `sharing_status`), pairing (`pairing_qr`, `list_paired_clients`, `revoke_client`, `pair_with_server`, `unpair`), discovery (`discover_servers`, `discover_via_tailscale`). |
 | `commands::recovery` | `get_database_recovery_state`, `recover_database_from_path`, `recover_database_wipe`, `database_encryption_status`. |
@@ -89,7 +88,6 @@ Holds:
 - **`capture_handle`** -- the active audio capture stream (wrapped for `Send + Sync`).
 - **`current_recording`** -- metadata about the in-progress recording session.
 - **`pipeline_cancels`** -- cancel tokens for in-flight transcribe-then-SOAP pipelines, keyed by recording ID.
-- **RAG subsystem** -- `embedding_generator`, `vector_store`, `bm25_search`, `graph_search`, `ingestion`.
 - **`sharing: Arc<RwLock<Option<Arc<SharingService>>>>`** -- lazy-initialized office-server service.
 - **Typed provider handles** -- `ollama_provider`, `lmstudio_provider`, `remote_stt_provider` for runtime endpoint updates.
 - **`http_client: Arc<reqwest::Client>`** -- shared, pooled HTTP client for connection tests and pairing.
