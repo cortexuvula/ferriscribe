@@ -55,9 +55,11 @@ impl VectorStore {
 
     /// Search for the closest chunks to a query embedding vector.
     ///
-    /// Loads all embeddings from the database, computes cosine similarity
-    /// against each one, filters by `threshold`, and returns the top `top_k`
-    /// results sorted by score descending.
+    /// Loads embedding vectors (no content) from the database, computes
+    /// cosine similarity against each, filters by `threshold`, keeps the
+    /// top `top_k` via a bounded selection, then hydrates content only for
+    /// those winners. This avoids loading the entire corpus's content
+    /// strings into memory on every query.
     pub fn search(
         &self,
         query_embedding: &[f32],
@@ -69,10 +71,12 @@ impl VectorStore {
             .conn()
             .map_err(|e| RagError::Database(e.to_string()))?;
 
-        let all_embeddings = VectorsRepo::get_all_embeddings(&conn)
+        // Phase 1: score only (no content loaded — avoids deserializing
+        // large text strings for the entire corpus).
+        let vectors = VectorsRepo::get_all_embedding_vectors(&conn)
             .map_err(|e| RagError::Database(e.to_string()))?;
 
-        let mut scored: Vec<(f32, &medical_db::vectors::EmbeddingRecord)> = all_embeddings
+        let mut scored: Vec<(f32, &medical_db::vectors::EmbeddingVectorRecord)> = vectors
             .iter()
             .map(|rec| {
                 let sim = cosine_similarity(query_embedding, &rec.embedding);
@@ -81,22 +85,29 @@ impl VectorStore {
             .filter(|(sim, _)| *sim >= threshold)
             .collect();
 
-        // Sort by score descending
+        // Sort by score descending and take top_k.
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Take top_k
         scored.truncate(top_k);
+
+        if scored.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Phase 2: hydrate content only for the top-k winners.
+        let ids: Vec<String> = scored.iter().map(|(_, r)| r.id.clone()).collect();
+        let content_map = VectorsRepo::get_content_by_ids(&conn, &ids)
+            .map_err(|e| RagError::Database(e.to_string()))?;
 
         let results = scored
             .into_iter()
             .map(|(score, rec)| {
-                // Parse the chunk_id; fall back to nil UUID if it doesn't parse
                 let chunk_id = Uuid::parse_str(&rec.id).unwrap_or(Uuid::nil());
+                let content = content_map.get(&rec.id).cloned().unwrap_or_default();
 
                 RagResult {
                     chunk_id,
                     document_id: Uuid::parse_str(&rec.document_id).unwrap_or(Uuid::nil()),
-                    content: rec.content.clone(),
+                    content,
                     score,
                     source: SearchSource::Vector,
                     metadata: RagChunkMetadata {

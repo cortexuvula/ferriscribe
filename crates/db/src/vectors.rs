@@ -1,5 +1,7 @@
 //! CRUD operations for the `document_chunks` table (RAG vector store).
 
+use std::collections::HashMap;
+
 use rusqlite::{Connection, params};
 
 use crate::DbResult;
@@ -26,6 +28,16 @@ pub struct EmbeddingRecord {
     pub id: String,
     pub document_id: String,
     pub content: String,
+    pub embedding: Vec<f32>,
+}
+
+/// Lightweight record for the scoring-only pass of vector search —
+/// excludes content to avoid loading large strings for the whole corpus.
+/// Content is hydrated only for the top-k winners via [`VectorsRepo::get_content_by_ids`].
+#[derive(Debug, Clone)]
+pub struct EmbeddingVectorRecord {
+    pub id: String,
+    pub document_id: String,
     pub embedding: Vec<f32>,
 }
 
@@ -113,6 +125,57 @@ impl VectorsRepo {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(rows)
+    }
+
+    /// Return every chunk's id, document_id, and embedding (no content).
+    ///
+    /// Used by the vector search's first phase (score-only pass) to avoid
+    /// loading potentially large content strings for the entire corpus.
+    /// Content is fetched only for the top-k winners via [`get_content_by_ids`].
+    pub fn get_all_embedding_vectors(conn: &Connection) -> DbResult<Vec<EmbeddingVectorRecord>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, document_id, embedding
+             FROM document_chunks
+             WHERE embedding IS NOT NULL",
+        )?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let document_id: String = row.get(1)?;
+                let blob: Vec<u8> = row.get(2)?;
+                let embedding: Vec<f32> = bytemuck::try_cast_slice(&blob).unwrap_or(&[]).to_vec();
+                Ok(EmbeddingVectorRecord {
+                    id,
+                    document_id,
+                    embedding,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
+    /// Fetch content for specific chunk IDs (used after the top-k scoring
+    /// pass to hydrate only the winning results).
+    pub fn get_content_by_ids(
+        conn: &Connection,
+        ids: &[String],
+    ) -> DbResult<HashMap<String, String>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT id, content FROM document_chunks WHERE id IN ({placeholders})");
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Retrieve all chunks belonging to a given document, ordered by

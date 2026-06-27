@@ -18,7 +18,7 @@
 //!    encounter V-codes.
 //! 5. Sort by score desc, dedupe, cap at [`MAX_CANDIDATES`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use medical_core::icd9::{self, Icd9Entry};
 use medical_core::types::PatientContext;
@@ -118,17 +118,53 @@ pub fn select_icd9_candidates(
     let source_set: HashSet<String> = source_tokens.into_iter().collect();
     let source_lower = source.to_lowercase();
 
-    // 2. Score every entry by source-token overlap with its description.
-    //    MSP descriptions are ALL UPPERCASE, so tokenize() lowercases both
-    //    sides to make the intersection case-insensitive. This is the
-    //    core selection mechanism — without it the feature is just the
-    //    static baseline.
-    let mut scored: Vec<(usize, &'static Icd9Entry)> = Vec::new();
-    for entry in icd9::entries() {
-        let desc_tokens = tokenize(&entry.description);
-        let desc_set: HashSet<String> = desc_tokens.into_iter().collect();
+    // 2. Score entries using the pre-computed inverted index (token → entry
+    //    indices). Instead of iterating all 7,122 entries and re-tokenizing
+    //    each description (the old O(n×tokens) approach), we look up each
+    //    source token in the index and score only the entries it appears in.
+    //    This reduces the scoring loop from ~7,122 iterations to typically
+    //    ~50-200 candidate entries.
+    let entries = icd9::entries();
+    let desc_sets = icd9::desc_token_sets();
+    let token_index = icd9::token_index();
 
-        let overlap = source_set.intersection(&desc_set).count();
+    // Collect candidate entry indices: the union of all entries that share
+    // at least one token with the source, PLUS any entries whose bare code
+    // is mentioned verbatim in the source (the code-mention bonus path —
+    // these may have no description-token overlap but should still score).
+    let mut candidate_indices: HashSet<usize> = HashSet::new();
+    for token in &source_set {
+        if let Some(indices) = token_index.get(token) {
+            candidate_indices.extend(indices.iter().copied());
+        }
+    }
+    // Add entries whose code appears verbatim in the source. The
+    // tokenization splits dotted codes (786.5 → "786" + "5"), so we scan
+    // the source for code-like substrings directly and look them up in
+    // the O(1) code index. Only distinctive codes (dotted or alpha) are
+    // worth checking — bare 3-digit codes collide with lab values.
+    let code_index = icd9::code_index();
+    // Extract code-like tokens: substrings matching \d{3}\.\d or [VE]\d+\.\d
+    // from the lowercased source. This is a lightweight scan, not the full
+    // per-entry code_mentioned regex.
+    for m in regex::Regex::new(r"(?P<code>(?:\d{3}\.\d+[a-z]?|[ve]\d+\.\d+))")
+        .expect("code-like regex compiles")
+        .find_iter(&source_lower)
+    {
+        let code = m.as_str().to_uppercase();
+        if let Some(entry) = code_index.get(&code)
+            && let Some(idx) = entries.iter().position(|e| std::ptr::eq(e, *entry))
+        {
+            candidate_indices.insert(idx);
+        }
+    }
+
+    let mut scored: Vec<(usize, &'static Icd9Entry)> = Vec::new();
+    for idx in candidate_indices {
+        let entry = &entries[idx];
+        let desc_set = &desc_sets[idx];
+
+        let overlap = source_set.intersection(desc_set).count();
         let mut score = overlap;
 
         // Bonus: the bare code is mentioned verbatim in the source text.
@@ -151,14 +187,16 @@ pub fn select_icd9_candidates(
     let baseline_floor = 1;
     let mut baseline: Vec<(usize, &'static Icd9Entry)> = Vec::new();
     let mut seen_codes: HashSet<String> = HashSet::new();
+    // Build a quick lookup from scored entries for baseline score retrieval.
+    let scored_map: HashMap<&str, usize> =
+        scored.iter().map(|(s, e)| (e.code.as_str(), *s)).collect();
     for code in PRIMARY_CARE_BASELINE {
         if let Some(entry) = icd9::find_by_code(code)
             && seen_codes.insert(entry.code.clone())
         {
-            let score = scored
-                .iter()
-                .find(|(_, e)| e.code == entry.code)
-                .map(|(s, _)| *s)
+            let score = scored_map
+                .get(entry.code.as_str())
+                .copied()
                 .unwrap_or(baseline_floor);
             baseline.push((score, entry));
         }
@@ -235,16 +273,32 @@ fn code_mentioned(code: &str, source_lower: &str) -> bool {
         return false;
     }
     let code_lower = code.to_lowercase();
-    // Escape regex-special characters (the `.` in dotted codes) and
-    // require the code to be delimited by non-alphanumeric characters
-    // (or string boundaries) — emulates word boundaries without the
-    // lookahead/lookbehind the `regex` crate lacks.
-    let escaped = regex::escape(&code_lower);
-    let pattern = format!("(?:^|[^0-9a-z]){escaped}(?:$|[^0-9a-z])");
-    match regex::Regex::new(&pattern) {
-        Ok(re) => re.is_match(source_lower),
-        Err(_) => false,
+    // Word-boundary match without compiling a regex per call. Find the
+    // code in the source, then check the chars before/after are
+    // non-alphanumeric (or string boundaries).
+    let mut search_from = 0;
+    while let Some(pos) = source_lower[search_from..].find(&code_lower) {
+        let abs = search_from + pos;
+        let before_ok = abs == 0
+            || !source_lower
+                .as_bytes()
+                .get(abs - 1)
+                .is_some_and(is_word_char);
+        let after = abs + code_lower.len();
+        let after_ok = after >= source_lower.len()
+            || !source_lower.as_bytes().get(after).is_some_and(is_word_char);
+        if before_ok && after_ok {
+            return true;
+        }
+        search_from = abs + 1;
     }
+    false
+}
+
+/// Returns true if the byte is an alphanumeric "word" character (for the
+/// word-boundary check in [`code_mentioned`]).
+fn is_word_char(b: &u8) -> bool {
+    b.is_ascii_alphanumeric()
 }
 
 #[cfg(test)]

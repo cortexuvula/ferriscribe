@@ -19,7 +19,7 @@
 //! submission note) for the compliance trail; only the `codes` array is
 //! modeled at runtime.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
 
 use serde::Deserialize;
@@ -75,6 +75,36 @@ static ENTRIES: LazyLock<Vec<Icd9Entry>> = LazyLock::new(|| {
 static CODE_SET: LazyLock<BTreeSet<String>> =
     LazyLock::new(|| ENTRIES.iter().map(|e| e.code.clone()).collect());
 
+/// HashMap index: code → entry, for O(1) [`find_by_code`] lookups.
+/// Replaces the previous O(n) linear scan that ran per baseline code
+/// and per frontend-validated code.
+static CODE_INDEX: LazyLock<HashMap<String, &'static Icd9Entry>> =
+    LazyLock::new(|| ENTRIES.iter().map(|e| (e.code.clone(), e)).collect());
+
+/// Pre-tokenized (lowercased) description token sets, one per entry.
+/// Avoids re-tokenizing all 7,122 descriptions on every SOAP generation.
+/// Allocated once; the selector reads these without allocation.
+static DESC_TOKEN_SETS: LazyLock<Vec<HashSet<String>>> = LazyLock::new(|| {
+    ENTRIES
+        .iter()
+        .map(|e| tokenize_desc(&e.description))
+        .collect()
+});
+
+/// Inverted index: lowercased description token → indices of entries
+/// whose description contains that token. Lets the selector score only
+/// the entries that share at least one token with the source text,
+/// instead of iterating all 7,122. ~100x reduction in scoring work.
+static TOKEN_INDEX: LazyLock<HashMap<String, Vec<usize>>> = LazyLock::new(|| {
+    let mut map: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, tokens) in DESC_TOKEN_SETS.iter().enumerate() {
+        for token in tokens {
+            map.entry(token.clone()).or_default().push(i);
+        }
+    }
+    map
+});
+
 /// Returns all ICD-9 entries in source order.
 pub fn entries() -> &'static [Icd9Entry] {
     &ENTRIES
@@ -85,9 +115,35 @@ pub fn code_set() -> &'static BTreeSet<String> {
     &CODE_SET
 }
 
-/// Looks up a single entry by exact bare-code match.
+/// Returns the code→entry HashMap index for O(1) lookups.
+pub fn code_index() -> &'static HashMap<String, &'static Icd9Entry> {
+    &CODE_INDEX
+}
+
+/// Returns the pre-tokenized description token sets (one per entry,
+/// indexed in parallel with [`entries()`]).
+pub fn desc_token_sets() -> &'static [HashSet<String>] {
+    &DESC_TOKEN_SETS
+}
+
+/// Returns the inverted index (token → entry indices).
+pub fn token_index() -> &'static HashMap<String, Vec<usize>> {
+    &TOKEN_INDEX
+}
+
+/// Tokenize a description into a set of lowercased tokens (no stopwords,
+/// no tokens <3 chars). Public so the selector reuses it for source text.
+pub fn tokenize_desc(desc: &str) -> HashSet<String> {
+    desc.split(|c: char| !c.is_alphanumeric())
+        .filter(|s| s.len() >= 3)
+        .map(|s| s.to_lowercase())
+        .collect()
+}
+
+/// Looks up a single entry by exact bare-code match (O(1) via the
+/// [`CODE_INDEX`] HashMap).
 pub fn find_by_code(code: &str) -> Option<&'static Icd9Entry> {
-    ENTRIES.iter().find(|e| e.code == code)
+    CODE_INDEX.get(code).copied()
 }
 
 /// Normalizes a bare ICD-9 code for membership comparison.

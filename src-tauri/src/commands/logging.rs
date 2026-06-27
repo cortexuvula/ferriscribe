@@ -19,15 +19,20 @@ pub fn get_log_path() -> String {
 /// Return the last `lines` lines of today's log file.
 ///
 /// Useful for an in-app log viewer or for attaching to bug reports.
+///
+/// Runs as `async` with `tokio::fs` so the (potentially large) file read
+/// doesn't block the Tauri IPC thread. Log files can grow to several MB
+/// with rotation; a synchronous `read_to_string` on the IPC thread would
+/// stall the UI during the read.
 #[tauri::command]
-pub fn get_recent_logs(lines: Option<usize>) -> AppResult<String> {
+pub async fn get_recent_logs(lines: Option<usize>) -> AppResult<String> {
     let max_lines = lines.unwrap_or(200);
     let dir = log_dir();
 
-    // Find the most recently modified .log file
+    // Find the most recently modified .log file (cheap metadata scan).
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-    let entries = std::fs::read_dir(&dir)?;
-    for entry in entries.flatten() {
+    let mut entries = tokio::fs::read_dir(&dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("log") {
             continue;
@@ -44,7 +49,8 @@ pub fn get_recent_logs(lines: Option<usize>) -> AppResult<String> {
         .map(|(_, p)| p)
         .ok_or_else(|| AppError::Other("No log files found".to_string()))?;
 
-    let content = std::fs::read_to_string(&log_path)?;
+    // Read the file off the async runtime (not the IPC thread).
+    let content = tokio::fs::read_to_string(&log_path).await?;
 
     let tail: Vec<&str> = content.lines().rev().take(max_lines).collect();
     let result: Vec<&str> = tail.into_iter().rev().collect();
