@@ -77,7 +77,10 @@ impl AuditRepo {
                     details,
                 })
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| {
+                r.map_err(|e| tracing::warn!(error = %e, "dropping unreadable row"))
+                    .ok()
+            })
             .collect();
 
         Ok(entries)

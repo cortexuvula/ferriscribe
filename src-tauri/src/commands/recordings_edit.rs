@@ -51,19 +51,28 @@ pub async fn save_recording_field(
     field: String,
     value: String,
 ) -> AppResult<()> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    let cfg = medical_db::settings::SettingsRepo::load_config(&conn).unwrap_or_default();
-    save_recording_field_inner(
-        state.db.clone(),
-        &conn,
-        &recording_id,
-        &field,
-        &value,
-        cfg.capture_for_training,
-    )
+    let db = state.db.clone();
+    let cfg = {
+        let conn = db.conn()?;
+        medical_db::settings::SettingsRepo::load_config(&conn).unwrap_or_default()
+    };
+    let recording_id_inner = recording_id.clone();
+    let field_inner = field.clone();
+    let value_inner = value.clone();
+    let capture = cfg.capture_for_training;
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        save_recording_field_inner(
+            db,
+            &conn,
+            &recording_id_inner,
+            &field_inner,
+            &value_inner,
+            capture,
+        )
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
 }
 
 /// Inner logic — testable without `tauri::State`.
@@ -104,8 +113,7 @@ pub fn save_recording_field_inner(
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
 
     // Load → mutate → persist.
-    let mut recording =
-        RecordingsRepo::get_by_id(conn, &id).map_err(|e| AppError::Database(e.to_string()))?;
+    let mut recording = RecordingsRepo::get_by_id(conn, &id)?;
 
     // Empty string means "clear the field".
     let owned_value = if value.is_empty() {
@@ -128,7 +136,7 @@ pub fn save_recording_field_inner(
         }
     }
 
-    RecordingsRepo::update(conn, &recording).map_err(|e| AppError::Database(e.to_string()))?;
+    RecordingsRepo::update(conn, &recording)?;
 
     // Training-corpus finalize hook. Only applies to soap_note (v1 captures
     // only SOAP). Best-effort — failures are logged but never returned to

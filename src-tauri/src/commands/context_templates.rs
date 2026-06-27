@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use tracing::{info, instrument};
@@ -146,27 +147,20 @@ pub fn export_json(templates: &[ContextTemplate]) -> AppResult<String> {
 }
 
 fn load_config(
-    state: &tauri::State<'_, AppState>,
+    db: &Arc<medical_db::Database>,
 ) -> AppResult<medical_core::types::settings::AppConfig> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    let mut config =
-        SettingsRepo::load_config(&conn).map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = db.conn()?;
+    let mut config = SettingsRepo::load_config(&conn)?;
     config.migrate();
     Ok(config)
 }
 
 fn save_config(
-    state: &tauri::State<'_, AppState>,
+    db: &Arc<medical_db::Database>,
     config: &medical_core::types::settings::AppConfig,
 ) -> AppResult<()> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    SettingsRepo::save_config(&conn, config).map_err(|e| AppError::Database(e.to_string()))
+    let conn = db.conn()?;
+    SettingsRepo::save_config(&conn, config).map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -178,7 +172,7 @@ pub async fn list_context_templates(
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         return remote.list().await;
     }
-    let config = load_config(&state)?;
+    let config = load_config(&state.db)?;
     let mut templates = config.custom_context_templates;
     sort_templates(&mut templates);
     Ok(templates)
@@ -212,9 +206,9 @@ pub async fn upsert_context_template(
         );
         return Ok(entry);
     }
-    let mut config = load_config(&state)?;
+    let mut config = load_config(&state.db)?;
     let result = upsert_into(&mut config.custom_context_templates, name, body);
-    save_config(&state, &config)?;
+    save_config(&state.db, &config)?;
     info!(
         name_len = result.name.chars().count(),
         "Upserted context template"
@@ -244,9 +238,9 @@ pub async fn rename_context_template(
         );
         return Ok(entry);
     }
-    let mut config = load_config(&state)?;
+    let mut config = load_config(&state.db)?;
     let result = rename_in(&mut config.custom_context_templates, &old_name, new_name)?;
-    save_config(&state, &config)?;
+    save_config(&state.db, &config)?;
     info!(
         name_len = result.name.chars().count(),
         "Renamed context template"
@@ -266,9 +260,9 @@ pub async fn delete_context_template(
         info!("Deleted context template (remote)");
         return Ok(());
     }
-    let mut config = load_config(&state)?;
+    let mut config = load_config(&state.db)?;
     delete_in(&mut config.custom_context_templates, &name)?;
-    save_config(&state, &config)?;
+    save_config(&state.db, &config)?;
     info!("Deleted context template");
     Ok(())
 }
@@ -297,9 +291,9 @@ pub async fn import_context_templates_json(
         info!(count, path = %file_path, "Imported context templates (remote)");
         return Ok(count);
     }
-    let mut config = load_config(&state)?;
+    let mut config = load_config(&state.db)?;
     let count = apply_import(&mut config.custom_context_templates, imported);
-    save_config(&state, &config)?;
+    save_config(&state.db, &config)?;
     info!(count, path = %file_path, "Imported context templates");
     Ok(count)
 }
@@ -315,7 +309,7 @@ pub async fn export_context_templates_json(
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         remote.list().await?
     } else {
-        let config = load_config(&state)?;
+        let config = load_config(&state.db)?;
         config.custom_context_templates
     };
     let count = templates.len() as u32;

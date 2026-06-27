@@ -37,7 +37,10 @@ impl SearchRepo {
                 let id_str: String = row.get(0)?;
                 Ok(id_str)
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| {
+                r.map_err(|e| tracing::warn!(error = %e, "dropping unreadable row"))
+                    .ok()
+            })
             .filter_map(|s| Uuid::parse_str(&s).ok())
             .collect();
 

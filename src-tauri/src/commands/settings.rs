@@ -23,21 +23,15 @@ use crate::state::AppState;
 /// complete on the next launch.
 #[tauri::command]
 pub fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    let onboarding_started = SettingsRepo::exists(&conn, "onboarding_started")
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    let config_existed =
-        SettingsRepo::exists(&conn, "app_config").map_err(|e| AppError::Database(e.to_string()))?;
-    let mut config =
-        SettingsRepo::load_config(&conn).map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state.db.conn()?;
+    let onboarding_started = SettingsRepo::exists(&conn, "onboarding_started")?;
+    let config_existed = SettingsRepo::exists(&conn, "app_config")?;
+    let mut config = SettingsRepo::load_config(&conn)?;
     config.migrate();
     if !config.onboarding_completed && config_existed && !onboarding_started {
         // Pre-wizard existing install: mark onboarded, never show the wizard.
         config.onboarding_completed = true;
-        SettingsRepo::save_config(&conn, &config).map_err(|e| AppError::Database(e.to_string()))?;
+        SettingsRepo::save_config(&conn, &config)?;
     }
     Ok(config)
 }
@@ -48,12 +42,8 @@ pub fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
 /// idempotent — setting it again is a no-op.
 #[tauri::command]
 pub fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppResult<()> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    SettingsRepo::set(&conn, "onboarding_started", "1")
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state.db.conn()?;
+    SettingsRepo::set(&conn, "onboarding_started", "1")?;
     Ok(())
 }
 
@@ -79,11 +69,8 @@ pub fn save_settings(state: tauri::State<'_, AppState>, config: AppConfig) -> Ap
             .map_err(|e| AppError::invalid_endpoint_for(e, field))?;
     }
 
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    SettingsRepo::save_config(&conn, &config).map_err(|e| AppError::Database(e.to_string()))
+    let conn = state.db.conn()?;
+    SettingsRepo::save_config(&conn, &config).map_err(AppError::from)
 }
 
 #[cfg(test)]

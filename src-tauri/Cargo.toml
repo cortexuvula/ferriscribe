@@ -36,7 +36,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 
-rusqlite = { version = "0.32" }
+rusqlite = { workspace = true }
 medical-core = { path = "../crates/core" }
 medical-db = { path = "../crates/db" }
 medical-security = { path = "../crates/security" }

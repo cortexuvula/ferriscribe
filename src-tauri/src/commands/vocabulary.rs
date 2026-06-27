@@ -40,14 +40,13 @@ pub async fn list_vocabulary_entries(
     }
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = db.conn()?;
         match category {
             Some(cat) => {
                 let cat = VocabularyCategory::from_str(&cat);
-                VocabularyRepo::list_by_category(&conn, &cat)
-                    .map_err(|e| AppError::Database(e.to_string()))
+                VocabularyRepo::list_by_category(&conn, &cat).map_err(AppError::from)
             }
-            None => VocabularyRepo::list_all(&conn).map_err(|e| AppError::Database(e.to_string())),
+            None => VocabularyRepo::list_all(&conn).map_err(AppError::from),
         }
     })
     .await
@@ -99,8 +98,8 @@ pub async fn add_vocabulary_entry(
     let db = Arc::clone(&state.db);
     let entry_clone = entry.clone();
     tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        VocabularyRepo::insert(&conn, &entry_clone).map_err(|e| AppError::Database(e.to_string()))
+        let conn = db.conn()?;
+        VocabularyRepo::insert(&conn, &entry_clone).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
@@ -143,8 +142,8 @@ pub async fn update_vocabulary_entry(
     let db2 = Arc::clone(&state.db);
 
     let existing = tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        VocabularyRepo::get_by_id(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))
+        let conn = db.conn()?;
+        VocabularyRepo::get_by_id(&conn, &uuid).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
@@ -165,8 +164,8 @@ pub async fn update_vocabulary_entry(
 
     let entry_clone = entry.clone();
     tokio::task::spawn_blocking(move || {
-        let conn = db2.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        VocabularyRepo::update(&conn, &entry_clone).map_err(|e| AppError::Database(e.to_string()))
+        let conn = db2.conn()?;
+        VocabularyRepo::update(&conn, &entry_clone).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
@@ -187,8 +186,8 @@ pub async fn delete_vocabulary_entry(
     }
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        VocabularyRepo::delete(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))
+        let conn = db.conn()?;
+        VocabularyRepo::delete(&conn, &uuid).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
@@ -204,8 +203,8 @@ pub async fn delete_all_vocabulary_entries(state: tauri::State<'_, AppState>) ->
     }
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        VocabularyRepo::delete_all(&conn).map_err(|e| AppError::Database(e.to_string()))
+        let conn = db.conn()?;
+        VocabularyRepo::delete_all(&conn).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
@@ -221,8 +220,8 @@ pub async fn get_vocabulary_count(state: tauri::State<'_, AppState>) -> AppResul
     }
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        VocabularyRepo::count(&conn).map_err(|e| AppError::Database(e.to_string()))
+        let conn = db.conn()?;
+        VocabularyRepo::count(&conn).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
@@ -303,9 +302,9 @@ pub async fn import_vocabulary_json(
     }
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = db.conn()?;
         for entry in &entries {
-            VocabularyRepo::upsert(&conn, entry).map_err(|e| AppError::Database(e.to_string()))?;
+            VocabularyRepo::upsert(&conn, entry)?;
         }
         Ok::<_, AppError>(())
     })
@@ -333,8 +332,8 @@ pub async fn export_vocabulary_json(
     } else {
         let db = Arc::clone(&state.db);
         tokio::task::spawn_blocking(move || {
-            let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-            VocabularyRepo::list_all(&conn).map_err(|e| AppError::Database(e.to_string()))
+            let conn = db.conn()?;
+            VocabularyRepo::list_all(&conn).map_err(AppError::from)
         })
         .await
         .map_err(|e| AppError::Other(format!("Task join error: {e}")))??
@@ -381,8 +380,8 @@ pub async fn test_vocabulary_correction(
     } else {
         let db = Arc::clone(&state.db);
         tokio::task::spawn_blocking(move || {
-            let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-            VocabularyRepo::list_enabled(&conn).map_err(|e| AppError::Database(e.to_string()))
+            let conn = db.conn()?;
+            VocabularyRepo::list_enabled(&conn).map_err(AppError::from)
         })
         .await
         .map_err(|e| AppError::Other(format!("Task join error: {e}")))??

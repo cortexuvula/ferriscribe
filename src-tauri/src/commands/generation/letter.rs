@@ -80,12 +80,8 @@ async fn generate_letter_inner(
     // If an audience_id is provided, fetch it from the DB and convert to context.
     let audience_context: Option<LetterAudienceContext> = match audience_id {
         Some(id) => {
-            let conn = state
-                .db
-                .conn()
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            let audience = LetterAudiencesRepo::get_by_id(&conn, id)
-                .map_err(|e| AppError::Database(e.to_string()))?;
+            let conn = state.db.conn()?;
+            let audience = LetterAudiencesRepo::get_by_id(&conn, id)?;
             Some(LetterAudienceContext {
                 name: audience.name,
                 system_prompt: audience.system_prompt,

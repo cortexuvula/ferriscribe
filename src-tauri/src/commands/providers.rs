@@ -14,10 +14,7 @@ use crate::state::{self, AppState};
 /// (AGENTS.md: no hosted AI APIs, no telemetry).
 fn validate_probe_host(state: &AppState, host: &str) -> AppResult<()> {
     let allow_public = {
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = state.db.conn()?;
         medical_db::settings::SettingsRepo::load_config(&conn)
             .map(|mut c| {
                 c.migrate();
@@ -122,12 +119,8 @@ pub async fn probe_endpoint_reachable(
 pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
     // Load saved settings for provider config (host, port, active provider, whisper model)
     let config = {
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = state.db.conn()?;
+        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)?;
         cfg.migrate();
         cfg
     };

@@ -8,6 +8,8 @@
 //! No word values are emitted to logs — the dictionary may contain
 //! patient-context-specific terms.
 
+use std::sync::Arc;
+
 use medical_core::error::{AppError, AppResult};
 
 use crate::state::{self, AppState};
@@ -31,12 +33,13 @@ pub async fn user_dict_list(state: tauri::State<'_, AppState>) -> AppResult<Vec<
             .ok_or_else(|| AppError::Other("paired dict target unavailable".into()))?;
         return remote.list().await;
     }
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    medical_db::user_dictionary::UserDictionaryRepo::list(&conn)
-        .map_err(|e| AppError::Database(e.to_string()))
+    let db = Arc::clone(&state.db);
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        medical_db::user_dictionary::UserDictionaryRepo::list(&conn).map_err(AppError::from)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
 }
 
 #[tauri::command]
@@ -46,12 +49,13 @@ pub async fn user_dict_add(state: tauri::State<'_, AppState>, word: String) -> A
             .ok_or_else(|| AppError::Other("paired dict target unavailable".into()))?;
         return remote.add(&word).await;
     }
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    medical_db::user_dictionary::UserDictionaryRepo::add(&conn, &word)
-        .map_err(|e| AppError::Database(e.to_string()))
+    let db = Arc::clone(&state.db);
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        medical_db::user_dictionary::UserDictionaryRepo::add(&conn, &word).map_err(AppError::from)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
 }
 
 #[tauri::command]
@@ -61,10 +65,12 @@ pub async fn user_dict_remove(state: tauri::State<'_, AppState>, word: String) -
             .ok_or_else(|| AppError::Other("paired dict target unavailable".into()))?;
         return remote.remove(&word).await;
     }
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    medical_db::user_dictionary::UserDictionaryRepo::remove(&conn, &word)
-        .map_err(|e| AppError::Database(e.to_string()))
+    let db = Arc::clone(&state.db);
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        medical_db::user_dictionary::UserDictionaryRepo::remove(&conn, &word)
+            .map_err(AppError::from)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
 }

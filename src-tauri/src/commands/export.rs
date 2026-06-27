@@ -19,8 +19,8 @@ fn load_recording_blocking(
 ) -> AppResult<medical_core::types::recording::Recording> {
     let uuid = Uuid::parse_str(recording_id)
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-    let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-    RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))
+    let conn = db.conn()?;
+    RecordingsRepo::get_by_id(&conn, &uuid).map_err(AppError::from)
 }
 
 #[tauri::command]

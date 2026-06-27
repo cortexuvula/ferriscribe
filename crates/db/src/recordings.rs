@@ -107,7 +107,10 @@ impl RecordingsRepo {
             .query_map(rusqlite::params![limit, offset], |row| {
                 Self::row_to_recording(row)
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| {
+                r.map_err(|e| tracing::warn!(error = %e, "dropping unreadable row"))
+                    .ok()
+            })
             .map(|rec| RecordingSummary::from(&rec))
             .collect();
 
@@ -194,7 +197,10 @@ impl RecordingsRepo {
                 let p: String = row.get(0)?;
                 Ok(PathBuf::from(p))
             })?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| {
+                r.map_err(|e| tracing::warn!(error = %e, "dropping unreadable row"))
+                    .ok()
+            })
             .collect();
 
         conn.execute("DELETE FROM recordings", [])?;
@@ -257,7 +263,10 @@ impl RecordingsRepo {
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params.as_slice(), Self::row_to_recording)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| {
+                r.map_err(|e| tracing::warn!(error = %e, "dropping unreadable row"))
+                    .ok()
+            })
             .collect();
         Ok(rows)
     }

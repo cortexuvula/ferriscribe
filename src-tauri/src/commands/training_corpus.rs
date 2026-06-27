@@ -3,6 +3,8 @@
 //! Backend is GenerationsRepo (in crates/db). These commands wrap
 //! list/count/set_status with the AppState + error conversions.
 
+use std::sync::Arc;
+
 use medical_core::error::{AppError, AppResult};
 use medical_db::generations::{Generation, GenerationsRepo};
 use serde::Serialize;
@@ -26,12 +28,13 @@ pub struct GenerationPage {
 
 #[tauri::command]
 pub async fn training_corpus_counts(state: tauri::State<'_, AppState>) -> AppResult<CorpusCounts> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    let (c, p, r, e) =
-        GenerationsRepo::count_by_status(&conn).map_err(|e| AppError::Database(e.to_string()))?;
+    let db = Arc::clone(&state.db);
+    let (c, p, r, e) = tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        GenerationsRepo::count_by_status(&conn)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
     Ok(CorpusCounts {
         candidates: c,
         promoted: p,
@@ -47,13 +50,13 @@ pub async fn training_corpus_list(
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> AppResult<GenerationPage> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    let (items, total) =
+    let db = Arc::clone(&state.db);
+    let (items, total) = tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
         GenerationsRepo::list_by_status(&conn, &status, limit.unwrap_or(50), offset.unwrap_or(0))
-            .map_err(|e| AppError::Database(e.to_string()))?;
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
     Ok(GenerationPage { items, total })
 }
 
@@ -65,11 +68,12 @@ pub async fn training_corpus_set_status(
 ) -> AppResult<()> {
     let id =
         Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid generation id: {e}")))?;
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    GenerationsRepo::set_corpus_status(&conn, id, &new_status)
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    let db = Arc::clone(&state.db);
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        GenerationsRepo::set_corpus_status(&conn, id, &new_status)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
     Ok(())
 }

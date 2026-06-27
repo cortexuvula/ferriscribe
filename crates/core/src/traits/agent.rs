@@ -27,12 +27,23 @@ pub trait Agent: Send + Sync {
     /// Process the given context and return a response, potentially
     /// invoking tools in a loop before producing a final answer.
     ///
+    /// # Default implementation
+    ///
+    /// Returns an error directing callers to use the orchestrator. All
+    /// agents delegate execution to `AgentOrchestrator::execute`; the
+    /// per-agent implementations were identical stubs, so the default
+    /// here removes that duplication.
+    ///
     /// # Errors
     ///
     /// Returns [`AppError::Agent`](crate::error::AppError::Agent) on
     /// orchestration failure, or the underlying provider error if a
     /// tool call or completion fails.
-    async fn execute(&self, context: AgentContext) -> AppResult<AgentResponse>;
+    async fn execute(&self, _context: AgentContext) -> AppResult<AgentResponse> {
+        Err(crate::error::AppError::Agent(
+            "Use AgentOrchestrator::execute instead".into(),
+        ))
+    }
 }
 
 /// A discrete capability that an agent can invoke.

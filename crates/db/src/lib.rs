@@ -40,11 +40,6 @@ pub mod vectors;
 pub use generations::{Generation, GenerationInsert, GenerationsRepo};
 pub mod user_dictionary;
 pub use user_dictionary::UserDictionaryRepo;
-// CozoDB-backed knowledge graph. Gated behind the `graph` feature because cozo
-// uses the Sled storage engine and brings in a non-trivial dependency tree.
-// Enable with: cargo build -p medical-db --features graph
-#[cfg(feature = "graph")]
-pub mod graph;
 
 use std::path::Path;
 
@@ -94,6 +89,20 @@ pub enum DbError {
 
 /// Convenience result type for database operations.
 pub type DbResult<T> = Result<T, DbError>;
+
+/// Convert a [`DbError`] into an [`AppError`].
+///
+/// `DbError`'s `Display` already includes its discriminant text (e.g.
+/// "Not found: ...", "Constraint violation: ..."), so mapping to
+/// `AppError::Database(e.to_string())` preserves the structured error info
+/// in the message string. This lets call sites use `?` instead of the
+/// ~90 `.map_err(AppError::from)` closures that
+/// previously existed across `src-tauri/src/commands/`.
+impl From<DbError> for medical_core::error::AppError {
+    fn from(e: DbError) -> Self {
+        medical_core::error::AppError::Database(e.to_string())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Database facade

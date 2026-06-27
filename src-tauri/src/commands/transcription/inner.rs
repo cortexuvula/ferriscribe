@@ -58,11 +58,8 @@ pub async fn transcribe_recording_inner(
         let db_cfg = Arc::clone(&state.db);
         tokio::task::spawn_blocking(
             move || -> AppResult<medical_core::types::settings::AppConfig> {
-                let conn = db_cfg
-                    .conn()
-                    .map_err(|e| AppError::Database(e.to_string()))?;
-                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-                    .map_err(|e| AppError::Database(e.to_string()))?;
+                let conn = db_cfg.conn()?;
+                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)?;
                 cfg.migrate();
                 Ok(cfg)
             },
@@ -86,14 +83,13 @@ pub async fn transcribe_recording_inner(
     // Pre-flight passed, so it is now safe to advance the recording's status.
     let db = Arc::clone(&state.db);
     let mut recording = tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        let mut recording = RecordingsRepo::get_by_id(&conn, &uuid)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = db.conn()?;
+        let mut recording = RecordingsRepo::get_by_id(&conn, &uuid)?;
 
         recording.status = ProcessingStatus::Processing {
             started_at: Utc::now(),
         };
-        RecordingsRepo::update(&conn, &recording).map_err(|e| AppError::Database(e.to_string()))?;
+        RecordingsRepo::update(&conn, &recording)?;
         Ok::<_, AppError>(recording)
     })
     .await
@@ -115,12 +111,8 @@ pub async fn transcribe_recording_inner(
                     );
                     // Persist the corrected path so future retries work directly.
                     recording.audio_path = candidate.clone();
-                    let conn = state
-                        .db
-                        .conn()
-                        .map_err(|e| AppError::Database(e.to_string()))?;
-                    RecordingsRepo::update(&conn, &recording)
-                        .map_err(|e| AppError::Database(e.to_string()))?;
+                    let conn = state.db.conn()?;
+                    RecordingsRepo::update(&conn, &recording)?;
                     candidate
                 } else {
                     let err_msg = format!("WAV file not found: {}", recording.audio_path.display());
@@ -414,10 +406,8 @@ pub async fn transcribe_recording_inner(
             if crate::state::load_paired_connection().is_some() {
                 return Ok(display_text);
             }
-            let conn = db_vocab
-                .conn()
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            VocabularyRepo::list_enabled(&conn).map_err(|e| AppError::Database(e.to_string()))?
+            let conn = db_vocab.conn()?;
+            VocabularyRepo::list_enabled(&conn)?
         };
         if entries.is_empty() {
             return Ok(display_text);
@@ -489,9 +479,8 @@ pub async fn transcribe_recording_inner(
         let db = Arc::clone(&state.db);
         let recording_owned = recording;
         move || {
-            let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-            RecordingsRepo::update(&conn, &recording_owned)
-                .map_err(|e| AppError::Database(e.to_string()))?;
+            let conn = db.conn()?;
+            RecordingsRepo::update(&conn, &recording_owned)?;
             Ok::<(), AppError>(())
         }
     })

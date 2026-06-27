@@ -1,9 +1,5 @@
 use async_trait::async_trait;
-use medical_core::{
-    error::{AppError, AppResult},
-    traits::Agent,
-    types::{AgentContext, AgentResponse, ToolDef},
-};
+use medical_core::{traits::Agent, types::ToolDef};
 
 /// Agent specializing in generating professional medical referral letters.
 ///
@@ -39,11 +35,5 @@ impl Agent for ReferralAgent {
 
     fn available_tools(&self) -> Vec<ToolDef> {
         vec![super::icd_lookup_tool_def()]
-    }
-
-    async fn execute(&self, _context: AgentContext) -> AppResult<AgentResponse> {
-        Err(AppError::Agent(
-            "Use AgentOrchestrator::execute instead".into(),
-        ))
     }
 }

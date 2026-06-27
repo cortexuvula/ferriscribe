@@ -82,12 +82,8 @@ pub async fn start_recording(
 
     // Read the configured input device and sample rate from settings.
     let (input_device_name, sample_rate) = try_or_reset!(state, {
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        let mut config = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = state.db.conn()?;
+        let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
         config.migrate();
         Ok::<_, AppError>((
             config.input_device.filter(|s| !s.is_empty()),
@@ -295,11 +291,8 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
     recording.status = ProcessingStatus::Pending;
 
     // Insert into DB.
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    RecordingsRepo::insert(&conn, &recording).map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state.db.conn()?;
+    RecordingsRepo::insert(&conn, &recording)?;
 
     info!(
         recording_id = %current.id,
@@ -492,8 +485,8 @@ pub async fn check_recording_audio_levels(
 
     let db = Arc::clone(&state.db);
     let recording = tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))
+        let conn = db.conn()?;
+        RecordingsRepo::get_by_id(&conn, &uuid).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;

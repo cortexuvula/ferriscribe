@@ -45,13 +45,11 @@ pub(super) async fn load_recording_and_settings(
     let db = Arc::clone(db);
 
     tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = db.conn()?;
 
-        let recording = RecordingsRepo::get_by_id(&conn, &uuid)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        let recording = RecordingsRepo::get_by_id(&conn, &uuid)?;
 
-        let mut config = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
         config.migrate();
 
         let icd = match config.icd_version {
@@ -100,8 +98,8 @@ pub(super) async fn persist_recording(
 ) -> AppResult<()> {
     let db = Arc::clone(db);
     tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        RecordingsRepo::update(&conn, &recording).map_err(|e| AppError::Database(e.to_string()))
+        let conn = db.conn()?;
+        RecordingsRepo::update(&conn, &recording).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?

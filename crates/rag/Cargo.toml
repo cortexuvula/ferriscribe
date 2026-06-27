@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 medical-core = { path = "../core" }
 medical-db = { path = "../db" }
-rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -81,12 +81,8 @@ pub async fn download_model(
     // After downloading, reinitialize the STT provider so it picks up new models.
     // Load the full AppConfig so local/remote mode + remote host/port/key all flow through.
     let config = {
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Database(e.to_string()))?;
+        let conn = state.db.conn()?;
+        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)?;
         cfg.migrate();
         cfg
     };

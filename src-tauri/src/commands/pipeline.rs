@@ -71,8 +71,14 @@ pub async fn process_recording(
         None => {
             let db = std::sync::Arc::clone(&state.db);
             tokio::task::spawn_blocking(move || {
-                let conn = db.conn().ok()?;
-                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn).ok()?;
+                let conn = db.conn().map_err(|e| {
+                    tracing::warn!(error = %e, "could not get DB conn for SOAP template lookup");
+                    e
+                }).ok()?;
+                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn).map_err(|e| {
+                    tracing::warn!(error = %e, "could not load config for SOAP template lookup");
+                    e
+                }).ok()?;
                 cfg.migrate();
                 let t = match cfg.soap_template {
                     medical_core::types::settings::SoapTemplate::FollowUp => "follow_up",
@@ -201,8 +207,19 @@ async fn get_recording_display_name(state: &AppState, recording_id: &str) -> Str
     };
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
-        let conn = db.conn().ok()?;
-        let rec = RecordingsRepo::get_by_id(&conn, &uuid).ok()?;
+        let conn = db
+            .conn()
+            .map_err(|e| {
+                tracing::warn!(error = %e, "could not get DB conn for display name lookup");
+                e
+            })
+            .ok()?;
+        let rec = RecordingsRepo::get_by_id(&conn, &uuid)
+            .map_err(|e| {
+                tracing::warn!(error = %e, "could not load recording for display name lookup");
+                e
+            })
+            .ok()?;
         Some(rec.patient_name.unwrap_or(rec.filename))
     })
     .await

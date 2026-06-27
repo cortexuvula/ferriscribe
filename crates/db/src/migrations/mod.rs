@@ -97,8 +97,8 @@ impl MigrationEngine {
     ///
     /// Returns [`DbError::Sqlite`](crate::DbError::Sqlite) or
     /// [`DbError::Migration`](crate::DbError::Migration) if any migration
-    /// fails. Partially applied migrations are **not** rolled back -- fix
-    /// the failing migration and re-run.
+    /// fails. Each migration runs inside a transaction; a mid-migration
+    /// failure rolls back so the DB is never left half-applied.
     pub fn migrate(conn: &Connection) -> DbResult<u32> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version (
@@ -113,12 +113,33 @@ impl MigrationEngine {
 
         for migration in all_migrations() {
             if migration.version > current {
-                (migration.up)(conn)?;
-                conn.execute(
-                    "INSERT INTO schema_version (version, name) VALUES (?1, ?2)",
-                    [&migration.version.to_string(), migration.name],
-                )?;
-                applied += 1;
+                // Wrap each migration in a transaction so a mid-batch
+                // failure (e.g. a trigger syntax error) rolls back cleanly.
+                // Without this, a failed migration leaves the DB half-
+                // applied and re-running compounds the damage — unacceptable
+                // for a medical DB holding the only copy of transcripts.
+                // Use manual BEGIN/COMMIT (not conn.transaction()) because
+                // transaction() needs &mut Connection and migrations get &.
+                conn.execute_batch("BEGIN")?;
+                let migrate_result = (migration.up)(conn).and_then(|()| {
+                    conn.execute(
+                        "INSERT INTO schema_version (version, name) VALUES (?1, ?2)",
+                        rusqlite::params![&migration.version.to_string(), migration.name],
+                    )?;
+                    Ok(())
+                });
+                match migrate_result {
+                    Ok(()) => {
+                        conn.execute_batch("COMMIT")?;
+                        applied += 1;
+                    }
+                    Err(e) => {
+                        // Best-effort rollback — ignore rollback errors so the
+                        // original migration error propagates cleanly.
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(e);
+                    }
+                }
             }
         }
 

@@ -1,9 +1,5 @@
 use async_trait::async_trait;
-use medical_core::{
-    error::{AppError, AppResult},
-    traits::Agent,
-    types::{AgentContext, AgentResponse, ToolDef},
-};
+use medical_core::{traits::Agent, types::ToolDef};
 use serde_json::json;
 
 /// Agent specializing in medication safety, drug interactions, and dosage validation.
@@ -43,11 +39,5 @@ impl Agent for MedicationAgent {
             },
             super::icd_lookup_tool_def(),
         ]
-    }
-
-    async fn execute(&self, _context: AgentContext) -> AppResult<AgentResponse> {
-        Err(AppError::Agent(
-            "Use AgentOrchestrator::execute instead".into(),
-        ))
     }
 }

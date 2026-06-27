@@ -1,9 +1,5 @@
 use async_trait::async_trait;
-use medical_core::{
-    error::{AppError, AppResult},
-    traits::Agent,
-    types::{AgentContext, AgentResponse, ToolDef},
-};
+use medical_core::{traits::Agent, types::ToolDef};
 use serde_json::json;
 
 /// Agent specializing in extracting structured clinical data from unstructured text.
@@ -41,11 +37,5 @@ impl Agent for DataExtractionAgent {
             description: "Extract vital signs from clinical text using pattern matching".into(),
             parameters: json!({"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}),
         }]
-    }
-
-    async fn execute(&self, _context: AgentContext) -> AppResult<AgentResponse> {
-        Err(AppError::Agent(
-            "Use AgentOrchestrator::execute instead".into(),
-        ))
     }
 }

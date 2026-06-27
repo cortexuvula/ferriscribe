@@ -20,12 +20,9 @@ pub fn list_recordings(
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> AppResult<Vec<RecordingSummary>> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state.db.conn()?;
     RecordingsRepo::list_all(&conn, limit.unwrap_or(50), offset.unwrap_or(0))
-        .map_err(|e| AppError::Database(e.to_string()))
+        .map_err(AppError::from)
 }
 
 /// Get a single recording by its UUID.
@@ -35,11 +32,8 @@ pub fn list_recordings(
 pub fn get_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<Recording> {
     let uuid =
         Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))
+    let conn = state.db.conn()?;
+    RecordingsRepo::get_by_id(&conn, &uuid).map_err(AppError::from)
 }
 
 /// Full-text search across recording transcripts and SOAP notes.
@@ -51,12 +45,8 @@ pub fn search_recordings(
     query: String,
     limit: Option<u32>,
 ) -> AppResult<Vec<Recording>> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    SearchRepo::search_recordings(&conn, &query, limit.unwrap_or(20))
-        .map_err(|e| AppError::Database(e.to_string()))
+    let conn = state.db.conn()?;
+    SearchRepo::search_recordings(&conn, &query, limit.unwrap_or(20)).map_err(AppError::from)
 }
 
 /// Delete a recording by UUID.
@@ -68,10 +58,7 @@ pub fn search_recordings(
 pub fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
     let uuid =
         Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-    let mut conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    let mut conn = state.db.conn()?;
 
     // Get the recording first so we can clean up the WAV file. Distinguish a
     // genuine DB error (propagate) from "not found" (proceed — the caller's
@@ -80,7 +67,7 @@ pub fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> AppRes
     let recording = match RecordingsRepo::get_by_id(&conn, &uuid) {
         Ok(r) => Some(r),
         Err(medical_db::DbError::NotFound(_)) => None,
-        Err(e) => return Err(AppError::Database(e.to_string())),
+        Err(e) => return Err(e.into()),
     };
 
     // Delete the vectors and the recording row atomically: if either fails,
@@ -90,7 +77,7 @@ pub fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> AppRes
         .transaction()
         .map_err(|e| AppError::Database(format!("begin tx: {e}")))?;
     delete_rag_vectors_best_effort(&tx, &id);
-    RecordingsRepo::delete(&tx, &uuid).map_err(|e| AppError::Database(e.to_string()))?;
+    RecordingsRepo::delete(&tx, &uuid)?;
     tx.commit()
         .map_err(|e| AppError::Database(format!("commit tx: {e}")))?;
 
@@ -131,10 +118,7 @@ fn delete_rag_vectors_best_effort(conn: &medical_db::Connection, recording_id: &
 /// Returns the number of recordings deleted.
 #[tauri::command]
 pub fn delete_all_recordings(state: tauri::State<'_, AppState>) -> AppResult<u32> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state.db.conn()?;
 
     // Delete all RAG vectors
     if let Err(e) = conn.execute("DELETE FROM vectors", []) {
@@ -142,7 +126,7 @@ pub fn delete_all_recordings(state: tauri::State<'_, AppState>) -> AppResult<u32
     }
 
     // Delete all recordings and get audio paths for file cleanup
-    let paths = RecordingsRepo::delete_all(&conn).map_err(|e| AppError::Database(e.to_string()))?;
+    let paths = RecordingsRepo::delete_all(&conn)?;
     let count = paths.len() as u32;
 
     // Remove audio files from disk
@@ -246,11 +230,8 @@ pub fn import_audio_file(
     recording.file_size_bytes = Some(file_size);
     recording.status = ProcessingStatus::Pending;
 
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
-    RecordingsRepo::insert(&conn, &recording).map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state.db.conn()?;
+    RecordingsRepo::insert(&conn, &recording)?;
 
     Ok(recording_id.to_string())
 }

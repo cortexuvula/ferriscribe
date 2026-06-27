@@ -253,7 +253,10 @@ impl GenerationsRepo {
         )?;
         let rows = stmt
             .query_map(params![status, limit, offset], Self::row_to_generation)?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| {
+                r.map_err(|e| tracing::warn!(error = %e, "dropping unreadable row"))
+                    .ok()
+            })
             .collect();
         Ok((rows, total))
     }

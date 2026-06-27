@@ -39,8 +39,8 @@ pub async fn ingest_document(
     // Load the recording from the database on a blocking thread.
     let db = Arc::clone(&state.db);
     let recording = tokio::task::spawn_blocking(move || {
-        let conn = db.conn().map_err(|e| AppError::Database(e.to_string()))?;
-        RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| AppError::Database(e.to_string()))
+        let conn = db.conn()?;
+        RecordingsRepo::get_by_id(&conn, &uuid).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
@@ -140,12 +140,9 @@ pub async fn search_rag(
 /// Return statistics about the RAG knowledge base.
 #[tauri::command]
 pub fn rag_stats(state: tauri::State<'_, AppState>) -> AppResult<RagStats> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Database(e.to_string()))?;
+    let conn = state.db.conn()?;
 
-    let chunk_count = VectorsRepo::count(&conn).map_err(|e| AppError::Database(e.to_string()))?;
+    let chunk_count = VectorsRepo::count(&conn)?;
 
     // Count graph entities via a direct query (GraphSearch doesn't expose count)
     let entity_count: u32 = conn

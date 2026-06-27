@@ -1,9 +1,5 @@
 use async_trait::async_trait;
-use medical_core::{
-    error::{AppError, AppResult},
-    traits::Agent,
-    types::{AgentContext, AgentResponse, ToolDef},
-};
+use medical_core::{traits::Agent, types::ToolDef};
 use serde_json::json;
 
 /// Agent specializing in clinical documentation compliance and SOAP note auditing.
@@ -42,11 +38,5 @@ impl Agent for ComplianceAgent {
             description: "Generate a clinical documentation checklist for compliance review".into(),
             parameters: json!({"type": "object", "properties": {"procedure": {"type": "string"}, "context": {"type": "string"}}, "required": ["procedure"]}),
         }]
-    }
-
-    async fn execute(&self, _context: AgentContext) -> AppResult<AgentResponse> {
-        Err(AppError::Agent(
-            "Use AgentOrchestrator::execute instead".into(),
-        ))
     }
 }
