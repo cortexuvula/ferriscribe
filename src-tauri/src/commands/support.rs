@@ -77,10 +77,7 @@ pub fn export_support_bundle_inner(log_dir: &Path) -> AppResult<String> {
 /// a frontend save-file dialog.
 #[tauri::command]
 pub async fn export_support_bundle(file_path: String) -> AppResult<()> {
-    let log_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("rust-medical-assistant")
-        .join("logs");
+    let log_dir = crate::log_dir();
 
     // Both the log reading AND the file write happen on spawn_blocking so
     // neither blocks the Tauri IPC thread.

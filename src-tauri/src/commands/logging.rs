@@ -13,7 +13,7 @@ use medical_security::phi_redactor::PhiRedactor;
 /// Return the path to the log directory.
 #[tauri::command]
 pub fn get_log_path() -> String {
-    log_dir().display().to_string()
+    crate::log_dir().display().to_string()
 }
 
 /// Return the last `lines` lines of today's log file.
@@ -27,7 +27,7 @@ pub fn get_log_path() -> String {
 #[tauri::command]
 pub async fn get_recent_logs(lines: Option<usize>) -> AppResult<String> {
     let max_lines = lines.unwrap_or(200);
-    let dir = log_dir();
+    let dir = crate::log_dir();
 
     // Find the most recently modified log file. tracing-appender names
     // files `ferri-scribe.log.2026-06-27` (prefix + date), so match
@@ -136,13 +136,6 @@ pub fn frontend_log(level: String, message: String, context: Option<serde_json::
         "trace" => tracing::trace!(source = "frontend", context = %ctx, "{message}"),
         _ => tracing::info!(source = "frontend", context = %ctx, "{message}"),
     }
-}
-
-fn log_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("rust-medical-assistant")
-        .join("logs")
 }
 
 #[cfg(test)]

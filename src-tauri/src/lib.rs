@@ -52,8 +52,17 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 /// Resolve the log directory inside the app data folder.
 ///
-/// Returns `~/{data}/rust-medical-assistant/logs/` and ensures it exists.
-fn log_dir() -> PathBuf {
+/// Returns the log directory, creating it if it doesn't exist.
+///
+/// The single source of truth for the log path — used by the tracing
+/// subscriber (this file), the log-viewer command (`commands::logging`),
+/// and the support-bundle export (`commands::support`).
+///
+/// Returns `~/{data}/rust-medical-assistant/logs/` on all platforms:
+/// - Windows: `C:\Users\{user}\AppData\Roaming\rust-medical-assistant\logs\`
+/// - macOS:   `~/Library/Application Support/rust-medical-assistant/logs/`
+/// - Linux:   `~/.local/share/rust-medical-assistant/logs/`
+pub(crate) fn log_dir() -> PathBuf {
     let dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("rust-medical-assistant")
