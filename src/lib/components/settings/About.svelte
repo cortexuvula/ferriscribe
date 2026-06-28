@@ -1,6 +1,10 @@
 <script lang="ts">
   import { settings } from '../../stores/settings.svelte';
   import { updater } from '../../stores/updater.svelte';
+  import { save as saveDialog } from '@tauri-apps/plugin-dialog';
+  import { exportSupportBundle } from '../../api/support';
+  import { toasts } from '../../stores/toasts.svelte';
+  import { formatError } from '../../types/errors';
 
   const appVersion = __APP_VERSION__;
 
@@ -16,6 +20,27 @@
 
   async function checkNow() {
     await updater.checkForUpdate();
+  }
+
+  let preparingLogs = $state(false);
+
+  async function shareLogsForSupport() {
+    preparingLogs = true;
+    try {
+      const selected = await saveDialog({
+        title: 'Save support logs',
+        defaultPath: 'ferriscribe-support-logs.txt',
+        filters: [{ name: 'Text', extensions: ['txt'] }],
+      });
+      if (!selected) return;
+
+      await exportSupportBundle(selected);
+      toasts.success('Support logs saved. Send the file to your support contact.');
+    } catch (e) {
+      toasts.error(formatError(e));
+    } finally {
+      preparingLogs = false;
+    }
   }
 </script>
 
@@ -82,6 +107,18 @@
     only <code>github.com/cortexuvula/rustMedicalAssistant</code> for the
     latest version manifest.
   </p>
+
+  <div class="form-group">
+    <h3>Support</h3>
+    <button
+      class="btn-check"
+      onclick={shareLogsForSupport}
+      disabled={preparingLogs}
+    >
+      {preparingLogs ? 'Preparing…' : 'Share logs for support'}
+    </button>
+    <span class="form-hint">Exports application logs with PHI (phone numbers, emails, etc.) automatically redacted. Safe to share with support.</span>
+  </div>
 </div>
 
 <style>

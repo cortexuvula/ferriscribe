@@ -329,6 +329,7 @@ pub fn run() {
             commands::recovery::recover_database_from_path,
             commands::recovery::recover_database_wipe,
             commands::recovery::database_encryption_status,
+            commands::support::export_support_bundle,
             commands::sharing::lifecycle::start_sharing,
             commands::sharing::lifecycle::stop_sharing,
             commands::sharing::lifecycle::sharing_status,
