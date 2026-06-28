@@ -108,9 +108,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-audit
       - name: Cargo audit
-        # Deny warnings (vulnerabilities). Ignore unmaintained GTK3
-        # bindings (transitive from Tauri's Linux webview — not fixable
-        # from our side) and the lopdf parse-only advisory (we only write
-        # PDFs via printpdf, never parse external input). Tracked for the
+        # Deny vulnerabilities only. "Unmaintained" warnings (GTK3 bindings
+        # from Tauri's Linux webview, proc-macro-error, etc.) are transitive
+        # deps we can't control and don't fail the build. The lopdf advisory
+        # (RUSTSEC-2026-0187) is a parse-only vector; we only write PDFs via
+        # printpdf, never parse external input — ignored, tracked for the
         # printpdf 0.7->0.9 bump.
-        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2024-0413 --ignore RUSTSEC-2024-0414 --ignore RUSTSEC-2024-0415 --ignore RUSTSEC-2024-0416 --ignore RUSTSEC-2024-0417 --ignore RUSTSEC-2024-0418 --ignore RUSTSEC-2024-0419 --ignore RUSTSEC-2024-0420
+        run: cargo audit --deny vulnerabilities --ignore RUSTSEC-2026-0187
