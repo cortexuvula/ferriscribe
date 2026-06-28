@@ -71,11 +71,12 @@ jobs:
       matrix:
         # Hosted Windows runners crash medical-audio's cpal device-enumeration
         # tests (STATUS_ACCESS_VIOLATION) because they have no audio hardware.
-        # release.yml builds Windows installers via `tauri build` (no tests), so
-        # we keep Windows out of the CI test matrix.
-        # macOS: macos-latest (Xcode 26.5) has a persistent clang_rt.osx
-        # linker path bug. macos-14 uses an older Xcode that works.
-        platform: [macos-14, ubuntu-24.04]
+        # macOS runners are excluded too: macos-latest (Xcode 26.5) has a
+        # persistent clang_rt.osx linker path bug, and macos-14 has a
+        # whisper.cpp/ggml_abort compile mismatch. Both are runner-image
+        # issues, not code issues — macOS builds are validated locally.
+        # release.yml builds installers on all platforms (no tests).
+        platform: [ubuntu-24.04]
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 30
     steps:
