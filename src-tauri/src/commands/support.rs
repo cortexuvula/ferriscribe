@@ -14,12 +14,19 @@ use medical_security::phi_redactor::PhiRedactor;
 /// bundle header with app version + timestamp, and runs the entire string
 /// through [`PhiRedactor::redact`].
 pub fn export_support_bundle_inner(log_dir: &Path) -> AppResult<String> {
-    // 1. Collect all .log files sorted by modified time (oldest first).
+    // 1. Collect all log files sorted by modified time (oldest first).
+    // tracing-appender names files `ferri-scribe.log.2026-06-27` (prefix
+    // + date), so we match filenames containing `.log` rather than checking
+    // the final extension (which would be the date, not "log").
     let mut log_files: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
     let entries = std::fs::read_dir(log_dir)?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("log")
+        let is_log = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name.contains(".log"));
+        if is_log
             && let Ok(meta) = path.metadata()
             && let Ok(modified) = meta.modified()
         {
@@ -95,13 +102,15 @@ mod tests {
     #[test]
     fn bundle_includes_header_and_file_separators() {
         let dir = TempDir::new().unwrap();
+        // tracing-appender names files `ferri-scribe.log.2026-06-27` (the
+        // .log prefix + date suffix), so the test must use that pattern.
         fs::write(
-            dir.path().join("app-2026-06-26.log"),
+            dir.path().join("ferri-scribe.log.2026-06-26"),
             "2026-06-26 INFO Old log entry\n",
         )
         .unwrap();
         fs::write(
-            dir.path().join("app-2026-06-27.log"),
+            dir.path().join("ferri-scribe.log.2026-06-27"),
             "2026-06-27 INFO New log entry\n",
         )
         .unwrap();
@@ -127,7 +136,7 @@ mod tests {
     fn bundle_redacts_phi() {
         let dir = TempDir::new().unwrap();
         let phi_line = "2026-06-27 INFO Called patient at (604) 555-0199\n";
-        fs::write(dir.path().join("app.log"), phi_line).unwrap();
+        fs::write(dir.path().join("ferri-scribe.log.2026-06-27"), phi_line).unwrap();
 
         let bundle = export_support_bundle_inner(dir.path()).unwrap();
 

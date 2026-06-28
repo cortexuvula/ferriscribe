@@ -29,12 +29,18 @@ pub async fn get_recent_logs(lines: Option<usize>) -> AppResult<String> {
     let max_lines = lines.unwrap_or(200);
     let dir = log_dir();
 
-    // Find the most recently modified .log file (cheap metadata scan).
+    // Find the most recently modified log file. tracing-appender names
+    // files `ferri-scribe.log.2026-06-27` (prefix + date), so match
+    // filenames containing `.log` rather than checking the final extension.
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
     let mut entries = tokio::fs::read_dir(&dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("log") {
+        let is_log = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name.contains(".log"));
+        if !is_log {
             continue;
         }
         if let Ok(meta) = path.metadata()
