@@ -73,7 +73,9 @@ jobs:
         # tests (STATUS_ACCESS_VIOLATION) because they have no audio hardware.
         # release.yml builds Windows installers via `tauri build` (no tests), so
         # we keep Windows out of the CI test matrix.
-        platform: [macos-latest, ubuntu-24.04]
+        # macOS: macos-latest (Xcode 26.5) has a persistent clang_rt.osx
+        # linker path bug. macos-14 uses an older Xcode that works.
+        platform: [macos-14, ubuntu-24.04]
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 30
     steps:
