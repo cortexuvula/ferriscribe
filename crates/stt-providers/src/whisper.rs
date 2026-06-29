@@ -102,6 +102,28 @@ impl WhisperTranscriber {
         params.set_temperature(0.0);
         params.set_temperature_inc(0.2);
 
+        // Anti-hallucination parameters — these are critical for preventing
+        // the repetition loops that plague medical transcripts ("I don't know
+        // if I was going to go through it" × 30, "I see a counsellor once
+        // every two weeks" × 100). Without these, whisper.cpp's decoder gets
+        // stuck in high-probability loops during low-energy/noisy audio.
+        //
+        // suppress_blank: drops the blank token from the top-k sampling,
+        //   which is the #1 cause of repetition loops (the model emits blank,
+        //   then repeats the preceding context).
+        // suppress_non_speech_tokens: filters out tokens like [BLANK], [NOISE],
+        //   [MUSIC], etc. that trigger loop behavior.
+        // no_context: prevents the model from carrying decoded text from one
+        //   segment into the next as prompt context — this stops a loop in
+        //   one segment from propagating to subsequent segments.
+        // max_len: caps each segment to 60 tokens (~1-2 sentences). Without
+        //   this, a single degenerate segment can grow to thousands of tokens
+        //   of repeated text.
+        params.set_suppress_blank(true);
+        params.set_suppress_nst(true);
+        params.set_no_context(true);
+        params.set_max_len(60);
+
         info!(
             samples = audio_16k_mono.len(),
             duration_s = audio_16k_mono.len() as f64 / 16_000.0,

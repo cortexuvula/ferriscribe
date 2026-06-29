@@ -122,13 +122,15 @@ pub(super) fn filter_segment_repetitions(transcript: &mut medical_core::types::s
     }
 }
 
-/// Drop runs of 3+ consecutive identical short segments — the classic
-/// whisper.cpp trailing-silence hallucination (e.g., 6× separate "so"
-/// segments when the mic stays on after the conversation ends).
+/// Drop runs of 3+ consecutive identical segments — whisper.cpp
+/// repetition hallucinations. These occur when whisper's decoder gets
+/// stuck in a high-probability loop during low-energy/noisy audio.
 ///
-/// A "run" is 3+ consecutive segments whose trimmed, lowercased text is
-/// identical and each segment is ≤ 5 words. Short enough and repeated
-/// enough to be a hallucination on silence, not legitimate speech.
+/// The original `MAX_WORDS = 5` limit was too restrictive — the real-world
+/// patterns include long phrases ("I don't know if I was going to go
+/// through it" = 10 words, "I see a counsellor once every two weeks"
+/// = 9 words). Any segment text repeated 3+ times consecutively is a
+/// hallucination, regardless of length.
 ///
 /// After dropping, `transcript.text` is rebuilt from the surviving
 /// segments so downstream code (hallucination guard, formatting) sees
@@ -137,39 +139,34 @@ pub(super) fn filter_cross_segment_repetitions(
     transcript: &mut medical_core::types::stt::Transcript,
 ) {
     const MIN_RUN_LEN: usize = 3;
-    const MAX_WORDS: usize = 5;
 
     let segments = &transcript.segments;
     if segments.len() < MIN_RUN_LEN {
         return;
     }
 
-    // Identify runs of consecutive identical short segments.
+    // Identify runs of consecutive identical segments.
     let mut drop_indices: Vec<usize> = Vec::new();
     let mut i = 0;
     while i < segments.len() {
         let current_key = segments[i].text.trim().to_lowercase();
-        let word_count = segments[i].text.split_whitespace().count();
-        if word_count > MAX_WORDS || current_key.is_empty() {
+        if current_key.is_empty() {
             i += 1;
             continue;
         }
-        // Count how many consecutive segments match.
+        // Count how many consecutive segments match (case-insensitive, trimmed).
         let run_end = i
             + 1
             + segments[i + 1..]
                 .iter()
-                .take_while(|s| {
-                    s.text.trim().to_lowercase() == current_key
-                        && s.text.split_whitespace().count() <= MAX_WORDS
-                })
+                .take_while(|s| s.text.trim().to_lowercase() == current_key)
                 .count();
         let run_len = run_end - i;
         if run_len >= MIN_RUN_LEN {
             tracing::warn!(
-                word = %current_key,
+                text = %current_key,
                 run_len,
-                "dropping cross-segment repetition (whisper trailing-silence hallucination)"
+                "dropping cross-segment repetition (whisper hallucination)"
             );
             drop_indices.extend(i..run_end);
         }
@@ -614,11 +611,23 @@ mod tests {
     }
 
     #[test]
-    fn filter_cross_segment_repetitions_keeps_long_repeated_segments() {
-        // Identical segments >5 words should be kept (legal/medical disclaimers).
-        let long = "The risks and benefits have been discussed at length today";
-        let mut t = mk_transcript(vec![seg(long, 0.0), seg(long, 10.0), seg(long, 20.0)]);
+    fn filter_cross_segment_repetitions_drops_long_repeated_phrases() {
+        // The user-reported bug: a 10-word phrase repeated 3+ times.
+        // The old MAX_WORDS=5 limit missed these; now any identical
+        // segment repeated 3+ times is dropped.
+        let phrase = "I don't know if I was going to go through it";
+        let mut t = mk_transcript(vec![
+            seg("Patient came in today", 0.0),
+            seg(phrase, 10.0),
+            seg(phrase, 20.0),
+            seg(phrase, 30.0),
+        ]);
         filter_cross_segment_repetitions(&mut t);
-        assert_eq!(t.segments.len(), 3, "long repeated segments are kept");
+        assert_eq!(
+            t.segments.len(),
+            1,
+            "repeated long phrases should be dropped"
+        );
+        assert!(t.text.contains("Patient came in today"));
     }
 }
