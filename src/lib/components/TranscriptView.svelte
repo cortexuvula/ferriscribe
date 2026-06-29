@@ -15,6 +15,7 @@
   const { value = '', segments, placeholder = '', onChange = () => {} }: Props = $props();
 
   let editing = $state(false);
+  // svelte-ignore state_referenced_locally
   let editText = $state(value);
 
   // Re-sync editText when the external value changes (e.g. different recording selected).
@@ -36,6 +37,7 @@
   // debounce window elapses.
   const DEBOUNCE_MS = 400;
   let parseTimer: ReturnType<typeof setTimeout> | null = null;
+  // svelte-ignore state_referenced_locally
   let parseCache = value; // non-reactive — read inside $derived but not tracked
   let parseVersion = $state(0);
 
