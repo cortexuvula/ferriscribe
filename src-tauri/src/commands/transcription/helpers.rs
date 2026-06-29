@@ -122,6 +122,83 @@ pub(super) fn filter_segment_repetitions(transcript: &mut medical_core::types::s
     }
 }
 
+/// Drop runs of 3+ consecutive identical short segments — the classic
+/// whisper.cpp trailing-silence hallucination (e.g., 6× separate "so"
+/// segments when the mic stays on after the conversation ends).
+///
+/// A "run" is 3+ consecutive segments whose trimmed, lowercased text is
+/// identical and each segment is ≤ 5 words. Short enough and repeated
+/// enough to be a hallucination on silence, not legitimate speech.
+///
+/// After dropping, `transcript.text` is rebuilt from the surviving
+/// segments so downstream code (hallucination guard, formatting) sees
+/// accurate content.
+pub(super) fn filter_cross_segment_repetitions(
+    transcript: &mut medical_core::types::stt::Transcript,
+) {
+    const MIN_RUN_LEN: usize = 3;
+    const MAX_WORDS: usize = 5;
+
+    let segments = &transcript.segments;
+    if segments.len() < MIN_RUN_LEN {
+        return;
+    }
+
+    // Identify runs of consecutive identical short segments.
+    let mut drop_indices: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i < segments.len() {
+        let current_key = segments[i].text.trim().to_lowercase();
+        let word_count = segments[i].text.split_whitespace().count();
+        if word_count > MAX_WORDS || current_key.is_empty() {
+            i += 1;
+            continue;
+        }
+        // Count how many consecutive segments match.
+        let run_end = i
+            + 1
+            + segments[i + 1..]
+                .iter()
+                .take_while(|s| {
+                    s.text.trim().to_lowercase() == current_key
+                        && s.text.split_whitespace().count() <= MAX_WORDS
+                })
+                .count();
+        let run_len = run_end - i;
+        if run_len >= MIN_RUN_LEN {
+            tracing::warn!(
+                word = %current_key,
+                run_len,
+                "dropping cross-segment repetition (whisper trailing-silence hallucination)"
+            );
+            drop_indices.extend(i..run_end);
+        }
+        i = run_end;
+    }
+
+    if drop_indices.is_empty() {
+        return;
+    }
+
+    // Retain only segments not in the drop set.
+    let drop_set: std::collections::HashSet<usize> = drop_indices.into_iter().collect();
+    transcript.segments = transcript
+        .segments
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !drop_set.contains(idx))
+        .map(|(_, seg)| seg.clone())
+        .collect();
+
+    // Rebuild the joined text so downstream guards see the filtered result.
+    transcript.text = transcript
+        .segments
+        .iter()
+        .map(|s| s.text.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+}
+
 /// Write an orphaned transcript (one whose DB persistence failed despite
 /// successful transcription) to an **encrypted** file inside
 /// `app_data_dir/orphaned_transcripts/`. Returns the full path so the
@@ -441,5 +518,90 @@ mod tests {
         persist_orphaned_transcript(tmp.path(), &id, "x").expect("persist");
 
         assert!(tmp.path().join("orphaned_transcripts").is_dir());
+    }
+
+    // ---- filter_cross_segment_repetitions tests ----
+
+    use medical_core::types::stt::{Transcript, TranscriptSegment};
+
+    fn seg(text: &str, start: f64) -> TranscriptSegment {
+        TranscriptSegment {
+            text: text.into(),
+            start,
+            end: start + 5.0,
+            speaker: None,
+            confidence: None,
+        }
+    }
+
+    fn mk_transcript(segments: Vec<TranscriptSegment>) -> Transcript {
+        let text = segments
+            .iter()
+            .map(|s| s.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Transcript {
+            text,
+            segments,
+            language: None,
+            duration_seconds: None,
+            provider: "test".into(),
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn filter_cross_segment_repetitions_strips_trailing_so_so_so() {
+        // The exact user-reported bug: real conversation followed by 6× "so".
+        let mut t = mk_transcript(vec![
+            seg("you need some medication refills", 0.0),
+            seg("which medications okay", 5.0),
+            seg("you're still using that", 10.0),
+            seg("so", 55.0),
+            seg("so", 65.0),
+            seg("so", 75.0),
+            seg("so", 85.0),
+            seg("so", 95.0),
+            seg("so", 115.0),
+        ]);
+        filter_cross_segment_repetitions(&mut t);
+        assert_eq!(t.segments.len(), 3, "should keep only the 3 real segments");
+        assert!(
+            !t.text.contains(" so "),
+            "rebuilt text should not contain the dropped 'so'"
+        );
+        assert!(t.text.contains("medication"));
+    }
+
+    #[test]
+    fn filter_cross_segment_repetitions_keeps_distinct_segments() {
+        let mut t = mk_transcript(vec![
+            seg("Patient reports headache", 0.0),
+            seg("BP 120 over 80", 5.0),
+            seg("Tension headache likely", 10.0),
+        ]);
+        filter_cross_segment_repetitions(&mut t);
+        assert_eq!(t.segments.len(), 3, "distinct segments unchanged");
+    }
+
+    #[test]
+    fn filter_cross_segment_repetitions_keeps_short_runs() {
+        // 2 identical segments is below the 3+ threshold.
+        let mut t = mk_transcript(vec![
+            seg("okay", 0.0),
+            seg("okay", 5.0),
+            seg("next topic", 10.0),
+        ]);
+        filter_cross_segment_repetitions(&mut t);
+        assert_eq!(t.segments.len(), 3, "runs < 3 are kept");
+    }
+
+    #[test]
+    fn filter_cross_segment_repetitions_keeps_long_repeated_segments() {
+        // Identical segments >5 words should be kept (legal/medical disclaimers).
+        let long = "The risks and benefits have been discussed at length today";
+        let mut t = mk_transcript(vec![seg(long, 0.0), seg(long, 10.0), seg(long, 20.0)]);
+        filter_cross_segment_repetitions(&mut t);
+        assert_eq!(t.segments.len(), 3, "long repeated segments are kept");
     }
 }

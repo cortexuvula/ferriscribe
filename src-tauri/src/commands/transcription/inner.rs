@@ -21,8 +21,9 @@ use crate::commands::unwrap_app_error_message;
 use crate::state::AppState;
 
 use super::helpers::{
-    filter_segment_repetitions, is_repeated_phrase_hallucination, load_wav_to_audio_data,
-    mark_recording_failed, mark_recording_failed_db_only, persist_orphaned_transcript,
+    filter_cross_segment_repetitions, filter_segment_repetitions, is_repeated_phrase_hallucination,
+    load_wav_to_audio_data, mark_recording_failed, mark_recording_failed_db_only,
+    persist_orphaned_transcript,
 };
 
 /// Inner implementation of [`super::transcribe_recording`] that accepts an
@@ -284,6 +285,10 @@ pub async fn transcribe_recording_inner(
     // token pattern repeats 3+ times and dominates the segment.
     let mut transcript = transcript;
     filter_segment_repetitions(&mut transcript);
+    // Drop runs of 3+ consecutive identical short segments — whisper.cpp
+    // trailing-silence hallucination (e.g., 6× separate "so" segments after
+    // the conversation ends). Rebuilds transcript.text from survivors.
+    filter_cross_segment_repetitions(&mut transcript);
 
     // Build speaker-attributed text when diarization segments are available.
     let display_text = format_transcript_with_speakers(&transcript);
