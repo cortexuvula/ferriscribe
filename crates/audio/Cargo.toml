@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 medical-core = { path = "../core" }
 cpal = "0.15"
-rodio = { version = "0.19", default-features = false, features = ["wav", "mp3", "symphonia-all"] }
+rodio = { version = "0.22", default-features = false, features = ["wav", "mp3", "symphonia-all"] }
 hound = { workspace = true }
 ringbuf = "0.4"
 tokio = { workspace = true }
