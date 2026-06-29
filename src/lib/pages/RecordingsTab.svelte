@@ -22,6 +22,21 @@
     if (!deleteTarget) return;
     try {
       await recordings.remove(deleteTarget.id);
+      // Show the Undo toast — the 8s auto-dismiss acts as the "commit" window.
+      toasts.add({
+        message: `Recording deleted`,
+        type: 'success',
+        autoDismiss: true,
+        actionLabel: 'Undo',
+        onAction: async () => {
+          try {
+            await recordings.restore(deleteTarget!.id);
+            toasts.success('Recording restored');
+          } catch (err) {
+            toasts.error(`Could not restore: ${err}`);
+          }
+        },
+      });
     } catch (err) {
       console.error('Failed to delete recording:', err);
       toasts.error(`Failed to delete recording: ${err}`);
@@ -103,7 +118,7 @@
 <ConfirmDialog
   open={deleteTarget !== null}
   title="Delete Recording"
-  message={deleteTarget ? `This will permanently delete "${deleteTarget.name}" including its audio file, transcript, SOAP note, and all generated documents.` : ''}
+  message={deleteTarget ? `Delete "${deleteTarget.name}"? You can undo this for 8 seconds after deleting.` : ''}
   confirmLabel="Delete"
   onConfirm={confirmDelete}
   onCancel={() => deleteTarget = null}

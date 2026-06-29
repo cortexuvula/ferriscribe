@@ -4,6 +4,7 @@ import {
   getRecording,
   searchRecordings,
   deleteRecording,
+  restoreRecording,
   deleteAllRecordings,
 } from '../api/recordings';
 
@@ -95,16 +96,38 @@ class RecordingsStore {
     }
   }
 
+  /** The most recently deleted summary, for undo. Cleared after restore or on next delete. */
+  lastDeleted = $state<RecordingSummary | null>(null);
+
   async remove(id: string): Promise<void> {
     try {
+      // Capture the item before removing so the Undo toast can restore it.
+      this.lastDeleted = this.list.find((r) => r.id === id) ?? null;
       await deleteRecording(id);
       this.list = this.list.filter((r) => r.id !== id);
-      // Clear selected if it was the deleted one
       if (this.selectedRecording?.id === id) {
         this.selectedRecording = null;
       }
     } catch (err) {
       console.error('Failed to delete recording:', err);
+      this.lastDeleted = null;
+      throw err;
+    }
+  }
+
+  async restore(id: string): Promise<void> {
+    try {
+      await restoreRecording(id);
+      // Re-insert the cached summary at its original position (front, since
+      // recordings are sorted newest-first and it was the most recent action).
+      if (this.lastDeleted) {
+        this.list = [this.lastDeleted, ...this.list];
+        this.lastDeleted = null;
+      }
+      // Reload to ensure consistent ordering + server-truth.
+      await this.load();
+    } catch (err) {
+      console.error('Failed to restore recording:', err);
       throw err;
     }
   }

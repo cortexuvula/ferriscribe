@@ -12,6 +12,11 @@
     }
     toasts.dismiss(toast.id);
   }
+
+  function handleAction(toast: Toast) {
+    toast.onAction?.();
+    toasts.dismiss(toast.id);
+  }
 </script>
 
 {#if toasts.list.length > 0}
@@ -20,7 +25,9 @@
       <div class="toast" class:toast-success={toast.type === 'success'} class:toast-error={toast.type === 'error'}>
         <span class="toast-message">{toast.message}</span>
         <div class="toast-actions">
-          {#if toast.type === 'success' && toast.recordingId}
+          {#if toast.actionLabel && toast.onAction}
+            <button class="toast-btn toast-btn-view" onclick={() => handleAction(toast)}>{toast.actionLabel}</button>
+          {:else if toast.type === 'success' && toast.recordingId}
             <button class="toast-btn toast-btn-view" onclick={() => handleView(toast)}>View</button>
           {/if}
           <button class="toast-btn toast-btn-dismiss" onclick={() => toasts.dismiss(toast.id)}>Dismiss</button>

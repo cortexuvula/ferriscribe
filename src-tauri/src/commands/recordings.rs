@@ -53,55 +53,43 @@ pub fn search_recordings(
 ///
 /// Removes the DB row, associated RAG vectors, and the WAV file from disk.
 /// The DB delete and vector cleanup are atomic (same transaction); the WAV
-/// file is removed only after the transaction commits.
+/// Soft-delete a recording. Marks `deleted_at` on the row and removes it
+/// from FTS. The WAV file and RAG vectors are **preserved** for undo. A
+/// future purge sweeper will permanently delete old soft-deleted recordings.
+///
+/// The frontend shows an Undo toast for 8 seconds after this succeeds.
 #[tauri::command]
 pub fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
     let uuid =
         Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-    let mut conn = state.db.conn()?;
+    let conn = state.db.conn()?;
 
-    // Get the recording first so we can clean up the WAV file. Distinguish a
-    // genuine DB error (propagate) from "not found" (proceed — the caller's
-    // intent is to delete, so an already-absent row is a no-op success). The
-    // old `.ok()` swallowed DB errors as None, silently orphaning the WAV.
-    let recording = match RecordingsRepo::get_by_id(&conn, &uuid) {
-        Ok(r) => Some(r),
-        Err(medical_db::DbError::NotFound(_)) => None,
+    // Soft-delete: mark the row as deleted. NotFound is a no-op success
+    // (the user's intent is to delete, so an already-absent row is fine).
+    match RecordingsRepo::soft_delete(&conn, &uuid) {
+        Ok(()) => {}
+        Err(medical_db::DbError::NotFound(_)) => {}
         Err(e) => return Err(e.into()),
-    };
-
-    // Delete the vectors and the recording row atomically: if either fails,
-    // rolling back leaves the user in a consistent "still present" state they
-    // can retry, rather than orphaned vectors pointing at a deleted recording.
-    let tx = conn
-        .transaction()
-        .map_err(|e| AppError::Database(format!("begin tx: {e}")))?;
-    delete_rag_vectors_best_effort(&tx, &id);
-    RecordingsRepo::delete(&tx, &uuid)?;
-    tx.commit()
-        .map_err(|e| AppError::Database(format!("commit tx: {e}")))?;
-
-    // Delete the WAV file from disk only after the DB commit succeeds —
-    // removing the file first and failing the DB delete would leave a row
-    // pointing at nothing.
-    if let Some(rec) = recording
-        && rec.audio_path.exists()
-        && let Err(e) = std::fs::remove_file(&rec.audio_path)
-    {
-        tracing::warn!(path = %rec.audio_path.display(), error = %e, "WAV delete failed");
     }
 
     Ok(())
 }
 
+/// Restore a soft-deleted recording (undo). Clears `deleted_at` and
+/// re-inserts the FTS row so search finds it again.
+#[tauri::command]
+pub fn restore_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
+    let uuid =
+        Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+    let conn = state.db.conn()?;
+    RecordingsRepo::restore(&conn, &uuid)?;
+    Ok(())
+}
+
 /// Delete RAG vectors for a recording, logging failures rather than aborting
-/// the recording deletion. Intentional: users expect recording delete to
-/// succeed even if the vector index is temporarily unreachable or the chunks
-/// were never persisted in the first place. Orphaned vectors are a known
-/// tradeoff — a follow-up background task should eventually sweep them.
-///
-/// Uses `tracing::error!` (not `warn!`) so orphans are visible in operations
-/// dashboards even when warn is filtered out.
+/// the recording deletion. Used by the future purge sweeper (permanent delete).
+/// The soft-delete path preserves vectors for undo.
+#[allow(dead_code)]
 fn delete_rag_vectors_best_effort(conn: &medical_db::Connection, recording_id: &str) {
     if let Err(e) = VectorsRepo::delete_by_document(conn, recording_id) {
         tracing::error!(

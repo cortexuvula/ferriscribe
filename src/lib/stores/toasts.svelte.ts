@@ -8,6 +8,10 @@ export interface Toast {
   displayName?: string;
   /** Whether to auto-dismiss (errors persist until manually dismissed). */
   autoDismiss: boolean;
+  /** Optional action button label (e.g. "Undo"). */
+  actionLabel?: string;
+  /** Callback fired when the action button is clicked. */
+  onAction?: () => void;
 }
 
 class ToastStore {

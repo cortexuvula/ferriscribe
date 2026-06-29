@@ -12,6 +12,7 @@ pub mod m005_user_dictionary;
 pub mod m006_letter_audiences;
 pub mod m007_processing_queue_indexes;
 pub mod m008_peer_discussion;
+pub mod m009_soft_delete;
 
 use rusqlite::Connection;
 
@@ -75,6 +76,11 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 8,
             name: "peer_discussion",
             up: m008_peer_discussion::up,
+        },
+        Migration {
+            version: 9,
+            name: "soft_delete",
+            up: m009_soft_delete::up,
         },
     ]
 }

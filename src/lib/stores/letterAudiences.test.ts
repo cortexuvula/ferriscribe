@@ -25,8 +25,8 @@ describe('LetterAudiencesStore', () => {
 
   it('list populates audiences from the API', async () => {
     const mockData = [
-      { id: 'a1', name: 'Cardiology', is_builtin: true, sort_order: 0 },
-      { id: 'a2', name: 'ER', is_builtin: false, sort_order: 1 },
+      { id: 'a1', name: 'Cardiology', is_builtin: true, sort_order: 0, system_prompt: '', user_template: '', created_at: '', updated_at: '' },
+      { id: 'a2', name: 'ER', is_builtin: false, sort_order: 1, system_prompt: '', user_template: '', created_at: '', updated_at: '' },
     ];
     mockList.mockResolvedValue(mockData);
     await letterAudiences.list();
@@ -45,7 +45,7 @@ describe('LetterAudiencesStore', () => {
   it('upsert adds a new audience', async () => {
     mockList.mockResolvedValue([]);
     await letterAudiences.list();
-    const newAudience = { id: 'a3', name: 'Neurology', is_builtin: false, sort_order: 2 };
+    const newAudience = { id: 'a3', name: 'Neurology', is_builtin: false, sort_order: 2, system_prompt: '', user_template: '', created_at: '', updated_at: '' };
     mockUpsert.mockResolvedValue(newAudience);
     const result = await letterAudiences.upsert(newAudience);
     expect(result).toEqual(newAudience);
@@ -54,7 +54,7 @@ describe('LetterAudiencesStore', () => {
   });
 
   it('upsert updates an existing audience', async () => {
-    const existing = { id: 'a1', name: 'Cardiology', is_builtin: true, sort_order: 0 };
+    const existing = { id: 'a1', name: 'Cardiology', is_builtin: true, sort_order: 0, system_prompt: '', user_template: '', created_at: '', updated_at: '' };
     mockList.mockResolvedValue([existing]);
     await letterAudiences.list();
     const updated = { ...existing, name: 'Cardiology Dept' };
@@ -65,8 +65,8 @@ describe('LetterAudiencesStore', () => {
   });
 
   it('delete removes an audience', async () => {
-    const a1 = { id: 'a1', name: 'A', is_builtin: false, sort_order: 0 };
-    const a2 = { id: 'a2', name: 'B', is_builtin: false, sort_order: 1 };
+    const a1 = { id: 'a1', name: 'A', is_builtin: false, sort_order: 0, system_prompt: '', user_template: '', created_at: '', updated_at: '' };
+    const a2 = { id: 'a2', name: 'B', is_builtin: false, sort_order: 1, system_prompt: '', user_template: '', created_at: '', updated_at: '' };
     mockList.mockResolvedValue([a1, a2]);
     await letterAudiences.list();
     mockDelete.mockResolvedValue(undefined);

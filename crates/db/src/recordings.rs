@@ -77,7 +77,7 @@ impl RecordingsRepo {
                     patient_name, audio_path, duration_seconds, file_size_bytes,
                     stt_provider, ai_provider, tags, processing_status, created_at, metadata
              FROM recordings
-             WHERE id = ?1",
+             WHERE id = ?1 AND deleted_at IS NULL",
             [&id_str],
             Self::row_to_recording,
         )
@@ -99,6 +99,7 @@ impl RecordingsRepo {
                     patient_name, audio_path, duration_seconds, file_size_bytes,
                     stt_provider, ai_provider, tags, processing_status, created_at, metadata
              FROM recordings
+             WHERE deleted_at IS NULL
              ORDER BY created_at DESC
              LIMIT ?1 OFFSET ?2",
         )?;
@@ -188,6 +189,52 @@ impl RecordingsRepo {
         Ok(())
     }
 
+    /// Soft-delete: mark a recording as deleted without removing the row.
+    ///
+    /// The recording is hidden from all queries (via `deleted_at IS NULL`
+    /// filtering). The frontend shows an Undo toast; if the user clicks Undo,
+    /// [`restore`](Self::restore) clears the `deleted_at` field. A future purge
+    /// sweeper will permanently delete soft-deleted recordings after 30 days.
+    pub fn soft_delete(conn: &Connection, id: &Uuid) -> DbResult<()> {
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let rows = conn.execute(
+            "UPDATE recordings SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![now, id.to_string()],
+        )?;
+        if rows == 0 {
+            return Err(DbError::NotFound(format!("recording {id}")));
+        }
+        // Remove from FTS so search doesn't surface the soft-deleted recording.
+        let _ = conn.execute(
+            "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+             VALUES('delete', (SELECT rowid FROM recordings WHERE id = ?1), ?1, '', '', '', '', '', '')",
+            [id.to_string()],
+        );
+        Ok(())
+    }
+
+    /// Restore a soft-deleted recording (undo).
+    ///
+    /// Clears `deleted_at` so the recording reappears in queries. Also
+    /// re-inserts the FTS row so search finds it again.
+    pub fn restore(conn: &Connection, id: &Uuid) -> DbResult<()> {
+        let rows = conn.execute(
+            "UPDATE recordings SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [id.to_string()],
+        )?;
+        if rows == 0 {
+            return Err(DbError::NotFound(format!(
+                "recording {id} (not deleted or not found)"
+            )));
+        }
+        // Re-insert into FTS by touching the row (the update trigger rebuilds it).
+        conn.execute(
+            "UPDATE recordings SET metadata = metadata WHERE id = ?1",
+            [id.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// Delete all recordings. Returns the audio paths so callers can clean up
     /// files on disk.
     pub fn delete_all(conn: &Connection) -> DbResult<Vec<PathBuf>> {
@@ -211,7 +258,11 @@ impl RecordingsRepo {
     ///
     /// Useful for pagination UI without fetching full rows.
     pub fn count(conn: &Connection) -> DbResult<u32> {
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM recordings", [], |r| r.get(0))?;
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM recordings WHERE deleted_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
         Ok(n as u32)
     }
 
@@ -253,7 +304,7 @@ impl RecordingsRepo {
             "SELECT id, filename, transcript, soap_note, referral, letter, peer_discussion, chat, \
                      patient_name, audio_path, duration_seconds, file_size_bytes, \
                      stt_provider, ai_provider, tags, processing_status, created_at, metadata \
-             FROM recordings WHERE id IN ({placeholders})"
+             FROM recordings WHERE id IN ({placeholders}) AND deleted_at IS NULL"
         );
         let id_strings: Vec<String> = ids.iter().map(|u| u.to_string()).collect();
         let params: Vec<&dyn rusqlite::ToSql> = id_strings
