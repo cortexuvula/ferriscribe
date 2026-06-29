@@ -75,4 +75,5 @@ These items were explicitly deferred from the v0.24 review and are tracked for a
 
 - **General.svelte** (`src/lib/components/settings/General.svelte`) is 567 lines mixing 6 concerns. Should be split into section components.
 - **Recording deletion** is a hard irreversible delete (no soft-delete / undo). The `delete_rag_vectors_best_effort` doc promises an orphan-vector sweeper that doesn't exist yet.
-- **`sharing_vocab_api.rs` template handlers** (`templates_rename_handler`, `templates_delete_handler`) still use `(StatusCode, String)` tuples while the other handlers use typed `AppError` — consistency cleanup.
+- **`sharing_vocab_api.rs` template handlers** (`templates_rename_handler`, `templates_delete_handler`) — converted to typed `AppError` in v0.24.3.
+- **Dependency version pins** — `printpdf` 0.7 (lopdf advisory is parse-only; 0.9 is a major API rewrite, deferred), `rusqlite` 0.32 (blocked by SQLCipher/libsqlite3-sys conflict — newer rusqlite requires a different libsqlite3-sys that conflicts with bundled-sqlcipher), `ort` 2.0.0-rc.12 (the latest available; no stable 2.x exists yet). All are ecosystem-blocked, not neglect.

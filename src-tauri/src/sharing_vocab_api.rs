@@ -436,13 +436,10 @@ async fn templates_rename_handler(
     }
     let old_name = body.old_name;
     let db = Arc::clone(&state.db);
-    let entry =
-        tokio::task::spawn_blocking(move || -> Result<ContextTemplate, (StatusCode, String)> {
-            let conn = db
-                .conn()
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let mut cfg = SettingsRepo::load_config(&conn)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let entry = tokio::task::spawn_blocking(
+        move || -> Result<ContextTemplate, medical_core::error::AppError> {
+            let conn = db.conn()?;
+            let mut cfg = SettingsRepo::load_config(&conn)?;
             cfg.migrate();
             if old_name == new_name {
                 return cfg
@@ -450,34 +447,40 @@ async fn templates_rename_handler(
                     .iter()
                     .find(|t| t.name == old_name)
                     .cloned()
-                    .ok_or((StatusCode::NOT_FOUND, format!("'{old_name}' not found")));
+                    .ok_or(medical_core::error::AppError::Other(format!(
+                        "'{old_name}' not found"
+                    )));
             }
             if cfg
                 .custom_context_templates
                 .iter()
                 .any(|t| t.name == new_name)
             {
-                return Err((StatusCode::CONFLICT, format!("'{new_name}' already exists")));
+                return Err(medical_core::error::AppError::Other(format!(
+                    "'{new_name}' already exists"
+                )));
             }
             let idx = cfg
                 .custom_context_templates
                 .iter()
                 .position(|t| t.name == old_name)
-                .ok_or((StatusCode::NOT_FOUND, format!("'{old_name}' not found")))?;
+                .ok_or(medical_core::error::AppError::Other(format!(
+                    "'{old_name}' not found"
+                )))?;
             cfg.custom_context_templates[idx].name = new_name.clone();
             let renamed = cfg.custom_context_templates[idx].clone();
             cfg.custom_context_templates
                 .sort_by_key(|a| a.name.to_lowercase());
-            SettingsRepo::save_config(&conn, &cfg)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            SettingsRepo::save_config(&conn, &cfg)?;
             Ok(renamed)
-        })
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map_err(|(code, msg)| {
-            warn!("templates rename: {msg}");
-            code
-        })?;
+        },
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        warn!("templates rename: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(Json(entry))
 }
 
@@ -489,28 +492,26 @@ async fn templates_delete_handler(
     let _ = authorize(&state, &headers)?;
     let name = body.name;
     let db = Arc::clone(&state.db);
-    tokio::task::spawn_blocking(move || -> Result<(), (StatusCode, String)> {
-        let conn = db
-            .conn()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let mut cfg = SettingsRepo::load_config(&conn)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tokio::task::spawn_blocking(move || -> Result<(), medical_core::error::AppError> {
+        let conn = db.conn()?;
+        let mut cfg = SettingsRepo::load_config(&conn)?;
         cfg.migrate();
         let idx = cfg
             .custom_context_templates
             .iter()
             .position(|t| t.name == name)
-            .ok_or((StatusCode::NOT_FOUND, format!("'{name}' not found")))?;
+            .ok_or(medical_core::error::AppError::Other(format!(
+                "'{name}' not found"
+            )))?;
         cfg.custom_context_templates.remove(idx);
-        SettingsRepo::save_config(&conn, &cfg)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        SettingsRepo::save_config(&conn, &cfg)?;
         Ok(())
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|(code, msg)| {
-        warn!("templates delete: {msg}");
-        code
+    .map_err(|e| {
+        warn!("templates delete: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
     })?;
     Ok(StatusCode::NO_CONTENT)
 }
