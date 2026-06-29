@@ -1,6 +1,9 @@
 # FerriScribe — Technical Debt Report
 
 **Generated:** 2026-06-24 (post v0.20.6)
+**Last updated:** 2026-06-28 (post v0.24.3)
+**Status:** The majority of items below are now RESOLVED (C1, H1-H10, M1, M4, M5, L1-L7, L11-L12, M17). Remaining open items are tracked in AGENTS.md "Known deferred debt". Treat this report as historical context, not a current work list.
+
 **Method:** Four parallel static audits across Rust crates, Tauri shell, Svelte frontend, and build/CI/deps. Deduplicated against the June 16 `CODE_REVIEW_REPORT.md` (items already shipped as FERRI-3 hardening + FERRI-11 bug-audit are excluded).
 
 ## Severity summary

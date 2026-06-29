@@ -76,4 +76,3 @@ These items were explicitly deferred from the v0.24 review and are tracked for a
 - **General.svelte** (`src/lib/components/settings/General.svelte`) is 567 lines mixing 6 concerns. Should be split into section components.
 - **Recording deletion** is a hard irreversible delete (no soft-delete / undo). The `delete_rag_vectors_best_effort` doc promises an orphan-vector sweeper that doesn't exist yet.
 - **`sharing_vocab_api.rs` template handlers** (`templates_rename_handler`, `templates_delete_handler`) still use `(StatusCode, String)` tuples while the other handlers use typed `AppError` — consistency cleanup.
-- **`src-tauri/README.md`** is stale (still documents the deleted RAG commands and AppState fields).
