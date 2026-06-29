@@ -199,6 +199,23 @@ pub(super) fn filter_cross_segment_repetitions(
         .join(" ");
 }
 
+/// Open a recording WAV file and return the raw decrypted bytes.
+///
+/// Used by `export_audio` to get the full WAV (header + data) for
+/// re-encoding as standard 16-bit PCM. Handles both encrypted (FE1)
+/// and legacy plaintext files.
+pub(crate) fn open_recording_wav_raw(path: &std::path::Path) -> AppResult<Vec<u8>> {
+    use medical_security::file_crypto::{FileCryptoError, decrypt_file};
+
+    match decrypt_file(path) {
+        Ok(plaintext) => Ok(plaintext),
+        Err(FileCryptoError::NotEncrypted) => std::fs::read(path).map_err(AppError::from),
+        Err(e) => Err(AppError::Processing(format!(
+            "Failed to decrypt recording: {e}"
+        ))),
+    }
+}
+
 /// Write an orphaned transcript (one whose DB persistence failed despite
 /// successful transcription) to an **encrypted** file inside
 /// `app_data_dir/orphaned_transcripts/`. Returns the full path so the

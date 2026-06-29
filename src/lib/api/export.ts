@@ -17,3 +17,8 @@ export async function exportDocx(
 export async function exportFhir(recordingId: string): Promise<number[]> {
   return invoke('export_fhir', { recordingId });
 }
+
+/** Export the recording's audio as a standard 16-bit PCM WAV file. */
+export async function exportAudio(recordingId: string, filePath: string): Promise<void> {
+  await invoke('export_audio', { recordingId, filePath });
+}

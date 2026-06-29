@@ -13,6 +13,9 @@
   import { icd9 as icd9Store } from '../stores/icd9.svelte';
   import { settings } from '../stores/settings.svelte';
   import IcdChip from '../components/IcdChip.svelte';
+  import { save as saveDialog } from '@tauri-apps/plugin-dialog';
+  import { exportAudio } from '../api/export';
+  import { toasts } from '../stores/toasts.svelte';
 
   const { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' | 'peer_discussion' } = $props();
 
@@ -160,6 +163,28 @@
     }
   }
 
+  let exportingAudio = $state(false);
+
+  async function handleExportAudio() {
+    const rec = recordings.selectedRecording;
+    if (!rec || exportingAudio) return;
+    exportingAudio = true;
+    try {
+      const selected = await saveDialog({
+        title: 'Export recording audio',
+        defaultPath: `${rec.patient_name ?? rec.filename}.wav`,
+        filters: [{ name: 'WAV', extensions: ['wav'] }],
+      });
+      if (!selected) return;
+      await exportAudio(rec.id, selected);
+      toasts.success('Audio exported as WAV');
+    } catch (e) {
+      toasts.error(formatError(e));
+    } finally {
+      exportingAudio = false;
+    }
+  }
+
   function handleSpeedRead() {
     if (!content) return;
     const map: Record<string, DocKind> = {
@@ -211,6 +236,15 @@
             Copy
           {/if}
         </button>
+        {#if tabId === 'transcript' && recordings.selectedRecording}
+          <button
+            class="btn-copy"
+            onclick={handleExportAudio}
+            title="Export the recording audio as a standard WAV file (decrypted, 16-bit PCM)"
+          >
+            Export Audio
+          </button>
+        {/if}
         {#if icdCodes.length > 0}
           <div class="icd-codes">
             <span class="icd-label">ICD:</span>

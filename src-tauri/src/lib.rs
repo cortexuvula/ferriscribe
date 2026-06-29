@@ -280,6 +280,7 @@ pub fn run() {
             commands::export::export_pdf,
             commands::export::export_docx,
             commands::export::export_fhir,
+            commands::export::export_audio,
             commands::providers::reinit_providers,
             commands::providers::test_lmstudio_connection,
             commands::providers::test_stt_remote_connection,
