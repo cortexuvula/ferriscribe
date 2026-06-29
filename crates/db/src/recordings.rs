@@ -77,7 +77,7 @@ impl RecordingsRepo {
                     patient_name, audio_path, duration_seconds, file_size_bytes,
                     stt_provider, ai_provider, tags, processing_status, created_at, metadata
              FROM recordings
-             WHERE id = ?1 AND deleted_at IS NULL",
+             WHERE id = ?1",
             [&id_str],
             Self::row_to_recording,
         )
