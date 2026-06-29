@@ -107,8 +107,8 @@ pub async fn process_recording(
         app.clone(),
         state.clone(),
         recording_id.clone(),
-        None,       // language — use default
-        Some(true), // diarize — medical encounters are multi-speaker
+        None,        // language — use default
+        Some(false), // diarize disabled — raw transcript is cleaner for clinical use
         Some(cancel.clone()),
     )
     .await;

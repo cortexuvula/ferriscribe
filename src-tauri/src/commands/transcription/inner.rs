@@ -207,7 +207,7 @@ pub async fn transcribe_recording_inner(
         .filter(|l| !l.is_empty());
     let config = SttConfig {
         language: effective_language,
-        diarize: diarize.unwrap_or(true),
+        diarize: diarize.unwrap_or(false),
         num_speakers: app_config.max_speakers,
         ..SttConfig::default()
     };
