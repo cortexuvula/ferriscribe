@@ -71,7 +71,7 @@ bytemuck = { version = "1", features = ["derive"] }
 # Crates pinned at workspace level to keep one source of truth.
 # `dirs` was previously split (5 in sharing, 6 in src-tauri); unifying to 6
 # is the only real version dedup — the rest already match across crates.
-rand = "0.8"
+rand = "0.10"
 hex = "0.4"
 base64 = "0.22"
 sha2 = "0.10"
