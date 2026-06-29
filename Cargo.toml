@@ -74,7 +74,7 @@ bytemuck = { version = "1", features = ["derive"] }
 rand = "0.8"
 hex = "0.4"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 regex = "1"
 hound = "3.5"
 urlencoding = "2"
