@@ -245,8 +245,9 @@ impl SttProvider for RemoteSttProvider {
         // Resolve the server URL once for this transcription (cached 30s).
         let resolved_server = self.current_base_url().await?;
 
-        // Stage 1: resample to 16 kHz mono f32, then convert to i16 for upload.
-        let audio_16k = audio_prep::to_16k_mono_f32(&audio);
+        // Stage 1: resample to 16 kHz mono f32, trim silence, convert to i16 for upload.
+        let audio_16k_raw = audio_prep::to_16k_mono_f32(&audio);
+        let audio_16k = audio_prep::trim_trailing_silence(&audio_16k_raw, 0.01);
         let samples_i16 = audio_prep::f32_to_i16(&audio_16k);
         let wav_bytes = audio_prep::write_pcm16_wav_bytes(&samples_i16, TARGET_SAMPLE_RATE);
 

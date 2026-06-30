@@ -77,16 +77,13 @@ impl WhisperTranscriber {
             .create_state()
             .map_err(|e| AppError::SttProvider(format!("Failed to create Whisper state: {e}")))?;
 
-        // BeamSearch with beam_size=5 matches whisper.cpp's default and is
-        // empirically ~3× more complete than Greedy{best_of=1} on long audio
-        // with medical terminology — greedy decoding triggers whisper.cpp's
-        // hallucination-skip on difficult stretches, silently dropping content.
-        // See crates/stt-providers/examples/transcribe_probe.rs for the
-        // A/B/C comparison that motivated this change.
-        let mut params = FullParams::new(SamplingStrategy::BeamSearch {
-            beam_size: 5,
-            patience: -1.0,
-        });
+        // Greedy decoding is more resistant to repetition loops than BeamSearch.
+        // Beam search explores multiple paths and picks the highest cumulative
+        // probability — which is often the repetition loop. Greedy takes the
+        // single best token at each step, breaking out of loops more easily.
+        // Combined with suppress_blank + no_context + trailing-silence trim,
+        // this is the standard whisper.cpp anti-hallucination configuration.
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
         let lang_code: Option<String> = language.map(|l| l.chars().take(2).collect());
         params.set_language(lang_code.as_deref());

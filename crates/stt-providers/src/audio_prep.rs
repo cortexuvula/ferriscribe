@@ -87,6 +87,75 @@ pub fn f32_to_i16(samples: &[f32]) -> Vec<i16> {
         .collect()
 }
 
+/// Trim trailing silence from 16 kHz mono f32 audio.
+///
+/// Scans backward from the end of the buffer in 1-second windows
+/// (16,000 samples). If a window's RMS energy is below the threshold,
+/// it's considered silence and removed. The scan continues backward
+/// until a window exceeds the threshold or the entire buffer is consumed
+/// (in which case the original is returned unchanged).
+///
+/// This prevents whisper.cpp from hallucinating repetition loops on
+/// the trailing silence after a conversation ends (the #1 cause of
+/// "so so so" and "I see a counsellor..." ×100 patterns).
+///
+/// A minimum 0.5s tail pad is kept after the last audible window so
+/// final words aren't cut off mid-syllable.
+///
+/// # Parameters
+/// - `samples`: 16 kHz mono f32 PCM
+/// - `threshold`: RMS energy threshold below which a window is silent.
+///   0.01 ≈ -40 dBFS — catches room tone but preserves quiet speech.
+pub fn trim_trailing_silence(samples: &[f32], threshold: f32) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    const WINDOW: usize = 16_000; // 1 second at 16 kHz
+    const TAIL_PAD: usize = 8_000; // 0.5 second pad
+
+    let total = samples.len();
+    if total <= WINDOW {
+        return samples.to_vec();
+    }
+
+    // Scan backward from the end in 1-second windows.
+    let mut last_audible_end = None;
+    let mut pos = total;
+    while pos >= WINDOW {
+        let window = &samples[pos - WINDOW..pos];
+        let rms = (window.iter().map(|s| s * s).sum::<f32>() / WINDOW as f32).sqrt();
+        if rms >= threshold {
+            last_audible_end = Some(pos);
+            break;
+        }
+        pos -= WINDOW;
+    }
+
+    match last_audible_end {
+        None => {
+            // Entire audio is silent. Return a minimal stub.
+            tracing::warn!("entire recording is silent; trimming to minimal stub");
+            samples[..TAIL_PAD.min(total)].to_vec()
+        }
+        Some(end) if end == total => {
+            // No trailing silence found.
+            samples.to_vec()
+        }
+        Some(end) => {
+            // Keep a 0.5s pad after the last audible content.
+            let trimmed_end = (end + TAIL_PAD).min(total);
+            let trimmed = samples[..trimmed_end].to_vec();
+            tracing::info!(
+                original_samples = total,
+                trimmed_samples = trimmed.len(),
+                removed_seconds = ((total - trimmed.len()) as f64 / 16_000.0 * 10.0).round() / 10.0,
+                "trimmed trailing silence before transcription"
+            );
+            trimmed
+        }
+    }
+}
+
 /// Encode a 16 kHz mono PCM16 buffer as an in-memory WAV file.
 ///
 /// Produces a RIFF/WAVE payload suitable for upload to any OpenAI-compatible
@@ -241,6 +310,64 @@ mod tests {
         assert!(
             converted.is_empty(),
             "expected empty i16 output for empty input"
+        );
+    }
+
+    #[test]
+    fn trim_removes_trailing_silence() {
+        // 3s loud + 2s silence = 80,000 samples at 16kHz
+        let mut samples = vec![0.5f32; 48_000]; // 3s of speech
+        samples.extend(vec![0.0f32; 32_000]); // 2s silence
+        let trimmed = trim_trailing_silence(&samples, 0.01);
+        assert!(
+            trimmed.len() < samples.len(),
+            "should have trimmed silence: {} vs {}",
+            trimmed.len(),
+            samples.len()
+        );
+        // Should keep ~3s speech + 0.5s pad
+        assert!(
+            trimmed.len() >= 48_000,
+            "should keep the speech: got {}",
+            trimmed.len()
+        );
+        assert!(
+            trimmed.len() <= 56_000,
+            "should keep speech + 0.5s pad max: got {}",
+            trimmed.len()
+        );
+    }
+
+    #[test]
+    fn trim_keeps_audio_without_trailing_silence() {
+        // 2s loud, no silence
+        let samples = vec![0.5f32; 32_000];
+        let trimmed = trim_trailing_silence(&samples, 0.01);
+        assert_eq!(
+            trimmed.len(),
+            samples.len(),
+            "no trailing silence = unchanged"
+        );
+    }
+
+    #[test]
+    fn trim_preserves_short_audio() {
+        // Shorter than 1 window
+        let samples = vec![0.5f32; 100];
+        let trimmed = trim_trailing_silence(&samples, 0.01);
+        assert_eq!(trimmed.len(), samples.len(), "short audio unchanged");
+    }
+
+    #[test]
+    fn trim_handles_all_silence() {
+        // 5s of pure silence
+        let samples = vec![0.0f32; 80_000];
+        let trimmed = trim_trailing_silence(&samples, 0.01);
+        // Should trim heavily but keep the tail pad
+        assert!(
+            trimmed.len() <= 8_000,
+            "all-silence should be trimmed to ~tail pad: got {}",
+            trimmed.len()
         );
     }
 }

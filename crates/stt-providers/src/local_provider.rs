@@ -102,8 +102,9 @@ impl SttProvider for LocalSttProvider {
 
         let duration = audio.duration_seconds();
 
-        // Stage 1: Resample to 16kHz mono
-        let audio_16k = audio_prep::to_16k_mono_f32(&audio);
+        // Stage 1: Resample to 16kHz mono + trim trailing silence
+        let audio_16k_raw = audio_prep::to_16k_mono_f32(&audio);
+        let audio_16k = audio_prep::trim_trailing_silence(&audio_16k_raw, 0.01);
 
         // Stage 2: Whisper transcription
         let whisper_path = self.whisper_model_path.clone();

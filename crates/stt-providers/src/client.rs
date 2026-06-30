@@ -61,7 +61,11 @@ pub async fn post_audio(
                 .map_err(|e| AppError::SttProvider(format!("multipart error: {}", e)))?,
         )
         .text("model", model.to_string())
-        .text("response_format", "verbose_json");
+        .text("response_format", "verbose_json")
+        // Anti-hallucination parameters matching the local whisper path.
+        // The whisper.cpp HTTP server supports these as multipart form fields.
+        .text("temperature", "0.0")
+        .text("condition_on_previous_text", "false");
 
     if let Some(lang) = language.filter(|l| !l.is_empty()) {
         // whisper.cpp's HTTP server rejects BCP-47 tags with a region/script
