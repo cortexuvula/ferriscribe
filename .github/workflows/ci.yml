@@ -115,7 +115,10 @@ jobs:
         # default, and exits zero on "unmaintained" warnings. We don't use
         # --deny warnings because unmaintained crates (GTK3 bindings from
         # Tauri's Linux webview, proc-macro-error, etc.) are transitive deps
-        # we can't control. The lopdf advisory (RUSTSEC-2026-0187) is a
-        # parse-only vector; we only write PDFs via printpdf, never parse
-        # external input — ignored, tracked for the printpdf 0.7->0.9 bump.
-        run: cargo audit --ignore RUSTSEC-2026-0187
+        # we can't control. Ignored advisories are all parse-only vectors in
+        # transitive deps we only use for writing (never parsing external input):
+        # - lopdf (RUSTSEC-2026-0187): PDF parse stack overflow — we only write.
+        # - quick-xml (RUSTSEC-2026-0194, 0195): XML parse DoS — only in
+        #   docx-rs (write) and plist/Tauri (internal config, not external).
+        # Tracked for dependency bumps (printpdf 0.7→0.9, docx-rs update).
+        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
