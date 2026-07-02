@@ -137,35 +137,40 @@ class AudioStore {
   async stop() {
     if (this.busy) return;
     this.busy = true;
-    // Capture pre-stop state so we only restore the timer if we were
-    // actively recording (not paused).
-    const wasRecording = this.state.state === 'recording';
     this.clearTimer();
+    // Stop listening for waveform events immediately so the visualizer freezes.
+    if (this.waveformUnlisten) {
+      this.waveformUnlisten();
+      this.waveformUnlisten = null;
+    }
+    // Optimistically flip the UI to 'stopped' BEFORE awaiting the backend.
+    // This makes the Stop button feel instant — the button set swaps from
+    // "Pause/Stop/Cancel" to "New Recording" immediately. The backend stop
+    // (drain-thread join + encryption + DB insert) runs concurrently and
+    // reconciles lastRecordingId when done.
+    this.state = {
+      ...this.state,
+      state: 'stopped',
+      lastRecordingId: this.state.lastRecordingId, // keep existing until backend confirms
+    };
     try {
       const recordingId = await audioApi.stopRecording();
       log.info('Recording stopped', { recordingId });
-      if (this.waveformUnlisten) {
-        this.waveformUnlisten();
-        this.waveformUnlisten = null;
-      }
+      // Reconcile with the actual recording ID from the backend.
       this.state = {
         ...this.state,
-        state: 'stopped',
         lastRecordingId: recordingId,
       };
     } catch (e) {
       const message = formatError(e);
       log.error('Failed to stop recording', { error: message });
-      if (this.waveformUnlisten) {
-        this.waveformUnlisten();
-        this.waveformUnlisten = null;
-      }
-      // Don't change state to 'stopped' on error — backend may still be recording
+      // The UI already shows 'stopped'. If the backend failed, surface the
+      // error but don't revert to 'recording' — the stream is likely torn
+      // down on the OS side even if the command errored.
       this.state = {
         ...this.state,
         error: message || 'Failed to stop recording',
       };
-      if (wasRecording) this.startTimer(); // Only restore timer if we were actively recording
     } finally {
       this.busy = false;
     }
