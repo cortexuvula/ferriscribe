@@ -253,27 +253,32 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
         tracing::warn!(path = %current.wav_path.display(), "WAV file is empty — audio may not have been captured");
     }
 
-    // Encrypt the recording at rest. Run as a DETACHED background task so
-    // it doesn't block the stop response (the UI already flipped to 'stopped'
-    // optimistically). The WAV is finalized on disk; a brief plaintext window
-    // is the pre-v0.24 behavior and is acceptable. The DB insert (below) does
-    // not depend on encryption completing.
+    // Encrypt the recording at rest. Run in spawn_blocking (off the async
+    // runtime) but AWAIT the result — the pipeline's transcription step
+    // reads this file immediately after, and if encryption is still writing
+    // (temp file + fsync + rename), the WAV header will be mid-replacement
+    // and the reader gets "Ill-formed WAVE file: no RIFF tag found".
+    // The frontend already flipped to 'stopped' optimistically, so the user
+    // doesn't perceive this wait.
     if file_size > 0 {
         let enc_path = current.wav_path.clone();
-        tokio::task::spawn_blocking(move || {
-            match medical_security::file_crypto::encrypt_file_in_place(&enc_path) {
-                Ok(()) => {
-                    tracing::debug!(path = %enc_path.display(), "Recording encrypted at rest (background)");
-                }
-                Err(medical_security::file_crypto::FileCryptoError::Keychain(e)) => {
-                    tracing::warn!(error = %e, "Could not encrypt recording (keychain unavailable); storing plaintext");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, path = %enc_path.display(), "Could not encrypt recording; storing plaintext");
-                }
+        let enc_result = tokio::task::spawn_blocking(move || {
+            medical_security::file_crypto::encrypt_file_in_place(&enc_path)
+        })
+        .await
+        .map_err(|e| AppError::Other(format!("encryption task panicked: {e}")))?;
+
+        match enc_result {
+            Ok(()) => {
+                tracing::debug!(path = %current.wav_path.display(), "Recording encrypted at rest");
             }
-        });
-        // Intentionally NOT awaited — fire-and-forget.
+            Err(medical_security::file_crypto::FileCryptoError::Keychain(e)) => {
+                tracing::warn!(error = %e, "Could not encrypt recording (keychain unavailable); storing plaintext");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %current.wav_path.display(), "Could not encrypt recording; storing plaintext");
+            }
+        }
     }
 
     let recording_uuid = Uuid::parse_str(&current.id)
