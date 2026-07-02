@@ -108,6 +108,7 @@ fn try_collapse_pattern(tokens: &[&str], pattern_len: usize) -> Option<String> {
 /// a new transcript text. Called after whisper transcription but before
 /// formatting/storage.
 pub(super) fn filter_segment_repetitions(transcript: &mut medical_core::types::stt::Transcript) {
+    let mut changed = false;
     for seg in &mut transcript.segments {
         let original = &seg.text;
         let collapsed = collapse_repetition_loops(original);
@@ -118,7 +119,18 @@ pub(super) fn filter_segment_repetitions(transcript: &mut medical_core::types::s
                 "collapsed whisper repetition loop in segment"
             );
             seg.text = collapsed;
+            changed = true;
         }
+    }
+    // Rebuild transcript.text if any segment was modified, so downstream
+    // code (hallucination guard, formatting) sees consistent content.
+    if changed {
+        transcript.text = transcript
+            .segments
+            .iter()
+            .map(|s| s.text.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
     }
 }
 

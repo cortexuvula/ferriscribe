@@ -43,7 +43,7 @@ pub async fn transcribe_recording_inner(
 ) -> AppResult<String> {
     tracing::info!(
         language = language.as_deref().unwrap_or("auto"),
-        diarize = diarize.unwrap_or(true),
+        diarize = diarize.unwrap_or(false),
         "Transcription requested"
     );
 

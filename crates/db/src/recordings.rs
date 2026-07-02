@@ -237,8 +237,17 @@ impl RecordingsRepo {
 
     /// Delete all recordings. Returns the audio paths so callers can clean up
     /// files on disk.
+    /// Permanently delete all visible (non-soft-deleted) recordings.
+    ///
+    /// This is a **hard DELETE** — it permanently removes recordings that have
+    /// not been soft-deleted. Used by the "Delete All" button in settings,
+    /// which is explicitly a destructive action with confirmation. Unlike the
+    /// single-record soft-delete path, there is no undo for delete-all.
+    ///
+    /// Returns the audio paths so the caller can clean up files on disk.
     pub fn delete_all(conn: &Connection) -> DbResult<Vec<PathBuf>> {
-        let mut stmt = conn.prepare("SELECT audio_path FROM recordings")?;
+        let mut stmt =
+            conn.prepare("SELECT audio_path FROM recordings WHERE deleted_at IS NULL")?;
         let paths: Vec<PathBuf> = stmt
             .query_map([], |row| {
                 let p: String = row.get(0)?;
@@ -250,7 +259,7 @@ impl RecordingsRepo {
             })
             .collect();
 
-        conn.execute("DELETE FROM recordings", [])?;
+        conn.execute("DELETE FROM recordings WHERE deleted_at IS NULL", [])?;
         Ok(paths)
     }
 
@@ -285,7 +294,8 @@ impl RecordingsRepo {
         let updated = conn.execute(
             "UPDATE recordings
              SET processing_status = ?1
-             WHERE processing_status LIKE '%\"status\":\"processing\"%'",
+             WHERE processing_status LIKE '%\"status\":\"processing\"%'
+             AND deleted_at IS NULL",
             rusqlite::params![failed_json],
         )?;
         Ok(updated as u32)

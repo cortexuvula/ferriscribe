@@ -128,7 +128,10 @@ pub async fn export_audio(
                 .collect::<Vec<_>>(),
             hound::SampleFormat::Int => {
                 let bits = spec.bits_per_sample;
-                let scale = if bits > 0 { 1i64 << (bits - 1) } else { 1 };
+                if bits == 0 {
+                    return Err(AppError::Audio("WAV has bits_per_sample=0".to_string()));
+                }
+                let scale = 1i64 << (bits - 1);
                 reader
                     .into_samples::<i32>()
                     .map(|s| {

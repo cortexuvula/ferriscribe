@@ -1,8 +1,8 @@
 //! Whisper transcription via whisper-rs.
 //!
 //! Wraps the whisper-rs FFI bindings to run local Whisper inference. Uses
-//! `BeamSearch { beam_size: 5 }` (not Greedy) to avoid whisper.cpp's
-//! hallucination-skip silently dropping content on medical terminology.
+//! `Greedy { best_of: 1 }` sampling with anti-hallucination parameters
+//! (suppress_blank, suppress_nst, no_context) to minimize repetition loops.
 //! Must run inside `spawn_blocking` — the C++ inference is CPU/GPU-bound.
 
 use std::path::PathBuf;
@@ -119,7 +119,11 @@ impl WhisperTranscriber {
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
         params.set_no_context(true);
-        params.set_max_len(60);
+        // Note: set_max_len is NOT used — it caps segment LENGTH IN CHARACTERS
+        // (not tokens as the name might suggest). A value of 60 would
+        // fragment every transcript into ~10-word pieces. The trailing-silence
+        // trim + cross-segment repetition filter handle hallucinations without
+        // segment-length restrictions.
 
         info!(
             samples = audio_16k_mono.len(),
