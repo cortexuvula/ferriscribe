@@ -36,7 +36,15 @@ class UpdaterStore {
       }
     } catch (e) {
       this.state = 'error';
-      this.errorMessage = e instanceof Error ? e.message : String(e);
+      const raw = e instanceof Error ? e.message : String(e);
+      // Common transient error: the release was published (latest.json
+      // exists) but not all platform assets are uploaded yet. The user
+      // checked for updates during the ~5-15 minute release build window.
+      if (raw.includes('fallback platforms') || raw.includes('were found in the response')) {
+        this.errorMessage = `Update v${this.availableVersion ?? ''} is still being built. Please try again in a few minutes.`;
+      } else {
+        this.errorMessage = raw;
+      }
     }
   }
 
@@ -75,7 +83,12 @@ class UpdaterStore {
       this.state = 'installed';
     } catch (e) {
       this.state = 'error';
-      this.errorMessage = e instanceof Error ? e.message : String(e);
+      const raw = e instanceof Error ? e.message : String(e);
+      if (raw.includes('fallback platforms') || raw.includes('were found in the response')) {
+        this.errorMessage = `Update assets are still uploading. Please try again in a few minutes.`;
+      } else {
+        this.errorMessage = raw;
+      }
     }
   }
 
