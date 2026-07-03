@@ -1,14 +1,12 @@
 <script lang="ts">
-  import { settings } from '../stores/settings.svelte';
+  import { onMount } from 'svelte';
+  import { addConditionChip, listConditionChips, removeConditionChip } from '../api/conditions';
 
-  interface Props {
-    /// Called when the user clicks a chip to add it to the conditions textarea.
-    onAdd: (condition: string) => void;
-  }
-  const { onAdd }: Props = $props();
+  let { onAdd }: { onAdd: (condition: string) => void } = $props();
 
-  // The default list shown when custom_conditions is empty (fresh install or
-  // backend default). If the backend returns values, those take precedence.
+  // The default list shown while the backend list is loading or when it's
+  // empty (fresh install / backend default). Once the backend returns a
+  // non-empty list, those values take precedence.
   const DEFAULT_CONDITIONS = [
     'Hypertension',
     'Type 2 diabetes',
@@ -27,41 +25,49 @@
     'Sleep apnea',
   ];
 
-  // Use the user's custom list if populated, otherwise fall back to defaults.
-  const conditions = $derived(
-    settings.state.custom_conditions.length > 0
-      ? settings.state.custom_conditions
-      : DEFAULT_CONDITIONS
-  );
-
+  let chips = $state<string[]>([]);
+  let loaded = $state(false);
   let adding = $state(false);
   let newCondition = $state('');
 
-  async function persistConditions(list: string[]) {
-    await settings.updateField('custom_conditions', list);
-  }
+  // Display defaults until the backend list loads (or if it's empty).
+  let conditions = $derived(loaded && chips.length > 0 ? chips : DEFAULT_CONDITIONS);
+
+  onMount(async () => {
+    try {
+      chips = (await listConditionChips()).map((c) => c.text);
+    } catch (e) {
+      console.error('Failed to load condition chips:', e);
+    }
+    loaded = true;
+  });
 
   async function addNewCondition() {
     const trimmed = newCondition.trim();
-    if (!trimmed) {
+    if (!trimmed) return;
+    // Dedup check (case-insensitive).
+    if (conditions.some((c) => c.toLowerCase() === trimmed.toLowerCase())) {
+      newCondition = '';
       adding = false;
       return;
     }
-    // Dedup: don't add if already present (case-insensitive).
-    const exists = conditions.some(
-      (c) => c.toLowerCase() === trimmed.toLowerCase()
-    );
-    if (!exists) {
-      const next = [...conditions, trimmed];
-      await persistConditions(next);
+    try {
+      const updated = await addConditionChip(trimmed);
+      chips = updated.map((c) => c.text);
+    } catch (e) {
+      console.error('Failed to add condition chip:', e);
     }
     newCondition = '';
     adding = false;
   }
 
   async function removeCondition(condition: string) {
-    const next = conditions.filter((c) => c !== condition);
-    await persistConditions(next);
+    try {
+      const updated = await removeConditionChip(condition);
+      chips = updated.map((c) => c.text);
+    } catch (e) {
+      console.error('Failed to remove condition chip:', e);
+    }
   }
 
   function handleKeydown(e: KeyboardEvent) {
