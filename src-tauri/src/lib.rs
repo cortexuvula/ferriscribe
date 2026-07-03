@@ -362,6 +362,10 @@ pub fn run() {
             commands::user_dictionary::user_dict_list,
             commands::user_dictionary::user_dict_add,
             commands::user_dictionary::user_dict_remove,
+            commands::conditions::list_condition_chips,
+            commands::conditions::add_condition_chip,
+            commands::conditions::remove_condition_chip,
+            commands::conditions::sync_condition_chips_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
