@@ -25,7 +25,7 @@
     "@tauri-apps/plugin-process": "^2.3.0",
     "@tauri-apps/plugin-updater": "^2.8.0",
     "@tiptap/core": "^2.10.0",
-    "@tiptap/extension-underline": "^2.10.0",
+    "@tiptap/extension-underline": "^3.27.1",
     "@tiptap/pm": "^2.10.0",
     "@tiptap/starter-kit": "^2.10.0",
     "dictionary-en": "^4.0.0",
