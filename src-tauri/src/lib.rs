@@ -38,6 +38,7 @@ mod commands;
 pub mod corpus_export;
 mod sharing_vocab_api;
 mod state;
+mod conditions_remote;
 mod templates_remote;
 mod user_dict_remote;
 mod vocab_remote;
