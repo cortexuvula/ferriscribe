@@ -67,29 +67,29 @@ fn now_iso() -> String {
 pub async fn list_condition_chips(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<Vec<ConditionChip>> {
-    if let Some((conn, bearer)) = paired_conditions_target(&state) {
-        if let Some(remote) = crate::conditions_remote::ConditionsRemote::from(
+    if let Some((conn, bearer)) = paired_conditions_target(&state)
+        && let Some(remote) = crate::conditions_remote::ConditionsRemote::from(
             &conn,
             Some(bearer),
             state.http_client.clone(),
-        ) {
-            match remote.list().await {
-                Ok(server_chips) => {
-                    let db = Arc::clone(&state.db);
-                    return tokio::task::spawn_blocking(move || {
-                        let conn = db.conn()?;
-                        medical_db::condition_chips::ConditionChipsRepo::merge_incoming(
-                            &conn, &server_chips,
-                        )
-                        .map_err(AppError::from)
-                    })
-                    .await
-                    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "conditions remote list failed, using local");
-                    // Fall through to local fallback below.
-                }
+        )
+    {
+        match remote.list().await {
+            Ok(server_chips) => {
+                let db = Arc::clone(&state.db);
+                return tokio::task::spawn_blocking(move || {
+                    let conn = db.conn()?;
+                    medical_db::condition_chips::ConditionChipsRepo::merge_incoming(
+                        &conn, &server_chips,
+                    )
+                    .map_err(AppError::from)
+                })
+                .await
+                .map_err(|e| AppError::Other(format!("Task join error: {e}")))?;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "conditions remote list failed, using local");
+                // Fall through to local fallback below.
             }
         }
     }
@@ -260,22 +260,22 @@ pub async fn sync_condition_chips_cmd(
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
 
-    if let Some((conn, bearer)) = paired_conditions_target(&state) {
-        if let Some(remote) = crate::conditions_remote::ConditionsRemote::from(
+    if let Some((conn, bearer)) = paired_conditions_target(&state)
+        && let Some(remote) = crate::conditions_remote::ConditionsRemote::from(
             &conn,
             Some(bearer),
             state.http_client.clone(),
-        ) {
-            let merged = remote.sync(local_all).await?;
-            let db = Arc::clone(&state.db);
-            return tokio::task::spawn_blocking(move || {
-                let conn = db.conn()?;
-                medical_db::condition_chips::ConditionChipsRepo::merge_incoming(&conn, &merged)
-                    .map_err(AppError::from)
-            })
-            .await
-            .map_err(|e| AppError::Other(format!("Task join error: {e}")))?;
-        }
+        )
+    {
+        let merged = remote.sync(local_all).await?;
+        let db = Arc::clone(&state.db);
+        return tokio::task::spawn_blocking(move || {
+            let conn = db.conn()?;
+            medical_db::condition_chips::ConditionChipsRepo::merge_incoming(&conn, &merged)
+                .map_err(AppError::from)
+        })
+        .await
+        .map_err(|e| AppError::Other(format!("Task join error: {e}")))?;
     }
 
     // Not paired / sync disabled — return the local active list.
