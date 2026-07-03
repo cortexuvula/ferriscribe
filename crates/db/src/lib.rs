@@ -24,6 +24,7 @@
 //! writer; `busy_timeout=5000` mitigates transient write contention.
 
 pub mod audit;
+pub mod condition_chips;
 pub mod encryption;
 pub mod letter_audiences;
 pub mod migrations;
@@ -40,6 +41,7 @@ pub mod vectors;
 pub use generations::{Generation, GenerationInsert, GenerationsRepo};
 pub mod user_dictionary;
 pub use user_dictionary::UserDictionaryRepo;
+pub use condition_chips::ConditionChipsRepo;
 
 use std::path::Path;
 
