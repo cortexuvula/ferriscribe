@@ -131,6 +131,8 @@ export interface AppConfig {
   auto_update_check: boolean;
   // Quick-add condition chips
   custom_conditions: string[];
+  /** When true, condition chip presets sync two-way with the paired server. Defaults to false. */
+  sync_condition_chips: boolean;
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

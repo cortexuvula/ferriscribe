@@ -489,6 +489,13 @@ pub struct AppConfig {
     /// docs/superpowers/specs/2026-05-11-training-corpus-design.md.
     #[serde(default)]
     pub capture_for_training: bool,
+
+    // Condition chip sync
+    /// When true, condition chip presets sync two-way between this machine
+    /// and the paired server via the vocab API. Defaults to false — each
+    /// machine keeps its own list unless the user opts in.
+    #[serde(default)]
+    pub sync_condition_chips: bool,
 }
 
 impl Default for AppConfig {
@@ -727,6 +734,14 @@ mod tests {
         let cfg: AppConfig =
             serde_json::from_str(old_json).expect("should parse with serde defaults");
         assert!(!cfg.capture_for_training, "default must be false");
+    }
+
+    #[test]
+    fn sync_condition_chips_defaults_to_false_in_older_configs() {
+        let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
+        let cfg: AppConfig =
+            serde_json::from_str(old_json).expect("should parse with serde defaults");
+        assert!(!cfg.sync_condition_chips, "default must be false");
     }
 
     #[test]

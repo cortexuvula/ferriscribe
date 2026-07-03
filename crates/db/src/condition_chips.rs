@@ -1,0 +1,366 @@
+//! CRUD + sync-merge operations for the `condition_chips` table.
+//!
+//! A condition chip is a practice-wide quick-add preset shown under "Known
+//! conditions" (e.g. "Hypertension"). Each chip has a deterministic ID derived
+//! from its normalized text, enabling per-item last-write-wins merge across
+//! machines.
+//!
+//! Deletion is soft: a tombstone timestamp is written to `deleted_at` and the
+//! row is retained so the deletion can propagate to other machines during sync.
+//! Tombstones older than a cutoff can eventually be pruned via
+//! [`ConditionChipsRepo::prune_tombstones`].
+
+use rusqlite::{Connection, Row, params};
+
+use medical_core::types::condition_chip::{ConditionChip, deterministic_id};
+
+use crate::DbResult;
+
+/// Repository for the `condition_chips` table.
+///
+/// All methods are associated functions taking a `&Connection` as the first
+/// argument, following the same pattern as [`crate::RecordingsRepo`] and
+/// [`crate::UserDictionaryRepo`].
+pub struct ConditionChipsRepo;
+
+impl ConditionChipsRepo {
+    /// List active (non-deleted) chips, ordered by text case-insensitively.
+    pub fn list_active(conn: &Connection) -> DbResult<Vec<ConditionChip>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, text, updated_at, deleted_at
+             FROM condition_chips
+             WHERE deleted_at IS NULL
+             ORDER BY LOWER(text)",
+        )?;
+        let chips = stmt
+            .query_map([], Self::row_to_chip)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(chips)
+    }
+
+    /// List all chips including tombstones (for sync).
+    pub fn list_all(conn: &Connection) -> DbResult<Vec<ConditionChip>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, text, updated_at, deleted_at
+             FROM condition_chips
+             ORDER BY LOWER(text)",
+        )?;
+        let chips = stmt
+            .query_map([], Self::row_to_chip)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(chips)
+    }
+
+    /// Insert or replace a chip by id (`ON CONFLICT DO UPDATE`).
+    ///
+    /// Used both for direct writes and as the primitive underlying the merge.
+    pub fn upsert(conn: &Connection, chip: &ConditionChip) -> DbResult<()> {
+        conn.execute(
+            "INSERT INTO condition_chips (id, text, updated_at, deleted_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 text = excluded.text,
+                 updated_at = excluded.updated_at,
+                 deleted_at = excluded.deleted_at",
+            params![chip.id, chip.text, chip.updated_at, chip.deleted_at],
+        )?;
+        Ok(())
+    }
+
+    /// Soft-delete a chip by id: set `deleted_at` and `updated_at` to `now_iso`.
+    pub fn soft_delete(conn: &Connection, id: &str, now_iso: &str) -> DbResult<()> {
+        conn.execute(
+            "UPDATE condition_chips
+             SET deleted_at = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![now_iso, id],
+        )?;
+        Ok(())
+    }
+
+    /// Merge a batch of remote chips into the local store using
+    /// last-write-wins semantics.
+    ///
+    /// # Algorithm
+    ///
+    /// For each remote chip `R`:
+    /// - If no local chip with the same id exists → **insert** `R` as-is
+    ///   (it is new — an addition or a tombstone from the other side).
+    /// - If `R.updated_at > local.updated_at` → **replace** local with `R`.
+    /// - If `R.updated_at < local.updated_at` → local wins, **do nothing**.
+    /// - If timestamps are equal (tie) → the **tombstone wins**: if `R` is a
+    ///   tombstone (`deleted_at` is `Some`) replace local, otherwise keep local.
+    ///
+    /// The tie-break rule (deleted wins on exact timestamp equality) is
+    /// conservative — it avoids ghost reappearance of a condition that one side
+    /// deleted.
+    ///
+    /// Timestamps are ISO 8601 UTC strings, which compare chronologically under
+    /// lexicographic ordering as long as the format/timezone is consistent.
+    ///
+    /// Returns the active chip list after merging.
+    pub fn merge_incoming(
+        conn: &Connection,
+        remote_chips: &[ConditionChip],
+    ) -> DbResult<Vec<ConditionChip>> {
+        // Load all local chips once and index by id for O(1) lookup.
+        let local_all = Self::list_all(conn)?;
+        let local_map: std::collections::HashMap<&str, &ConditionChip> = local_all
+            .iter()
+            .map(|c| (c.id.as_str(), c))
+            .collect();
+
+        for remote in remote_chips {
+            match local_map.get(remote.id.as_str()) {
+                None => {
+                    // New chip — insert as-is (addition or tombstone).
+                    Self::upsert(conn, remote)?;
+                }
+                Some(local) => {
+                    match remote.updated_at.cmp(&local.updated_at) {
+                        std::cmp::Ordering::Greater => {
+                            // Remote is newer — remote wins.
+                            Self::upsert(conn, remote)?;
+                        }
+                        std::cmp::Ordering::Less => {
+                            // Local is newer — local wins, do nothing.
+                        }
+                        std::cmp::Ordering::Equal => {
+                            // Tie — tombstone wins to avoid ghost reappearance.
+                            if remote.deleted_at.is_some() {
+                                Self::upsert(conn, remote)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Self::list_active(conn)
+    }
+
+    /// Permanently delete tombstones whose `deleted_at` is older than
+    /// `cutoff_iso`. Returns the number of rows removed.
+    ///
+    /// Active chips are never touched.
+    pub fn prune_tombstones(conn: &Connection, cutoff_iso: &str) -> DbResult<usize> {
+        let removed = conn.execute(
+            "DELETE FROM condition_chips
+             WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            params![cutoff_iso],
+        )?;
+        Ok(removed)
+    }
+
+    /// Add a new chip with the given text. The id is derived deterministically
+    /// from the normalized text. Returns the active chip list afterwards.
+    pub fn add(conn: &Connection, text: &str, now_iso: &str) -> DbResult<Vec<ConditionChip>> {
+        let chip = ConditionChip {
+            id: deterministic_id(text),
+            text: text.to_string(),
+            updated_at: now_iso.to_string(),
+            deleted_at: None,
+        };
+        Self::upsert(conn, &chip)?;
+        Self::list_active(conn)
+    }
+
+    /// Soft-delete the chip whose text matches (case-insensitively, via the
+    /// deterministic id). Returns the active chip list afterwards.
+    pub fn remove_by_text(
+        conn: &Connection,
+        text: &str,
+        now_iso: &str,
+    ) -> DbResult<Vec<ConditionChip>> {
+        let id = deterministic_id(text);
+        Self::soft_delete(conn, &id, now_iso)?;
+        Self::list_active(conn)
+    }
+
+    /// Map a `rusqlite::Row` (columns: id, text, updated_at, deleted_at) to a
+    /// [`ConditionChip`].
+    fn row_to_chip(row: &Row) -> rusqlite::Result<ConditionChip> {
+        Ok(ConditionChip {
+            id: row.get(0)?,
+            text: row.get(1)?,
+            updated_at: row.get(2)?,
+            deleted_at: row.get(3)?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create an in-memory database with the `condition_chips` table.
+    /// The table migration is Task 3, so tests create it manually here.
+    fn fresh() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory");
+        conn.execute_batch(
+            "CREATE TABLE condition_chips (
+                id TEXT PRIMARY KEY, text TEXT NOT NULL,
+                updated_at TEXT NOT NULL, deleted_at TEXT
+            );",
+        )
+        .expect("create condition_chips table");
+        conn
+    }
+
+    /// ISO 8601 timestamp offset from a fixed base epoch.
+    fn now(offset_secs: i64) -> String {
+        let base = chrono::DateTime::parse_from_rfc3339("2026-07-03T10:00:00Z").unwrap();
+        let t = base + chrono::Duration::seconds(offset_secs);
+        t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+    }
+
+    /// Build a chip with a deterministic id for the given text.
+    fn chip(text: &str, updated_offset: i64, deleted: bool) -> ConditionChip {
+        ConditionChip {
+            id: deterministic_id(text),
+            text: text.to_string(),
+            updated_at: now(updated_offset),
+            deleted_at: if deleted {
+                Some(now(updated_offset))
+            } else {
+                None
+            },
+        }
+    }
+
+    #[test]
+    fn merge_inserts_new_remote_chip() {
+        let conn = fresh();
+        let remote = vec![chip("Hypertension", 0, false)];
+
+        let result = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("merge");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].text, "Hypertension");
+        assert!(result[0].deleted_at.is_none());
+    }
+
+    #[test]
+    fn merge_remote_newer_wins() {
+        let conn = fresh();
+        // Local chip at t=0.
+        ConditionChipsRepo::upsert(&conn, &chip("Hypertension", 0, false)).expect("upsert local");
+        // Remote chip at t=300 — should win.
+        let remote = vec![chip("Hypertension", 300, false)];
+
+        let result = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("merge");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].updated_at, now(300));
+    }
+
+    #[test]
+    fn merge_local_newer_wins() {
+        let conn = fresh();
+        // Local chip at t=300.
+        ConditionChipsRepo::upsert(&conn, &chip("Hypertension", 300, false)).expect("upsert local");
+        // Remote chip at t=0 — local should win.
+        let remote = vec![chip("Hypertension", 0, false)];
+
+        let result = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("merge");
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].updated_at, now(300));
+    }
+
+    #[test]
+    fn merge_tombstone_wins_over_older_active() {
+        let conn = fresh();
+        // Local active chip at t=0.
+        ConditionChipsRepo::upsert(&conn, &chip("Hypertension", 0, false)).expect("upsert local");
+        // Remote tombstone at t=600 — newer, so tombstone wins.
+        let remote = vec![chip("Hypertension", 600, true)];
+
+        let result = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("merge");
+
+        assert!(result.is_empty(), "active list should be empty after tombstone merge");
+    }
+
+    #[test]
+    fn merge_re_add_after_tombstone() {
+        let conn = fresh();
+        // Local tombstone at t=600.
+        ConditionChipsRepo::upsert(&conn, &chip("Hypertension", 600, true)).expect("upsert tombstone");
+        // Remote active at t=1200 — newer, so the chip is resurrected.
+        let remote = vec![chip("Hypertension", 1200, false)];
+
+        let result = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("merge");
+
+        assert_eq!(result.len(), 1, "chip should be resurrected");
+        assert!(result[0].deleted_at.is_none());
+    }
+
+    #[test]
+    fn merge_tie_deleted_wins() {
+        let conn = fresh();
+        // Local active chip at t=500.
+        ConditionChipsRepo::upsert(&conn, &chip("Hypertension", 500, false)).expect("upsert local");
+        // Remote tombstone at the SAME t=500 — tie, tombstone wins.
+        let remote = vec![chip("Hypertension", 500, true)];
+
+        let result = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("merge");
+
+        assert!(result.is_empty(), "on tie the tombstone should win");
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let conn = fresh();
+        let remote = vec![
+            chip("Hypertension", 100, false),
+            chip("Diabetes", 200, false),
+        ];
+
+        let first = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("first merge");
+        let second = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("second merge");
+
+        assert_eq!(first, second, "merging the same list twice must yield the same result");
+        assert_eq!(second.len(), 2);
+    }
+
+    #[test]
+    fn prune_tombstones_removes_old_only() {
+        let conn = fresh();
+        // Old tombstone at t=0.
+        ConditionChipsRepo::upsert(&conn, &chip("Old Condition", 0, true)).expect("upsert old tombstone");
+        // Recent tombstone at t=900.
+        ConditionChipsRepo::upsert(&conn, &chip("Recent Condition", 900, true)).expect("upsert recent tombstone");
+        // Active chip — must be untouched.
+        ConditionChipsRepo::upsert(&conn, &chip("Active Condition", 300, false)).expect("upsert active");
+
+        // Prune tombstones older than t=500.
+        let removed = ConditionChipsRepo::prune_tombstones(&conn, &now(500)).expect("prune");
+
+        assert_eq!(removed, 1, "only the old tombstone should be pruned");
+
+        let all = ConditionChipsRepo::list_all(&conn).expect("list_all");
+        assert_eq!(all.len(), 2, "recent tombstone + active chip should remain");
+        let active = ConditionChipsRepo::list_active(&conn).expect("list_active");
+        assert_eq!(active.len(), 1, "active chip should still be present");
+        assert_eq!(active[0].text, "Active Condition");
+    }
+
+    #[test]
+    fn add_and_remove_by_text() {
+        let conn = fresh();
+
+        // Add returns a single active chip.
+        let after_add = ConditionChipsRepo::add(&conn, "Hypertension", &now(100)).expect("add");
+        assert_eq!(after_add.len(), 1);
+        assert_eq!(after_add[0].text, "Hypertension");
+
+        // Remove returns an empty active list.
+        let after_remove = ConditionChipsRepo::remove_by_text(&conn, "Hypertension", &now(200)).expect("remove");
+        assert!(after_remove.is_empty(), "active list should be empty after remove");
+
+        // The tombstone should still exist in list_all.
+        let all = ConditionChipsRepo::list_all(&conn).expect("list_all");
+        assert_eq!(all.len(), 1, "tombstone should be retained");
+        assert!(all[0].deleted_at.is_some(), "chip should be a tombstone");
+    }
+}

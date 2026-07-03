@@ -13,6 +13,7 @@ pub mod m006_letter_audiences;
 pub mod m007_processing_queue_indexes;
 pub mod m008_peer_discussion;
 pub mod m009_soft_delete;
+pub mod m010_condition_chips;
 
 use rusqlite::Connection;
 
@@ -81,6 +82,11 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 9,
             name: "soft_delete",
             up: m009_soft_delete::up,
+        },
+        Migration {
+            version: 10,
+            name: "condition_chips",
+            up: m010_condition_chips::up,
         },
     ]
 }

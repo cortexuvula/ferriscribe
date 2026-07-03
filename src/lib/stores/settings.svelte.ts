@@ -50,6 +50,7 @@ const defaults: AppConfig = {
   onboarding_completed: false,
   auto_update_check: true,
   custom_conditions: [],
+  sync_condition_chips: false,
 };
 
 class SettingsStore {

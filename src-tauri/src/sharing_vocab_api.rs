@@ -21,6 +21,9 @@
 //!     GET    /                       — list all words
 //!     POST   /                       — add word { word }
 //!     DELETE /{word}                 — remove word
+//!   /v1/condition-chips
+//!     GET    /                       — list active chips
+//!     POST   /sync                   — two-way merge (client → server)
 //!
 //! Wire formats reuse the existing `VocabularyEntry` and `ContextTemplate`
 //! serde definitions, so clients deserialize directly into the same types
@@ -39,7 +42,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State as AxumState},
     http::{HeaderMap, StatusCode},
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use chrono::Utc;
 use medical_core::types::settings::ContextTemplate;
@@ -104,6 +107,8 @@ pub async fn spawn(
             "/v1/user-dictionary/{word}",
             axum::routing::delete(dict_remove_handler),
         )
+        .route("/v1/condition-chips", get(condition_chips_list_handler))
+        .route("/v1/condition-chips/sync", post(condition_chips_sync_handler))
         .with_state(state);
 
     let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
@@ -598,4 +603,81 @@ async fn dict_remove_handler(
         })?;
     info!(word_len, removed, "dict_api: remove");
     Ok(Json(removed))
+}
+
+// ── Condition chips handlers ────────────────────────────────────────────
+//
+// Practice-wide quick-add condition presets stored in the dedicated
+// `condition_chips` table (not the settings blob). Reads/writes hit
+// `medical_db::condition_chips::ConditionChipsRepo` directly — the same
+// pattern as the vocabulary handlers above. Deletion is soft (tombstoned),
+// so a two-way merge can propagate add/remove across machines. No PHI in
+// logs; only counts and lengths are logged.
+
+/// GET /v1/condition-chips — return all active condition chips.
+async fn condition_chips_list_handler(
+    AxumState(state): AxumState<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<medical_core::types::condition_chip::ConditionChip>>, StatusCode> {
+    let _ = authorize(&state, &headers)?;
+    let db = Arc::clone(&state.db);
+    let chips = tokio::task::spawn_blocking(
+        move || -> Result<Vec<medical_core::types::condition_chip::ConditionChip>, medical_core::error::AppError> {
+            let conn = db.conn()?;
+            medical_db::condition_chips::ConditionChipsRepo::list_active(&conn)
+                .map_err(medical_core::error::AppError::from)
+        },
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        warn!("condition_chips_api list failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    debug!(count = chips.len(), "condition_chips_api: list");
+    Ok(Json(chips))
+}
+
+/// POST /v1/condition-chips/sync — two-way merge.
+///
+/// Body: the client's full chip list (active chips + tombstones).
+/// Returns: the merged active chip list after applying last-write-wins.
+async fn condition_chips_sync_handler(
+    AxumState(state): AxumState<ApiState>,
+    headers: HeaderMap,
+    Json(incoming): Json<Vec<medical_core::types::condition_chip::ConditionChip>>,
+) -> Result<Json<Vec<medical_core::types::condition_chip::ConditionChip>>, StatusCode> {
+    let _ = authorize(&state, &headers)?;
+    let db = Arc::clone(&state.db);
+
+    let incoming_count = incoming.len();
+
+    // Prune old tombstones opportunistically (30 days). Best-effort — a
+    // prune failure must not fail the sync.
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    let cutoff_iso = cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+
+    let merged = tokio::task::spawn_blocking(
+        move || -> Result<Vec<medical_core::types::condition_chip::ConditionChip>, medical_core::error::AppError> {
+            let conn = db.conn()?;
+            let result = medical_db::condition_chips::ConditionChipsRepo::merge_incoming(&conn, &incoming)
+                .map_err(medical_core::error::AppError::from)?;
+            // Best-effort prune — don't fail the sync if pruning errors.
+            let _ = medical_db::condition_chips::ConditionChipsRepo::prune_tombstones(&conn, &cutoff_iso);
+            Ok(result)
+        },
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        warn!("condition_chips_api sync failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    info!(
+        incoming_count,
+        result_count = merged.len(),
+        "condition_chips_api: sync"
+    );
+    Ok(Json(merged))
 }

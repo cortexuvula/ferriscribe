@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod chat;
+pub mod conditions;
 pub mod context_templates;
 pub mod export;
 pub mod generation;

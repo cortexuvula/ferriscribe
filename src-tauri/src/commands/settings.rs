@@ -6,6 +6,21 @@ use medical_db::settings::SettingsRepo;
 
 use crate::state::AppState;
 
+/// Synchronously load the app config (for use in non-async dispatch helpers).
+///
+/// This mirrors the load half of [`get_settings`] but takes a borrowed
+/// `Database` and applies all migrations, without the onboarding auto-mark
+/// side effects. It exists so sync-dispatch helpers (e.g. condition-chip
+/// routing) can read the opt-in flags without an `async` context.
+pub fn load_config_sync(
+    db: &Arc<medical_db::Database>,
+) -> AppResult<medical_core::types::settings::AppConfig> {
+    let conn = db.conn()?;
+    let mut config = SettingsRepo::load_config(&conn)?;
+    config.migrate();
+    Ok(config)
+}
+
 /// Load the current application settings from the database.
 ///
 /// Returns the full `AppConfig` with all migrations applied.
