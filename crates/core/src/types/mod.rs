@@ -10,6 +10,7 @@
 //! | [`processing`] | Queue tasks, batch processing, priority |
 //! | [`agent`] | Agent context, tools, patient context |
 //! | [`ai`] | Completion request/response, messages, streaming |
+//! | [`condition_chip`] | [`condition_chip::ConditionChip`] with deterministic UUID v5 id |
 //! | [`stt`] | Audio data, transcription config/results |
 //! | [`tts`] | TTS config, voice info |
 //! | [`rag`] | RAG results, search config, knowledge graph types |
@@ -20,6 +21,7 @@
 
 pub mod agent;
 pub mod ai;
+pub mod condition_chip;
 pub mod endpoint;
 pub mod letter_audience;
 pub mod processing;
@@ -32,6 +34,7 @@ pub mod vocabulary;
 
 pub use agent::*;
 pub use ai::*;
+pub use condition_chip::*;
 pub use endpoint::*;
 pub use letter_audience::LetterAudience;
 pub use processing::*;
