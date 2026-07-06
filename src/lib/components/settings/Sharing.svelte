@@ -58,7 +58,9 @@
     <p class="hint">
       Stop sharing first (in the panel below) before switching modes.
     </p>
+  {/if}
 
+  {#if sharingOn || pairedTo}
     <label class="form-row" style="margin-top: 1rem;">
       <input
         type="checkbox"
