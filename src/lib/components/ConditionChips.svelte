@@ -83,65 +83,95 @@
     }
   }
 
-  // Drag-and-drop state
+  // Drag-and-drop using pointer events (not HTML5 DnD API, which is
+  // unreliable in Tauri's webview — dragover/drop events don't fire
+  // reliably). Pointer events work identically in all webviews.
+  //
+  // Flow: pointerdown marks a potential drag start. pointermove beyond a
+  // small threshold activates the drag (capture pointer, start hit-testing).
+  // pointerup performs the reorder if a drag was active, otherwise lets the
+  // click pass through to the button.
+  let pointerDownIndex = $state<number | null>(null);
   let dragIndex = $state<number | null>(null);
   let dragOverIndex = $state<number | null>(null);
+  let isDragging = $state(false);
+  let startX = 0;
+  let startY = 0;
 
-  function handleDragStart(e: DragEvent, index: number) {
-    dragIndex = index;
-    // Must set effectAllowed + data for the drag to be valid in all webviews.
-    if (e.dataTransfer) {
-      e.dataTransfer.effectAllowed = 'move';
-      // setData is required for Firefox/webview compatibility.
-      e.dataTransfer.setData('text/plain', String(index));
-    }
+  let wasDragging = false; // set after a drag to suppress the subsequent click
+
+  const DRAG_THRESHOLD = 5; // px — movement beyond this activates drag
+
+  function handlePointerDown(e: PointerEvent, index: number) {
+    if (e.button !== 0 || !loaded || chips.length === 0) return;
+    pointerDownIndex = index;
+    startX = e.clientX;
+    startY = e.clientY;
   }
 
-  function handleDragEnter(e: DragEvent, index: number) {
-    // dragenter MUST preventDefault for the drop zone to be valid.
-    e.preventDefault();
-    dragOverIndex = index;
-  }
-
-  function handleDragOver(e: DragEvent, index: number) {
-    e.preventDefault();
-    if (e.dataTransfer) {
-      e.dataTransfer.dropEffect = 'move';
-    }
-    dragOverIndex = index;
-  }
-
-  async function handleDrop(e: DragEvent, dropIndex: number) {
-    e.preventDefault();
-    if (dragIndex === null || dragIndex === dropIndex) {
-      dragIndex = null;
-      dragOverIndex = null;
+  function handlePointerMove(e: PointerEvent) {
+    if (pointerDownIndex === null || isDragging) {
+      if (isDragging) {
+        // Hit-test: find which chip wrapper is under the pointer.
+        const el = document
+          .elementFromPoint(e.clientX, e.clientY)
+          ?.closest('.condition-chip-wrapper') as HTMLElement | null;
+        if (el) {
+          const idx = Number(el.dataset.index);
+          if (!Number.isNaN(idx)) {
+            dragOverIndex = idx;
+          }
+        }
+      }
       return;
     }
-    // Only reorder if we have real chip IDs (loaded from backend).
-    if (!loaded || chips.length === 0) {
-      dragIndex = null;
-      dragOverIndex = null;
-      return;
-    }
-    const reordered = [...chips];
-    const [moved] = reordered.splice(dragIndex, 1);
-    reordered.splice(dropIndex, 0, moved);
-    chips = reordered; // optimistic UI update
-
-    const orderedIds = reordered.map((c) => c.id);
-    dragIndex = null;
-    dragOverIndex = null;
-    try {
-      chips = await reorderConditionChips(orderedIds);
-    } catch (e) {
-      console.error('Failed to reorder condition chips:', e);
+    // Check if movement exceeds threshold to activate drag.
+    const dx = Math.abs(e.clientX - startX);
+    const dy = Math.abs(e.clientY - startY);
+    if (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
+      isDragging = true;
+      dragIndex = pointerDownIndex;
+      // Capture pointer so we get pointermove/up even outside this element.
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     }
   }
 
-  function handleDragEnd() {
+  async function handlePointerUp(e: PointerEvent) {
+    const didDrag = isDragging;
+    const dropIndex = dragOverIndex;
+    const srcIndex = dragIndex;
+
+    if (didDrag) {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    }
+
+    // Reset pointer state.
+    pointerDownIndex = null;
+    isDragging = false;
     dragIndex = null;
     dragOverIndex = null;
+
+    if (didDrag) {
+      // Set wasDragging so the subsequent click event on the button is
+      // suppressed, then reset it on the next tick so future clicks work.
+      wasDragging = true;
+      setTimeout(() => { wasDragging = false; }, 0);
+
+      if (dropIndex !== null && dropIndex !== srcIndex) {
+        const reordered = [...chips];
+        const [moved] = reordered.splice(srcIndex!, 1);
+        reordered.splice(dropIndex, 0, moved);
+        chips = reordered; // optimistic UI update
+
+        const orderedIds = reordered.map((c) => c.id);
+        try {
+          chips = await reorderConditionChips(orderedIds);
+        } catch (err) {
+          console.error('Failed to reorder condition chips:', err);
+        }
+      }
+    }
+    // If not dragging, the click passes through to the button normally.
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -160,19 +190,19 @@
     <div
       class="condition-chip-wrapper"
       role="listitem"
+      data-index={i}
       class:drag-over={dragOverIndex === i && dragIndex !== null}
-      draggable={loaded}
-      ondragstart={(e) => handleDragStart(e, i)}
-      ondragenter={(e) => handleDragEnter(e, i)}
-      ondragover={(e) => handleDragOver(e, i)}
-      ondrop={(e) => handleDrop(e, i)}
-      ondragend={handleDragEnd}
+      class:dragging={dragIndex === i}
+      class:drag-active={isDragging}
+      onpointerdown={(e) => handlePointerDown(e, i)}
+      onpointermove={handlePointerMove}
+      onpointerup={handlePointerUp}
       style:opacity={dragIndex === i ? '0.4' : '1'}
     >
       <button
         class="condition-chip"
         type="button"
-        onclick={() => onAdd(chip.text)}
+        onclick={(e) => { if (wasDragging) { e.preventDefault(); return; } onAdd(chip.text); }}
         title={`Add "${chip.text}" to the list`}
       >
         {chip.text}
@@ -245,12 +275,13 @@
     border-left: 2px solid var(--accent, #3b82f6);
   }
 
-  .condition-chip-wrapper[draggable='true'] {
-    cursor: grab;
+  /* Only show grab cursor when loaded (draggable is active) */
+  .condition-chip-wrapper.drag-active {
+    cursor: grabbing;
   }
 
-  .condition-chip-wrapper[draggable='true']:active {
-    cursor: grabbing;
+  .condition-chip-wrapper:not(.dragging):hover {
+    cursor: grab;
   }
 
   .condition-chip {
