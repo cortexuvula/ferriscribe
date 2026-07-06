@@ -312,11 +312,11 @@ describe('ConditionChips — drag-and-drop reorder', () => {
     // The chip wrapper divs only become draggable once `loaded` is true, which
     // happens after the (non-empty) backend list resolves. Wait for at least
     // two truly-draggable wrappers.
-    let chipWrappers: NodeListOf<HTMLElement>;
     await waitFor(() => {
-      chipWrappers = document.querySelectorAll('[draggable="true"]');
-      expect(chipWrappers.length).toBeGreaterThanOrEqual(2);
+      const wrappers = document.querySelectorAll('[draggable="true"]');
+      expect(wrappers.length).toBeGreaterThanOrEqual(2);
     });
+    const chipWrappers = document.querySelectorAll<HTMLElement>('[draggable="true"]');
 
     // Simulate dragging Alpha (index 0) onto Beta's position (index 1).
     // fireEvent.dragStart/dragOver/drop dispatch native DnD events on the
@@ -341,11 +341,11 @@ describe('ConditionChips — drag-and-drop reorder', () => {
       expect(screen.getByRole('button', { name: 'Alpha' })).toBeTruthy();
     });
 
-    let chipWrappers: NodeListOf<HTMLElement>;
     await waitFor(() => {
-      chipWrappers = document.querySelectorAll('[draggable="true"]');
-      expect(chipWrappers.length).toBeGreaterThanOrEqual(2);
+      const wrappers = document.querySelectorAll('[draggable="true"]');
+      expect(wrappers.length).toBeGreaterThanOrEqual(2);
     });
+    const chipWrappers = document.querySelectorAll<HTMLElement>('[draggable="true"]');
 
     // Dragging a chip onto itself is a no-op.
     await fireEvent.dragStart(chipWrappers[0]);
