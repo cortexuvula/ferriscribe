@@ -14,6 +14,7 @@ pub mod m007_processing_queue_indexes;
 pub mod m008_peer_discussion;
 pub mod m009_soft_delete;
 pub mod m010_condition_chips;
+pub mod m011_condition_chip_order;
 
 use rusqlite::Connection;
 
@@ -87,6 +88,11 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 10,
             name: "condition_chips",
             up: m010_condition_chips::up,
+        },
+        Migration {
+            version: 11,
+            name: "condition_chip_order",
+            up: m011_condition_chip_order::up,
         },
     ]
 }

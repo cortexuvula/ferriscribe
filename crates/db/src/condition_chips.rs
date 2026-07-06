@@ -24,13 +24,14 @@ use crate::DbResult;
 pub struct ConditionChipsRepo;
 
 impl ConditionChipsRepo {
-    /// List active (non-deleted) chips, ordered by text case-insensitively.
+    /// List active (non-deleted) chips, ordered by sort_order then text
+    /// case-insensitively.
     pub fn list_active(conn: &Connection) -> DbResult<Vec<ConditionChip>> {
         let mut stmt = conn.prepare(
-            "SELECT id, text, updated_at, deleted_at
+            "SELECT id, text, updated_at, deleted_at, sort_order
              FROM condition_chips
              WHERE deleted_at IS NULL
-             ORDER BY LOWER(text)",
+             ORDER BY sort_order, LOWER(text)",
         )?;
         let chips = stmt
             .query_map([], Self::row_to_chip)?
@@ -41,7 +42,7 @@ impl ConditionChipsRepo {
     /// List all chips including tombstones (for sync).
     pub fn list_all(conn: &Connection) -> DbResult<Vec<ConditionChip>> {
         let mut stmt = conn.prepare(
-            "SELECT id, text, updated_at, deleted_at
+            "SELECT id, text, updated_at, deleted_at, sort_order
              FROM condition_chips
              ORDER BY LOWER(text)",
         )?;
@@ -56,13 +57,14 @@ impl ConditionChipsRepo {
     /// Used both for direct writes and as the primitive underlying the merge.
     pub fn upsert(conn: &Connection, chip: &ConditionChip) -> DbResult<()> {
         conn.execute(
-            "INSERT INTO condition_chips (id, text, updated_at, deleted_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO condition_chips (id, text, updated_at, deleted_at, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
                  text = excluded.text,
                  updated_at = excluded.updated_at,
-                 deleted_at = excluded.deleted_at",
-            params![chip.id, chip.text, chip.updated_at, chip.deleted_at],
+                 deleted_at = excluded.deleted_at,
+                 sort_order = excluded.sort_order",
+            params![chip.id, chip.text, chip.updated_at, chip.deleted_at, chip.sort_order],
         )?;
         Ok(())
     }
@@ -155,11 +157,19 @@ impl ConditionChipsRepo {
     /// Add a new chip with the given text. The id is derived deterministically
     /// from the normalized text. Returns the active chip list afterwards.
     pub fn add(conn: &Connection, text: &str, now_iso: &str) -> DbResult<Vec<ConditionChip>> {
+        let max_order: i32 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(sort_order), -1) FROM condition_chips WHERE deleted_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1);
         let chip = ConditionChip {
             id: deterministic_id(text),
-            text: text.to_string(),
+            text: text.trim().to_string(),
             updated_at: now_iso.to_string(),
             deleted_at: None,
+            sort_order: max_order + 1,
         };
         Self::upsert(conn, &chip)?;
         Self::list_active(conn)
@@ -177,14 +187,31 @@ impl ConditionChipsRepo {
         Self::list_active(conn)
     }
 
-    /// Map a `rusqlite::Row` (columns: id, text, updated_at, deleted_at) to a
-    /// [`ConditionChip`].
+    /// Reorder chips to match the given ordered list of IDs.
+    /// Sets sort_order = index for each, bumps updated_at on all listed rows.
+    /// Chips not in the list keep their existing sort_order.
+    /// Returns the active list in the new order.
+    pub fn reorder(conn: &Connection, ordered_ids: &[String], now_iso: &str) -> DbResult<Vec<ConditionChip>> {
+        for (index, id) in ordered_ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE condition_chips
+                 SET sort_order = ?1, updated_at = ?2
+                 WHERE id = ?3",
+                params![index as i32, now_iso, id],
+            )?;
+        }
+        Self::list_active(conn)
+    }
+
+    /// Map a `rusqlite::Row` (columns: id, text, updated_at, deleted_at,
+    /// sort_order) to a [`ConditionChip`].
     fn row_to_chip(row: &Row) -> rusqlite::Result<ConditionChip> {
         Ok(ConditionChip {
             id: row.get(0)?,
             text: row.get(1)?,
             updated_at: row.get(2)?,
             deleted_at: row.get(3)?,
+            sort_order: row.get(4)?,
         })
     }
 }
@@ -192,6 +219,7 @@ impl ConditionChipsRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Database;
 
     /// Create an in-memory database with the `condition_chips` table.
     /// The table migration is Task 3, so tests create it manually here.
@@ -200,7 +228,8 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE condition_chips (
                 id TEXT PRIMARY KEY, text TEXT NOT NULL,
-                updated_at TEXT NOT NULL, deleted_at TEXT
+                updated_at TEXT NOT NULL, deleted_at TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0
             );",
         )
         .expect("create condition_chips table");
@@ -225,6 +254,7 @@ mod tests {
             } else {
                 None
             },
+            sort_order: 0,
         }
     }
 
@@ -362,5 +392,113 @@ mod tests {
         let all = ConditionChipsRepo::list_all(&conn).expect("list_all");
         assert_eq!(all.len(), 1, "tombstone should be retained");
         assert!(all[0].deleted_at.is_some(), "chip should be a tombstone");
+    }
+
+    #[test]
+    fn reorder_updates_sort_order() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+
+        ConditionChipsRepo::add(&conn, "Alpha", &now(0)).unwrap();
+        ConditionChipsRepo::add(&conn, "Beta", &now(1)).unwrap();
+        ConditionChipsRepo::add(&conn, "Gamma", &now(2)).unwrap();
+
+        // Reorder: Gamma first, Alpha second, Beta third.
+        let gamma_id = deterministic_id("Gamma");
+        let alpha_id = deterministic_id("Alpha");
+        let beta_id = deterministic_id("Beta");
+        let reordered =
+            ConditionChipsRepo::reorder(&conn, &[gamma_id, alpha_id, beta_id], &now(100))
+                .unwrap();
+        assert_eq!(
+            reordered.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["Gamma", "Alpha", "Beta"],
+            "list_active should reflect new sort_order"
+        );
+    }
+
+    #[test]
+    fn reorder_bumps_updated_at() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+
+        ConditionChipsRepo::add(&conn, "Alpha", &now(0)).unwrap();
+        ConditionChipsRepo::add(&conn, "Beta", &now(0)).unwrap();
+
+        let alpha_id = deterministic_id("Alpha");
+        let beta_id = deterministic_id("Beta");
+        ConditionChipsRepo::reorder(&conn, &[beta_id, alpha_id], &now(100)).unwrap();
+
+        let all = ConditionChipsRepo::list_all(&conn).unwrap();
+        for chip in &all {
+            assert_eq!(
+                chip.updated_at, now(100),
+                "updated_at should be bumped by reorder"
+            );
+        }
+    }
+
+    #[test]
+    fn reorder_partial_list_keeps_unlisted_positions() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+
+        ConditionChipsRepo::add(&conn, "Alpha", &now(0)).unwrap();
+        ConditionChipsRepo::add(&conn, "Beta", &now(0)).unwrap();
+        ConditionChipsRepo::add(&conn, "Gamma", &now(0)).unwrap();
+
+        let alpha_id = deterministic_id("Alpha");
+        let beta_id = deterministic_id("Beta");
+        let reordered = ConditionChipsRepo::reorder(&conn, &[beta_id, alpha_id], &now(100)).unwrap();
+
+        assert_eq!(
+            reordered.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["Beta", "Alpha", "Gamma"]
+        );
+    }
+
+    #[test]
+    fn merge_propagates_order() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+
+        ConditionChipsRepo::add(&conn, "Alpha", &now(0)).unwrap();
+        ConditionChipsRepo::add(&conn, "Beta", &now(0)).unwrap();
+
+        let remote = vec![
+            ConditionChip {
+                id: deterministic_id("Beta"),
+                text: "Beta".into(),
+                updated_at: now(100),
+                deleted_at: None,
+                sort_order: 0,
+            },
+            ConditionChip {
+                id: deterministic_id("Alpha"),
+                text: "Alpha".into(),
+                updated_at: now(100),
+                deleted_at: None,
+                sort_order: 1,
+            },
+        ];
+        let merged = ConditionChipsRepo::merge_incoming(&conn, &remote).unwrap();
+
+        assert_eq!(
+            merged.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["Beta", "Alpha"],
+            "merge should propagate remote's ordering"
+        );
+    }
+
+    #[test]
+    fn add_appends_to_end_of_sorted_list() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+
+        ConditionChipsRepo::add(&conn, "Alpha", &now(0)).unwrap();
+        ConditionChipsRepo::add(&conn, "Beta", &now(0)).unwrap();
+        let after_gamma = ConditionChipsRepo::add(&conn, "Gamma", &now(0)).unwrap();
+
+        assert_eq!(after_gamma.last().unwrap().text, "Gamma");
     }
 }

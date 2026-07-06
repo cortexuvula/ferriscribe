@@ -26,6 +26,8 @@ pub struct ConditionChip {
     pub text: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
+    #[serde(default)]
+    pub sort_order: i32,
 }
 
 /// Normalize condition text for deterministic ID generation.

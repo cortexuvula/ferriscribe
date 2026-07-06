@@ -36,11 +36,13 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/sv
 const mockListConditionChips = vi.fn();
 const mockAddConditionChip = vi.fn();
 const mockRemoveConditionChip = vi.fn();
+const mockReorderConditionChips = vi.fn();
 
 vi.mock('../api/conditions', () => ({
   listConditionChips: (...args: unknown[]) => mockListConditionChips(...(args as [])),
   addConditionChip: (...args: unknown[]) => mockAddConditionChip(...(args as [string])),
   removeConditionChip: (...args: unknown[]) => mockRemoveConditionChip(...(args as [string])),
+  reorderConditionChips: (...args: unknown[]) => mockReorderConditionChips(...(args as [string[]])),
 }));
 
 // Import AFTER mocks are registered.
@@ -67,19 +69,28 @@ const DEFAULT_CONDITIONS = [
   'Sleep apnea',
 ];
 
-/** Helper: a ConditionChip-shaped object as returned by the API. */
-function chip(text: string) {
-  return { id: `id-${text}`, text, updated_at: '2026-01-01T00:00:00Z', deleted_at: null };
+/** Helper: a ConditionChip-shaped object as returned by the API. sort_order is
+ *  assigned from insertion order so each chip in a list gets a distinct index. */
+function chip(text: string, sortOrder = 0) {
+  return {
+    id: `id-${text}`,
+    text,
+    updated_at: '2026-01-01T00:00:00Z',
+    deleted_at: null,
+    sort_order: sortOrder,
+  };
 }
 
 beforeEach(() => {
   mockListConditionChips.mockReset();
   mockAddConditionChip.mockReset();
   mockRemoveConditionChip.mockReset();
+  mockReorderConditionChips.mockReset();
   // Default: backend returns an empty list → component shows defaults.
   mockListConditionChips.mockResolvedValue([]);
   mockAddConditionChip.mockResolvedValue([]);
   mockRemoveConditionChip.mockResolvedValue([]);
+  mockReorderConditionChips.mockResolvedValue([]);
 });
 
 // Vitest globals are not enabled in this project, so @testing-library/svelte's
@@ -281,5 +292,70 @@ describe('ConditionChips — remove flow', () => {
     expect(screen.getByRole('button', { name: 'Asthma' })).toBeTruthy();
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
+  });
+});
+
+describe('ConditionChips — drag-and-drop reorder', () => {
+  it('calls reorderConditionChips when chips are dragged to a new position', async () => {
+    mockListConditionChips.mockResolvedValue([
+      chip('Alpha', 0),
+      chip('Beta', 1),
+    ]);
+    // Backend echoes back the new order after persisting.
+    mockReorderConditionChips.mockResolvedValue([chip('Beta', 0), chip('Alpha', 1)]);
+
+    render(ConditionChips, { onAdd: () => {} });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Beta' })).toBeTruthy();
+    });
+
+    // The chip wrapper divs only become draggable once `loaded` is true, which
+    // happens after the (non-empty) backend list resolves. Wait for at least
+    // two truly-draggable wrappers.
+    await waitFor(() => {
+      const wrappers = document.querySelectorAll('[draggable="true"]');
+      expect(wrappers.length).toBeGreaterThanOrEqual(2);
+    });
+    const chipWrappers = document.querySelectorAll<HTMLElement>('[draggable="true"]');
+
+    // Simulate dragging Alpha (index 0) onto Beta's position (index 1).
+    // fireEvent.dragStart/dragOver/drop dispatch native DnD events on the
+    // wrapper divs that carry ondragstart/ondragover/ondrop handlers.
+    await fireEvent.dragStart(chipWrappers[0]);
+    await fireEvent.dragOver(chipWrappers[1]);
+    await fireEvent.drop(chipWrappers[1]);
+
+    // The component splices index 0 → index 1, producing [Beta, Alpha], and
+    // calls reorderConditionChips with that ordered ID list.
+    await waitFor(() => {
+      expect(mockReorderConditionChips).toHaveBeenCalledTimes(1);
+    });
+    expect(mockReorderConditionChips).toHaveBeenCalledWith(['id-Beta', 'id-Alpha']);
+  });
+
+  it('does not call reorderConditionChips when a chip is dropped on its own position', async () => {
+    mockListConditionChips.mockResolvedValue([chip('Alpha', 0), chip('Beta', 1)]);
+
+    render(ConditionChips, { onAdd: () => {} });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Alpha' })).toBeTruthy();
+    });
+
+    await waitFor(() => {
+      const wrappers = document.querySelectorAll('[draggable="true"]');
+      expect(wrappers.length).toBeGreaterThanOrEqual(2);
+    });
+    const chipWrappers = document.querySelectorAll<HTMLElement>('[draggable="true"]');
+
+    // Dragging a chip onto itself is a no-op.
+    await fireEvent.dragStart(chipWrappers[0]);
+    await fireEvent.dragOver(chipWrappers[0]);
+    await fireEvent.drop(chipWrappers[0]);
+
+    // Give any stray async work a chance to flush, then assert no reorder.
+    await tick();
+    await waitFor(() => {
+      expect(mockReorderConditionChips).not.toHaveBeenCalled();
+    });
   });
 });
