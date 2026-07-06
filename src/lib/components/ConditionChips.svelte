@@ -45,6 +45,12 @@
   let adding = $state(false);
   let newCondition = $state('');
 
+  // Hint text "Drag to reorder" is shown until the user's first successful
+  // drag, then permanently dismissed via localStorage.
+  let showDragHint = $state(
+    typeof localStorage !== 'undefined' && !localStorage.getItem('hasDraggedChips')
+  );
+
   // Display defaults until the backend list loads (or if it's empty).
   let displayChips = $derived(loaded && chips.length > 0 ? chips : DEFAULT_CHIPS);
 
@@ -169,6 +175,12 @@
         } catch (err) {
           console.error('Failed to reorder condition chips:', err);
         }
+
+        // First successful drag — dismiss the hint permanently.
+        if (showDragHint) {
+          showDragHint = false;
+          try { localStorage.setItem('hasDraggedChips', '1'); } catch {}
+        }
       }
     }
     // If not dragging, the click passes through to the button normally.
@@ -199,6 +211,7 @@
       onpointerup={handlePointerUp}
       style:opacity={dragIndex === i ? '0.4' : '1'}
     >
+      <span class="chip-grip" aria-hidden="true">⠿</span>
       <button
         class="condition-chip"
         type="button"
@@ -238,6 +251,9 @@
       +
     </button>
   {/if}
+  {#if showDragHint && loaded}
+    <p class="drag-hint">⠿ Drag to reorder · Click text to add</p>
+  {/if}
 </div>
 
 <style>
@@ -264,6 +280,24 @@
     background-color: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--success, #22c55e) 30%, transparent);
     overflow: hidden;
+  }
+
+  /* Grip handle — visual affordance for drag. Muted by default, brightens
+     on hover so the user sees the chip is interactive beyond click. */
+  .chip-grip {
+    flex: 0 0 auto;
+    padding: 3px 2px 3px 6px;
+    font-size: 10px;
+    line-height: 1.4;
+    color: var(--success, #22c55e);
+    opacity: 0.35;
+    cursor: grab;
+    user-select: none;
+    transition: opacity 0.15s ease;
+  }
+
+  .condition-chip-wrapper:hover .chip-grip {
+    opacity: 0.7;
   }
 
   .condition-chip-wrapper:hover {
@@ -352,5 +386,16 @@
 
   .chip-input:focus {
     outline: none;
+  }
+
+  /* Hint text shown until the user's first successful drag. Tiny and muted
+     so it's unobtrusive but discoverable. Auto-dismisses via localStorage. */
+  .drag-hint {
+    width: 100%;
+    margin: 2px 0 0 0;
+    font-size: 9px;
+    color: var(--text-muted, #666);
+    opacity: 0.7;
+    user-select: none;
   }
 </style>
