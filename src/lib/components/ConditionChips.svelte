@@ -87,12 +87,27 @@
   let dragIndex = $state<number | null>(null);
   let dragOverIndex = $state<number | null>(null);
 
-  function handleDragStart(_e: DragEvent, index: number) {
+  function handleDragStart(e: DragEvent, index: number) {
     dragIndex = index;
+    // Must set effectAllowed + data for the drag to be valid in all webviews.
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      // setData is required for Firefox/webview compatibility.
+      e.dataTransfer.setData('text/plain', String(index));
+    }
+  }
+
+  function handleDragEnter(e: DragEvent, index: number) {
+    // dragenter MUST preventDefault for the drop zone to be valid.
+    e.preventDefault();
+    dragOverIndex = index;
   }
 
   function handleDragOver(e: DragEvent, index: number) {
     e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'move';
+    }
     dragOverIndex = index;
   }
 
@@ -148,6 +163,7 @@
       class:drag-over={dragOverIndex === i && dragIndex !== null}
       draggable={loaded}
       ondragstart={(e) => handleDragStart(e, i)}
+      ondragenter={(e) => handleDragEnter(e, i)}
       ondragover={(e) => handleDragOver(e, i)}
       ondrop={(e) => handleDrop(e, i)}
       ondragend={handleDragEnd}
