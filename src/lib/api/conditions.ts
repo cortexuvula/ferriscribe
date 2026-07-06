@@ -5,6 +5,7 @@ export interface ConditionChip {
   text: string;
   updated_at: string;
   deleted_at: string | null;
+  sort_order: number;
 }
 
 export async function listConditionChips(): Promise<ConditionChip[]> {
@@ -17,6 +18,10 @@ export async function addConditionChip(text: string): Promise<ConditionChip[]> {
 
 export async function removeConditionChip(text: string): Promise<ConditionChip[]> {
   return invoke<ConditionChip[]>('remove_condition_chip', { text });
+}
+
+export async function reorderConditionChips(orderedIds: string[]): Promise<ConditionChip[]> {
+  return invoke<ConditionChip[]>('reorder_condition_chips', { orderedIds });
 }
 
 export async function syncConditionChips(): Promise<ConditionChip[]> {

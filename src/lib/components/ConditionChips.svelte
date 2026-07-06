@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { addConditionChip, listConditionChips, removeConditionChip } from '../api/conditions';
+  import {
+    addConditionChip,
+    listConditionChips,
+    removeConditionChip,
+    reorderConditionChips,
+  } from '../api/conditions';
+  import type { ConditionChip } from '../api/conditions';
 
   let { onAdd }: { onAdd: (condition: string) => void } = $props();
 
@@ -25,17 +31,26 @@
     'Sleep apnea',
   ];
 
-  let chips = $state<string[]>([]);
+  // Build default chip objects for display fallback (when not loaded or empty).
+  const DEFAULT_CHIPS: ConditionChip[] = DEFAULT_CONDITIONS.map((text, i) => ({
+    id: '',
+    text,
+    updated_at: '',
+    deleted_at: null,
+    sort_order: i,
+  }));
+
+  let chips = $state<ConditionChip[]>([]);
   let loaded = $state(false);
   let adding = $state(false);
   let newCondition = $state('');
 
   // Display defaults until the backend list loads (or if it's empty).
-  let conditions = $derived(loaded && chips.length > 0 ? chips : DEFAULT_CONDITIONS);
+  let displayChips = $derived(loaded && chips.length > 0 ? chips : DEFAULT_CHIPS);
 
   onMount(async () => {
     try {
-      chips = (await listConditionChips()).map((c) => c.text);
+      chips = await listConditionChips();
     } catch (e) {
       console.error('Failed to load condition chips:', e);
     }
@@ -46,14 +61,13 @@
     const trimmed = newCondition.trim();
     if (!trimmed) return;
     // Dedup check (case-insensitive).
-    if (conditions.some((c) => c.toLowerCase() === trimmed.toLowerCase())) {
+    if (displayChips.some((c) => c.text.toLowerCase() === trimmed.toLowerCase())) {
       newCondition = '';
       adding = false;
       return;
     }
     try {
-      const updated = await addConditionChip(trimmed);
-      chips = updated.map((c) => c.text);
+      chips = await addConditionChip(trimmed);
     } catch (e) {
       console.error('Failed to add condition chip:', e);
     }
@@ -61,13 +75,58 @@
     adding = false;
   }
 
-  async function removeCondition(condition: string) {
+  async function removeCondition(conditionText: string) {
     try {
-      const updated = await removeConditionChip(condition);
-      chips = updated.map((c) => c.text);
+      chips = await removeConditionChip(conditionText);
     } catch (e) {
       console.error('Failed to remove condition chip:', e);
     }
+  }
+
+  // Drag-and-drop state
+  let dragIndex = $state<number | null>(null);
+  let dragOverIndex = $state<number | null>(null);
+
+  function handleDragStart(_e: DragEvent, index: number) {
+    dragIndex = index;
+  }
+
+  function handleDragOver(e: DragEvent, index: number) {
+    e.preventDefault();
+    dragOverIndex = index;
+  }
+
+  async function handleDrop(e: DragEvent, dropIndex: number) {
+    e.preventDefault();
+    if (dragIndex === null || dragIndex === dropIndex) {
+      dragIndex = null;
+      dragOverIndex = null;
+      return;
+    }
+    // Only reorder if we have real chip IDs (loaded from backend).
+    if (!loaded || chips.length === 0) {
+      dragIndex = null;
+      dragOverIndex = null;
+      return;
+    }
+    const reordered = [...chips];
+    const [moved] = reordered.splice(dragIndex, 1);
+    reordered.splice(dropIndex, 0, moved);
+    chips = reordered; // optimistic UI update
+
+    const orderedIds = reordered.map((c) => c.id);
+    dragIndex = null;
+    dragOverIndex = null;
+    try {
+      chips = await reorderConditionChips(orderedIds);
+    } catch (e) {
+      console.error('Failed to reorder condition chips:', e);
+    }
+  }
+
+  function handleDragEnd() {
+    dragIndex = null;
+    dragOverIndex = null;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -82,22 +141,32 @@
 </script>
 
 <div class="condition-chips" role="group" aria-label="Common conditions quick-add">
-  {#each conditions as condition (condition)}
-    <div class="condition-chip-wrapper">
+  {#each displayChips as chip, i (chip.text)}
+    <div
+      class="condition-chip-wrapper"
+      role="listitem"
+      class:drag-over={dragOverIndex === i && dragIndex !== null}
+      draggable={loaded}
+      ondragstart={(e) => handleDragStart(e, i)}
+      ondragover={(e) => handleDragOver(e, i)}
+      ondrop={(e) => handleDrop(e, i)}
+      ondragend={handleDragEnd}
+      style:opacity={dragIndex === i ? '0.4' : '1'}
+    >
       <button
         class="condition-chip"
         type="button"
-        onclick={() => onAdd(condition)}
-        title={`Add "${condition}" to the list`}
+        onclick={() => onAdd(chip.text)}
+        title={`Add "${chip.text}" to the list`}
       >
-        {condition}
+        {chip.text}
       </button>
       <button
         class="chip-remove"
         type="button"
-        onclick={() => removeCondition(condition)}
-        title={`Remove "${condition}" from chips`}
-        aria-label="Remove {condition}"
+        onclick={() => removeCondition(chip.text)}
+        title={`Remove "${chip.text}" from chips`}
+        aria-label="Remove {chip.text}"
       >
         ×
       </button>
@@ -154,6 +223,18 @@
   .condition-chip-wrapper:hover {
     background-color: color-mix(in srgb, var(--success, #22c55e) 18%, transparent);
     border-color: color-mix(in srgb, var(--success, #22c55e) 45%, transparent);
+  }
+
+  .condition-chip-wrapper.drag-over {
+    border-left: 2px solid var(--accent, #3b82f6);
+  }
+
+  .condition-chip-wrapper[draggable='true'] {
+    cursor: grab;
+  }
+
+  .condition-chip-wrapper[draggable='true']:active {
+    cursor: grabbing;
   }
 
   .condition-chip {
