@@ -280,6 +280,8 @@
     background-color: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--success, #22c55e) 30%, transparent);
     overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   /* Grip handle — visual affordance for drag. Muted by default, brightens
