@@ -179,7 +179,7 @@
         // First successful drag — dismiss the hint permanently.
         if (showDragHint) {
           showDragHint = false;
-          try { localStorage.setItem('hasDraggedChips', '1'); } catch {}
+          try { localStorage.setItem('hasDraggedChips', '1'); } catch { /* localStorage may be unavailable */ }
         }
       }
     }
