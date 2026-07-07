@@ -19,6 +19,13 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # tiptap v3 is a major breaking change requiring all editor extensions
+      # to migrate together. Handle in a dedicated upgrade effort.
+      - dependency-name: "@tiptap/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tiptap-markdown"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "cargo"
     directory: "/"
