@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import {
     addConditionChip,
     listConditionChips,
@@ -54,14 +54,36 @@
   // Display defaults until the backend list loads (or if it's empty).
   let displayChips = $derived(loaded && chips.length > 0 ? chips : DEFAULT_CHIPS);
 
+  // Poll handle for periodic chip refresh (cleared on destroy).
+  let pollHandle: ReturnType<typeof setInterval> | null = null;
+
+  onDestroy(() => {
+    if (pollHandle) clearInterval(pollHandle);
+  });
+
   onMount(async () => {
+    await refreshChips();
+    // Poll every 30s so changes from other machines (via server sync) appear
+    // without requiring an app restart. When sync is off or unpaired, this
+    // just re-reads the local DB — negligible cost.
+    pollHandle = setInterval(refreshChips, 30_000);
+  });
+
+  async function refreshChips() {
     try {
-      chips = await listConditionChips();
+      const result = await listConditionChips();
+      // Only update if the list actually changed (avoid unnecessary re-renders).
+      if (
+        result.length !== chips.length ||
+        result.some((c, i) => c.id !== chips[i]?.id || c.sort_order !== chips[i]?.sort_order)
+      ) {
+        chips = result;
+      }
     } catch (e) {
       console.error('Failed to load condition chips:', e);
     }
     loaded = true;
-  });
+  }
 
   async function addNewCondition() {
     const trimmed = newCondition.trim();
