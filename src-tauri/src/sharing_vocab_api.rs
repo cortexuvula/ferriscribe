@@ -108,7 +108,10 @@ pub async fn spawn(
             axum::routing::delete(dict_remove_handler),
         )
         .route("/v1/condition-chips", get(condition_chips_list_handler))
-        .route("/v1/condition-chips/sync", post(condition_chips_sync_handler))
+        .route(
+            "/v1/condition-chips/sync",
+            post(condition_chips_sync_handler),
+        )
         .with_state(state);
 
     let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")

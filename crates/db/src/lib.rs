@@ -40,8 +40,8 @@ pub mod generations;
 pub mod vectors;
 pub use generations::{Generation, GenerationInsert, GenerationsRepo};
 pub mod user_dictionary;
-pub use user_dictionary::UserDictionaryRepo;
 pub use condition_chips::ConditionChipsRepo;
+pub use user_dictionary::UserDictionaryRepo;
 
 use std::path::Path;
 

@@ -64,7 +64,13 @@ impl ConditionChipsRepo {
                  updated_at = excluded.updated_at,
                  deleted_at = excluded.deleted_at,
                  sort_order = excluded.sort_order",
-            params![chip.id, chip.text, chip.updated_at, chip.deleted_at, chip.sort_order],
+            params![
+                chip.id,
+                chip.text,
+                chip.updated_at,
+                chip.deleted_at,
+                chip.sort_order
+            ],
         )?;
         Ok(())
     }
@@ -107,10 +113,8 @@ impl ConditionChipsRepo {
     ) -> DbResult<Vec<ConditionChip>> {
         // Load all local chips once and index by id for O(1) lookup.
         let local_all = Self::list_all(conn)?;
-        let local_map: std::collections::HashMap<&str, &ConditionChip> = local_all
-            .iter()
-            .map(|c| (c.id.as_str(), c))
-            .collect();
+        let local_map: std::collections::HashMap<&str, &ConditionChip> =
+            local_all.iter().map(|c| (c.id.as_str(), c)).collect();
 
         for remote in remote_chips {
             match local_map.get(remote.id.as_str()) {
@@ -191,7 +195,11 @@ impl ConditionChipsRepo {
     /// Sets sort_order = index for each, bumps updated_at on all listed rows.
     /// Chips not in the list keep their existing sort_order.
     /// Returns the active list in the new order.
-    pub fn reorder(conn: &Connection, ordered_ids: &[String], now_iso: &str) -> DbResult<Vec<ConditionChip>> {
+    pub fn reorder(
+        conn: &Connection,
+        ordered_ids: &[String],
+        now_iso: &str,
+    ) -> DbResult<Vec<ConditionChip>> {
         for (index, id) in ordered_ids.iter().enumerate() {
             conn.execute(
                 "UPDATE condition_chips
@@ -308,14 +316,18 @@ mod tests {
 
         let result = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("merge");
 
-        assert!(result.is_empty(), "active list should be empty after tombstone merge");
+        assert!(
+            result.is_empty(),
+            "active list should be empty after tombstone merge"
+        );
     }
 
     #[test]
     fn merge_re_add_after_tombstone() {
         let conn = fresh();
         // Local tombstone at t=600.
-        ConditionChipsRepo::upsert(&conn, &chip("Hypertension", 600, true)).expect("upsert tombstone");
+        ConditionChipsRepo::upsert(&conn, &chip("Hypertension", 600, true))
+            .expect("upsert tombstone");
         // Remote active at t=1200 — newer, so the chip is resurrected.
         let remote = vec![chip("Hypertension", 1200, false)];
 
@@ -349,7 +361,10 @@ mod tests {
         let first = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("first merge");
         let second = ConditionChipsRepo::merge_incoming(&conn, &remote).expect("second merge");
 
-        assert_eq!(first, second, "merging the same list twice must yield the same result");
+        assert_eq!(
+            first, second,
+            "merging the same list twice must yield the same result"
+        );
         assert_eq!(second.len(), 2);
     }
 
@@ -357,11 +372,14 @@ mod tests {
     fn prune_tombstones_removes_old_only() {
         let conn = fresh();
         // Old tombstone at t=0.
-        ConditionChipsRepo::upsert(&conn, &chip("Old Condition", 0, true)).expect("upsert old tombstone");
+        ConditionChipsRepo::upsert(&conn, &chip("Old Condition", 0, true))
+            .expect("upsert old tombstone");
         // Recent tombstone at t=900.
-        ConditionChipsRepo::upsert(&conn, &chip("Recent Condition", 900, true)).expect("upsert recent tombstone");
+        ConditionChipsRepo::upsert(&conn, &chip("Recent Condition", 900, true))
+            .expect("upsert recent tombstone");
         // Active chip — must be untouched.
-        ConditionChipsRepo::upsert(&conn, &chip("Active Condition", 300, false)).expect("upsert active");
+        ConditionChipsRepo::upsert(&conn, &chip("Active Condition", 300, false))
+            .expect("upsert active");
 
         // Prune tombstones older than t=500.
         let removed = ConditionChipsRepo::prune_tombstones(&conn, &now(500)).expect("prune");
@@ -385,8 +403,12 @@ mod tests {
         assert_eq!(after_add[0].text, "Hypertension");
 
         // Remove returns an empty active list.
-        let after_remove = ConditionChipsRepo::remove_by_text(&conn, "Hypertension", &now(200)).expect("remove");
-        assert!(after_remove.is_empty(), "active list should be empty after remove");
+        let after_remove =
+            ConditionChipsRepo::remove_by_text(&conn, "Hypertension", &now(200)).expect("remove");
+        assert!(
+            after_remove.is_empty(),
+            "active list should be empty after remove"
+        );
 
         // The tombstone should still exist in list_all.
         let all = ConditionChipsRepo::list_all(&conn).expect("list_all");
@@ -408,10 +430,12 @@ mod tests {
         let alpha_id = deterministic_id("Alpha");
         let beta_id = deterministic_id("Beta");
         let reordered =
-            ConditionChipsRepo::reorder(&conn, &[gamma_id, alpha_id, beta_id], &now(100))
-                .unwrap();
+            ConditionChipsRepo::reorder(&conn, &[gamma_id, alpha_id, beta_id], &now(100)).unwrap();
         assert_eq!(
-            reordered.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            reordered
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
             vec!["Gamma", "Alpha", "Beta"],
             "list_active should reflect new sort_order"
         );
@@ -432,7 +456,8 @@ mod tests {
         let all = ConditionChipsRepo::list_all(&conn).unwrap();
         for chip in &all {
             assert_eq!(
-                chip.updated_at, now(100),
+                chip.updated_at,
+                now(100),
                 "updated_at should be bumped by reorder"
             );
         }
@@ -449,10 +474,14 @@ mod tests {
 
         let alpha_id = deterministic_id("Alpha");
         let beta_id = deterministic_id("Beta");
-        let reordered = ConditionChipsRepo::reorder(&conn, &[beta_id, alpha_id], &now(100)).unwrap();
+        let reordered =
+            ConditionChipsRepo::reorder(&conn, &[beta_id, alpha_id], &now(100)).unwrap();
 
         assert_eq!(
-            reordered.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            reordered
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
             vec!["Beta", "Alpha", "Gamma"]
         );
     }

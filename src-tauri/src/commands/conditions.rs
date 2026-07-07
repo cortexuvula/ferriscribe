@@ -80,7 +80,8 @@ pub async fn list_condition_chips(
                 return tokio::task::spawn_blocking(move || {
                     let conn = db.conn()?;
                     medical_db::condition_chips::ConditionChipsRepo::merge_incoming(
-                        &conn, &server_chips,
+                        &conn,
+                        &server_chips,
                     )
                     .map_err(AppError::from)
                 })
@@ -98,8 +99,7 @@ pub async fn list_condition_chips(
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
         let conn = db.conn()?;
-        medical_db::condition_chips::ConditionChipsRepo::list_active(&conn)
-            .map_err(AppError::from)
+        medical_db::condition_chips::ConditionChipsRepo::list_active(&conn).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
@@ -254,8 +254,7 @@ pub async fn sync_condition_chips_cmd(
     let db = Arc::clone(&state.db);
     let local_all = tokio::task::spawn_blocking(move || {
         let conn = db.conn()?;
-        medical_db::condition_chips::ConditionChipsRepo::list_all(&conn)
-            .map_err(AppError::from)
+        medical_db::condition_chips::ConditionChipsRepo::list_all(&conn).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
@@ -282,8 +281,7 @@ pub async fn sync_condition_chips_cmd(
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || {
         let conn = db.conn()?;
-        medical_db::condition_chips::ConditionChipsRepo::list_active(&conn)
-            .map_err(AppError::from)
+        medical_db::condition_chips::ConditionChipsRepo::list_active(&conn).map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::Other(format!("Task join error: {e}")))?

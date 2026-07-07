@@ -35,10 +35,10 @@
 //! module for the full command inventory.
 
 mod commands;
+mod conditions_remote;
 pub mod corpus_export;
 mod sharing_vocab_api;
 mod state;
-mod conditions_remote;
 mod templates_remote;
 mod user_dict_remote;
 mod vocab_remote;

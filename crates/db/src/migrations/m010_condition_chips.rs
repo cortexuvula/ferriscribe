@@ -40,13 +40,17 @@ fn seed_from_custom_conditions(conn: &Connection) -> DbResult<()> {
         )
         .ok();
 
-    let Some(json) = json else { return Ok(()); };
+    let Some(json) = json else {
+        return Ok(());
+    };
     let config: AppConfig = match serde_json::from_str(&json) {
         Ok(c) => c,
         Err(_) => return Ok(()), // unparseable config — skip seeding
     };
 
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let now = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
     for text in &config.custom_conditions {
         let chip = ConditionChip {
             id: deterministic_id(text),
@@ -62,6 +66,9 @@ fn seed_from_custom_conditions(conn: &Connection) -> DbResult<()> {
         );
     }
 
-    tracing::info!(count = config.custom_conditions.len(), "Seeded condition chips from custom_conditions");
+    tracing::info!(
+        count = config.custom_conditions.len(),
+        "Seeded condition chips from custom_conditions"
+    );
     Ok(())
 }
