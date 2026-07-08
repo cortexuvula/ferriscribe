@@ -7,6 +7,7 @@
     reorderConditionChips,
   } from '../api/conditions';
   import type { ConditionChip } from '../api/conditions';
+  import { settings } from '../stores/settings.svelte';
 
   let { onAdd }: { onAdd: (condition: string) => void } = $props();
 
@@ -63,10 +64,15 @@
 
   onMount(async () => {
     await refreshChips();
-    // Poll every 30s so changes from other machines (via server sync) appear
-    // without requiring an app restart. When sync is off or unpaired, this
-    // just re-reads the local DB — negligible cost.
-    pollHandle = setInterval(refreshChips, 30_000);
+  });
+
+  // Only poll when sync is enabled — avoids pointless DB reads for users
+  // who haven't opted into chip sync (the default).
+  $effect(() => {
+    if (settings.state.sync_condition_chips) {
+      pollHandle = setInterval(refreshChips, 30_000);
+      return () => { if (pollHandle) clearInterval(pollHandle); };
+    }
   });
 
   async function refreshChips() {
