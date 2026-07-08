@@ -151,6 +151,7 @@ class AudioStore {
     this.state = {
       ...this.state,
       state: 'stopped',
+      waveformData: [], // clear the visualizer so it returns to a flat line
       lastRecordingId: this.state.lastRecordingId, // keep existing until backend confirms
     };
     try {
