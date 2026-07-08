@@ -8,6 +8,7 @@
   } from '../api/conditions';
   import type { ConditionChip } from '../api/conditions';
   import { settings } from '../stores/settings.svelte';
+  import { toasts } from '../stores/toasts.svelte';
 
   let { onAdd }: { onAdd: (condition: string) => void } = $props();
 
@@ -58,8 +59,21 @@
   // Poll handle for periodic chip refresh (cleared on destroy).
   let pollHandle: ReturnType<typeof setInterval> | null = null;
 
+  // Tracks whether the user made a local mutation (add/remove/reorder) within
+  // the last 5s. If the 30s poll detects a remote change while dirtySince is
+  // set, we surface a toast instead of silently clobbering their edit.
+  let dirtySince = $state<number | null>(null);
+  let dirtyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function markDirty() {
+    dirtySince = Date.now();
+    if (dirtyTimer) clearTimeout(dirtyTimer);
+    dirtyTimer = setTimeout(() => { dirtySince = null; }, 5000);
+  }
+
   onDestroy(() => {
     if (pollHandle) clearInterval(pollHandle);
+    if (dirtyTimer) clearTimeout(dirtyTimer);
   });
 
   onMount(async () => {
@@ -83,6 +97,16 @@
         result.length !== chips.length ||
         result.some((c, i) => c.id !== chips[i]?.id || c.sort_order !== chips[i]?.sort_order)
       ) {
+        // If the user made a local change within the last 5s, the poll is
+        // about to clobber it — surface a toast instead of silently
+        // overwriting their edit.
+        if (dirtySince !== null) {
+          toasts.add({
+            message: 'Condition chips updated from another machine',
+            type: 'success',
+            autoDismiss: true,
+          });
+        }
         chips = result;
       }
     } catch (e) {
@@ -101,6 +125,7 @@
       return;
     }
     try {
+      markDirty();
       chips = await addConditionChip(trimmed);
     } catch (e) {
       console.error('Failed to add condition chip:', e);
@@ -111,6 +136,7 @@
 
   async function removeCondition(conditionText: string) {
     try {
+      markDirty();
       chips = await removeConditionChip(conditionText);
     } catch (e) {
       console.error('Failed to remove condition chip:', e);
@@ -198,6 +224,7 @@
         chips = reordered; // optimistic UI update
 
         const orderedIds = reordered.map((c) => c.id);
+        markDirty();
         try {
           chips = await reorderConditionChips(orderedIds);
         } catch (err) {
