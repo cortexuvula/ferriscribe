@@ -2,8 +2,8 @@
 //! databases (simulating two machines).
 
 use medical_core::types::condition_chip::{ConditionChip, deterministic_id};
-use medical_db::condition_chips::ConditionChipsRepo;
 use medical_db::Database;
+use medical_db::condition_chips::ConditionChipsRepo;
 
 /// ISO 8601 timestamp offset from a fixed base epoch.
 fn now(offset_secs: i64) -> String {
@@ -54,8 +54,14 @@ fn both_add_unique_chips_converge() {
     let mut b_texts = texts(&b_after);
     a_texts.sort();
     b_texts.sort();
-    assert_eq!(a_texts, vec!["Diabetes".to_string(), "Hypertension".to_string()]);
-    assert_eq!(b_texts, vec!["Diabetes".to_string(), "Hypertension".to_string()]);
+    assert_eq!(
+        a_texts,
+        vec!["Diabetes".to_string(), "Hypertension".to_string()]
+    );
+    assert_eq!(
+        b_texts,
+        vec!["Diabetes".to_string(), "Hypertension".to_string()]
+    );
 }
 
 #[test]
@@ -100,7 +106,10 @@ fn tombstone_propagates_across_roundtrip() {
     let (a_after, b_after) = sync_roundtrip(&conn_a, &conn_b);
 
     assert!(a_after.is_empty(), "A should have no active chips");
-    assert!(b_after.is_empty(), "B should have no active chips (tombstone propagated)");
+    assert!(
+        b_after.is_empty(),
+        "B should have no active chips (tombstone propagated)"
+    );
 
     // The tombstone itself should be present in list_all on both sides.
     let a_all = ConditionChipsRepo::list_all(&conn_a).unwrap();

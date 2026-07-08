@@ -324,9 +324,8 @@ impl RecordingsRepo {
     /// or hard-quit mid-encryption. Rows with a missing/unparseable id or
     /// path are dropped (they can't be encrypted by name).
     pub fn list_encryption_pending(conn: &Connection) -> DbResult<Vec<(Uuid, PathBuf)>> {
-        let mut stmt = conn.prepare(
-            "SELECT id, audio_path FROM recordings WHERE encryption_pending = 1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, audio_path FROM recordings WHERE encryption_pending = 1")?;
         let rows = stmt
             .query_map([], |row| {
                 let id_str: String = row.get(0)?;

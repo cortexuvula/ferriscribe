@@ -412,9 +412,7 @@ pub async fn subscribe_condition_chips(
             ) {
                 Some(r) => r,
                 None => {
-                    tracing::warn!(
-                        "condition chip SSE subscription target unavailable, retrying"
-                    );
+                    tracing::warn!("condition chip SSE subscription target unavailable, retrying");
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                     continue;
