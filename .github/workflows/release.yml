@@ -132,6 +132,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
       - name: Generate consolidated latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
