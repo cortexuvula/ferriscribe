@@ -659,6 +659,55 @@ impl AppState {
             }
         }
 
+        // Sweep: encrypt any recordings left pending by a crash. A row is
+        // flagged encryption_pending=1 by stop_recording right before it
+        // spawns the background encrypt task; the task clears the flag when
+        // done. If the app died in between, the WAV is still plaintext at
+        // rest — finish the encryption here so no PHI audio is left
+        // unencrypted. Best-effort: a failure here must not block boot.
+        if let Ok(conn) = db.conn() {
+            let pending = match RecordingsRepo::list_encryption_pending(&conn) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "encryption sweep: list_encryption_pending failed");
+                    Vec::new()
+                }
+            };
+            if !pending.is_empty() {
+                info!(
+                    count = pending.len(),
+                    "Encrypting pending recordings from previous session"
+                );
+                for (id, path) in &pending {
+                    // Guard against the crash-after-encrypt-but-before-clear-
+                    // flag window: if the file is already encrypted on disk
+                    // (FE1 magic), just clear the flag instead of re-encrypting
+                    // — re-encrypting ciphertext would corrupt the file.
+                    if medical_security::file_crypto::is_encrypted(path) {
+                        let _ = RecordingsRepo::set_encryption_done(&conn, id);
+                        tracing::debug!(
+                            recording_id = %id,
+                            "Pending recording already encrypted on disk; cleared flag"
+                        );
+                        continue;
+                    }
+                    match medical_security::file_crypto::encrypt_file_in_place(path) {
+                        Ok(()) => {
+                            let _ = RecordingsRepo::set_encryption_done(&conn, id);
+                            tracing::debug!(recording_id = %id, "Encrypted pending recording");
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                recording_id = %id,
+                                "Failed to encrypt pending recording"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let config_dir = data_dir.join("config");
         let keys = KeyStorage::open(&config_dir)?;
 
