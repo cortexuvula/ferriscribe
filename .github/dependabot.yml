@@ -38,6 +38,18 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # Major bumps requiring dedicated migration effort (multi-crate, API changes)
+      - dependency-name: "rand"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "zip"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "rubato"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "sha2"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "rodio"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
