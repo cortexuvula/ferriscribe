@@ -15,7 +15,7 @@
   import PatientContextSidebar from './record/PatientContextSidebar.svelte';
   import ResizeHandle from './record/ResizeHandle.svelte';
   import { open } from '@tauri-apps/plugin-dialog';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { contextTemplates } from '../stores/contextTemplates.svelte';
   import { toasts } from '../stores/toasts.svelte';
   import { rsvp } from '../stores/rsvp.svelte';
@@ -86,6 +86,11 @@
 
   onMount(() => {
     contextTemplates.load();
+    window.addEventListener('keydown', handleGlobalKeydown);
+  });
+
+  onDestroy(() => {
+    window.removeEventListener('keydown', handleGlobalKeydown);
   });
 
   // Import flow state
@@ -313,6 +318,43 @@
     } catch (e) {
       console.error('Failed to open speed reader:', e);
       toasts.error(`Failed to open speed reader: ${e}`);
+    }
+  }
+
+  // Global keyboard shortcuts for the Record tab.
+  //   Space      — toggle record/stop
+  //   Cmd+Enter  — generate (regenerate) SOAP for the selected recording
+  // Both bail out when the user is typing in an input, textarea, or
+  // contenteditable element so the shortcuts don't hijack normal text entry.
+  function handleGlobalKeydown(e: KeyboardEvent) {
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
+
+    // Space — toggle record/stop.
+    // recording -> stop; idle/stopped/paused -> start a fresh recording.
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (audio.state.state === 'recording') {
+        handleStopRecording();
+      } else {
+        handleStartRecording();
+      }
+      return;
+    }
+
+    // Cmd+Enter (Mac) or Ctrl+Enter — regenerate the SOAP note for the
+    // selected recording. handleRegenerateSoap already no-ops when there's
+    // no recording or a regeneration is in flight.
+    if ((e.metaKey || e.ctrlKey) && e.code === 'Enter') {
+      e.preventDefault();
+      handleRegenerateSoap();
     }
   }
 </script>
