@@ -367,6 +367,7 @@ pub fn run() {
             commands::conditions::remove_condition_chip,
             commands::conditions::sync_condition_chips_cmd,
             commands::conditions::reorder_condition_chips,
+            commands::conditions::subscribe_condition_chips,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

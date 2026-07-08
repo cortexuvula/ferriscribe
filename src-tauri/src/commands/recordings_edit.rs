@@ -72,7 +72,7 @@ pub async fn save_recording_field(
         )
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 /// Inner logic — testable without `tauri::State`.

@@ -54,14 +54,14 @@
 
     <div class="controls">
       {#if audio.state.state === 'idle'}
-        <button class="btn btn-record" onclick={handleStart}>
+        <button class="btn btn-record" onclick={handleStart} title="Record (Space)">
           <span class="btn-icon">●</span> Record
         </button>
       {:else if audio.state.state === 'recording'}
         <button class="btn btn-pause" onclick={() => audio.pause()}>
           <span class="btn-icon">⏸</span> Pause
         </button>
-        <button class="btn btn-stop" onclick={handleStop}>
+        <button class="btn btn-stop" onclick={handleStop} title="Stop (Space)">
           <span class="btn-icon">■</span> Stop
         </button>
         <button class="btn btn-cancel" onclick={() => audio.cancel()}>
@@ -71,14 +71,14 @@
         <button class="btn btn-resume" onclick={() => audio.resume()}>
           <span class="btn-icon">▶</span> Resume
         </button>
-        <button class="btn btn-stop" onclick={handleStop}>
+        <button class="btn btn-stop" onclick={handleStop} title="Stop (Space)">
           <span class="btn-icon">■</span> Stop
         </button>
         <button class="btn btn-cancel" onclick={() => audio.cancel()}>
           <span class="btn-icon">✕</span> Cancel
         </button>
       {:else if audio.state.state === 'stopped'}
-        <button class="btn btn-new" onclick={handleNew}>
+        <button class="btn btn-new" onclick={handleNew} title="Record (Space)">
           <span class="btn-icon">+</span> New Recording
         </button>
       {/if}

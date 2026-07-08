@@ -94,7 +94,7 @@ pub async fn transcribe_recording_inner(
         Ok::<_, AppError>(recording)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
 
     let wav_path = if recording.audio_path.exists() {
         recording.audio_path.clone()

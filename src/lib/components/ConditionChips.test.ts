@@ -45,6 +45,19 @@ vi.mock('../api/conditions', () => ({
   reorderConditionChips: (...args: unknown[]) => mockReorderConditionChips(...(args as [string[]])),
 }));
 
+// The component now subscribes to a Tauri SSE event on mount. Mock the Tauri
+// event + core APIs so importing/calling them doesn't fail under jsdom.
+const mockInvoke = vi.fn();
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => mockInvoke(...(args as [string, unknown?])),
+}));
+
+const mockListen = vi.fn();
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (...args: unknown[]) =>
+    mockListen(...(args as [string, (e: unknown) => void])),
+}));
+
 // Import AFTER mocks are registered.
 import ConditionChips from './ConditionChips.svelte';
 
@@ -91,6 +104,14 @@ beforeEach(() => {
   mockAddConditionChip.mockResolvedValue([]);
   mockRemoveConditionChip.mockResolvedValue([]);
   mockReorderConditionChips.mockResolvedValue([]);
+
+  // The component calls `listen('condition-chips-changed', …)` and
+  // `invoke('subscribe_condition_chips')` on mount. Default both to no-ops so
+  // mount doesn't reject and tests stay focused on the chip behavior.
+  mockListen.mockReset();
+  mockListen.mockResolvedValue(async () => {});
+  mockInvoke.mockReset();
+  mockInvoke.mockResolvedValue(undefined);
 
   // jsdom doesn't implement pointer capture methods. Polyfill them as no-ops
   // so the pointer-event-based DnD handlers don't throw.
@@ -336,5 +357,41 @@ describe('ConditionChips — drag-and-drop reorder', () => {
     // A simple click (no drag movement) should call onAdd.
     await fireEvent.click(screen.getByRole('button', { name: 'Hypertension' }));
     expect(onAdd).toHaveBeenCalledWith('Hypertension');
+  });
+});
+
+describe('ConditionChips — realtime SSE sync', () => {
+  it('subscribes to the condition-chips-changed event and the backend on mount', async () => {
+    // Capture the handler passed to `listen` so we can simulate a server push.
+    let capturedHandler: ((e: unknown) => void) | null = null;
+    mockListen.mockImplementation(async (_eventName: string, handler: (e: unknown) => void) => {
+      capturedHandler = handler;
+      return async () => {};
+    });
+    mockListConditionChips.mockResolvedValue([chip('Hypertension')]);
+
+    render(ConditionChips, { onAdd: () => {} });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Hypertension' })).toBeTruthy();
+    });
+
+    // The component registers a listener for the SSE event …
+    await waitFor(() => {
+      expect(mockListen).toHaveBeenCalledWith('condition-chips-changed', expect.any(Function));
+    });
+    // … and starts the backend SSE subscription task.
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('subscribe_condition_chips');
+    });
+
+    // Simulate a server push: a second chip now exists on the server. Firing
+    // the captured handler should trigger a refreshChips() that pulls it in.
+    mockListConditionChips.mockResolvedValue([chip('Hypertension'), chip('Asthma')]);
+    expect(capturedHandler).not.toBeNull();
+    capturedHandler!({ payload: null });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Asthma' })).toBeTruthy();
+    });
   });
 });

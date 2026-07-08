@@ -39,7 +39,7 @@ pub async fn user_dict_list(state: tauri::State<'_, AppState>) -> AppResult<Vec<
         medical_db::user_dictionary::UserDictionaryRepo::list(&conn).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 #[tauri::command]
@@ -55,7 +55,7 @@ pub async fn user_dict_add(state: tauri::State<'_, AppState>, word: String) -> A
         medical_db::user_dictionary::UserDictionaryRepo::add(&conn, &word).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 #[tauri::command]
@@ -72,5 +72,5 @@ pub async fn user_dict_remove(state: tauri::State<'_, AppState>, word: String) -
             .map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }

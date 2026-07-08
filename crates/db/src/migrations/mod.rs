@@ -15,6 +15,7 @@ pub mod m008_peer_discussion;
 pub mod m009_soft_delete;
 pub mod m010_condition_chips;
 pub mod m011_condition_chip_order;
+pub mod m012_encryption_pending;
 
 use rusqlite::Connection;
 
@@ -93,6 +94,11 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 11,
             name: "condition_chip_order",
             up: m011_condition_chip_order::up,
+        },
+        Migration {
+            version: 12,
+            name: "encryption_pending",
+            up: m012_encryption_pending::up,
         },
     ]
 }

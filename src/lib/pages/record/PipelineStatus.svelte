@@ -128,7 +128,7 @@
           class="btn-secondary"
           onclick={onRegenerate}
           disabled={regenerating}
-          title="Regenerate the SOAP note using the current Patient Context (keeps the transcript)"
+          title="Generate SOAP (Cmd+Enter) — regenerate using the current Patient Context (keeps the transcript)"
         >
           {#if regenerating}<span class="spinner"></span>{/if}
           {regenerating ? 'Regenerating…' : 'Regenerate'}

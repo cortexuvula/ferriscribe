@@ -42,14 +42,17 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State as AxumState},
     http::{HeaderMap, StatusCode},
+    response::sse::{Event, Sse},
     routing::{get, post, put},
 };
 use chrono::Utc;
+use futures_util::Stream;
 use medical_core::types::settings::ContextTemplate;
 use medical_core::types::vocabulary::{VocabularyCategory, VocabularyEntry};
 use medical_db::{Database, settings::SettingsRepo, vocabulary::VocabularyRepo};
 use medical_sharing::token_store::TokenStore;
 use serde::Deserialize;
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -61,6 +64,9 @@ use uuid::Uuid;
 struct ApiState {
     db: Arc<Database>,
     tokens: Arc<TokenStore>,
+    /// Broadcasts `()` whenever condition chips change on the server so SSE
+    /// subscribers can push realtime notifications to their clients.
+    chips_changed_tx: broadcast::Sender<()>,
 }
 
 /// Spawn the vocab/templates/dictionary HTTP API server on `0.0.0.0:{port}`.
@@ -73,7 +79,12 @@ pub async fn spawn(
     tokens: Arc<TokenStore>,
     port: u16,
 ) -> Result<JoinHandle<()>, medical_core::error::AppError> {
-    let state = ApiState { db, tokens };
+    let (chips_changed_tx, _) = broadcast::channel::<()>(16);
+    let state = ApiState {
+        db,
+        tokens,
+        chips_changed_tx,
+    };
     let app = Router::new()
         .route(
             "/v1/vocabulary",
@@ -111,6 +122,10 @@ pub async fn spawn(
         .route(
             "/v1/condition-chips/sync",
             post(condition_chips_sync_handler),
+        )
+        .route(
+            "/v1/condition-chips/events",
+            get(condition_chips_events_handler),
         )
         .with_state(state);
 
@@ -677,10 +692,41 @@ async fn condition_chips_sync_handler(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Notify SSE subscribers that chips changed. Best-effort: no receivers is
+    // not an error (send returns Err only when there are no active receivers,
+    // which is the normal idle case).
+    let _ = state.chips_changed_tx.send(());
+
     info!(
         incoming_count,
         result_count = merged.len(),
         "condition_chips_api: sync"
     );
     Ok(Json(merged))
+}
+
+/// GET /v1/condition-chips/events — Server-Sent Events stream.
+///
+/// Pushes a `data: connected` event immediately on connection, then a
+/// `data: changed` event each time a condition-chips sync completes on the
+/// server. Clients use this to refresh their local chip list in near-realtime
+/// instead of waiting for the 30s poll. The stream stays open until the client
+/// disconnects or the server shuts down.
+async fn condition_chips_events_handler(
+    AxumState(state): AxumState<ApiState>,
+    headers: HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, StatusCode> {
+    let _ = authorize(&state, &headers)?;
+    let mut rx = state.chips_changed_tx.subscribe();
+    let stream = async_stream::stream! {
+        yield Ok(Event::default().data("connected"));
+        loop {
+            match rx.recv().await {
+                Ok(()) => yield Ok(Event::default().data("changed")),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Ok(Sse::new(stream))
 }

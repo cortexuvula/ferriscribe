@@ -301,6 +301,45 @@ impl RecordingsRepo {
         Ok(updated as u32)
     }
 
+    /// Mark a recording's background encryption as complete (clears the
+    /// `encryption_pending` flag set by `stop_recording`).
+    ///
+    /// Called from the `spawn_blocking` task that encrypts the WAV file, on
+    /// both success and failure — the flag is "encryption attempt finished",
+    /// not "encryption succeeded". On failure the recording is left as
+    /// plaintext at rest, which the reader (`open_recording_wav`) handles
+    /// transparently.
+    pub fn set_encryption_done(conn: &Connection, id: &Uuid) -> DbResult<()> {
+        conn.execute(
+            "UPDATE recordings SET encryption_pending = 0 WHERE id = ?1",
+            [&id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Return the `(id, audio_path)` of every recording still flagged
+    /// `encryption_pending = 1`.
+    ///
+    /// Used by the startup sweep to encrypt WAVs left plaintext by a crash
+    /// or hard-quit mid-encryption. Rows with a missing/unparseable id or
+    /// path are dropped (they can't be encrypted by name).
+    pub fn list_encryption_pending(conn: &Connection) -> DbResult<Vec<(Uuid, PathBuf)>> {
+        let mut stmt =
+            conn.prepare("SELECT id, audio_path FROM recordings WHERE encryption_pending = 1")?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id_str: String = row.get(0)?;
+                let path: String = row.get(1)?;
+                Ok((
+                    Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::nil()),
+                    PathBuf::from(path),
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     /// Fetch multiple recordings by ID in a single query.
     ///
     /// Order is not guaranteed; sort the result on the caller side if needed.

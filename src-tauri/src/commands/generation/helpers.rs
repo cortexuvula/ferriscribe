@@ -72,7 +72,7 @@ pub(super) async fn load_recording_and_settings(
         Ok::<_, AppError>((recording, settings, config))
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 /// Resolve the AI provider from the registry using the settings provider name.
@@ -102,7 +102,7 @@ pub(super) async fn persist_recording(
         RecordingsRepo::update(&conn, &recording).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 /// Parse a template string into the `SoapTemplate` enum.

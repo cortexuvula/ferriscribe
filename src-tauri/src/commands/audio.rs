@@ -253,34 +253,6 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
         tracing::warn!(path = %current.wav_path.display(), "WAV file is empty — audio may not have been captured");
     }
 
-    // Encrypt the recording at rest. Run in spawn_blocking (off the async
-    // runtime) but AWAIT the result — the pipeline's transcription step
-    // reads this file immediately after, and if encryption is still writing
-    // (temp file + fsync + rename), the WAV header will be mid-replacement
-    // and the reader gets "Ill-formed WAVE file: no RIFF tag found".
-    // The frontend already flipped to 'stopped' optimistically, so the user
-    // doesn't perceive this wait.
-    if file_size > 0 {
-        let enc_path = current.wav_path.clone();
-        let enc_result = tokio::task::spawn_blocking(move || {
-            medical_security::file_crypto::encrypt_file_in_place(&enc_path)
-        })
-        .await
-        .map_err(|e| AppError::Other(format!("encryption task panicked: {e}")))?;
-
-        match enc_result {
-            Ok(()) => {
-                tracing::debug!(path = %current.wav_path.display(), "Recording encrypted at rest");
-            }
-            Err(medical_security::file_crypto::FileCryptoError::Keychain(e)) => {
-                tracing::warn!(error = %e, "Could not encrypt recording (keychain unavailable); storing plaintext");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, path = %current.wav_path.display(), "Could not encrypt recording; storing plaintext");
-            }
-        }
-    }
-
     let recording_uuid = Uuid::parse_str(&current.id)
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
 
@@ -301,6 +273,47 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
     // Insert into DB.
     let conn = state.db.conn()?;
     RecordingsRepo::insert(&conn, &recording)?;
+
+    // Mark encryption as pending BEFORE spawning the task, so the row is in
+    // the correct state by the time the background task (and any startup
+    // sweep) sees it. If we spawned first, the task could finish and call
+    // set_encryption_done on a not-yet-inserted row (a no-op), then this
+    // UPDATE would wrongly re-flag an already-encrypted recording as
+    // pending — the sweep would then re-encrypt ciphertext and corrupt it.
+    if file_size > 0 {
+        conn.execute(
+            "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+            [&recording_uuid.to_string()],
+        )
+        .map_err(medical_db::DbError::from)?;
+    }
+
+    // Spawn background encryption — don't block stop_recording.
+    // The reader handles both plaintext and encrypted files (checks FE1 magic),
+    // so transcription works regardless. The atomic rename guarantees the reader
+    // never sees a half-encrypted file.
+    if file_size > 0 {
+        let enc_path = current.wav_path.clone();
+        let rec_id = recording_uuid;
+        let db_for_enc = Arc::clone(&state.db);
+        tokio::task::spawn_blocking(move || {
+            match medical_security::file_crypto::encrypt_file_in_place(&enc_path) {
+                Ok(()) => {
+                    tracing::debug!(path = %enc_path.display(), "Recording encrypted at rest (background)");
+                    if let Ok(conn) = db_for_enc.conn() {
+                        let _ = RecordingsRepo::set_encryption_done(&conn, &rec_id);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %enc_path.display(), "Could not encrypt recording; storing plaintext");
+                    if let Ok(conn) = db_for_enc.conn() {
+                        let _ = RecordingsRepo::set_encryption_done(&conn, &rec_id);
+                    }
+                }
+            }
+        });
+        // NOT awaited — fire and forget.
+    }
 
     info!(
         recording_id = %current.id,
@@ -497,12 +510,12 @@ pub async fn check_recording_audio_levels(
         RecordingsRepo::get_by_id(&conn, &uuid).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
 
     let wav_path = recording.audio_path.clone();
     let levels = tokio::task::spawn_blocking(move || compute_audio_levels(&wav_path))
         .await
-        .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+        .map_err(crate::commands::join_err)??;
 
     if levels.is_silent {
         warn!(

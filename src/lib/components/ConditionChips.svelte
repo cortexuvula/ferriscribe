@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
+  import { invoke } from '@tauri-apps/api/core';
   import {
     addConditionChip,
     listConditionChips,
@@ -7,6 +9,8 @@
     reorderConditionChips,
   } from '../api/conditions';
   import type { ConditionChip } from '../api/conditions';
+  import { settings } from '../stores/settings.svelte';
+  import { toasts } from '../stores/toasts.svelte';
 
   let { onAdd }: { onAdd: (condition: string) => void } = $props();
 
@@ -57,16 +61,54 @@
   // Poll handle for periodic chip refresh (cleared on destroy).
   let pollHandle: ReturnType<typeof setInterval> | null = null;
 
+  // Unsubscribe function for the SSE event listener (set up in onMount,
+  // invoked in onDestroy). Null until the listener attaches or if it failed.
+  let unlistenSSE: (() => void) | null = null;
+
+  // Tracks whether the user made a local mutation (add/remove/reorder) within
+  // the last 5s. If the 30s poll detects a remote change while dirtySince is
+  // set, we surface a toast instead of silently clobbering their edit.
+  let dirtySince = $state<number | null>(null);
+  let dirtyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function markDirty() {
+    dirtySince = Date.now();
+    if (dirtyTimer) clearTimeout(dirtyTimer);
+    dirtyTimer = setTimeout(() => { dirtySince = null; }, 5000);
+  }
+
   onDestroy(() => {
     if (pollHandle) clearInterval(pollHandle);
+    if (dirtyTimer) clearTimeout(dirtyTimer);
+    if (unlistenSSE) unlistenSSE();
   });
 
   onMount(async () => {
     await refreshChips();
-    // Poll every 30s so changes from other machines (via server sync) appear
-    // without requiring an app restart. When sync is off or unpaired, this
-    // just re-reads the local DB — negligible cost.
-    pollHandle = setInterval(refreshChips, 30_000);
+
+    // Listen for SSE push notifications (realtime sync). When the office
+    // server broadcasts a chip change, the backend emits
+    // `condition-chips-changed` and we refresh immediately instead of waiting
+    // for the 30s poll.
+    try {
+      unlistenSSE = await listen('condition-chips-changed', () => {
+        refreshChips();
+      });
+      // Start the SSE subscription on the backend (long-lived task). Safe to
+      // call when not paired — the command returns immediately in that case.
+      await invoke('subscribe_condition_chips');
+    } catch (e) {
+      console.error('Failed to start chip sync subscription:', e);
+    }
+  });
+
+  // Only poll when sync is enabled — avoids pointless DB reads for users
+  // who haven't opted into chip sync (the default).
+  $effect(() => {
+    if (settings.state.sync_condition_chips) {
+      pollHandle = setInterval(refreshChips, 30_000);
+      return () => { if (pollHandle) clearInterval(pollHandle); };
+    }
   });
 
   async function refreshChips() {
@@ -77,6 +119,16 @@
         result.length !== chips.length ||
         result.some((c, i) => c.id !== chips[i]?.id || c.sort_order !== chips[i]?.sort_order)
       ) {
+        // If the user made a local change within the last 5s, the poll is
+        // about to clobber it — surface a toast instead of silently
+        // overwriting their edit.
+        if (dirtySince !== null) {
+          toasts.add({
+            message: 'Condition chips updated from another machine',
+            type: 'success',
+            autoDismiss: true,
+          });
+        }
         chips = result;
       }
     } catch (e) {
@@ -95,6 +147,7 @@
       return;
     }
     try {
+      markDirty();
       chips = await addConditionChip(trimmed);
     } catch (e) {
       console.error('Failed to add condition chip:', e);
@@ -105,6 +158,7 @@
 
   async function removeCondition(conditionText: string) {
     try {
+      markDirty();
       chips = await removeConditionChip(conditionText);
     } catch (e) {
       console.error('Failed to remove condition chip:', e);
@@ -192,6 +246,7 @@
         chips = reordered; // optimistic UI update
 
         const orderedIds = reordered.map((c) => c.id);
+        markDirty();
         try {
           chips = await reorderConditionChips(orderedIds);
         } catch (err) {

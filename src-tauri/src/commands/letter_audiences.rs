@@ -20,7 +20,7 @@ pub async fn list_letter_audiences(
         LetterAudiencesRepo::list_all(&conn).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 #[tauri::command]
@@ -49,7 +49,7 @@ pub async fn upsert_letter_audience(
         LetterAudiencesRepo::upsert(&conn, &audience_clone).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
     // PHI guardrail: audience names are physician-authored free text that
     // could embed a recipient name; log the id + name length only.
     info!(
@@ -72,7 +72,7 @@ pub async fn delete_letter_audience(state: tauri::State<'_, AppState>, id: Uuid)
         })
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
     info!(%id, "Deleted letter audience");
     Ok(())
 }
