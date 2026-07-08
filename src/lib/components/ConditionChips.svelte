@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
+  import { invoke } from '@tauri-apps/api/core';
   import {
     addConditionChip,
     listConditionChips,
@@ -59,6 +61,10 @@
   // Poll handle for periodic chip refresh (cleared on destroy).
   let pollHandle: ReturnType<typeof setInterval> | null = null;
 
+  // Unsubscribe function for the SSE event listener (set up in onMount,
+  // invoked in onDestroy). Null until the listener attaches or if it failed.
+  let unlistenSSE: (() => void) | null = null;
+
   // Tracks whether the user made a local mutation (add/remove/reorder) within
   // the last 5s. If the 30s poll detects a remote change while dirtySince is
   // set, we surface a toast instead of silently clobbering their edit.
@@ -74,10 +80,26 @@
   onDestroy(() => {
     if (pollHandle) clearInterval(pollHandle);
     if (dirtyTimer) clearTimeout(dirtyTimer);
+    if (unlistenSSE) unlistenSSE();
   });
 
   onMount(async () => {
     await refreshChips();
+
+    // Listen for SSE push notifications (realtime sync). When the office
+    // server broadcasts a chip change, the backend emits
+    // `condition-chips-changed` and we refresh immediately instead of waiting
+    // for the 30s poll.
+    try {
+      unlistenSSE = await listen('condition-chips-changed', () => {
+        refreshChips();
+      });
+      // Start the SSE subscription on the backend (long-lived task). Safe to
+      // call when not paired — the command returns immediately in that case.
+      await invoke('subscribe_condition_chips');
+    } catch (e) {
+      console.error('Failed to start chip sync subscription:', e);
+    }
   });
 
   // Only poll when sync is enabled — avoids pointless DB reads for users
