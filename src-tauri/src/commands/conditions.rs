@@ -18,7 +18,10 @@
 //! next `list` (which always pulls + merges when paired).
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures_util::StreamExt;
+use tauri::Emitter;
 use tracing::instrument;
 
 use medical_core::error::{AppError, AppResult};
@@ -365,4 +368,78 @@ pub async fn reorder_condition_chips(
     }
 
     Ok(local_list)
+}
+
+/// Start a long-lived SSE subscription to the office server's condition-chip
+/// change notifications.
+///
+/// Spawns a background task that connects to `/v1/condition-chips/events` and
+/// emits a `condition-chips-changed` Tauri event for each server-pushed
+/// "changed" notification. The frontend listens for this event and calls
+/// `refreshChips()` for near-realtime sync across machines. The task runs for
+/// the lifetime of the app and reconnects with exponential backoff (capped at
+/// 30s) when the stream ends or errors.
+///
+/// This is a complement to, not a replacement for, the 30s poll — the poll
+/// remains as a safety net in case SSE delivery fails silently.
+///
+/// Returns `Ok(())` immediately when not paired / sync disabled (no task is
+/// spawned). This command is safe to call repeatedly; each call spawns an
+/// independent task. In practice the frontend calls it once on mount.
+#[tauri::command]
+#[instrument(skip(app, state), name = "conditions::subscribe")]
+pub async fn subscribe_condition_chips(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> AppResult<()> {
+    // Gate the same way the other condition commands do: only subscribe when
+    // paired + sync enabled. When not paired, return quietly (the frontend
+    // relies on the 30s poll only).
+    let Some((conn, bearer)) = paired_conditions_target(&state) else {
+        return Ok(());
+    };
+    let http_client = state.http_client.clone();
+    tokio::spawn(async move {
+        let mut backoff = Duration::from_secs(5);
+        loop {
+            // `conn` and `bearer` are owned by this task; `ConditionsRemote`
+            // borrows `conn` from within the task scope (cannot borrow from the
+            // calling frame because `tokio::spawn` requires `'static`).
+            let remote = match crate::conditions_remote::ConditionsRemote::from(
+                &conn,
+                Some(bearer.clone()),
+                http_client.clone(),
+            ) {
+                Some(r) => r,
+                None => {
+                    tracing::warn!(
+                        "condition chip SSE subscription target unavailable, retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    continue;
+                }
+            };
+            match remote.subscribe_events().await {
+                Ok(stream) => {
+                    tracing::info!("condition chip SSE subscription connected");
+                    backoff = Duration::from_secs(5);
+                    // The stream from `filter_map` is `!Unpin`; pin it on the
+                    // stack so `StreamExt::next` can borrow it mutably.
+                    tokio::pin!(stream);
+                    while let Some(()) = stream.next().await {
+                        let _ = app.emit("condition-chips-changed", ());
+                    }
+                    tracing::info!("condition chip SSE stream ended, reconnecting");
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "condition chip SSE subscription failed, reconnecting"
+                ),
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(30));
+        }
+    });
+    Ok(())
 }
