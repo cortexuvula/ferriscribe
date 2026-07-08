@@ -27,6 +27,12 @@ use std::path::{Path, PathBuf};
 use medical_core::error::{AppError, AppResult};
 use medical_db::Database;
 
+/// Convert a tokio JoinError into an AppError. Used by spawn_blocking call
+/// sites to avoid repeating the format! boilerplate 36 times.
+pub fn join_err(e: tokio::task::JoinError) -> AppError {
+    AppError::Other(format!("Task join error: {e}"))
+}
+
 /// Resolve the recordings directory from settings.
 ///
 /// If the user has configured a custom `storage_path`, use it.

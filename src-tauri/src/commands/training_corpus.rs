@@ -34,7 +34,7 @@ pub async fn training_corpus_counts(state: tauri::State<'_, AppState>) -> AppRes
         GenerationsRepo::count_by_status(&conn)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
     Ok(CorpusCounts {
         candidates: c,
         promoted: p,
@@ -56,7 +56,7 @@ pub async fn training_corpus_list(
         GenerationsRepo::list_by_status(&conn, &status, limit.unwrap_or(50), offset.unwrap_or(0))
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
     Ok(GenerationPage { items, total })
 }
 
@@ -74,6 +74,6 @@ pub async fn training_corpus_set_status(
         GenerationsRepo::set_corpus_status(&conn, id, &new_status)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
     Ok(())
 }

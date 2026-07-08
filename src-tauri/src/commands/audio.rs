@@ -497,12 +497,12 @@ pub async fn check_recording_audio_levels(
         RecordingsRepo::get_by_id(&conn, &uuid).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
 
     let wav_path = recording.audio_path.clone();
     let levels = tokio::task::spawn_blocking(move || compute_audio_levels(&wav_path))
         .await
-        .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+        .map_err(crate::commands::join_err)??;
 
     if levels.is_silent {
         warn!(

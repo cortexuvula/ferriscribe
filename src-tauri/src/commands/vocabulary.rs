@@ -50,7 +50,7 @@ pub async fn list_vocabulary_entries(
         }
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 /// Add a new vocabulary correction entry.
@@ -102,7 +102,7 @@ pub async fn add_vocabulary_entry(
         VocabularyRepo::insert(&conn, &entry_clone).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
     // PHI guard: do not log find_text/replacement — vocabulary entries may
     // contain patient-specific medication/dosage text (AGENTS.md line 6).
     info!("Vocabulary entry added");
@@ -146,7 +146,7 @@ pub async fn update_vocabulary_entry(
         VocabularyRepo::get_by_id(&conn, &uuid).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
 
     let entry = VocabularyEntry {
         id: existing.id,
@@ -168,7 +168,7 @@ pub async fn update_vocabulary_entry(
         VocabularyRepo::update(&conn, &entry_clone).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
     Ok(entry)
 }
 
@@ -190,7 +190,7 @@ pub async fn delete_vocabulary_entry(
         VocabularyRepo::delete(&conn, &uuid).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 /// Delete all vocabulary entries.
@@ -207,7 +207,7 @@ pub async fn delete_all_vocabulary_entries(state: tauri::State<'_, AppState>) ->
         VocabularyRepo::delete_all(&conn).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 /// Get vocabulary counts as `(total, enabled)`.
@@ -224,7 +224,7 @@ pub async fn get_vocabulary_count(state: tauri::State<'_, AppState>) -> AppResul
         VocabularyRepo::count(&conn).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 /// Import vocabulary entries from a JSON file.
@@ -309,7 +309,7 @@ pub async fn import_vocabulary_json(
         Ok::<_, AppError>(())
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
 
     info!(count, path = %file_path, "Imported vocabulary entries");
     Ok(count)
@@ -336,7 +336,7 @@ pub async fn export_vocabulary_json(
             VocabularyRepo::list_all(&conn).map_err(AppError::from)
         })
         .await
-        .map_err(|e| AppError::Other(format!("Task join error: {e}")))??
+        .map_err(crate::commands::join_err)??
     };
 
     let count = entries.len() as u32;
@@ -384,7 +384,7 @@ pub async fn test_vocabulary_correction(
             VocabularyRepo::list_enabled(&conn).map_err(AppError::from)
         })
         .await
-        .map_err(|e| AppError::Other(format!("Task join error: {e}")))??
+        .map_err(crate::commands::join_err)??
     };
 
     Ok(vocabulary_corrector::apply_corrections(&text, &entries))

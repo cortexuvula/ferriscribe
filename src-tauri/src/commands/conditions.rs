@@ -86,7 +86,7 @@ pub async fn list_condition_chips(
                     .map_err(AppError::from)
                 })
                 .await
-                .map_err(|e| AppError::Other(format!("Task join error: {e}")))?;
+                .map_err(crate::commands::join_err)?;
             }
             Err(e) => {
                 tracing::warn!(error = %e, "conditions remote list failed, using local");
@@ -102,7 +102,7 @@ pub async fn list_condition_chips(
         medical_db::condition_chips::ConditionChipsRepo::list_active(&conn).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 /// Add a condition chip.
@@ -126,7 +126,7 @@ pub async fn add_condition_chip(
             .map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
 
     // 2. Best-effort background sync push (non-blocking). The owned
     //    `PairedConnection` is moved into the task and the `ConditionsRemote`
@@ -182,7 +182,7 @@ pub async fn remove_condition_chip(
             .map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
 
     // 2. Best-effort background sync — push ALL chips (including tombstones)
     //    so the server records the deletion. The owned `PairedConnection` is
@@ -257,7 +257,7 @@ pub async fn sync_condition_chips_cmd(
         medical_db::condition_chips::ConditionChipsRepo::list_all(&conn).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
 
     if let Some((conn, bearer)) = paired_conditions_target(&state)
         && let Some(remote) = crate::conditions_remote::ConditionsRemote::from(
@@ -274,7 +274,7 @@ pub async fn sync_condition_chips_cmd(
                 .map_err(AppError::from)
         })
         .await
-        .map_err(|e| AppError::Other(format!("Task join error: {e}")))?;
+        .map_err(crate::commands::join_err)?;
     }
 
     // Not paired / sync disabled — return the local active list.
@@ -284,7 +284,7 @@ pub async fn sync_condition_chips_cmd(
         medical_db::condition_chips::ConditionChipsRepo::list_active(&conn).map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 /// Reorder condition chips.
@@ -312,7 +312,7 @@ pub async fn reorder_condition_chips(
             .map_err(AppError::from)
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))??;
+    .map_err(crate::commands::join_err)??;
 
     // 2. Best-effort background sync — push ALL chips (including tombstones)
     //    so the server sees the new sort_order values. The owned

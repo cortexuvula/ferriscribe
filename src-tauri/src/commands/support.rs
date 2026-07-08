@@ -87,7 +87,7 @@ pub async fn export_support_bundle(file_path: String) -> AppResult<()> {
         Ok(())
     })
     .await
-    .map_err(|e| AppError::Other(format!("Task join error: {e}")))?
+    .map_err(crate::commands::join_err)?
 }
 
 #[cfg(test)]
