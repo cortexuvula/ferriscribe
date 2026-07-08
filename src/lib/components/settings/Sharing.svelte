@@ -1,35 +1,17 @@
 <script lang="ts">
-  import { invoke } from '@tauri-apps/api/core';
-  import { onMount } from 'svelte';
-  import { settings } from '../../stores/settings.svelte';
-  import { syncConditionChips } from '../../api/conditions';
+  import SharingModes, { type Mode } from './sharing/SharingModes.svelte';
+  import ConditionChipSync from './sharing/ConditionChipSync.svelte';
   import ServerWizard from './sharing/ServerWizard.svelte';
   import ServerStatus from './sharing/ServerStatus.svelte';
   import ClientPair from './sharing/ClientPair.svelte';
 
-  type Mode = 'off' | 'server' | 'client';
-  let mode: Mode = 'off';
-  let sharingOn = false;
-  let pairedTo: string | null = null;
-
-  async function refresh() {
-    try {
-      const status = await invoke<{ enabled: boolean }>('sharing_status');
-      sharingOn = !!status.enabled;
-    } catch {
-      sharingOn = false;
-    }
-    try {
-      const paired = await invoke<{ label: string } | null>('paired_endpoint');
-      pairedTo = paired?.label ?? null;
-    } catch {
-      pairedTo = null;
-    }
-    if (sharingOn) mode = 'server';
-    else if (pairedTo) mode = 'client';
-    else mode = 'off';
-  }
-  onMount(refresh);
+  // SharingModes owns the canonical mode/sharingOn/pairedTo state and its
+  // refresh() re-derivation; the orchestrator mirrors the values it needs to
+  // route ServerWizard/ServerStatus/ClientPair and to gate ConditionChipSync.
+  let mode = $state<Mode>('off');
+  let sharingOn = $state(false);
+  let pairedTo = $state<string | null>(null);
+  let sharingModes: SharingModes;
 </script>
 
 <div class="sharing">
@@ -39,59 +21,21 @@
     laptop or other clinicians' machines.
   </p>
 
-  <div class="modes">
-    <label class:disabled={sharingOn}>
-      <input type="radio" bind:group={mode} value="off" disabled={sharingOn} />
-      Off
-    </label>
-    <label>
-      <input type="radio" bind:group={mode} value="server" />
-      This machine is the office server
-    </label>
-    <label class:disabled={sharingOn}>
-      <input type="radio" bind:group={mode} value="client" disabled={sharingOn} />
-      This machine connects to an office server
-    </label>
-  </div>
+  <SharingModes
+    bind:this={sharingModes}
+    onModeChange={(m) => (mode = m)}
+    onStatusChange={(on, paired) => {
+      sharingOn = on;
+      pairedTo = paired;
+    }}
+  />
 
-  {#if sharingOn}
-    <p class="hint">
-      Stop sharing first (in the panel below) before switching modes.
-    </p>
-  {/if}
-
-  {#if sharingOn || pairedTo}
-    <label class="form-row" style="margin-top: 1rem;">
-      <input
-        type="checkbox"
-        checked={settings.state.sync_condition_chips ?? false}
-        onchange={async (e) => {
-          const checked = (e.target as HTMLInputElement).checked;
-          settings.updateField('sync_condition_chips', checked);
-          if (checked) {
-            try {
-              await syncConditionChips();
-            } catch (err) {
-              console.error('Initial condition chip sync failed:', err);
-            }
-          }
-        }}
-      />
-      <span>
-        Sync known condition chips with the server
-        <p class="hint">
-          When enabled, your condition chip presets sync two-way between this
-          machine and the server. Other clients' changes appear on reconnect.
-          Off by default — each machine keeps its own list.
-        </p>
-      </span>
-    </label>
-  {/if}
+  <ConditionChipSync visible={sharingOn || !!pairedTo} />
 
   {#if mode === 'server' && !sharingOn}
-    <ServerWizard ondone={refresh} />
+    <ServerWizard ondone={() => sharingModes.refresh()} />
   {:else if mode === 'server' && sharingOn}
-    <ServerStatus onstopped={refresh} />
+    <ServerStatus onstopped={() => sharingModes.refresh()} />
   {:else if mode === 'client'}
     <ClientPair />
   {/if}
@@ -99,8 +43,5 @@
 
 <style>
   .sharing { display: flex; flex-direction: column; gap: 1rem; }
-  .modes { display: flex; gap: 1rem; }
   .hint { color: var(--text-muted, #888); font-size: 0.8rem; margin: 4px 0 0 0; }
-  label.disabled { opacity: 0.5; cursor: not-allowed; }
-  .form-row { display: flex; gap: 10px; align-items: flex-start; }
 </style>
