@@ -8,7 +8,7 @@ medical-core = { path = "../core" }
 cpal = "0.15"
 rodio = { version = "0.19", default-features = false, features = ["wav", "mp3", "symphonia-all"] }
 hound = { workspace = true }
-ringbuf = "0.4"
+ringbuf = "0.5"
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
