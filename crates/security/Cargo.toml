@@ -14,7 +14,7 @@ rand = { workspace = true }
 base64 = { workspace = true }
 regex = { workspace = true }
 lazy_static = "1"
-machine-uid = "0.5"
+machine-uid = "0.6"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
