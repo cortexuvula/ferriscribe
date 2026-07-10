@@ -64,20 +64,7 @@ impl AuditRepo {
                 let resource: String = row.get(4)?;
                 let details: Option<String> = row.get(5)?;
 
-                let timestamp = DateTime::parse_from_rfc3339(&ts_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| {
-                        tracing::error!(
-                            ts_str = %ts_str,
-                            error = %e,
-                            "corrupt audit_log timestamp in DB"
-                        );
-                        rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    })?;
+                let timestamp = crate::parse_db_timestamp(1, &ts_str, "audit_log.timestamp")?;
 
                 Ok(AuditEntry {
                     id,

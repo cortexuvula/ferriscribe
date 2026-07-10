@@ -14,7 +14,7 @@ use rusqlite::{Connection, Row, params};
 
 use medical_core::types::condition_chip::{ConditionChip, deterministic_id};
 
-use crate::DbResult;
+use crate::{DbError, DbResult};
 
 /// Repository for the `condition_chips` table.
 ///

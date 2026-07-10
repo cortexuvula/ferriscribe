@@ -92,6 +92,42 @@ pub enum DbError {
 /// Convenience result type for database operations.
 pub type DbResult<T> = Result<T, DbError>;
 
+/// Parse a timestamp column that may be stored in either of two legitimate
+/// formats: RFC 3339 (e.g. `2026-05-22T00:00:00Z`, used by rows written from
+/// Rust via `to_rfc3339()`) or SQLite's native `datetime('now')` format
+/// (`2026-05-22 00:00:00`, used by columns with `DEFAULT (datetime('now'))`
+/// when no explicit value is supplied). Both are valid stored data; only
+/// genuinely corrupt strings surface as a `FromSqlConversionFailure` error
+/// instead of silently falling back to the current time.
+pub(crate) fn parse_db_timestamp(
+    col_index: usize,
+    ts_str: &str,
+    column_label: &str,
+) -> rusqlite::Result<chrono::DateTime<chrono::Utc>> {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+    // Fast path: RFC 3339.
+    if let Ok(dt) = DateTime::parse_from_rfc3339(ts_str) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    // SQLite `datetime('now')` format: "YYYY-MM-DD HH:MM:SS" (UTC).
+    match NaiveDateTime::parse_from_str(ts_str, "%Y-%m-%d %H:%M:%S") {
+        Ok(ndt) => Ok(DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc)),
+        Err(e) => {
+            tracing::error!(
+                ts_str = %ts_str,
+                column = %column_label,
+                error = %e,
+                "corrupt timestamp in DB"
+            );
+            Err(rusqlite::Error::FromSqlConversionFailure(
+                col_index,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            ))
+        }
+    }
+}
+
 /// Convert a [`DbError`] into an [`AppError`].
 ///
 /// `DbError`'s `Display` already includes its discriminant text (e.g.

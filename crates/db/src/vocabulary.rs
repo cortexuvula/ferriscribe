@@ -4,7 +4,6 @@
 //! Each entry maps `find_text` to `replacement`, with support for categories,
 //! case sensitivity, priority ordering, and enable/disable toggling.
 
-use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -231,34 +230,8 @@ impl VocabularyRepo {
             case_sensitive: case_sensitive_int != 0,
             priority: row.get(5)?,
             enabled: enabled_int != 0,
-            created_at: DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|e| {
-                    tracing::error!(
-                        created_str = %created_str,
-                        error = %e,
-                        "corrupt vocabulary created_at in DB"
-                    );
-                    rusqlite::Error::FromSqlConversionFailure(
-                        7,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?,
-            updated_at: DateTime::parse_from_rfc3339(&updated_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|e| {
-                    tracing::error!(
-                        updated_str = %updated_str,
-                        error = %e,
-                        "corrupt vocabulary updated_at in DB"
-                    );
-                    rusqlite::Error::FromSqlConversionFailure(
-                        8,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?,
+            created_at: crate::parse_db_timestamp(7, &created_str, "vocabulary_entries.created_at")?,
+            updated_at: crate::parse_db_timestamp(8, &updated_str, "vocabulary_entries.updated_at")?,
         })
     }
 }

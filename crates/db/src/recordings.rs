@@ -417,20 +417,7 @@ impl RecordingsRepo {
 
         let created_at_str: String = row.get(16)?;
         let created_at: DateTime<Utc> =
-            DateTime::parse_from_rfc3339(&created_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|e| {
-                    tracing::error!(
-                        created_at_str = %created_at_str,
-                        error = %e,
-                        "corrupt recording created_at in DB"
-                    );
-                    rusqlite::Error::FromSqlConversionFailure(
-                        16,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    )
-                })?;
+            crate::parse_db_timestamp(16, &created_at_str, "recordings.created_at")?;
 
         let metadata_str: Option<String> = row.get(17)?;
         let metadata: serde_json::Value = metadata_str
