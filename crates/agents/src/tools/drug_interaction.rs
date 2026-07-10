@@ -80,13 +80,67 @@ fn normalize(s: &str) -> String {
     s.to_lowercase().trim().to_string()
 }
 
-/// Bidirectional substring match: returns true if either string contains the other.
+/// Word-boundary match: returns true if `pattern` matches `drug` as a complete
+/// word/token (case-insensitive), NOT as a substring.
 ///
-/// This allows "ibuprofen nsaid" to match the pattern "nsaid" and vice versa.
+/// This allows "ibuprofen nsaid" to match the pattern "nsaid" (because "nsaid"
+/// is a token in "ibuprofen nsaid") but prevents "ace" from matching
+/// "acetaminophen" (a dangerous false positive that would raise a spurious
+/// ACE-inhibitor interaction warning).
 fn drugs_match(drug: &str, pattern: &str) -> bool {
     let drug_lower = normalize(drug);
     let pattern_lower = normalize(pattern);
-    drug_lower.contains(&pattern_lower) || pattern_lower.contains(&drug_lower)
+
+    // Exact match (case-insensitive).
+    if drug_lower == pattern_lower {
+        return true;
+    }
+
+    // Word-boundary matching: the pattern must appear as a complete word
+    // in the drug name, not as a substring. E.g., "ace" should match
+    // "ace inhibitor" but NOT "acetaminophen".
+    drug_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| word == pattern_lower)
+}
+
+/// A single detected drug-drug interaction between two medications.
+#[derive(Debug, Clone)]
+pub struct DrugInteraction {
+    pub drug_a: String,
+    pub drug_b: String,
+    pub severity: String,
+    pub description: String,
+}
+
+/// Check all pairs in a medication list against the known interaction table.
+///
+/// Returns one `DrugInteraction` per matching `(pattern_a, pattern_b)` rule.
+/// A given drug pair may produce more than one result if multiple rules match.
+pub fn check_interactions(medications: &[&str]) -> Vec<DrugInteraction> {
+    let mut found = Vec::new();
+    if medications.len() < 2 {
+        return found;
+    }
+    for i in 0..medications.len() {
+        for j in (i + 1)..medications.len() {
+            let drug_a = medications[i];
+            let drug_b = medications[j];
+            for (pattern_a, pattern_b, severity, description) in KNOWN_INTERACTIONS {
+                let ab_match = drugs_match(drug_a, pattern_a) && drugs_match(drug_b, pattern_b);
+                let ba_match = drugs_match(drug_a, pattern_b) && drugs_match(drug_b, pattern_a);
+                if ab_match || ba_match {
+                    found.push(DrugInteraction {
+                        drug_a: drug_a.to_string(),
+                        drug_b: drug_b.to_string(),
+                        severity: severity.to_string(),
+                        description: description.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    found
 }
 
 #[async_trait]
@@ -130,29 +184,20 @@ impl Tool for DrugInteractionTool {
             ));
         }
 
-        let mut interactions_found = Vec::new();
+        let meds_refs: Vec<&str> = medications.iter().map(|s| s.as_str()).collect();
+        let interactions = check_interactions(&meds_refs);
 
-        // Check all pairs
-        for i in 0..medications.len() {
-            for j in (i + 1)..medications.len() {
-                let drug_a = &medications[i];
-                let drug_b = &medications[j];
-
-                for (pattern_a, pattern_b, severity, description) in KNOWN_INTERACTIONS {
-                    let ab_match = drugs_match(drug_a, pattern_a) && drugs_match(drug_b, pattern_b);
-                    let ba_match = drugs_match(drug_a, pattern_b) && drugs_match(drug_b, pattern_a);
-
-                    if ab_match || ba_match {
-                        interactions_found.push(json!({
-                            "drug_a": drug_a,
-                            "drug_b": drug_b,
-                            "severity": severity,
-                            "description": description
-                        }));
-                    }
-                }
-            }
-        }
+        let interactions_found: Vec<serde_json::Value> = interactions
+            .iter()
+            .map(|i| {
+                json!({
+                    "drug_a": i.drug_a,
+                    "drug_b": i.drug_b,
+                    "severity": i.severity,
+                    "description": i.description
+                })
+            })
+            .collect();
 
         let content = serde_json::to_string_pretty(&json!({
             "medications_checked": medications,
@@ -206,6 +251,37 @@ mod tests {
         assert!(!result.is_error);
         let parsed: serde_json::Value = serde_json::from_str(&result.content).unwrap();
         assert!(parsed["interactions_found"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn no_false_positive_acetaminophen_ace() {
+        // "ace" should NOT match "acetaminophen" — this is a false positive
+        // that could cause unnecessary alarm about ACE inhibitor interactions.
+        let results = check_interactions(&["acetaminophen", "potassium chloride"]);
+        // acetaminophen is NOT an ACE inhibitor, so no ACE-potassium interaction.
+        let ace_interactions: Vec<_> = results
+            .iter()
+            .filter(|r| r.description.contains("ACE") || r.description.contains("Hyperkalemia"))
+            .collect();
+        assert!(
+            ace_interactions.is_empty(),
+            "acetaminophen should not trigger ACE interaction"
+        );
+    }
+
+    #[test]
+    fn ace_inhibitor_word_still_matches() {
+        // "ace" SHOULD still match the phrase "ace inhibitor" (word token),
+        // so a real ACE inhibitor + potassium combo is still flagged.
+        let results = check_interactions(&["ace inhibitor", "potassium chloride"]);
+        let ace_interactions: Vec<_> = results
+            .iter()
+            .filter(|r| r.description.contains("ACE") || r.description.contains("Hyperkalemia"))
+            .collect();
+        assert!(
+            !ace_interactions.is_empty(),
+            "ace inhibitor + potassium should still be flagged"
+        );
     }
 
     #[test]
