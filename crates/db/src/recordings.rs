@@ -330,10 +330,15 @@ impl RecordingsRepo {
             .query_map([], |row| {
                 let id_str: String = row.get(0)?;
                 let path: String = row.get(1)?;
-                Ok((
-                    Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::nil()),
-                    PathBuf::from(path),
-                ))
+                let id = Uuid::parse_str(&id_str).map_err(|e| {
+                    tracing::error!(id_str = %id_str, error = %e, "corrupt recording id in encryption_pending");
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                Ok((id, PathBuf::from(path)))
             })?
             .filter_map(|r| r.ok())
             .collect();
@@ -379,7 +384,10 @@ impl RecordingsRepo {
     /// safe defaults on parse failure rather than propagating an error.
     pub fn row_to_recording(row: &Row) -> rusqlite::Result<Recording> {
         let id_str: String = row.get(0)?;
-        let id = Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::nil());
+        let id = Uuid::parse_str(&id_str).map_err(|e| {
+            tracing::error!(id_str = %id_str, error = %e, "corrupt recording id in DB");
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?;
 
         let filename: String = row.get(1)?;
         let transcript: Option<String> = row.get(2)?;

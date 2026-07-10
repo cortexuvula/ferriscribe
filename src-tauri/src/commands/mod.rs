@@ -62,17 +62,7 @@ pub fn validate_user_path(path: &str) -> AppResult<PathBuf> {
 
     // Block known-dangerous paths.
     let dangerous = [
-        "/etc",
-        "/var",
-        "/usr",
-        "/bin",
-        "/sbin",
-        "/boot",
-        "/dev",
-        "/proc",
-        "/sys",
-        "/root",
-        "/lib",
+        "/etc", "/var", "/usr", "/bin", "/sbin", "/boot", "/dev", "/proc", "/sys", "/root", "/lib",
     ];
     let canonical_str = canonical.to_string_lossy();
     for d in &dangerous {
@@ -97,11 +87,14 @@ pub fn validate_user_path(path: &str) -> AppResult<PathBuf> {
     }
 
     // Block hidden files that could be used for persistence (e.g., .bashrc, .ssh/authorized_keys).
-    let file_name = canonical
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    let blocked_files = [".bashrc", ".bash_profile", ".profile", ".ssh", "authorized_keys"];
+    let file_name = canonical.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let blocked_files = [
+        ".bashrc",
+        ".bash_profile",
+        ".profile",
+        ".ssh",
+        "authorized_keys",
+    ];
     for f in &blocked_files {
         if file_name == *f || canonical_str.contains(&format!("/{f}")) {
             return Err(AppError::Other(format!(

@@ -217,7 +217,14 @@ impl VocabularyRepo {
         let updated_str: String = row.get(8)?;
 
         Ok(VocabularyEntry {
-            id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::nil()),
+            id: Uuid::parse_str(&id_str).map_err(|e| {
+                tracing::error!(id_str = %id_str, error = %e, "corrupt vocabulary id in DB");
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
             find_text: row.get(1)?,
             replacement: row.get(2)?,
             category: VocabularyCategory::from_str(&category_str),
