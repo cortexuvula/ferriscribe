@@ -416,9 +416,8 @@ impl RecordingsRepo {
             .unwrap_or(ProcessingStatus::Pending);
 
         let created_at_str: String = row.get(16)?;
-        let created_at: DateTime<Utc> = DateTime::parse_from_rfc3339(&created_at_str)
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now());
+        let created_at: DateTime<Utc> =
+            crate::parse_db_timestamp(16, &created_at_str, "recordings.created_at")?;
 
         let metadata_str: Option<String> = row.get(17)?;
         let metadata: serde_json::Value = metadata_str

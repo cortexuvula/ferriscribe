@@ -14,7 +14,7 @@ use rusqlite::{Connection, Row, params};
 
 use medical_core::types::condition_chip::{ConditionChip, deterministic_id};
 
-use crate::DbResult;
+use crate::{DbError, DbResult};
 
 /// Repository for the `condition_chips` table.
 ///
@@ -116,14 +116,18 @@ impl ConditionChipsRepo {
         let local_map: std::collections::HashMap<&str, &ConditionChip> =
             local_all.iter().map(|c| (c.id.as_str(), c)).collect();
 
-        for remote in remote_chips {
-            match local_map.get(remote.id.as_str()) {
-                None => {
-                    // New chip — insert as-is (addition or tombstone).
-                    Self::upsert(conn, remote)?;
-                }
-                Some(local) => {
-                    match remote.updated_at.cmp(&local.updated_at) {
+        // Wrap the upsert loop in a transaction so a mid-merge failure
+        // rolls back all prior writes — otherwise a partial merge leaves
+        // the local store inconsistent with the remote side.
+        conn.execute_batch("BEGIN")?;
+        let result = (|| {
+            for remote in remote_chips {
+                match local_map.get(remote.id.as_str()) {
+                    None => {
+                        // New chip — insert as-is (addition or tombstone).
+                        Self::upsert(conn, remote)?;
+                    }
+                    Some(local) => match remote.updated_at.cmp(&local.updated_at) {
                         std::cmp::Ordering::Greater => {
                             // Remote is newer — remote wins.
                             Self::upsert(conn, remote)?;
@@ -137,8 +141,18 @@ impl ConditionChipsRepo {
                                 Self::upsert(conn, remote)?;
                             }
                         }
-                    }
+                    },
                 }
+            }
+            Ok::<(), DbError>(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
             }
         }
 
@@ -160,22 +174,37 @@ impl ConditionChipsRepo {
 
     /// Add a new chip with the given text. The id is derived deterministically
     /// from the normalized text. Returns the active chip list afterwards.
+    ///
+    /// The MAX(sort_order) read and the subsequent insert run inside a
+    /// transaction so a concurrent writer can't slip in between them and
+    /// steal the same sort_order slot.
     pub fn add(conn: &Connection, text: &str, now_iso: &str) -> DbResult<Vec<ConditionChip>> {
-        let max_order: i32 = conn
-            .query_row(
+        conn.execute_batch("BEGIN")?;
+        let result = (|| {
+            let max_order: i32 = conn.query_row(
                 "SELECT COALESCE(MAX(sort_order), -1) FROM condition_chips WHERE deleted_at IS NULL",
                 [],
                 |row| row.get(0),
-            )
-            .unwrap_or(-1);
-        let chip = ConditionChip {
-            id: deterministic_id(text),
-            text: text.trim().to_string(),
-            updated_at: now_iso.to_string(),
-            deleted_at: None,
-            sort_order: max_order + 1,
-        };
-        Self::upsert(conn, &chip)?;
+            )?;
+            let chip = ConditionChip {
+                id: deterministic_id(text),
+                text: text.trim().to_string(),
+                updated_at: now_iso.to_string(),
+                deleted_at: None,
+                sort_order: max_order + 1,
+            };
+            Self::upsert(conn, &chip)?;
+            Ok::<(), DbError>(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
         Self::list_active(conn)
     }
 
@@ -195,18 +224,35 @@ impl ConditionChipsRepo {
     /// Sets sort_order = index for each, bumps updated_at on all listed rows.
     /// Chips not in the list keep their existing sort_order.
     /// Returns the active list in the new order.
+    ///
+    /// The UPDATE loop runs inside a transaction so a mid-loop failure
+    /// (e.g. DB lock) rolls back all prior updates — without this, a partial
+    /// failure would leave chips with inconsistent sort_order values.
     pub fn reorder(
         conn: &Connection,
         ordered_ids: &[String],
         now_iso: &str,
     ) -> DbResult<Vec<ConditionChip>> {
-        for (index, id) in ordered_ids.iter().enumerate() {
-            conn.execute(
-                "UPDATE condition_chips
-                 SET sort_order = ?1, updated_at = ?2
-                 WHERE id = ?3",
-                params![index as i32, now_iso, id],
-            )?;
+        conn.execute_batch("BEGIN")?;
+        let result = (|| {
+            for (index, id) in ordered_ids.iter().enumerate() {
+                conn.execute(
+                    "UPDATE condition_chips
+                     SET sort_order = ?1, updated_at = ?2
+                     WHERE id = ?3",
+                    params![index as i32, now_iso, id],
+                )?;
+            }
+            Ok::<(), DbError>(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
         }
         Self::list_active(conn)
     }

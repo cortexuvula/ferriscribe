@@ -12,7 +12,7 @@
 //! | Linux | `/etc/machine-id`, then `/var/lib/dbus/machine-id` |
 //! | macOS | `IOPlatformUUID` via `ioreg -rd1 -c IOPlatformExpertDevice` |
 //! | Windows | `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` |
-//! | Other / fallback | SHA-256 of `"<username>:<home_directory>"` |
+//! | Other / fallback | Persistent random ID in the app data dir |
 //!
 //! # Stability
 //!
@@ -133,25 +133,37 @@ fn raw_machine_id() -> SecurityResult<String> {
     Ok(fallback_id())
 }
 
-/// Fallback identifier: `"<username>:<home_directory>"`.
+/// Generate a fallback machine ID when hardware ID lookup fails.
 ///
-/// Used when the platform-specific hardware identifier is unavailable.
-/// Reads `USER` (or `USERNAME` on Windows) and `HOME` (or `USERPROFILE`),
-/// defaulting to `"unknown"` and `"/"` respectively.
+/// Uses a persistent random ID stored in the app data directory so it's
+/// stable across restarts but not guessable. If the persistent file can't
+/// be created, includes a process-random component as a last resort.
 ///
 /// This is **public** so integration tests can verify that hashing the
 /// fallback still produces a valid 64-char hex machine ID. Production
 /// callers should always use [`get_machine_id`] instead.
 pub fn fallback_id() -> String {
-    let username = std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "unknown".to_string());
+    // Try to read/create a persistent random ID file.
+    if let Some(data_dir) = dirs::data_dir() {
+        let id_file = data_dir.join("ferriescribe").join(".machine-id");
+        if let Ok(existing) = std::fs::read_to_string(&id_file) {
+            let trimmed = existing.trim().to_string();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+        // Generate a new random ID and persist it.
+        let random_id = uuid::Uuid::new_v4().to_string();
+        if std::fs::create_dir_all(id_file.parent().unwrap()).is_ok() {
+            let _ = std::fs::write(&id_file, &random_id);
+        }
+        return random_id;
+    }
 
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| "/".to_string());
-
-    format!("{}:{}", username, home)
+    // Absolute last resort: random (not persisted, changes per restart)
+    // but at least not guessable.
+    tracing::warn!("Using non-persistent random machine ID fallback");
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]
@@ -179,10 +191,12 @@ mod tests {
     #[test]
     fn fallback_works() {
         let id = fallback_id();
-        // Must contain ':'
+        // New fallback is a UUID v4 string (persistent or random), so it
+        // must NOT be empty and must contain the UUID hyphen separators.
+        assert!(!id.is_empty(), "fallback_id must not be empty");
         assert!(
-            id.contains(':'),
-            "fallback_id should be 'user:home', got: {}",
+            id.contains('-'),
+            "fallback_id should be a UUID, got: {}",
             id
         );
         // Hashing the fallback should also produce a 64-char hex

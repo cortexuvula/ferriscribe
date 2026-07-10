@@ -5,7 +5,6 @@
 //! system prompt and optional user template. Six built-in audiences are
 //! seeded by migration `m006` and cannot be deleted.
 
-use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
@@ -132,12 +131,8 @@ impl LetterAudiencesRepo {
             system_prompt: row.get(2)?,
             user_template: row.get(3)?,
             is_builtin: is_builtin_int != 0,
-            created_at: DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            updated_at: DateTime::parse_from_rfc3339(&updated_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
+            created_at: crate::parse_db_timestamp(5, &created_str, "letter_audiences.created_at")?,
+            updated_at: crate::parse_db_timestamp(6, &updated_str, "letter_audiences.updated_at")?,
         })
     }
 }

@@ -29,7 +29,9 @@ impl Agent for WorkflowAgent {
         verification steps; (4) outlining documentation requirements for each step of a clinical workflow; \
         (5) adapting workflows to specific clinical contexts such as inpatient, outpatient, or emergency settings. \
         Present guidance in numbered steps with clear actions, responsible parties, and time-sensitive elements \
-        highlighted. Always note when steps require licensed provider authorization or co-signature."
+        highlighted. Always note when steps require licensed provider authorization or co-signature. You are \
+        a clinical decision support tool, not a substitute for professional judgment. All outputs must be \
+        reviewed and approved by a licensed healthcare provider before clinical use."
     }
 
     fn available_tools(&self) -> Vec<ToolDef> {

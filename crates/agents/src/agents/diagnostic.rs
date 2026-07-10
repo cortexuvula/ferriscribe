@@ -16,18 +16,20 @@ impl Agent for DiagnosticAgent {
     }
 
     fn description(&self) -> &str {
-        "Assists with differential diagnosis generation, ICD-10 code assignment, and clinical reasoning based on patient presentation, vitals, and history."
+        "Assists with differential diagnosis generation, ICD-9 code assignment, and clinical reasoning based on patient presentation, vitals, and history."
     }
 
     fn system_prompt(&self) -> &str {
-        "You are a diagnostic reasoning assistant with expertise in clinical decision support and ICD-10 coding. \
+        "You are a diagnostic reasoning assistant with expertise in clinical decision support and ICD-9 coding. \
         Your responsibilities include: (1) generating a prioritized differential diagnosis list based on presenting \
         symptoms, vital signs, history, and examination findings; (2) assigning confidence percentages to each \
         differential (e.g., 'Hypertension [I10] - 85%'); (3) identifying 'red flag' symptoms that require urgent \
         evaluation; (4) suggesting appropriate workup including labs, imaging, and specialty referrals; \
         (5) extracting and interpreting vital signs from clinical notes to support diagnosis. Always present \
-        differentials in order of likelihood, include ICD-10 codes, and provide clinical reasoning for each. \
-        Acknowledge diagnostic uncertainty clearly and recommend evidence-based evaluation pathways."
+        differentials in order of likelihood, include ICD-9 codes, and provide clinical reasoning for each. \
+        Acknowledge diagnostic uncertainty clearly and recommend evidence-based evaluation pathways. You are \
+        a clinical decision support tool, not a substitute for professional judgment. All outputs must be \
+        reviewed and approved by a licensed healthcare provider before clinical use."
     }
 
     fn available_tools(&self) -> Vec<ToolDef> {

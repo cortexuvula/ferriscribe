@@ -100,7 +100,10 @@ impl VectorsRepo {
     /// Return every chunk that has a non-NULL embedding.
     ///
     /// Each `BLOB` is deserialised back into `Vec<f32>` via `bytemuck`.
-    /// Chunks without embeddings are excluded.
+    /// Chunks without embeddings are excluded. Chunks whose embedding BLOB
+    /// cannot be deserialised (e.g. wrong length / corrupt) are skipped with
+    /// a warning rather than silently returning an empty vector, which would
+    /// pollute search results with a zero-similarity entry.
     pub fn get_all_embeddings(conn: &Connection) -> DbResult<Vec<EmbeddingRecord>> {
         let mut stmt = conn.prepare(
             "SELECT id, document_id, content, embedding
@@ -108,21 +111,42 @@ impl VectorsRepo {
              WHERE embedding IS NOT NULL",
         )?;
 
-        let rows = stmt
+        // Read the raw columns first (real DB errors propagate via `?`),
+        // then cast the BLOB outside the query_map closure so corrupt
+        // embeddings can be skipped individually instead of poisoning the
+        // whole result set with empty vectors.
+        let raw: Vec<(String, String, String, Vec<u8>)> = stmt
             .query_map([], |row| {
-                let id: String = row.get(0)?;
-                let document_id: String = row.get(1)?;
-                let content: String = row.get(2)?;
-                let blob: Vec<u8> = row.get(3)?;
-                let embedding: Vec<f32> = bytemuck::try_cast_slice(&blob).unwrap_or(&[]).to_vec();
-                Ok(EmbeddingRecord {
-                    id,
-                    document_id,
-                    content,
-                    embedding,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
             })?
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut rows = Vec::with_capacity(raw.len());
+        for (id, document_id, content, blob) in raw {
+            let embedding = match bytemuck::try_cast_slice::<u8, f32>(&blob) {
+                Ok(slice) => slice.to_vec(),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        doc_len = blob.len(),
+                        chunk_id = %id,
+                        "corrupt embedding blob, skipping"
+                    );
+                    continue;
+                }
+            };
+            rows.push(EmbeddingRecord {
+                id,
+                document_id,
+                content,
+                embedding,
+            });
+        }
 
         Ok(rows)
     }
@@ -132,6 +156,8 @@ impl VectorsRepo {
     /// Used by the vector search's first phase (score-only pass) to avoid
     /// loading potentially large content strings for the entire corpus.
     /// Content is fetched only for the top-k winners via [`get_content_by_ids`].
+    /// Corrupt embedding BLOBs are skipped with a warning (same policy as
+    /// [`get_all_embeddings`]).
     pub fn get_all_embedding_vectors(conn: &Connection) -> DbResult<Vec<EmbeddingVectorRecord>> {
         let mut stmt = conn.prepare(
             "SELECT id, document_id, embedding
@@ -139,19 +165,36 @@ impl VectorsRepo {
              WHERE embedding IS NOT NULL",
         )?;
 
-        let rows = stmt
+        let raw: Vec<(String, String, Vec<u8>)> = stmt
             .query_map([], |row| {
-                let id: String = row.get(0)?;
-                let document_id: String = row.get(1)?;
-                let blob: Vec<u8> = row.get(2)?;
-                let embedding: Vec<f32> = bytemuck::try_cast_slice(&blob).unwrap_or(&[]).to_vec();
-                Ok(EmbeddingVectorRecord {
-                    id,
-                    document_id,
-                    embedding,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
             })?
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut rows = Vec::with_capacity(raw.len());
+        for (id, document_id, blob) in raw {
+            let embedding = match bytemuck::try_cast_slice::<u8, f32>(&blob) {
+                Ok(slice) => slice.to_vec(),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        doc_len = blob.len(),
+                        chunk_id = %id,
+                        "corrupt embedding blob, skipping"
+                    );
+                    continue;
+                }
+            };
+            rows.push(EmbeddingVectorRecord {
+                id,
+                document_id,
+                embedding,
+            });
+        }
 
         Ok(rows)
     }
@@ -180,6 +223,12 @@ impl VectorsRepo {
 
     /// Retrieve all chunks belonging to a given document, ordered by
     /// `chunk_index ASC`.
+    ///
+    /// A corrupt embedding BLOB (one whose byte length is not a multiple of
+    /// 4) surfaces as an error rather than silently returning an empty
+    /// vector — unlike the `get_all_embeddings` bulk loaders, this is a
+    /// targeted single-document read where the caller should know the data
+    /// is damaged.
     pub fn get_by_document(conn: &Connection, document_id: &str) -> DbResult<Vec<DocumentChunk>> {
         let mut stmt = conn.prepare(
             "SELECT id, document_id, content, embedding, chunk_index, metadata, created_at
@@ -191,11 +240,22 @@ impl VectorsRepo {
         let rows = stmt
             .query_map([document_id], |row| {
                 let blob: Option<Vec<u8>> = row.get(3)?;
-                let embedding = blob.map(|b| {
-                    bytemuck::try_cast_slice::<u8, f32>(&b)
-                        .unwrap_or(&[])
-                        .to_vec()
-                });
+                let embedding = match blob {
+                    None => None,
+                    Some(b) => match bytemuck::try_cast_slice::<u8, f32>(&b) {
+                        Ok(slice) => Some(slice.to_vec()),
+                        Err(e) => {
+                            tracing::warn!(error = %e, doc_len = b.len(), "corrupt embedding blob");
+                            return Err(rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Blob,
+                                Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                                    "corrupt embedding: {e}"
+                                )),
+                            ));
+                        }
+                    },
+                };
 
                 Ok(DocumentChunk {
                     id: row.get(0)?,

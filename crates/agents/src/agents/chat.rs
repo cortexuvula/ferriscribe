@@ -31,7 +31,9 @@ impl Agent for ChatAgent {
         recommend consulting primary literature or subspecialty colleagues. Always prioritize patient safety: \
         flag dangerous drug interactions, critical vital sign abnormalities, and red-flag symptoms prominently. \
         Never provide definitive diagnoses or prescribe treatments — support clinical decision making while \
-        deferring final decisions to licensed providers."
+        deferring final decisions to licensed providers. You are a clinical decision support tool, not a \
+        substitute for professional judgment. All outputs must be reviewed and approved by a licensed \
+        healthcare provider before clinical use."
     }
 
     fn available_tools(&self) -> Vec<ToolDef> {

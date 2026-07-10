@@ -3338,6 +3338,7 @@ dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "chrono",
+ "dirs",
  "hex",
  "keyring",
  "lazy_static",
@@ -3353,6 +3354,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5025,7 +5027,7 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.29.1"
+version = "0.29.2"
 dependencies = [
  "async-stream",
  "axum",
