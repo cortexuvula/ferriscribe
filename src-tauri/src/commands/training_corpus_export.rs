@@ -2,7 +2,6 @@
 
 use medical_core::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 use crate::corpus_export::{self, ExportOptions, RedactionStrictness};
 use crate::state::AppState;
@@ -26,12 +25,13 @@ pub async fn training_corpus_export(
     state: tauri::State<'_, AppState>,
     req: ExportRequest,
 ) -> AppResult<ExportResponse> {
+    let output_dir = crate::commands::validate_user_path(&req.output_dir)?;
     let strictness = match req.redaction_strictness.as_str() {
         "aggressive" => RedactionStrictness::Aggressive,
         _ => RedactionStrictness::Standard,
     };
     let opts = ExportOptions {
-        output_dir: PathBuf::from(req.output_dir),
+        output_dir,
         base_model_filter: req.base_model_filter,
         redaction_strictness: strictness,
         ferri_scribe_version: env!("CARGO_PKG_VERSION").to_string(),

@@ -104,6 +104,7 @@ pub async fn export_audio(
     recording_id: String,
     file_path: String,
 ) -> AppResult<()> {
+    let file_path = crate::commands::validate_user_path(&file_path)?;
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || -> AppResult<()> {
         let recording = load_recording_blocking(&db, &recording_id)?;

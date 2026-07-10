@@ -13,18 +13,6 @@ lazy_static! {
     static ref HTML_TAG: Regex = Regex::new(r"<[^>]+>").expect("invalid HTML tag regex");
 }
 
-/// Decode the five common HTML entities. Not a full entity decoder — covers
-/// the cases that matter for the "stripped text is rendered elsewhere" threat
-/// model. Numeric `&#x27;` and `&#39;` both map to apostrophe.
-fn decode_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#x27;", "'")
-        .replace("&#39;", "'")
-}
-
 /// Utilities for sanitizing untrusted text input.
 ///
 /// `InputSanitizer` is a stateless unit struct — both methods are
@@ -32,9 +20,14 @@ fn decode_entities(s: &str) -> String {
 pub struct InputSanitizer;
 
 impl InputSanitizer {
-    /// Remove all HTML tags from `input`, returning the bare text content,
-    /// and decode the five common HTML entities (`&amp;`, `&lt;`, `&gt;`,
-    /// `&quot;`, `&#x27;` / `&#39;`).
+    /// Remove all HTML tags from `input`, returning the bare text content.
+    ///
+    /// HTML entities (`&amp;`, `&lt;`, `&gt;`, etc.) are deliberately left
+    /// **encoded** in the output. This is the safe choice: encoded entities
+    /// render as their literal characters in a browser but cannot re-form
+    /// live tags. Decoding them after stripping reintroduces the XSS bypass
+    /// where `&amp;lt;script&amp;gt;` survives the strip, then decodes
+    /// through `&lt;` into a live `<script>` tag.
     ///
     /// The tag-stripping regex is applied in a loop until no more matches are
     /// found — this catches the classic `title=">"` bypass where a `>` inside
@@ -55,7 +48,9 @@ impl InputSanitizer {
             }
             current = next;
         }
-        decode_entities(&current)
+        // Do NOT decode entities — leaving them encoded is safe and prevents
+        // the double-decode bypass where &amp;lt; → &lt; → <.
+        current
     }
 
     /// Truncate `input` to at most `max_len` **bytes**, respecting UTF-8
@@ -111,23 +106,46 @@ mod tests {
     }
 
     #[test]
-    fn strip_html_decodes_common_entities() {
-        assert_eq!(InputSanitizer::strip_html("a &amp; b"), "a & b");
-        assert_eq!(InputSanitizer::strip_html("&lt;tag&gt;"), "<tag>");
+    fn strip_html_leaves_entities_encoded() {
+        // Entities are deliberately left encoded — decoding them after
+        // stripping reintroduces the XSS bypass. They render safely as text.
+        assert_eq!(InputSanitizer::strip_html("a &amp; b"), "a &amp; b");
+        assert_eq!(InputSanitizer::strip_html("&lt;tag&gt;"), "&lt;tag&gt;");
         assert_eq!(
             InputSanitizer::strip_html("say &quot;hi&quot;"),
-            "say \"hi\""
+            "say &quot;hi&quot;"
         );
-        assert_eq!(InputSanitizer::strip_html("it&#x27;s"), "it's");
-        assert_eq!(InputSanitizer::strip_html("it&#39;s"), "it's");
+        assert_eq!(InputSanitizer::strip_html("it&#x27;s"), "it&#x27;s");
+        assert_eq!(InputSanitizer::strip_html("it&#39;s"), "it&#39;s");
     }
 
     #[test]
-    fn strip_html_decodes_entities_after_stripping() {
-        // Tags removed, then entities in the remaining text decoded.
+    fn strip_html_keeps_entities_after_stripping() {
+        // Tags removed; entities in the remaining text stay encoded (safe).
         assert_eq!(
             InputSanitizer::strip_html("<b>&amp;</b> and &lt;rest&gt;"),
-            "& and <rest>"
+            "&amp; and &lt;rest&gt;"
+        );
+    }
+
+    #[test]
+    fn strip_html_prevents_double_decode_bypass() {
+        // Input: &amp;lt;script&amp;gt;alert(1)&amp;lt;/script&amp;gt;
+        // With the old sequential decode, this would become
+        // <script>alert(1)</script>. With the fix, entities are left
+        // encoded — no live script tag survives. (The literal text "alert(1)"
+        // remains as inert text; it cannot execute without surrounding tags.)
+        let input = "&amp;lt;script&amp;gt;alert(1)&amp;lt;/script&amp;gt;";
+        let result = InputSanitizer::strip_html(input);
+        assert!(
+            !result.contains("<script>"),
+            "double-decode bypass should be prevented: {:?}",
+            result
+        );
+        assert!(
+            !result.contains("</script>"),
+            "closing script tag should not survive: {:?}",
+            result
         );
     }
 
