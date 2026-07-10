@@ -6,7 +6,7 @@ use serde_json::json;
 ///
 /// Has access to the vitals extraction tool. Its system prompt covers
 /// vital-sign parsing, lab-result structuring, medication-list compilation,
-/// diagnosis extraction with ICD-10 codes, and allergy documentation.
+/// diagnosis extraction with ICD-9 codes, and allergy documentation.
 pub struct DataExtractionAgent;
 
 #[async_trait]
@@ -26,9 +26,11 @@ impl Agent for DataExtractionAgent {
         with their values, units, and timestamps when available; (2) identifying and structuring laboratory \
         results including test name, value, units, reference range, and interpretation flag; (3) compiling \
         complete medication lists with drug name, dose, route, frequency, and indication when documented; \
-        (4) extracting diagnoses with ICD-10 codes when assignable, distinguishing active from historical problems; \
+        (4) extracting diagnoses with ICD-9 codes when assignable, distinguishing active from historical problems; \
         (5) documenting allergies with allergen, reaction type, and severity. Output extracted data as structured \
-        JSON when possible. Flag any ambiguous or incomplete values for clinician review."
+        JSON when possible. Flag any ambiguous or incomplete values for clinician review. You are a clinical \
+        decision support tool, not a substitute for professional judgment. All outputs must be reviewed and \
+        approved by a licensed healthcare provider before clinical use."
     }
 
     fn available_tools(&self) -> Vec<ToolDef> {

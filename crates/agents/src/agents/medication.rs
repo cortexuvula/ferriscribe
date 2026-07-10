@@ -25,9 +25,11 @@ impl Agent for MedicationAgent {
         severity ratings (contraindicated, major, moderate, minor); (2) validating medication dosages against \
         standard references considering renal/hepatic function and patient age; (3) applying Beers Criteria to \
         flag potentially inappropriate medications in elderly patients (≥65 years); (4) reviewing medication \
-        lists for therapeutic duplications or class overlaps; (5) providing ICD-10 codes for diagnosed conditions \
+        lists for therapeutic duplications or class overlaps; (5) providing ICD-9 codes for diagnosed conditions \
         when relevant to medication decisions. Always cite clinical reasoning and recommend monitoring parameters. \
-        Do not prescribe — provide decision support for licensed prescribers."
+        Do not prescribe — provide decision support for licensed prescribers. You are a clinical decision \
+        support tool, not a substitute for professional judgment. All outputs must be reviewed and approved \
+        by a licensed healthcare provider before clinical use."
     }
 
     fn available_tools(&self) -> Vec<ToolDef> {
