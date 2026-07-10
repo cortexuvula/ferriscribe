@@ -120,7 +120,14 @@ impl LetterAudiencesRepo {
         let updated_str: String = row.get(6)?;
 
         Ok(LetterAudience {
-            id: Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::nil()),
+            id: Uuid::parse_str(&id_str).map_err(|e| {
+                tracing::error!(id_str = %id_str, error = %e, "corrupt letter audience id in DB");
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
             name: row.get(1)?,
             system_prompt: row.get(2)?,
             user_template: row.get(3)?,

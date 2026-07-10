@@ -237,6 +237,7 @@ pub async fn import_vocabulary_json(
     state: tauri::State<'_, AppState>,
     file_path: String,
 ) -> AppResult<u32> {
+    let file_path = crate::commands::validate_user_path(&file_path)?;
     let content = tokio::fs::read_to_string(&file_path).await?;
 
     #[derive(Deserialize)]
@@ -297,7 +298,7 @@ pub async fn import_vocabulary_json(
             };
             remote.insert(&body).await?;
         }
-        info!(count, path = %file_path, "Imported vocabulary entries (remote)");
+        info!(count, path = %file_path.display(), "Imported vocabulary entries (remote)");
         return Ok(count);
     }
     let db = Arc::clone(&state.db);
@@ -311,7 +312,7 @@ pub async fn import_vocabulary_json(
     .await
     .map_err(crate::commands::join_err)??;
 
-    info!(count, path = %file_path, "Imported vocabulary entries");
+    info!(count, path = %file_path.display(), "Imported vocabulary entries");
     Ok(count)
 }
 
@@ -325,6 +326,7 @@ pub async fn export_vocabulary_json(
     state: tauri::State<'_, AppState>,
     file_path: String,
 ) -> AppResult<u32> {
+    let file_path = crate::commands::validate_user_path(&file_path)?;
     let entries: Vec<VocabularyEntry> = if let Some((conn, bearer)) = paired_vocab_target() {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
@@ -355,7 +357,7 @@ pub async fn export_vocabulary_json(
     let json = serde_json::to_string_pretty(&export)?;
     tokio::fs::write(&file_path, json).await?;
 
-    info!(count, path = %file_path, "Exported vocabulary entries");
+    info!(count, path = %file_path.display(), "Exported vocabulary entries");
     Ok(count)
 }
 

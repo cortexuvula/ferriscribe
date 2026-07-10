@@ -12,12 +12,30 @@
  *   KEEP=3 node scripts/prune-old-releases.mjs     # keep 3 instead of 5
  *
  * Requires GH_TOKEN (or GITHUB_TOKEN) env var with repo:delete scope.
- * Only deletes releases whose tag matches /^v\d/ (FerriScribe releases);
- * leaves non-version tags (whisper-server-*) untouched.
+ * Only deletes releases whose tag matches a clean semver pattern
+ * (vX.Y.Z or vX.Y.Z-suffix); leaves non-version tags untouched.
  */
 import { execSync } from 'node:child_process';
 
-const KEEP = parseInt(process.env.KEEP ?? '5', 10);
+// Only match clean semver tags: vX.Y.Z or vX.Y.Z-suffix (no shell metacharacters).
+// Fully anchored to reject tags like "v1.0.0; rm -rf /".
+const VERSION_RE = /^v\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/;
+// Reject tags containing shell metacharacters (defense against injection).
+const SHELL_SAFE = /^[a-zA-Z0-9._-]+$/;
+
+// Validate KEEP: must be a positive integer. A bad value (e.g. "abc") would
+// produce NaN, and slice(0, NaN) === [] → every release deleted.
+let KEEP;
+const KEEP_RAW = parseInt(process.env.KEEP ?? '5', 10);
+if (!Number.isFinite(KEEP_RAW) || KEEP_RAW < 1) {
+  console.error(
+    `Invalid KEEP value: "${process.env.KEEP}". Must be a positive integer. Defaulting to 5.`,
+  );
+  KEEP = 5;
+} else {
+  KEEP = KEEP_RAW;
+}
+
 const DRY_RUN = process.argv.includes('--dry-run');
 
 /** Run a gh CLI command and return trimmed stdout. */
@@ -39,8 +57,8 @@ function ghOk(...args) {
 const raw = gh('release', 'list', '--limit', '200', '--json', 'tagName');
 const tags = JSON.parse(raw)
   .map((r) => r.tagName)
-  // Only FerriScribe version tags (vX.Y.Z or vX.Y.Z-beta.N).
-  .filter((t) => /^v\d+\.\d+\.\d+/.test(t))
+  // Only FerriScribe version tags (vX.Y.Z or vX.Y.Z-beta.N), fully anchored.
+  .filter((t) => VERSION_RE.test(t))
   // Semver-aware sort: split into numeric parts, compare descending.
   .sort((a, b) => {
     const pa = a.replace(/^v/, '').split(/[.-]/).map((x) => parseInt(x, 10) || 0);
@@ -68,6 +86,12 @@ if (DRY_RUN) {
 let deleted = 0;
 let failed = 0;
 for (const tag of delete_) {
+  // Defense in depth: skip any tag that slipped past the regex but contains
+  // shell metacharacters, since gh args are joined into a single shell string.
+  if (!SHELL_SAFE.test(tag)) {
+    console.warn(`Skipping tag with unsafe characters: ${tag}`);
+    continue;
+  }
   // --cleanup-tag deletes the git ref alongside the release.
   if (ghOk('release', 'delete', tag, '--yes', '--cleanup-tag')) {
     deleted++;

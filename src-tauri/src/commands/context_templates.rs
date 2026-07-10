@@ -273,6 +273,7 @@ pub async fn import_context_templates_json(
     state: tauri::State<'_, AppState>,
     file_path: String,
 ) -> AppResult<u32> {
+    let file_path = crate::commands::validate_user_path(&file_path)?;
     let content = tokio::fs::read_to_string(&file_path).await?;
     let imported = parse_import_json(&content)?;
     if let Some((conn, bearer)) = paired_templates_target() {
@@ -288,13 +289,13 @@ pub async fn import_context_templates_json(
             remote.upsert(name, body).await?;
             count += 1;
         }
-        info!(count, path = %file_path, "Imported context templates (remote)");
+        info!(count, path = %file_path.display(), "Imported context templates (remote)");
         return Ok(count);
     }
     let mut config = load_config(&state.db)?;
     let count = apply_import(&mut config.custom_context_templates, imported);
     save_config(&state.db, &config)?;
-    info!(count, path = %file_path, "Imported context templates");
+    info!(count, path = %file_path.display(), "Imported context templates");
     Ok(count)
 }
 
@@ -304,6 +305,7 @@ pub async fn export_context_templates_json(
     state: tauri::State<'_, AppState>,
     file_path: String,
 ) -> AppResult<u32> {
+    let file_path = crate::commands::validate_user_path(&file_path)?;
     let templates: Vec<ContextTemplate> = if let Some((conn, bearer)) = paired_templates_target() {
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
@@ -315,7 +317,7 @@ pub async fn export_context_templates_json(
     let count = templates.len() as u32;
     let json = export_json(&templates)?;
     tokio::fs::write(&file_path, json).await?;
-    info!(count, path = %file_path, "Exported context templates");
+    info!(count, path = %file_path.display(), "Exported context templates");
     Ok(count)
 }
 

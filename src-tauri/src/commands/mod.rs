@@ -33,6 +33,79 @@ pub fn join_err(e: tokio::task::JoinError) -> AppError {
     AppError::Other(format!("Task join error: {e}"))
 }
 
+/// Validate that a user-supplied file path is safe to read from or write to.
+/// Rejects paths that traverse outside the allowed directories.
+/// For SAVE operations (export), the path should be under a user-chosen directory
+/// (we can't sandbox to app-data because the user picks where to save via a dialog).
+/// Instead, we validate it's an absolute path with no traversal components and
+/// doesn't target sensitive system files.
+pub fn validate_user_path(path: &str) -> AppResult<PathBuf> {
+    let p = PathBuf::from(path);
+
+    // Must be absolute (no relative traversal).
+    if !p.is_absolute() {
+        return Err(AppError::Other("Path must be absolute".into()));
+    }
+
+    // Normalize the path (resolves .. and .).
+    let canonical = if p.exists() {
+        p.canonicalize()
+            .map_err(|e| AppError::Other(format!("Invalid path: {e}")))?
+    } else {
+        // For paths that don't exist yet (save targets), canonicalize the parent.
+        let parent = p.parent().unwrap_or(&p);
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|e| AppError::Other(format!("Invalid directory: {e}")))?;
+        canonical_parent.join(p.file_name().unwrap_or_default())
+    };
+
+    // Block known-dangerous paths.
+    let dangerous = [
+        "/etc", "/var", "/usr", "/bin", "/sbin", "/boot", "/dev", "/proc", "/sys", "/root", "/lib",
+    ];
+    let canonical_str = canonical.to_string_lossy();
+    for d in &dangerous {
+        if canonical_str.starts_with(d) {
+            return Err(AppError::Other(format!(
+                "Access denied: path targets a system directory ({d})"
+            )));
+        }
+    }
+
+    // Windows: block system directories
+    #[cfg(target_os = "windows")]
+    {
+        let win_dangerous = ["C:\\Windows", "C:\\Program Files", "C:\\ProgramData"];
+        for d in &win_dangerous {
+            if canonical_str.to_lowercase().starts_with(&d.to_lowercase()) {
+                return Err(AppError::Other(format!(
+                    "Access denied: path targets a system directory ({d})"
+                )));
+            }
+        }
+    }
+
+    // Block hidden files that could be used for persistence (e.g., .bashrc, .ssh/authorized_keys).
+    let file_name = canonical.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let blocked_files = [
+        ".bashrc",
+        ".bash_profile",
+        ".profile",
+        ".ssh",
+        "authorized_keys",
+    ];
+    for f in &blocked_files {
+        if file_name == *f || canonical_str.contains(&format!("/{f}")) {
+            return Err(AppError::Other(format!(
+                "Access denied: path targets a sensitive file ({f})"
+            )));
+        }
+    }
+
+    Ok(canonical)
+}
+
 /// Resolve the recordings directory from settings.
 ///
 /// If the user has configured a custom `storage_path`, use it.
