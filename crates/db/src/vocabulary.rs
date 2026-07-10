@@ -230,8 +230,16 @@ impl VocabularyRepo {
             case_sensitive: case_sensitive_int != 0,
             priority: row.get(5)?,
             enabled: enabled_int != 0,
-            created_at: crate::parse_db_timestamp(7, &created_str, "vocabulary_entries.created_at")?,
-            updated_at: crate::parse_db_timestamp(8, &updated_str, "vocabulary_entries.updated_at")?,
+            created_at: crate::parse_db_timestamp(
+                7,
+                &created_str,
+                "vocabulary_entries.created_at",
+            )?,
+            updated_at: crate::parse_db_timestamp(
+                8,
+                &updated_str,
+                "vocabulary_entries.updated_at",
+            )?,
         })
     }
 }

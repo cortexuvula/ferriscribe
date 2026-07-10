@@ -131,16 +131,8 @@ impl LetterAudiencesRepo {
             system_prompt: row.get(2)?,
             user_template: row.get(3)?,
             is_builtin: is_builtin_int != 0,
-            created_at: crate::parse_db_timestamp(
-                5,
-                &created_str,
-                "letter_audiences.created_at"
-            )?,
-            updated_at: crate::parse_db_timestamp(
-                6,
-                &updated_str,
-                "letter_audiences.updated_at"
-            )?,
+            created_at: crate::parse_db_timestamp(5, &created_str, "letter_audiences.created_at")?,
+            updated_at: crate::parse_db_timestamp(6, &updated_str, "letter_audiences.updated_at")?,
         })
     }
 }

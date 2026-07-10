@@ -193,10 +193,7 @@ mod tests {
         let id = fallback_id();
         // New fallback is a UUID v4 string (persistent or random), so it
         // must NOT be empty and must contain the UUID hyphen separators.
-        assert!(
-            !id.is_empty(),
-            "fallback_id must not be empty"
-        );
+        assert!(!id.is_empty(), "fallback_id must not be empty");
         assert!(
             id.contains('-'),
             "fallback_id should be a UUID, got: {}",
