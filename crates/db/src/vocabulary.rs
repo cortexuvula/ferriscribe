@@ -233,10 +233,32 @@ impl VocabularyRepo {
             enabled: enabled_int != 0,
             created_at: DateTime::parse_from_rfc3339(&created_str)
                 .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
+                .map_err(|e| {
+                    tracing::error!(
+                        created_str = %created_str,
+                        error = %e,
+                        "corrupt vocabulary created_at in DB"
+                    );
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
             updated_at: DateTime::parse_from_rfc3339(&updated_str)
                 .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
+                .map_err(|e| {
+                    tracing::error!(
+                        updated_str = %updated_str,
+                        error = %e,
+                        "corrupt vocabulary updated_at in DB"
+                    );
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
         })
     }
 }

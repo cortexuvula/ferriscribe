@@ -66,7 +66,18 @@ impl AuditRepo {
 
                 let timestamp = DateTime::parse_from_rfc3339(&ts_str)
                     .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
+                    .map_err(|e| {
+                        tracing::error!(
+                            ts_str = %ts_str,
+                            error = %e,
+                            "corrupt audit_log timestamp in DB"
+                        );
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
 
                 Ok(AuditEntry {
                     id,
