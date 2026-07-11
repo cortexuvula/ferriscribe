@@ -513,7 +513,7 @@ pub async fn transcribe_recording_inner(
                     "{err_msg} — additionally failed to write orphaned transcript file"
                 ),
             }
-            return Err(AppError::Database(
+            return Err(AppError::database(
                 mark_recording_failed(&app, &state.db, recording_for_failure, err_msg).await,
             ));
         }

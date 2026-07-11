@@ -75,8 +75,12 @@ pub enum OfflineReason {
 #[derive(Error, Debug)]
 pub enum AppError {
     /// A database operation failed (SQL error, migration, connection pool).
-    #[error("Database error: {0}")]
-    Database(String),
+    #[error("Database error: {message}")]
+    Database {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A remote endpoint was unreachable during preflight or at call time.
     #[error("{provider_name} at {endpoint} is offline ({reason:?})")]
@@ -183,7 +187,7 @@ impl AppError {
     /// for the frontend.
     pub fn kind_str(&self) -> &'static str {
         match self {
-            AppError::Database(_) => "Database",
+            AppError::Database { .. } => "Database",
             AppError::EndpointOffline { .. } => "EndpointOffline",
             AppError::Security(_) => "Security",
             AppError::Audio(_) => "Audio",
@@ -203,6 +207,26 @@ impl AppError {
             AppError::MutexPoisoned(_) => "MutexPoisoned",
             AppError::HttpClient(_) => "HttpClient",
             AppError::Other(_) => "Other",
+        }
+    }
+
+    /// Create a Database error with a source error preserved for
+    /// `Error::source()` chain inspection.
+    pub fn database_with_source(
+        message: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        AppError::Database {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
+    /// Create a Database error from a plain message (no source preserved).
+    pub fn database(message: impl Into<String>) -> Self {
+        AppError::Database {
+            message: message.into(),
+            source: None,
         }
     }
 }
@@ -369,7 +393,7 @@ mod tests {
 
     #[test]
     fn app_error_display_formats_correctly() {
-        let err = AppError::Database("connection failed".into());
+        let err = AppError::database("connection failed");
         assert_eq!(err.to_string(), "Database error: connection failed");
     }
 
@@ -379,6 +403,28 @@ mod tests {
         let app_err: AppError = io_err.into();
         assert!(matches!(app_err, AppError::Io(_)));
         assert!(app_err.to_string().contains("file missing"));
+    }
+
+    #[test]
+    fn database_with_source_preserves_chain() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "truncated");
+        let app_err = AppError::database_with_source("DB read failed", io_err);
+        assert_eq!(app_err.kind_str(), "Database");
+        assert!(app_err.to_string().contains("DB read failed"));
+        // The source chain must be preserved for structured error inspection.
+        let source = std::error::Error::source(&app_err);
+        assert!(source.is_some(), "source should be preserved");
+        assert!(
+            source.unwrap().to_string().contains("truncated"),
+            "source should contain the original error text"
+        );
+    }
+
+    #[test]
+    fn database_without_source_has_none_source() {
+        let app_err = AppError::database("simple error");
+        let source = std::error::Error::source(&app_err);
+        assert!(source.is_none(), "source should be None when not provided");
     }
 
     #[test]

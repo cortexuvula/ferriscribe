@@ -68,7 +68,7 @@ pub async fn delete_letter_audience(state: tauri::State<'_, AppState>, id: Uuid)
         LetterAudiencesRepo::delete(&conn, &id).map_err(|e| match e {
             medical_db::DbError::Constraint(msg) => AppError::Other(msg),
             medical_db::DbError::NotFound(msg) => AppError::Other(msg),
-            other => AppError::Database(other.to_string()),
+            other => AppError::database(other.to_string()),
         })
     })
     .await

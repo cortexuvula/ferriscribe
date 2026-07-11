@@ -133,7 +133,7 @@ pub fn resolve_recordings_dir(db: &Database, data_dir: &Path) -> AppResult<PathB
 /// an existing `AppError` so we don't double-prefix the stored/emitted message.
 pub(super) fn unwrap_app_error_message(err: AppError) -> String {
     match err {
-        AppError::Database(s)
+        AppError::Database { message: s, .. }
         | AppError::Security(s)
         | AppError::Audio(s)
         | AppError::AiProvider(s)
@@ -163,7 +163,7 @@ pub(super) fn unwrap_app_error_message(err: AppError) -> String {
 /// the error and return an owned `String` from the borrowed variants.
 pub(super) fn unwrap_app_error_message_ref(err: &AppError) -> String {
     match err {
-        AppError::Database(s)
+        AppError::Database { message: s, .. }
         | AppError::Security(s)
         | AppError::Audio(s)
         | AppError::AiProvider(s)
@@ -197,7 +197,7 @@ mod tests {
             "bad key"
         );
         assert_eq!(
-            unwrap_app_error_message(AppError::Database("db down".to_string())),
+            unwrap_app_error_message(AppError::database("db down")),
             "db down"
         );
         assert_eq!(unwrap_app_error_message(AppError::Cancelled), "Cancelled");
@@ -210,7 +210,7 @@ mod tests {
             "bad key"
         );
         assert_eq!(
-            unwrap_app_error_message_ref(&AppError::Database("db down".to_string())),
+            unwrap_app_error_message_ref(&AppError::database("db down")),
             "db down"
         );
         assert_eq!(

@@ -128,17 +128,15 @@ pub(crate) fn parse_db_timestamp(
     }
 }
 
-/// Convert a [`DbError`] into an [`AppError`].
+/// Convert a [`DbError`] into an [`AppError`], preserving the source chain.
 ///
-/// `DbError`'s `Display` already includes its discriminant text (e.g.
-/// "Not found: ...", "Constraint violation: ..."), so mapping to
-/// `AppError::Database(e.to_string())` preserves the structured error info
-/// in the message string. This lets call sites use `?` instead of the
-/// ~90 `.map_err(AppError::from)` closures that
-/// previously existed across `src-tauri/src/commands/`.
+/// The `DbError` is stored as the `source` of the `AppError::Database`
+/// variant so that `Error::source()` returns the original typed error
+/// (e.g. `rusqlite::Error`), enabling structured error inspection at
+/// crate boundaries.
 impl From<DbError> for medical_core::error::AppError {
     fn from(e: DbError) -> Self {
-        medical_core::error::AppError::Database(e.to_string())
+        medical_core::error::AppError::database_with_source(e.to_string(), e)
     }
 }
 
