@@ -15,10 +15,20 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+// `Manager` provides `AppHandle::state::<T>()` used by the content-sync push.
+use tauri::Manager;
+
 /// Whitelist of fields that the frontend is allowed to edit. Anything
 /// else returns an error. Keeps the surface tight; non-text fields like
 /// patient_name, tags, metadata get their own commands.
-const EDITABLE_FIELDS: &[&str] = &["transcript", "soap_note", "referral", "letter", "chat"];
+const EDITABLE_FIELDS: &[&str] = &[
+    "transcript",
+    "soap_note",
+    "referral",
+    "letter",
+    "peer_discussion",
+    "chat",
+];
 
 /// Per-field character caps for edited content. Mirrors the generation
 /// pipeline's `MAX_*_CHARS` bounds so a misbehaving/compromised frontend
@@ -35,7 +45,7 @@ const EDITABLE_FIELDS: &[&str] = &["transcript", "soap_note", "referral", "lette
 fn max_chars_for_field(field: &str) -> usize {
     match field {
         "transcript" => 500_000,
-        "soap_note" | "referral" | "letter" | "chat" => 500_000,
+        "soap_note" | "referral" | "letter" | "peer_discussion" | "chat" => 500_000,
         _ => 50_000,
     }
 }
@@ -46,6 +56,7 @@ fn max_chars_for_field(field: &str) -> usize {
 /// unit-tested without needing `tauri::State`.
 #[tauri::command]
 pub async fn save_recording_field(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     recording_id: String,
     field: String,
@@ -72,7 +83,38 @@ pub async fn save_recording_field(
         )
     })
     .await
-    .map_err(crate::commands::join_err)?
+    .map_err(crate::commands::join_err)??;
+
+    // Best-effort content sync push (fire-and-forget, debounced ~2s). The
+    // debounce coaleses back-to-back edits (e.g. the frontend saving SOAP
+    // then referral within the same second) into a single push batch. The
+    // owned `PairedConnection` is moved into the task and `ContentRemote`
+    // borrows it from within the task scope, mirroring the condition-chip
+    // push pattern.
+    let app_clone = app.clone();
+    let rec_id = recording_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let st = app_clone.state::<AppState>();
+        if let Some((conn, bearer, client)) =
+            crate::commands::content_sync::content_sync_target(&st)
+            && let Some(remote) =
+                crate::content_remote::ContentRemote::from(&conn, Some(bearer), client)
+        {
+            let db = st.db.clone();
+            let rec_id_clone = rec_id.clone();
+            let push_result = tokio::task::spawn_blocking(move || -> AppResult<_> {
+                let c = db.conn()?;
+                crate::commands::content_sync::build_sync_recording(&c, &rec_id_clone)
+            })
+            .await;
+            if let Ok(Ok(sync_rec)) = push_result {
+                let _ = remote.push(vec![sync_rec]).await;
+            }
+        }
+    });
+
+    Ok(())
 }
 
 /// Inner logic — testable without `tauri::State`.
@@ -127,6 +169,7 @@ pub fn save_recording_field_inner(
         "soap_note" => recording.soap_note = owned_value,
         "referral" => recording.referral = owned_value,
         "letter" => recording.letter = owned_value,
+        "peer_discussion" => recording.peer_discussion = owned_value,
         "chat" => recording.chat = owned_value,
         _ => {
             // The whitelist check above makes this branch unreachable in
@@ -137,6 +180,24 @@ pub fn save_recording_field_inner(
     }
 
     RecordingsRepo::update(conn, &recording)?;
+
+    // Bump updated_at + field revision for content sync. The recording row's
+    // `updated_at` drives the changed-since delta query, and the per-field
+    // revision gives the merge a precise LWW timestamp for this exact field.
+    // Best-effort: a failure here must not turn a successful edit-save into
+    // an error (the user's edit is already persisted above).
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = conn.execute(
+        "UPDATE recordings SET updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![now, recording.id.to_string()],
+    );
+    let _ = medical_db::ContentSyncRepo::upsert_revision(
+        conn,
+        &recording.id,
+        field,
+        &now,
+        None, // origin_device — could add machine_id later
+    );
 
     // Training-corpus finalize hook. Only applies to soap_note (v1 captures
     // only SOAP). Best-effort — failures are logged but never returned to

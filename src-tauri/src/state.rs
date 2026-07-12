@@ -708,6 +708,41 @@ impl AppState {
             }
         }
 
+        // ── Tombstone sweeper (server only) ────────────────────────────────
+        // Permanently purge recordings soft-deleted >30 days ago. Runs only on
+        // machines acting as the office server (where durable deletion policy
+        // applies); client machines keep their soft-deletes for local undo.
+        // The loop sleeps a day between sweeps — the first pass runs ~24h after
+        // boot, which is fine since the 30-day window dwarfs the interval.
+        {
+            let db_clone = Arc::clone(&db);
+            let server_config = load_server_config();
+            if server_config.is_some() {
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
+                        tracing::info!("running tombstone sweeper");
+                        if let Ok(conn) = db_clone.conn() {
+                            match conn.execute(
+                                "DELETE FROM recordings
+                                 WHERE deleted_at IS NOT NULL
+                                 AND datetime(deleted_at) < datetime('now', '-30 days')",
+                                [],
+                            ) {
+                                Ok(count) => {
+                                    tracing::info!(
+                                        purged = count,
+                                        "tombstone sweeper purged soft-deleted recordings"
+                                    );
+                                }
+                                Err(e) => tracing::warn!(error = %e, "tombstone sweeper failed"),
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
         let config_dir = data_dir.join("config");
         let keys = KeyStorage::open(&config_dir)?;
 

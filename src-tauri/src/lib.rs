@@ -232,6 +232,27 @@ pub fn run() {
                 });
             }
 
+            // Content sync: initial pull on startup if enabled. The 3s delay
+            // lets the window finish rendering before the network round-trip;
+            // failures are logged inside `run_initial_sync` and never block
+            // boot — the app stays usable offline.
+            {
+                use tauri::Manager;
+                let app_handle = app.handle().clone();
+                let state = app_handle.state::<crate::state::AppState>();
+                let db = state.db.clone();
+                let config =
+                    crate::commands::settings::load_config_sync(&db).unwrap_or_default();
+                if config.sync_content {
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        tracing::info!("starting initial content sync");
+                        let _ = crate::commands::content_sync::run_initial_sync(app_handle, db)
+                            .await;
+                    });
+                }
+            }
+
             // Auto-stop sharing when the main window closes, so the
             // whisper-server child process is killed instead of becoming an
             // orphan zombie on app quit. Best-effort: failures are logged.
