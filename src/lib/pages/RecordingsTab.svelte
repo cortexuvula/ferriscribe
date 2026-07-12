@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
   import { recordings, selectRecording } from '../stores/recordings.svelte';
   import { pipeline } from '../stores/pipeline.svelte';
   import { toasts } from '../stores/toasts.svelte';
+  import { subscribeContentSync } from '../api/contentSync';
   import SearchBar from '../components/SearchBar.svelte';
   import RecordingCard from '../components/RecordingCard.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
@@ -10,8 +12,44 @@
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
   let showDeleteAll = $state(false);
 
+  // Cleanup functions for the content sync event listeners, populated as they
+  // attach in onMount. Kept in module scope so the (synchronous) onMount
+  // return can tear them down even if the async setup hasn't finished yet.
+  let unlisteners: Array<() => void> = [];
+
   onMount(() => {
     recordings.load();
+
+    // Content sync event listeners. The backend emits:
+    //  - `content-changed`: server has new data → pull a full sync.
+    //  - `recording-updated`: a specific recording was merged → refresh it.
+    //  - `content-sync-complete`: a sync cycle finished → stamp the timestamp.
+    (async () => {
+      try {
+        const unlistenChanged = await listen('content-changed', () => {
+          recordings.syncNow();
+        });
+        const unlistenUpdated = await listen('recording-updated', (e) => {
+          const payload = e.payload as { id: string };
+          recordings.handleRemoteUpdate(payload.id);
+        });
+        const unlistenComplete = await listen('content-sync-complete', () => {
+          recordings.lastSyncedAt = new Date();
+        });
+        unlisteners.push(unlistenChanged, unlistenUpdated, unlistenComplete);
+
+        // Start the SSE subscription (long-lived backend task). Safe to call
+        // when not paired — the command returns immediately in that case.
+        await subscribeContentSync();
+      } catch (err) {
+        console.error('Failed to start content sync subscription:', err);
+      }
+    })();
+
+    return () => {
+      for (const unlisten of unlisteners) unlisten();
+      unlisteners = [];
+    };
   });
 
   function requestDelete(id: string, name: string) {
