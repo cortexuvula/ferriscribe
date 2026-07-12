@@ -36,6 +36,7 @@
 
 mod commands;
 mod conditions_remote;
+mod content_remote;
 pub mod corpus_export;
 mod sharing_vocab_api;
 mod state;
@@ -368,6 +369,10 @@ pub fn run() {
             commands::conditions::sync_condition_chips_cmd,
             commands::conditions::reorder_condition_chips,
             commands::conditions::subscribe_condition_chips,
+            commands::content_sync::sync_content_now,
+            commands::content_sync::subscribe_content_sync,
+            commands::content_sync::fetch_audio_from_server,
+            commands::content_sync::upload_audio_to_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

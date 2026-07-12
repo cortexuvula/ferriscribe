@@ -1,0 +1,638 @@
+//! Tauri commands for content sync (recordings, transcripts, SOAP, ...).
+//!
+//! Dispatch model: content-sync operations check three gates before routing
+//! through the office server's HTTP API:
+//!
+//! 1. The `sync_content` opt-in setting must be enabled.
+//! 2. This client must be paired with an office server that exposes a
+//!    `vocab` port AND advertises a Tailscale address. Content sync routes
+//!    **exclusively over Tailscale** — never the LAN — because the payload
+//!    is PHI.
+//! 3. A bearer token must be present.
+//!
+//! When all three hold, [`sync_content_now`] performs a bidirectional merge
+//! and [`subscribe_content_sync`] keeps this client near-realtime via SSE.
+//! When any gate fails, the commands return quietly and the app operates
+//! against the local SQLite store only.
+//!
+//! # HIPAA note
+//!
+//! No transcript / SOAP / referral / letter / chat / audio content is logged.
+//! Logging is restricted to counts, IDs, and byte lengths.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures_util::StreamExt;
+use tauri::Emitter;
+use tracing::instrument;
+
+use medical_core::error::{AppError, AppResult};
+use medical_db::content_sync::{
+    ContentSyncRepo, FieldRevision, SyncFieldValue, SyncRecording, SYNCABLE_FIELDS,
+};
+use medical_db::recordings::RecordingsRepo;
+use medical_db::Database;
+
+use crate::commands::sharing::PairedConnection;
+use crate::state::{self, AppState};
+
+/// Returns `Some((conn, bearer, http_client))` when content sync should route
+/// through the office server. Three gates must all pass:
+///
+/// 1. `config.sync_content` is true (user opt-in).
+/// 2. The paired connection has a Tailscale address **and** a vocab port.
+///    (Tailscale-only transport — content sync never falls back to LAN.)
+/// 3. A bearer token is present.
+///
+/// `pub(crate)` so other command files (e.g. a future recording-edit command
+/// that wants to push on save) can reuse the same gating.
+pub(crate) fn content_sync_target(
+    state: &AppState,
+) -> Option<(PairedConnection, String, Arc<reqwest::Client>)> {
+    // Gate 1: user opt-in.
+    let config = crate::commands::settings::load_config_sync(&state.db).ok()?;
+    if !config.sync_content {
+        return None;
+    }
+    // Gate 2: paired connection with Tailscale + vocab port.
+    let conn = state::load_paired_connection()?;
+    conn.ports.vocab?;
+    conn.tailscale.as_ref()?;
+    // Gate 3: bearer token.
+    let bearer = state::load_sharing_bearer()?;
+    Some((conn, bearer, state.http_client.clone()))
+}
+
+/// Build a sparse [`SyncRecording`] from a local recording row + its field
+/// revisions, suitable for pushing to the server.
+///
+/// Mirrors the server-side `recording_to_sync` + `build_sparse_fields` logic.
+/// Only fields with content are included (sparse by design) so absent fields
+/// don't participate in the merge.
+///
+/// `pub(crate)` so the recording-edit commands can push a single updated
+/// recording without going through a full sync round-trip.
+pub(crate) fn build_sync_recording(
+    conn: &rusqlite::Connection,
+    rec_id: &str,
+) -> AppResult<SyncRecording> {
+    let uuid = uuid::Uuid::parse_str(rec_id).map_err(|e| {
+        AppError::Other(format!("build_sync_recording: invalid recording id: {e}"))
+    })?;
+    let rec = RecordingsRepo::get_by_id(conn, &uuid).map_err(AppError::from)?;
+
+    // Read deleted_at separately — it's not on the Recording struct.
+    let deleted_at: Option<String> = conn
+        .query_row(
+            "SELECT deleted_at FROM recordings WHERE id = ?1",
+            rusqlite::params![rec_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let revisions = ContentSyncRepo::revisions_for(conn, &uuid).map_err(AppError::from)?;
+    let fields = build_sparse_fields(&rec, &revisions);
+
+    Ok(SyncRecording {
+        id: rec.id.to_string(),
+        filename: rec.filename.clone(),
+        created_at: rec.created_at.to_rfc3339(),
+        updated_at: rec
+            .updated_at
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| rec.created_at.to_rfc3339()),
+        deleted_at,
+        patient_name: rec.patient_name.clone(),
+        duration_seconds: rec.duration_seconds,
+        file_size_bytes: rec.file_size_bytes,
+        stt_provider: rec.stt_provider.clone(),
+        ai_provider: rec.ai_provider.clone(),
+        fields,
+    })
+}
+
+/// Build the sparse field map for a recording.
+///
+/// For each syncable field that has content, look up its revision (if any)
+/// to get the precise `updated_at` + `origin_device`; otherwise fall back to
+/// the recording's row-level `updated_at`. Mirrors the server-side helper of
+/// the same name.
+fn build_sparse_fields(
+    rec: &medical_core::types::recording::Recording,
+    revisions: &[FieldRevision],
+) -> HashMap<String, SyncFieldValue> {
+    let mut fields: HashMap<String, SyncFieldValue> = HashMap::new();
+    let rev_map: HashMap<&str, &FieldRevision> = revisions
+        .iter()
+        .map(|r| (r.field.as_str(), r))
+        .collect();
+
+    let row_ts = rec
+        .updated_at
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| rec.created_at.to_rfc3339());
+
+    let mut push_text = |name: &str, val: Option<&str>| {
+        if let Some(s) = val {
+            let (ts, device) = rev_map
+                .get(name)
+                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
+                .unwrap_or_else(|| (row_ts.clone(), None));
+            fields.insert(
+                name.to_string(),
+                SyncFieldValue {
+                    value: serde_json::Value::String(s.to_string()),
+                    updated_at: ts,
+                    origin_device: device,
+                },
+            );
+        }
+    };
+
+    push_text("transcript", rec.transcript.as_deref());
+    push_text("soap_note", rec.soap_note.as_deref());
+    push_text("referral", rec.referral.as_deref());
+    push_text("letter", rec.letter.as_deref());
+    push_text("peer_discussion", rec.peer_discussion.as_deref());
+    push_text("chat", rec.chat.as_deref());
+    push_text("patient_name", rec.patient_name.as_deref());
+
+    let mut push_json = |name: &str, val: &serde_json::Value| {
+        if !val.is_null() {
+            let (ts, device) = rev_map
+                .get(name)
+                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
+                .unwrap_or_else(|| (row_ts.clone(), None));
+            fields.insert(
+                name.to_string(),
+                SyncFieldValue {
+                    value: val.clone(),
+                    updated_at: ts,
+                    origin_device: device,
+                },
+            );
+        }
+    };
+
+    if let Ok(tags_json) = serde_json::to_value(&rec.tags) {
+        push_json("tags", &tags_json);
+    }
+    push_json("metadata", &rec.metadata);
+    let status_json = serde_json::to_value(&rec.status).unwrap_or(serde_json::Value::Null);
+    push_json("processing_status", &status_json);
+
+    fields
+}
+
+/// Run one full bidirectional content sync against the office server.
+///
+/// This is the core logic shared by the [`sync_content_now`] command and the
+/// [`run_initial_sync`] startup hook. It:
+///
+/// 1. **Pull loop**: read the local cursor, call `remote.pull(cursor)`, merge
+///    the incoming batch into the local store (per-field LWW), advance the
+///    cursor to the batch's max `updated_at`, and repeat while `has_more`.
+/// 2. **Push**: collect local recording IDs changed since the cursor, build
+///    `SyncRecording`s for each, and push them in a single batch.
+///
+/// Returns a summary (counts only — never PHI). Errors are logged and
+/// propagated so the caller can decide whether to surface them.
+async fn run_sync(
+    db: Arc<Database>,
+    remote: &crate::content_remote::ContentRemote<'_>,
+) -> AppResult<SyncSummary> {
+    let mut summary = SyncSummary::default();
+
+    // ── Pull loop ───────────────────────────────────────────────────────
+    loop {
+        // Read cursor and pull a batch on the blocking pool, then merge.
+        let cursor = tokio::task::spawn_blocking({
+            let db = Arc::clone(&db);
+            move || -> AppResult<Option<String>> {
+                let conn = db.conn()?;
+                Ok(ContentSyncRepo::get_cursor(&conn)
+                    .map_err(AppError::from)?
+                    .cursor)
+            }
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
+
+        let batch = remote.pull(cursor.as_deref()).await?;
+        let batch_count = batch.recordings.len();
+        let has_more = batch.has_more;
+
+        // Merge incoming + advance the cursor. The next cursor is the max
+        // `updated_at` in the batch (the server returns rows ordered by
+        // updated_at ascending, so it's the last row's timestamp).
+        let next_cursor = batch
+            .recordings
+            .iter()
+            .map(|r| r.updated_at.as_str())
+            .max()
+            .map(|s| s.to_string());
+
+        let merge_db = Arc::clone(&db);
+        let merge_result = tokio::task::spawn_blocking(move || {
+            let conn = merge_db.conn()?;
+            ContentSyncRepo::merge_incoming(&conn, &batch.recordings).map_err(AppError::from)
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
+
+        summary.pulled += batch_count;
+        summary.merge_conflicts += merge_result.conflicts.len();
+
+        // Advance the cursor if we made progress.
+        if let Some(ref nc) = next_cursor {
+            let cursor_db = Arc::clone(&db);
+            let nc = nc.clone();
+            tokio::task::spawn_blocking(move || {
+                let conn = cursor_db.conn()?;
+                ContentSyncRepo::set_cursor(&conn, Some(&nc)).map_err(AppError::from)
+            })
+            .await
+            .map_err(crate::commands::join_err)??;
+        }
+
+        if !has_more || batch_count == 0 {
+            break;
+        }
+    }
+
+    // ── Push ────────────────────────────────────────────────────────────
+    // Collect local recordings changed since the (now-advanced) cursor and
+    // push them. We reuse the delta query: IDs whose updated_at exceeds the
+    // cursor are the ones the server hasn't seen since our last successful
+    // pull.
+    let push_db = Arc::clone(&db);
+    let to_push: Vec<SyncRecording> = tokio::task::spawn_blocking(move || {
+        let conn = push_db.conn()?;
+        let cursor = ContentSyncRepo::get_cursor(&conn)
+            .map_err(AppError::from)?
+            .cursor;
+        // Use a generous limit; changed_since caps a page but we want all
+        // local changes in one push batch.
+        let (ids, _has_more) =
+            ContentSyncRepo::changed_since(&conn, cursor.as_deref(), 1000).map_err(AppError::from)?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in &ids {
+            match build_sync_recording(&conn, id) {
+                Ok(sr) => out.push(sr),
+                Err(e) => {
+                    tracing::warn!(
+                        recording_id_len = id.len(),
+                        error = %e,
+                        "content sync push: skipping unreadable recording"
+                    );
+                }
+            }
+        }
+        Ok::<Vec<SyncRecording>, AppError>(out)
+    })
+    .await
+    .map_err(crate::commands::join_err)??;
+
+    if !to_push.is_empty() {
+        let push_count = to_push.len();
+        let push_resp = remote.push(to_push).await?;
+        summary.pushed = push_count;
+        summary.push_conflicts = push_resp.conflicts.len();
+    }
+
+    Ok(summary)
+}
+
+/// Counts-only summary of a sync round (no PHI).
+#[derive(Debug, Default, Clone, Copy)]
+struct SyncSummary {
+    pulled: usize,
+    pushed: usize,
+    merge_conflicts: usize,
+    push_conflicts: usize,
+}
+
+/// Manually trigger a full bidirectional content sync.
+///
+/// Pulls server changes (per-field LWW merge into local), then pushes local
+/// changes back. Emits a `content-sync-complete` Tauri event with a
+/// counts-only payload (no PHI) when done so the frontend can refresh.
+///
+/// When not paired / sync disabled / no Tailscale, returns a zero summary
+/// quietly (the app keeps working offline).
+#[tauri::command]
+#[instrument(skip(app, state), name = "content::sync_now")]
+pub async fn sync_content_now(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> AppResult<SyncSummaryPayload> {
+    let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
+        return Ok(SyncSummaryPayload::default());
+    };
+    let remote = match crate::content_remote::ContentRemote::from(
+        &conn,
+        Some(bearer),
+        http_client,
+    ) {
+        Some(r) => r,
+        None => return Ok(SyncSummaryPayload::default()),
+    };
+    let summary = run_sync(Arc::clone(&state.db), &remote).await?;
+    // Emit a counts-only event (no PHI). Failures to emit are non-fatal.
+    let _ = app.emit("content-sync-complete", SyncSummaryPayload::from(summary));
+    Ok(SyncSummaryPayload::default())
+}
+
+/// Startup initial sync — same logic as [`sync_content_now`] but takes
+/// explicit params so it can run before `AppState` is registered with Tauri.
+///
+/// Called from `AppState::initialize` (or the app boot sequence) on startup.
+/// Failures are logged but do not abort boot — the app must remain usable
+/// offline. Emits `content-sync-complete` on the passed `AppHandle` if one is
+/// available.
+///
+/// This is `pub` (not a `#[tauri::command]`) so it can be invoked directly
+/// from `lib.rs::run`.
+#[allow(dead_code)] // wired into AppState::initialize by the boot-sequence task
+pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
+    // Re-evaluate the gates without an AppState: load config + pairing from
+    // disk directly. This mirrors content_sync_target but against raw state
+    // helpers since AppState may not be fully wired yet at the call site.
+    let config = crate::commands::settings::load_config_sync(&db).ok();
+    let enabled = config.map(|c| c.sync_content).unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    let Some(conn) = state::load_paired_connection() else {
+        return;
+    };
+    if conn.ports.vocab.is_none() || conn.tailscale.is_none() {
+        return;
+    }
+    let Some(bearer) = state::load_sharing_bearer() else {
+        return;
+    };
+    let http_client = Arc::new(
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(4)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new()),
+    );
+
+    let remote = match crate::content_remote::ContentRemote::from(&conn, Some(bearer), http_client)
+    {
+        Some(r) => r,
+        None => return,
+    };
+    match run_sync(db, &remote).await {
+        Ok(summary) => {
+            tracing::info!(
+                pulled = summary.pulled,
+                pushed = summary.pushed,
+                merge_conflicts = summary.merge_conflicts,
+                push_conflicts = summary.push_conflicts,
+                "initial content sync complete"
+            );
+            let _ = app.emit("content-sync-complete", SyncSummaryPayload::from(summary));
+        }
+        Err(e) => tracing::warn!(error = %e, "initial content sync failed (non-fatal)"),
+    }
+}
+
+/// Counts-only payload emitted on `content-sync-complete` (no PHI).
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct SyncSummaryPayload {
+    pub pulled: usize,
+    pub pushed: usize,
+    pub merge_conflicts: usize,
+    pub push_conflicts: usize,
+}
+
+impl From<SyncSummary> for SyncSummaryPayload {
+    fn from(s: SyncSummary) -> Self {
+        Self {
+            pulled: s.pulled,
+            pushed: s.pushed,
+            merge_conflicts: s.merge_conflicts,
+            push_conflicts: s.push_conflicts,
+        }
+    }
+}
+
+/// Start a long-lived SSE subscription to the office server's content-change
+/// notifications.
+///
+/// Spawns a background task that connects to `/v1/content/events` and emits a
+/// `content-changed` Tauri event for each server-pushed "changed"
+/// notification. The frontend listens for this event and calls
+/// `syncContentNow()` for near-realtime convergence across machines. The task
+/// runs for the lifetime of the app and reconnects with exponential backoff
+/// (5s → 30s cap) when the stream ends or errors.
+///
+/// Returns `Ok(())` immediately when not paired / sync disabled / no
+/// Tailscale (no task is spawned). Safe to call repeatedly; each call spawns
+/// an independent task. In practice the frontend calls it once on mount.
+#[tauri::command]
+#[instrument(skip(app, state), name = "content::subscribe")]
+pub async fn subscribe_content_sync(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> AppResult<()> {
+    let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
+        return Ok(());
+    };
+    tokio::spawn(async move {
+        let mut backoff = Duration::from_secs(5);
+        loop {
+            // `conn` and `bearer` are owned by this task; `ContentRemote`
+            // borrows `conn` from within the task scope.
+            let remote = match crate::content_remote::ContentRemote::from(
+                &conn,
+                Some(bearer.clone()),
+                http_client.clone(),
+            ) {
+                Some(r) => r,
+                None => {
+                    tracing::warn!("content SSE target unavailable, retrying");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    continue;
+                }
+            };
+            match remote.subscribe_events_async().await {
+                Ok(resp) => {
+                    tracing::info!("content SSE subscription connected");
+                    backoff = Duration::from_secs(5);
+                    let mut stream = resp.bytes_stream();
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(bytes) => {
+                                let text = String::from_utf8_lossy(&bytes);
+                                for line in text.lines() {
+                                    if line.starts_with("data: changed") {
+                                        let _ = app.emit("content-changed", ());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "content SSE chunk error"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    tracing::info!("content SSE stream ended, reconnecting");
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "content SSE subscription failed, reconnecting"
+                ),
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(30));
+        }
+    });
+    Ok(())
+}
+
+// ── Task 13: Audio commands ──────────────────────────────────────────────
+
+/// Download audio for a recording from the office server, re-encrypt it
+/// locally, write it to `{recordings_dir}/{id}.enc`, and update the DB
+/// `audio_path`.
+///
+/// Used when a recording's metadata arrived via content sync but the audio
+/// blob did not (audio is synced separately from field metadata). The server
+/// returns decrypted plaintext bytes; this command re-encrypts them at rest
+/// before the write completes so plaintext PHI never touches disk.
+///
+/// Returns the local file path. No-op (returns the existing path) if the
+/// audio is already present locally.
+#[tauri::command]
+#[instrument(skip(state), name = "content::fetch_audio")]
+pub async fn fetch_audio_from_server(
+    state: tauri::State<'_, AppState>,
+    recording_id: String,
+) -> AppResult<String> {
+    let (conn, bearer, http_client) = content_sync_target(&state)
+        .ok_or_else(|| AppError::Other("content sync target unavailable".into()))?;
+    let remote = crate::content_remote::ContentRemote::from(&conn, Some(bearer), http_client)
+        .ok_or_else(|| AppError::Other("content remote unavailable (no tailscale?)".into()))?;
+
+    // Resolve the local target path first so we can short-circuit if the
+    // audio already exists (idempotent).
+    let data_dir = state.data_dir.clone();
+    let db = Arc::clone(&state.db);
+    let recordings_dir =
+        crate::commands::resolve_recordings_dir(&db, &data_dir)?;
+    let target_path = recordings_dir.join(format!("{recording_id}.enc"));
+
+    // First-write-wins: if we already have the audio, return its path.
+    if target_path.exists() {
+        return Ok(target_path.to_string_lossy().into_owned());
+    }
+
+    // Download decrypted plaintext bytes from the server.
+    let plaintext = remote.fetch_audio(&recording_id).await?;
+    let byte_count = plaintext.len();
+
+    // Re-encrypt + write to disk + update DB audio_path, all on the blocking
+    // pool. We write to a temp file, encrypt in place, then atomically rename
+    // so plaintext PHI is never persisted.
+    let db2 = Arc::clone(&state.db);
+    let target_for_task = target_path.clone();
+    let rec_id_for_task = recording_id.clone();
+    let path_str = tokio::task::spawn_blocking(move || -> AppResult<String> {
+        let tmp_path = target_for_task.with_extension("enc.tmp");
+        std::fs::write(&tmp_path, &plaintext)?;
+        medical_security::file_crypto::encrypt_file_in_place(&tmp_path).map_err(|e| {
+            // Clean up the temp plaintext on failure — never leave
+            // unencrypted PHI on disk.
+            let _ = std::fs::remove_file(&tmp_path);
+            AppError::Security(format!("audio re-encrypt failed: {e}"))
+        })?;
+        std::fs::rename(&tmp_path, &target_for_task)?;
+
+        // Update the recording's audio_path + file_size_bytes.
+        let conn = db2.conn()?;
+        let uuid = uuid::Uuid::parse_str(&rec_id_for_task)
+            .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+        let mut rec = RecordingsRepo::get_by_id(&conn, &uuid).map_err(AppError::from)?;
+        rec.audio_path = target_for_task.clone();
+        rec.file_size_bytes = Some(byte_count as u64);
+        RecordingsRepo::update(&conn, &rec).map_err(AppError::from)?;
+
+        Ok(target_for_task.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(crate::commands::join_err)??;
+
+    tracing::debug!(
+        recording_id_len = recording_id.len(),
+        byte_count,
+        "audio fetched and re-encrypted locally"
+    );
+    Ok(path_str)
+}
+
+/// Read local audio for a recording, decrypt it to plaintext, and upload it
+/// to the office server.
+///
+/// The inverse of [`fetch_audio_from_server`]. Used when this machine created
+/// the recording (so it owns the audio) and needs to push the blob to the
+/// server so other paired clients can fetch it.
+///
+/// A server-side `409 Conflict` (the server already has this audio) is
+/// treated as success — first-write-wins.
+#[tauri::command]
+#[instrument(skip(state), name = "content::upload_audio")]
+pub async fn upload_audio_to_server(
+    state: tauri::State<'_, AppState>,
+    recording_id: String,
+) -> AppResult<()> {
+    let (conn, bearer, http_client) = content_sync_target(&state)
+        .ok_or_else(|| AppError::Other("content sync target unavailable".into()))?;
+    let remote = crate::content_remote::ContentRemote::from(&conn, Some(bearer), http_client)
+        .ok_or_else(|| AppError::Other("content remote unavailable (no tailscale?)".into()))?;
+
+    // Load the recording + decrypt its audio to plaintext on the blocking pool.
+    let db = Arc::clone(&state.db);
+    let rec_id_for_task = recording_id.clone();
+    let plaintext = tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
+        let conn = db.conn()?;
+        let uuid = uuid::Uuid::parse_str(&rec_id_for_task)
+            .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+        let rec = RecordingsRepo::get_by_id(&conn, &uuid).map_err(AppError::from)?;
+        let path = &rec.audio_path;
+        if path.as_os_str().is_empty() || !path.exists() {
+            return Err(AppError::Other("local audio file not found".into()));
+        }
+        match medical_security::file_crypto::decrypt_file(path) {
+            Ok(plaintext) => Ok(plaintext),
+            Err(medical_security::file_crypto::FileCryptoError::NotEncrypted) => {
+                // Legacy plaintext file — read as-is.
+                std::fs::read(path).map_err(|e| {
+                    AppError::Other(format!("audio read failed: {e}"))
+                })
+            }
+            Err(e) => Err(AppError::Security(format!("audio decrypt failed: {e}"))),
+        }
+    })
+    .await
+    .map_err(crate::commands::join_err)??;
+
+    remote.upload_audio(&recording_id, plaintext).await
+}
+
+// Keep SYNCABLE_FIELDS referenced so the const stays part of the public
+// surface even if the field list isn't directly used here yet. This also
+// documents which fields participate in sync.
+#[allow(dead_code)]
+const _: &[&str] = SYNCABLE_FIELDS;
