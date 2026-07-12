@@ -29,11 +29,11 @@ use tauri::Emitter;
 use tracing::instrument;
 
 use medical_core::error::{AppError, AppResult};
+use medical_db::Database;
 use medical_db::content_sync::{
-    ContentSyncRepo, FieldRevision, SyncFieldValue, SyncRecording, SYNCABLE_FIELDS,
+    ContentSyncRepo, FieldRevision, SYNCABLE_FIELDS, SyncFieldValue, SyncRecording,
 };
 use medical_db::recordings::RecordingsRepo;
-use medical_db::Database;
 
 use crate::commands::sharing::PairedConnection;
 use crate::state::{self, AppState};
@@ -78,9 +78,8 @@ pub(crate) fn build_sync_recording(
     conn: &rusqlite::Connection,
     rec_id: &str,
 ) -> AppResult<SyncRecording> {
-    let uuid = uuid::Uuid::parse_str(rec_id).map_err(|e| {
-        AppError::Other(format!("build_sync_recording: invalid recording id: {e}"))
-    })?;
+    let uuid = uuid::Uuid::parse_str(rec_id)
+        .map_err(|e| AppError::Other(format!("build_sync_recording: invalid recording id: {e}")))?;
     let rec = RecordingsRepo::get_by_id(conn, &uuid).map_err(AppError::from)?;
 
     // Read deleted_at separately — it's not on the Recording struct.
@@ -125,10 +124,8 @@ fn build_sparse_fields(
     revisions: &[FieldRevision],
 ) -> HashMap<String, SyncFieldValue> {
     let mut fields: HashMap<String, SyncFieldValue> = HashMap::new();
-    let rev_map: HashMap<&str, &FieldRevision> = revisions
-        .iter()
-        .map(|r| (r.field.as_str(), r))
-        .collect();
+    let rev_map: HashMap<&str, &FieldRevision> =
+        revisions.iter().map(|r| (r.field.as_str(), r)).collect();
 
     let row_ts = rec
         .updated_at
@@ -276,8 +273,8 @@ async fn run_sync(
             .cursor;
         // Use a generous limit; changed_since caps a page but we want all
         // local changes in one push batch.
-        let (ids, _has_more) =
-            ContentSyncRepo::changed_since(&conn, cursor.as_deref(), 1000).map_err(AppError::from)?;
+        let (ids, _has_more) = ContentSyncRepo::changed_since(&conn, cursor.as_deref(), 1000)
+            .map_err(AppError::from)?;
         let mut out = Vec::with_capacity(ids.len());
         for id in &ids {
             match build_sync_recording(&conn, id) {
@@ -332,11 +329,8 @@ pub async fn sync_content_now(
     let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
         return Ok(SyncSummaryPayload::default());
     };
-    let remote = match crate::content_remote::ContentRemote::from(
-        &conn,
-        Some(bearer),
-        http_client,
-    ) {
+    let remote = match crate::content_remote::ContentRemote::from(&conn, Some(bearer), http_client)
+    {
         Some(r) => r,
         None => return Ok(SyncSummaryPayload::default()),
     };
@@ -530,8 +524,7 @@ pub async fn fetch_audio_from_server(
     // audio already exists (idempotent).
     let data_dir = state.data_dir.clone();
     let db = Arc::clone(&state.db);
-    let recordings_dir =
-        crate::commands::resolve_recordings_dir(&db, &data_dir)?;
+    let recordings_dir = crate::commands::resolve_recordings_dir(&db, &data_dir)?;
     let target_path = recordings_dir.join(format!("{recording_id}.enc"));
 
     // First-write-wins: if we already have the audio, return its path.
@@ -618,9 +611,7 @@ pub async fn upload_audio_to_server(
             Ok(plaintext) => Ok(plaintext),
             Err(medical_security::file_crypto::FileCryptoError::NotEncrypted) => {
                 // Legacy plaintext file — read as-is.
-                std::fs::read(path).map_err(|e| {
-                    AppError::Other(format!("audio read failed: {e}"))
-                })
+                std::fs::read(path).map_err(|e| AppError::Other(format!("audio read failed: {e}")))
             }
             Err(e) => Err(AppError::Security(format!("audio decrypt failed: {e}"))),
         }

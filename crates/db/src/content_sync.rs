@@ -165,18 +165,16 @@ impl ContentSyncRepo {
              ON CONFLICT(recording_id, field) DO UPDATE SET
                 updated_at    = excluded.updated_at,
                 origin_device = excluded.origin_device",
-            params![
-                recording_id.to_string(),
-                field,
-                updated_at,
-                origin_device,
-            ],
+            params![recording_id.to_string(), field, updated_at, origin_device,],
         )?;
         Ok(())
     }
 
     /// Load all field revisions for a single recording.
-    pub fn revisions_for(conn: &Connection, recording_id: &uuid::Uuid) -> DbResult<Vec<FieldRevision>> {
+    pub fn revisions_for(
+        conn: &Connection,
+        recording_id: &uuid::Uuid,
+    ) -> DbResult<Vec<FieldRevision>> {
         let mut stmt = conn.prepare(
             "SELECT field, updated_at, origin_device
              FROM recording_field_revisions
@@ -328,10 +326,7 @@ impl ContentSyncRepo {
     ///
     /// Returns the list of conflicts (local won) and the IDs of recordings
     /// whose local data changed.
-    pub fn merge_incoming(
-        conn: &Connection,
-        remotes: &[SyncRecording],
-    ) -> DbResult<MergeResult> {
+    pub fn merge_incoming(conn: &Connection, remotes: &[SyncRecording]) -> DbResult<MergeResult> {
         let mut conflicts: Vec<MergeConflict> = Vec::new();
         let mut changed: Vec<String> = Vec::new();
 
@@ -443,12 +438,7 @@ impl ContentSyncRepo {
                             match remote_value.updated_at.cmp(&local_rev.updated_at) {
                                 std::cmp::Ordering::Greater => {
                                     // Remote newer → remote wins.
-                                    Self::apply_field(
-                                        conn,
-                                        id_str,
-                                        field,
-                                        &remote_value.value,
-                                    )?;
+                                    Self::apply_field(conn, id_str, field, &remote_value.value)?;
                                     Self::upsert_revision(
                                         conn,
                                         &id,
@@ -537,8 +527,8 @@ impl ContentSyncRepo {
         };
 
         let column = match field {
-            "transcript" | "soap_note" | "referral" | "letter" | "peer_discussion"
-            | "chat" | "patient_name" => field,
+            "transcript" | "soap_note" | "referral" | "letter" | "peer_discussion" | "chat"
+            | "patient_name" => field,
             "tags" | "metadata" | "processing_status" => field,
             other => {
                 tracing::warn!(field = %other, "sync: ignoring unknown field");
@@ -627,8 +617,7 @@ mod tests {
         assert!(initial.cursor.is_none());
         assert!(initial.last_pull.is_none());
 
-        ContentSyncRepo::set_cursor(&conn, Some("2026-07-10T00:00:00Z"))
-            .expect("set");
+        ContentSyncRepo::set_cursor(&conn, Some("2026-07-10T00:00:00Z")).expect("set");
 
         let after = ContentSyncRepo::get_cursor(&conn).expect("get");
         assert_eq!(after.cursor.as_deref(), Some("2026-07-10T00:00:00Z"));
@@ -682,7 +671,8 @@ mod tests {
         .expect("insert new");
 
         let (ids, has_more) =
-            ContentSyncRepo::changed_since(&conn, Some("2026-07-01T00:00:00Z"), 100).expect("query");
+            ContentSyncRepo::changed_since(&conn, Some("2026-07-01T00:00:00Z"), 100)
+                .expect("query");
         assert_eq!(ids, vec!["b".to_string()]);
         assert!(!has_more);
     }

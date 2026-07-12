@@ -11,11 +11,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use medical_core::types::recording::Recording;
-use medical_db::content_sync::{
-    ContentSyncRepo, MergeResult, SyncFieldValue, SyncRecording,
-};
-use medical_db::recordings::RecordingsRepo;
 use medical_db::Database;
+use medical_db::content_sync::{ContentSyncRepo, MergeResult, SyncFieldValue, SyncRecording};
+use medical_db::recordings::RecordingsRepo;
 use uuid::Uuid;
 
 /// ISO 8601 timestamp offset from a fixed base epoch (milliseconds).
@@ -66,8 +64,10 @@ fn remote_for(id: Uuid, fields: HashMap<String, SyncFieldValue>) -> SyncRecordin
 /// Fetch the local recording's column value for a text field.
 fn get_text_column(conn: &rusqlite::Connection, id: Uuid, column: &str) -> Option<String> {
     let sql = format!("SELECT {column} FROM recordings WHERE id = ?1");
-    conn.query_row(&sql, [id.to_string()], |row| row.get::<_, Option<String>>(0))
-        .expect("query column")
+    conn.query_row(&sql, [id.to_string()], |row| {
+        row.get::<_, Option<String>>(0)
+    })
+    .expect("query column")
 }
 
 // -------------------------------------------------------------------------
@@ -101,7 +101,10 @@ fn merge_remote_wins_when_newer() {
         changed_recording_ids,
     } = ContentSyncRepo::merge_incoming(&conn, &[remote]).expect("merge");
 
-    assert!(conflicts.is_empty(), "no conflict expected when remote newer");
+    assert!(
+        conflicts.is_empty(),
+        "no conflict expected when remote newer"
+    );
     assert!(
         changed_recording_ids.contains(&id.to_string()),
         "recording should be marked changed"
@@ -220,7 +223,10 @@ fn merge_deletion_propagates() {
     let MergeResult { conflicts, .. } =
         ContentSyncRepo::merge_incoming(&conn, &[remote]).expect("merge");
 
-    assert!(conflicts.is_empty(), "deletion should not produce conflicts");
+    assert!(
+        conflicts.is_empty(),
+        "deletion should not produce conflicts"
+    );
 
     let deleted_at: Option<String> = conn
         .query_row(
@@ -229,5 +235,8 @@ fn merge_deletion_propagates() {
             |row| row.get(0),
         )
         .expect("query deleted_at");
-    assert!(deleted_at.is_some(), "recording must be soft-deleted after merge");
+    assert!(
+        deleted_at.is_some(),
+        "recording must be soft-deleted after merge"
+    );
 }

@@ -43,7 +43,10 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State as AxumState},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response, sse::{Event, Sse}},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, Sse},
+    },
     routing::{get, post, put},
 };
 use chrono::Utc;
@@ -54,7 +57,9 @@ use medical_core::types::vocabulary::{VocabularyCategory, VocabularyEntry};
 use medical_db::content_sync::{
     ContentSyncRepo, FieldRevision, MergeConflict, SyncFieldValue, SyncRecording,
 };
-use medical_db::{Database, recordings::RecordingsRepo, settings::SettingsRepo, vocabulary::VocabularyRepo};
+use medical_db::{
+    Database, recordings::RecordingsRepo, settings::SettingsRepo, vocabulary::VocabularyRepo,
+};
 use medical_security::file_crypto;
 use medical_sharing::token_store::TokenStore;
 use serde::Deserialize;
@@ -933,8 +938,7 @@ fn load_sync_recordings(
          FROM recordings
          WHERE id IN ({placeholders})"
     );
-    let params: Vec<&dyn rusqlite::ToSql> =
-        ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let params: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| medical_core::error::AppError::from(medical_db::DbError::from(e)))?;
@@ -986,9 +990,8 @@ async fn content_sync_pull_handler(
     let recordings = tokio::task::spawn_blocking(
         move || -> Result<(Vec<SyncRecording>, bool), medical_core::error::AppError> {
             let conn = db.conn()?;
-            let (ids, has_more) =
-                ContentSyncRepo::changed_since(&conn, since.as_deref(), limit)
-                    .map_err(medical_core::error::AppError::from)?;
+            let (ids, has_more) = ContentSyncRepo::changed_since(&conn, since.as_deref(), limit)
+                .map_err(medical_core::error::AppError::from)?;
             let recs = load_sync_recordings(&conn, &ids)?;
             Ok((recs, has_more))
         },
@@ -1002,11 +1005,7 @@ async fn content_sync_pull_handler(
 
     let (recordings, has_more) = recordings;
 
-    info!(
-        count = recordings.len(),
-        has_more,
-        "content_sync: pull"
-    );
+    info!(count = recordings.len(), has_more, "content_sync: pull");
     Ok(Json(ContentPullResponse {
         recordings,
         server_time: Utc::now().to_rfc3339(),
@@ -1083,11 +1082,9 @@ async fn content_sync_meta_handler(
                 )
                 .map_err(|e| medical_core::error::AppError::from(medical_db::DbError::from(e)))?;
             let latest: Option<String> = conn
-                .query_row(
-                    "SELECT MAX(updated_at) FROM recordings",
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row("SELECT MAX(updated_at) FROM recordings", [], |row| {
+                    row.get(0)
+                })
                 .ok()
                 .flatten();
             Ok((count, latest))
@@ -1147,8 +1144,8 @@ async fn content_audio_get_handler(
     let id_len = recording_id.len();
     let db = Arc::clone(&state.db);
 
-    let bytes = tokio::task::spawn_blocking(
-        move || -> Result<Vec<u8>, medical_core::error::AppError> {
+    let bytes =
+        tokio::task::spawn_blocking(move || -> Result<Vec<u8>, medical_core::error::AppError> {
             let conn = db.conn()?;
             let uuid = Uuid::parse_str(&recording_id)
                 .map_err(|_| medical_core::error::AppError::Other("invalid recording id".into()))?;
@@ -1156,7 +1153,9 @@ async fn content_audio_get_handler(
                 .map_err(medical_core::error::AppError::from)?;
             let path = &rec.audio_path;
             if path.as_os_str().is_empty() || !path.exists() {
-                return Err(medical_core::error::AppError::Other("audio file not found".into()));
+                return Err(medical_core::error::AppError::Other(
+                    "audio file not found".into(),
+                ));
             }
             match file_crypto::decrypt_file(path) {
                 Ok(plaintext) => Ok(plaintext),
@@ -1170,22 +1169,21 @@ async fn content_audio_get_handler(
                     "audio decrypt failed: {e}"
                 ))),
             }
-        },
-    )
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|e| {
-        warn!(id_len, error = %e, "content_audio: get failed");
-        if matches!(
-            e,
-            medical_core::error::AppError::Other(ref s)
-                if s.contains("not found")
-        ) {
-            StatusCode::NOT_FOUND
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    })?;
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            warn!(id_len, error = %e, "content_audio: get failed");
+            if matches!(
+                e,
+                medical_core::error::AppError::Other(ref s)
+                    if s.contains("not found")
+            ) {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })?;
 
     let byte_count = bytes.len();
     info!(id_len, byte_count, "content_audio: get");
@@ -1232,8 +1230,8 @@ async fn content_audio_put_handler(
     let data_dir = state.data_dir.clone();
     let target_path = {
         // Resolve the recordings dir synchronously (cheap: reads settings).
-        let recordings_dir = crate::commands::resolve_recordings_dir(&db, &data_dir)
-            .map_err(|e| {
+        let recordings_dir =
+            crate::commands::resolve_recordings_dir(&db, &data_dir).map_err(|e| {
                 warn!(id_len, error = %e, "content_audio: resolve dir failed");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
@@ -1251,28 +1249,26 @@ async fn content_audio_put_handler(
     let db2 = Arc::clone(&db);
     let path_for_db = target_path.clone();
     let body_vec = body.to_vec();
-    tokio::task::spawn_blocking(
-        move || -> Result<(), medical_core::error::AppError> {
-            let tmp_path = target_path.with_extension("enc.tmp");
-            std::fs::write(&tmp_path, &body_vec)?;
-            file_crypto::encrypt_file_in_place(&tmp_path).map_err(|e| {
-                // Clean up the temp plaintext on failure — never leave
-                // unencrypted PHI on disk.
-                let _ = std::fs::remove_file(&tmp_path);
-                medical_core::error::AppError::Security(format!("audio encrypt failed: {e}"))
-            })?;
-            std::fs::rename(&tmp_path, &target_path)?;
+    tokio::task::spawn_blocking(move || -> Result<(), medical_core::error::AppError> {
+        let tmp_path = target_path.with_extension("enc.tmp");
+        std::fs::write(&tmp_path, &body_vec)?;
+        file_crypto::encrypt_file_in_place(&tmp_path).map_err(|e| {
+            // Clean up the temp plaintext on failure — never leave
+            // unencrypted PHI on disk.
+            let _ = std::fs::remove_file(&tmp_path);
+            medical_core::error::AppError::Security(format!("audio encrypt failed: {e}"))
+        })?;
+        std::fs::rename(&tmp_path, &target_path)?;
 
-            // Update audio_path on the recording row.
-            let conn = db2.conn()?;
-            let mut rec = RecordingsRepo::get_by_id(&conn, &uuid)
-                .map_err(medical_core::error::AppError::from)?;
-            rec.audio_path = path_for_db;
-            rec.file_size_bytes = Some(body_vec.len() as u64);
-            RecordingsRepo::update(&conn, &rec).map_err(medical_core::error::AppError::from)?;
-            Ok(())
-        },
-    )
+        // Update audio_path on the recording row.
+        let conn = db2.conn()?;
+        let mut rec =
+            RecordingsRepo::get_by_id(&conn, &uuid).map_err(medical_core::error::AppError::from)?;
+        rec.audio_path = path_for_db;
+        rec.file_size_bytes = Some(body_vec.len() as u64);
+        RecordingsRepo::update(&conn, &rec).map_err(medical_core::error::AppError::from)?;
+        Ok(())
+    })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .map_err(|e| {

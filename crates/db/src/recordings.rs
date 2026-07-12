@@ -62,10 +62,7 @@ impl RecordingsRepo {
                 status_json,
                 recording.created_at.to_rfc3339(),
                 metadata_json,
-                recording
-                    .updated_at
-                    .unwrap_or_else(Utc::now)
-                    .to_rfc3339(),
+                recording.updated_at.unwrap_or_else(Utc::now).to_rfc3339(),
             ],
         )?;
         Ok(())
