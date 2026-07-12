@@ -16,6 +16,9 @@ pub mod m009_soft_delete;
 pub mod m010_condition_chips;
 pub mod m011_condition_chip_order;
 pub mod m012_encryption_pending;
+pub mod m013_recording_updated_at;
+pub mod m014_field_revisions;
+pub mod m015_sync_state;
 
 use rusqlite::Connection;
 
@@ -99,6 +102,21 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 12,
             name: "encryption_pending",
             up: m012_encryption_pending::up,
+        },
+        Migration {
+            version: 13,
+            name: "recording_updated_at",
+            up: m013_recording_updated_at::up,
+        },
+        Migration {
+            version: 14,
+            name: "field_revisions",
+            up: m014_field_revisions::up,
+        },
+        Migration {
+            version: 15,
+            name: "sync_state",
+            up: m015_sync_state::up,
         },
     ]
 }
