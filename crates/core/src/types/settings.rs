@@ -496,6 +496,14 @@ pub struct AppConfig {
     /// machine keeps its own list unless the user opts in.
     #[serde(default)]
     pub sync_condition_chips: bool,
+
+    // Content sync
+    /// When true, patient content (transcripts, SOAP notes, letters, peer
+    /// discussions, audio) syncs two-way between this machine and the paired
+    /// server over Tailscale. Requires Tailscale on both machines. Defaults
+    /// to false.
+    #[serde(default)]
+    pub sync_content: bool,
 }
 
 impl Default for AppConfig {
@@ -742,6 +750,14 @@ mod tests {
         let cfg: AppConfig =
             serde_json::from_str(old_json).expect("should parse with serde defaults");
         assert!(!cfg.sync_condition_chips, "default must be false");
+    }
+
+    #[test]
+    fn sync_content_defaults_to_false_in_older_configs() {
+        let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
+        let cfg: AppConfig =
+            serde_json::from_str(old_json).expect("should parse with serde defaults");
+        assert!(!cfg.sync_content, "default must be false");
     }
 
     #[test]
