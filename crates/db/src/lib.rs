@@ -25,6 +25,7 @@
 
 pub mod audit;
 pub mod condition_chips;
+pub mod content_sync;
 pub mod encryption;
 pub mod letter_audiences;
 pub mod migrations;
@@ -41,6 +42,10 @@ pub mod vectors;
 pub use generations::{Generation, GenerationInsert, GenerationsRepo};
 pub mod user_dictionary;
 pub use condition_chips::ConditionChipsRepo;
+pub use content_sync::{
+    ContentSyncRepo, FieldRevision, MergeConflict, MergeResult, SyncCursor, SyncFieldValue,
+    SyncRecording,
+};
 pub use user_dictionary::UserDictionaryRepo;
 
 use std::path::Path;

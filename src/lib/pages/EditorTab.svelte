@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
   import type { Recording } from '../types';
-  import { recordings } from '../stores/recordings.svelte';
+  import { recordings, selectRecording } from '../stores/recordings.svelte';
   import { copyToClipboard } from '../utils/clipboard';
   import RichEditor from '../components/RichEditor.svelte';
   import TranscriptView from '../components/TranscriptView.svelte';
@@ -15,6 +16,7 @@
   import IcdChip from '../components/IcdChip.svelte';
   import { save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { exportAudio } from '../api/export';
+  import { fetchAudioFromServer } from '../api/contentSync';
   import { toasts } from '../stores/toasts.svelte';
 
   const { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' | 'peer_discussion' } = $props();
@@ -84,6 +86,41 @@
     if (saveTimer) clearTimeout(saveTimer);
     if (clearBadgeTimer) clearTimeout(clearBadgeTimer);
     if (copyBadgeTimer) clearTimeout(copyBadgeTimer);
+    if (unlistenUpdate) unlistenUpdate();
+  });
+
+  // Listener for remote `recording-updated` events (content sync merge). When
+  // the currently-open recording is updated on the server and the user is NOT
+  // actively editing it (no pending debounced save / save in flight), reload it
+  // so the editor reflects the merged content and surface a subtle toast.
+  // Actively-edited recordings are left alone to avoid clobbering the user's
+  // in-progress edits — the next manual save round-trips their version.
+  let unlistenUpdate: (() => void) | null = null;
+
+  // True when the user has unsaved work in flight (pending debounce or saving).
+  // Excludes the brief 'saved'/'error' settle states so we only block reload
+  // while a real write is pending.
+  const isDirty = $derived(pendingValue !== null || saveStatus === 'saving');
+  const currentRecordingId = $derived(recordings.selectedRecording?.id ?? null);
+
+  onMount(async () => {
+    try {
+      unlistenUpdate = await listen('recording-updated', (e) => {
+        const payload = e.payload as { id: string };
+        if (payload.id === currentRecordingId && !isDirty) {
+          // Reload the recording to show the updated content. Voided — we
+          // don't await here to avoid blocking the event loop.
+          void selectRecording(payload.id);
+          toasts.add({
+            message: 'Recording updated from another machine',
+            type: 'success',
+            autoDismiss: true,
+          });
+        }
+      });
+    } catch (err) {
+      console.error('Failed to listen for recording-updated events:', err);
+    }
   });
 
   // Track which (recordingId, field) the current content belongs to.
@@ -185,6 +222,26 @@
     }
   }
 
+  // On-demand audio fetch from the server (content sync archives audio on the
+  // server and pulls it back only when the user wants to play/export it).
+  let fetchingAudio = $state(false);
+
+  async function handleFetchAudio() {
+    const rec = recordings.selectedRecording;
+    if (!rec || fetchingAudio) return;
+    fetchingAudio = true;
+    try {
+      await fetchAudioFromServer(rec.id);
+      // Reload the recording so the UI picks up the newly available audio.
+      await selectRecording(rec.id);
+      toasts.success('Audio fetched from server');
+    } catch (e) {
+      toasts.error(formatError(e));
+    } finally {
+      fetchingAudio = false;
+    }
+  }
+
   function handleSpeedRead() {
     if (!content) return;
     const map: Record<string, DocKind> = {
@@ -244,6 +301,16 @@
           >
             Export Audio
           </button>
+          {#if settings.state.sync_content}
+            <button
+              class="btn-copy"
+              onclick={handleFetchAudio}
+              disabled={fetchingAudio}
+              title="Fetch this recording's audio from the server over your Tailscale connection"
+            >
+              {#if fetchingAudio}Fetching…{:else}Fetch Audio from Server{/if}
+            </button>
+          {/if}
         {/if}
         {#if icdCodes.length > 0}
           <div class="icd-codes">

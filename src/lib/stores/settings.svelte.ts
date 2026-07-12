@@ -51,6 +51,7 @@ const defaults: AppConfig = {
   auto_update_check: true,
   custom_conditions: [],
   sync_condition_chips: false,
+  sync_content: false,
 };
 
 class SettingsStore {

@@ -35,11 +35,13 @@ impl RecordingsRepo {
             "INSERT INTO recordings (
                 id, filename, transcript, soap_note, referral, letter, peer_discussion, chat,
                 patient_name, audio_path, duration_seconds, file_size_bytes,
-                stt_provider, ai_provider, tags, processing_status, created_at, metadata
+                stt_provider, ai_provider, tags, processing_status, created_at, metadata,
+                updated_at
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                 ?9, ?10, ?11, ?12,
-                ?13, ?14, ?15, ?16, ?17, ?18
+                ?13, ?14, ?15, ?16, ?17, ?18,
+                ?19
              )",
             rusqlite::params![
                 recording.id.to_string(),
@@ -60,6 +62,7 @@ impl RecordingsRepo {
                 status_json,
                 recording.created_at.to_rfc3339(),
                 metadata_json,
+                recording.updated_at.unwrap_or_else(Utc::now).to_rfc3339(),
             ],
         )?;
         Ok(())
@@ -75,7 +78,8 @@ impl RecordingsRepo {
         conn.query_row(
             "SELECT id, filename, transcript, soap_note, referral, letter, peer_discussion, chat,
                     patient_name, audio_path, duration_seconds, file_size_bytes,
-                    stt_provider, ai_provider, tags, processing_status, created_at, metadata
+                    stt_provider, ai_provider, tags, processing_status, created_at, metadata,
+                    updated_at
              FROM recordings
              WHERE id = ?1",
             [&id_str],
@@ -97,7 +101,8 @@ impl RecordingsRepo {
         let mut stmt = conn.prepare(
             "SELECT id, filename, transcript, soap_note, referral, letter, peer_discussion, chat,
                     patient_name, audio_path, duration_seconds, file_size_bytes,
-                    stt_provider, ai_provider, tags, processing_status, created_at, metadata
+                    stt_provider, ai_provider, tags, processing_status, created_at, metadata,
+                    updated_at
              FROM recordings
              WHERE deleted_at IS NULL
              ORDER BY created_at DESC
@@ -130,6 +135,8 @@ impl RecordingsRepo {
             .map_err(|e| DbError::Migration(e.to_string()))?;
         let metadata_json = recording.metadata.to_string();
 
+        let now_rfc3339 = Utc::now().to_rfc3339();
+
         let rows = conn.execute(
             "UPDATE recordings SET
                 filename = ?1,
@@ -147,8 +154,9 @@ impl RecordingsRepo {
                 ai_provider = ?13,
                 tags = ?14,
                 processing_status = ?15,
-                metadata = ?16
-             WHERE id = ?17",
+                metadata = ?16,
+                updated_at = ?17
+             WHERE id = ?18",
             rusqlite::params![
                 recording.filename,
                 recording.transcript,
@@ -166,6 +174,7 @@ impl RecordingsRepo {
                 tags_json,
                 status_json,
                 metadata_json,
+                now_rfc3339,
                 recording.id.to_string(),
             ],
         )?;
@@ -357,7 +366,8 @@ impl RecordingsRepo {
         let sql = format!(
             "SELECT id, filename, transcript, soap_note, referral, letter, peer_discussion, chat, \
                      patient_name, audio_path, duration_seconds, file_size_bytes, \
-                     stt_provider, ai_provider, tags, processing_status, created_at, metadata \
+                     stt_provider, ai_provider, tags, processing_status, created_at, metadata, \
+                     updated_at \
              FROM recordings WHERE id IN ({placeholders}) AND deleted_at IS NULL"
         );
         let id_strings: Vec<String> = ids.iter().map(|u| u.to_string()).collect();
@@ -425,6 +435,15 @@ impl RecordingsRepo {
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or(serde_json::Value::Null);
 
+        // `updated_at` is read by column name (robust to position) and falls
+        // back to `None` if the column is missing/NULL.
+        let updated_at: Option<DateTime<Utc>> = row
+            .get::<_, Option<String>>("updated_at")
+            .ok()
+            .flatten()
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+
         Ok(Recording {
             id,
             filename,
@@ -444,6 +463,7 @@ impl RecordingsRepo {
             status,
             created_at,
             metadata,
+            updated_at,
         })
     }
 }

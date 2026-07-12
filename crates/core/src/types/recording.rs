@@ -53,6 +53,10 @@ pub struct Recording {
     pub created_at: DateTime<Utc>,
     /// Freeform JSON metadata (see module docs for known keys).
     pub metadata: serde_json::Value,
+    /// Last modification timestamp (any field). Drives content-sync
+    /// delta filtering. Set to `created_at` on insert, bumped on every update.
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 impl Recording {
@@ -80,6 +84,7 @@ impl Recording {
             status: ProcessingStatus::Pending,
             created_at: Utc::now(),
             metadata: serde_json::Value::Null,
+            updated_at: None,
         }
     }
 

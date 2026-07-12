@@ -68,6 +68,7 @@ pub async fn start_sharing_inner(
         std::sync::Arc::clone(&state.db),
         service.token_store(),
         service.config().vocab_port,
+        state.data_dir.clone(),
     )
     .await
     {

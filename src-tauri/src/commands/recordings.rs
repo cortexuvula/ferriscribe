@@ -72,6 +72,43 @@ pub fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> AppRes
         Err(e) => return Err(e.into()),
     }
 
+    // Best-effort content sync push of the tombstone. Resolve the sync target
+    // (owned PairedConnection + bearer + client) and the db clone here, then
+    // move them into a fire-and-forget task — `tauri::State` is a borrow and
+    // can't cross the spawn boundary. Mirrors the condition-chip push pattern.
+    let sync_target = crate::commands::content_sync::content_sync_target(&state);
+    if let Some((conn_paired, bearer, client)) = sync_target {
+        let db = state.db.clone();
+        let rec_id = id.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Some(remote) =
+                crate::content_remote::ContentRemote::from(&conn_paired, Some(bearer), client)
+            {
+                let result = tokio::task::spawn_blocking(move || -> AppResult<Vec<_>> {
+                    let c = db.conn()?;
+                    let mut sync_rec =
+                        crate::commands::content_sync::build_sync_recording(&c, &rec_id)?;
+                    // Read deleted_at to include the tombstone marker so the
+                    // server's merge sees the deletion.
+                    let deleted_at: Option<String> = c
+                        .query_row(
+                            "SELECT deleted_at FROM recordings WHERE id = ?1",
+                            rusqlite::params![rec_id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten();
+                    sync_rec.deleted_at = deleted_at;
+                    Ok(vec![sync_rec])
+                })
+                .await;
+                if let Ok(Ok(recordings)) = result {
+                    let _ = remote.push(recordings).await;
+                }
+            }
+        });
+    }
+
     Ok(())
 }
 

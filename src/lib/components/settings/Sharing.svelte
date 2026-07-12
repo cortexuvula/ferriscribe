@@ -1,6 +1,7 @@
 <script lang="ts">
   import SharingModes, { type Mode } from './sharing/SharingModes.svelte';
   import ConditionChipSync from './sharing/ConditionChipSync.svelte';
+  import ContentSync from './sharing/ContentSync.svelte';
   import ServerWizard from './sharing/ServerWizard.svelte';
   import ServerStatus from './sharing/ServerStatus.svelte';
   import ClientPair from './sharing/ClientPair.svelte';
@@ -31,6 +32,8 @@
   />
 
   <ConditionChipSync visible={sharingOn || !!pairedTo} />
+
+  <ContentSync visible={sharingOn || !!pairedTo} />
 
   {#if mode === 'server' && !sharingOn}
     <ServerWizard ondone={() => sharingModes.refresh()} />

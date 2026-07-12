@@ -133,6 +133,10 @@ export interface AppConfig {
   custom_conditions: string[];
   /** When true, condition chip presets sync two-way with the paired server. Defaults to false. */
   sync_condition_chips: boolean;
+  /** When true, patient content (transcripts, SOAP notes, letters, peer discussions)
+   *  syncs two-way with the paired server over Tailscale. Audio is archived on the
+   *  server and fetched on demand. Defaults to false. */
+  sync_content: boolean;
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

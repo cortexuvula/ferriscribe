@@ -36,6 +36,7 @@
 
 mod commands;
 mod conditions_remote;
+mod content_remote;
 pub mod corpus_export;
 mod sharing_vocab_api;
 mod state;
@@ -231,6 +232,26 @@ pub fn run() {
                 });
             }
 
+            // Content sync: initial pull on startup if enabled. The 3s delay
+            // lets the window finish rendering before the network round-trip;
+            // failures are logged inside `run_initial_sync` and never block
+            // boot — the app stays usable offline.
+            {
+                use tauri::Manager;
+                let app_handle = app.handle().clone();
+                let state = app_handle.state::<crate::state::AppState>();
+                let db = state.db.clone();
+                let config = crate::commands::settings::load_config_sync(&db).unwrap_or_default();
+                if config.sync_content {
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        tracing::info!("starting initial content sync");
+                        let _ =
+                            crate::commands::content_sync::run_initial_sync(app_handle, db).await;
+                    });
+                }
+            }
+
             // Auto-stop sharing when the main window closes, so the
             // whisper-server child process is killed instead of becoming an
             // orphan zombie on app quit. Best-effort: failures are logged.
@@ -368,6 +389,10 @@ pub fn run() {
             commands::conditions::sync_condition_chips_cmd,
             commands::conditions::reorder_condition_chips,
             commands::conditions::subscribe_condition_chips,
+            commands::content_sync::sync_content_now,
+            commands::content_sync::subscribe_content_sync,
+            commands::content_sync::fetch_audio_from_server,
+            commands::content_sync::upload_audio_to_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import type { Recording, RecordingSummary } from '../types';
 import {
   listRecordings,
@@ -22,6 +23,12 @@ class RecordingsStore {
   /// True when the backend likely has more recordings beyond what's loaded.
   /// Derived from the last fetch returning a full page. Reset by load()/search().
   hasMore = $state<boolean>(false);
+  /// True while a content sync round-trip is in flight. UI uses this to show
+  /// a syncing indicator and to avoid stacking concurrent syncs.
+  syncing = $state(false);
+  /// Timestamp of the most recently completed sync cycle. Null until the first
+  /// successful sync / `content-sync-complete` event.
+  lastSyncedAt = $state<Date | null>(null);
 
   /// Load the first page, replacing the list. Called on mount and after
   /// mutations that change ordering (new recording, generation, etc.).
@@ -143,6 +150,30 @@ class RecordingsStore {
       console.error('Failed to delete all recordings:', err);
       throw err;
     }
+  }
+
+  /// Sync with server (manual trigger or `content-changed` event). Sets the
+  /// `syncing` flag for the duration, reloads the list afterwards so the UI
+  /// reflects any merged changes, and stamps `lastSyncedAt`.
+  async syncNow(): Promise<void> {
+    this.syncing = true;
+    try {
+      await invoke('sync_content_now');
+      await this.load();
+      this.lastSyncedAt = new Date();
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  /// Handle a `recording-updated` event for a specific recording. If the
+  /// affected recording is currently selected, re-fetch it so the open editor
+  /// shows the merged content; always reload the list to refresh summaries.
+  handleRemoteUpdate(recordingId: string): void {
+    if (this.selectedRecording?.id === recordingId) {
+      void selectRecording(recordingId);
+    }
+    this.load();
   }
 }
 
