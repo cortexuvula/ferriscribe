@@ -65,6 +65,7 @@ use medical_sharing::token_store::TokenStore;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -86,6 +87,13 @@ struct ApiState {
     /// App data dir; used to resolve the recordings directory for audio
     /// upload/download.
     data_dir: PathBuf,
+    /// Tauri app handle for emitting events to THIS machine's own frontend.
+    /// When a remote client pushes recordings into the server's DB, the
+    /// server's webview would otherwise never learn about the new rows
+    /// (the SSE channel only notifies *other* clients). We emit a
+    /// `recording-updated` Tauri event per changed ID so the server's own
+    /// Recordings view reloads — mirroring what the client does on pull.
+    app_handle: AppHandle,
 }
 
 /// Spawn the vocab/templates/dictionary HTTP API server on `0.0.0.0:{port}`.
@@ -98,6 +106,7 @@ pub async fn spawn(
     tokens: Arc<TokenStore>,
     port: u16,
     data_dir: PathBuf,
+    app_handle: AppHandle,
 ) -> Result<JoinHandle<()>, medical_core::error::AppError> {
     let (chips_changed_tx, _) = broadcast::channel::<()>(16);
     let (content_changed_tx, _) = broadcast::channel::<String>(32);
@@ -107,6 +116,7 @@ pub async fn spawn(
         chips_changed_tx,
         content_changed_tx,
         data_dir,
+        app_handle,
     };
     let app = Router::new()
         .route(
@@ -1048,6 +1058,17 @@ async fn content_sync_push_handler(
     // Notify SSE subscribers that content changed. Best-effort: no
     // receivers is not an error.
     let _ = state.content_changed_tx.send("*".to_string());
+
+    // Emit a `recording-updated` Tauri event for each changed recording so
+    // THIS server's own webview refreshes. Without this, the server's
+    // Recordings view never learns about rows a remote client just pushed
+    // (the broadcast above only notifies *other* clients over SSE). Mirrors
+    // what the client does after a pull in content_sync.rs.
+    for id in &result.changed_recording_ids {
+        let _ = state
+            .app_handle
+            .emit("recording-updated", serde_json::json!({ "id": id }));
+    }
 
     info!(
         incoming_count,

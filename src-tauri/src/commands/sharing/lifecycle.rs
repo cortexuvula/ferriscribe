@@ -63,12 +63,19 @@ pub async fn start_sharing_inner(
 
     // Spawn the vocab CRUD API on the configured port. Failures here are
     // logged but don't abort sharing — clients on older versions don't
-    // expect a vocab API anyway, so they degrade gracefully.
+    // expect a vocab API anyway, so they degrade gracefully. The app handle
+    // lets the vocab API emit Tauri events to this server's own frontend
+    // when a remote client pushes recordings (so the Recordings view
+    // refreshes). Both call sites (the Tauri command and the auto-resume
+    // setup hook) pass `Some(...)`, so unwrap is safe.
     let vocab_handle = match crate::sharing_vocab_api::spawn(
         std::sync::Arc::clone(&state.db),
         service.token_store(),
         service.config().vocab_port,
         state.data_dir.clone(),
+        app_handle
+            .clone()
+            .expect("app_handle is always Some at both call sites of start_sharing_inner"),
     )
     .await
     {
