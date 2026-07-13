@@ -97,17 +97,18 @@
   // in-progress edits — the next manual save round-trips their version.
   let unlistenUpdate: (() => void) | null = null;
 
-  // True when the user has unsaved work in flight (pending debounce or saving).
-  // Excludes the brief 'saved'/'error' settle states so we only block reload
-  // while a real write is pending.
-  const isDirty = $derived(pendingValue !== null || saveStatus === 'saving');
-  const currentRecordingId = $derived(recordings.selectedRecording?.id ?? null);
-
   onMount(async () => {
     try {
       unlistenUpdate = await listen('recording-updated', (e) => {
         const payload = e.payload as { id: string };
-        if (payload.id === currentRecordingId && !isDirty) {
+        // Read the underlying $state fields live inside the callback rather
+        // than capturing the $derived values (isDirty / currentRecordingId),
+        // which are evaluated once at mount time and never update. Reading
+        // the $state fields here gives the current values each invocation
+        // (Bug C5).
+        const recId = recordings.selectedRecording?.id ?? null;
+        const dirty = pendingValue !== null || saveStatus === 'saving';
+        if (payload.id === recId && !dirty) {
           // Reload the recording to show the updated content. Voided — we
           // don't await here to avoid blocking the event loop.
           void selectRecording(payload.id);

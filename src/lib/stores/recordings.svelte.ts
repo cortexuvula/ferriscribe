@@ -156,11 +156,18 @@ class RecordingsStore {
   /// `syncing` flag for the duration, reloads the list afterwards so the UI
   /// reflects any merged changes, and stamps `lastSyncedAt`.
   async syncNow(): Promise<void> {
+    // Guard against concurrent syncs: stacked `content-changed` events would
+    // otherwise fire multiple overlapping round-trips (Bug M4).
+    if (this.syncing) return;
     this.syncing = true;
     try {
       await invoke('sync_content_now');
       await this.load();
       this.lastSyncedAt = new Date();
+    } catch (err) {
+      // Network failures and backend errors are logged here rather than
+      // propagating as unhandled promise rejections (Bug M4).
+      console.error('Content sync failed:', err);
     } finally {
       this.syncing = false;
     }

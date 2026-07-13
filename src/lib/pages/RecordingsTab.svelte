@@ -58,8 +58,13 @@
 
   async function confirmDelete() {
     if (!deleteTarget) return;
+    // Capture the target into locals before any async work. The toast's
+    // onAction closure captures these values by value, so the finally-block
+    // nulling deleteTarget can no longer null them out from under the Undo
+    // callback (Bug H8).
+    const targetId = deleteTarget.id;
     try {
-      await recordings.remove(deleteTarget.id);
+      await recordings.remove(targetId);
       // Show the Undo toast — the 8s auto-dismiss acts as the "commit" window.
       toasts.add({
         message: `Recording deleted`,
@@ -68,7 +73,7 @@
         actionLabel: 'Undo',
         onAction: async () => {
           try {
-            await recordings.restore(deleteTarget!.id);
+            await recordings.restore(targetId);
             toasts.success('Recording restored');
           } catch (err) {
             toasts.error(`Could not restore: ${err}`);

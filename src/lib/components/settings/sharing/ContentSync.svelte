@@ -1,6 +1,6 @@
 <script lang="ts">
   import { settings } from '../../../stores/settings.svelte';
-  import { syncContentNow } from '../../../api/contentSync';
+  import { syncContentNow, subscribeContentSync } from '../../../api/contentSync';
 
   type Props = {
     visible: boolean;
@@ -13,6 +13,10 @@
     if (checked) {
       try {
         await syncContentNow();
+        // Start the long-lived SSE subscription now that sync is enabled.
+        // Covers the case where the toggle is flipped on outside
+        // RecordingsTab (which subscribes on its own mount) (Bug M5).
+        await subscribeContentSync();
       } catch (err) {
         console.error('Initial content sync failed:', err);
       }
