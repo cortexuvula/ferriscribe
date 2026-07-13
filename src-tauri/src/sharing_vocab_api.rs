@@ -1143,6 +1143,7 @@ async fn content_audio_get_handler(
     let _ = authorize(&state, &headers)?;
     let id_len = recording_id.len();
     let db = Arc::clone(&state.db);
+    let data_dir = state.data_dir.clone();
 
     let bytes =
         tokio::task::spawn_blocking(move || -> Result<Vec<u8>, medical_core::error::AppError> {
@@ -1155,6 +1156,27 @@ async fn content_audio_get_handler(
             if path.as_os_str().is_empty() || !path.exists() {
                 return Err(medical_core::error::AppError::Other(
                     "audio file not found".into(),
+                ));
+            }
+            // Containment check: verify the audio path is within the
+            // recordings directory. This prevents a malicious DB value
+            // from causing the server to decrypt/read arbitrary files.
+            let recordings_dir = crate::commands::resolve_recordings_dir(&db, &data_dir)?;
+            let canonical_path = path.canonicalize().map_err(|e| {
+                medical_core::error::AppError::Other(format!("path canonicalize failed: {e}"))
+            })?;
+            let canonical_dir = recordings_dir.canonicalize().map_err(|e| {
+                medical_core::error::AppError::Other(format!(
+                    "recordings dir canonicalize failed: {e}"
+                ))
+            })?;
+            if !canonical_path.starts_with(&canonical_dir) {
+                tracing::warn!(
+                    id_len,
+                    "content_audio: path outside recordings dir — rejected"
+                );
+                return Err(medical_core::error::AppError::Other(
+                    "audio path not allowed".into(),
                 ));
             }
             match file_crypto::decrypt_file(path) {

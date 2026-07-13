@@ -185,6 +185,10 @@ pub struct CurrentRecording {
     pub wav_path: PathBuf,
     /// When the recording started (for elapsed-time display).
     pub started_at: Instant,
+    /// When the recording was most recently paused, if currently paused.
+    pub paused_at: Option<Instant>,
+    /// Total time spent paused across all pause/resume cycles.
+    pub accumulated_pause: std::time::Duration,
 }
 
 /// Application state managed by Tauri and injected into every command via

@@ -205,9 +205,9 @@ impl RecordingsRepo {
     /// [`restore`](Self::restore) clears the `deleted_at` field. A future purge
     /// sweeper will permanently delete soft-deleted recordings after 30 days.
     pub fn soft_delete(conn: &Connection, id: &Uuid) -> DbResult<()> {
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let now = chrono::Utc::now().to_rfc3339();
         let rows = conn.execute(
-            "UPDATE recordings SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            "UPDATE recordings SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             rusqlite::params![now, id.to_string()],
         )?;
         if rows == 0 {
@@ -227,9 +227,10 @@ impl RecordingsRepo {
     /// Clears `deleted_at` so the recording reappears in queries. Also
     /// re-inserts the FTS row so search finds it again.
     pub fn restore(conn: &Connection, id: &Uuid) -> DbResult<()> {
+        let now = chrono::Utc::now().to_rfc3339();
         let rows = conn.execute(
-            "UPDATE recordings SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
-            [id.to_string()],
+            "UPDATE recordings SET deleted_at = NULL, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NOT NULL",
+            rusqlite::params![now, id.to_string()],
         )?;
         if rows == 0 {
             return Err(DbError::NotFound(format!(

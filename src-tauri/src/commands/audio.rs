@@ -148,6 +148,8 @@ pub async fn start_recording(
             id: recording_id.to_string(),
             wav_path,
             started_at: Instant::now(),
+            paused_at: None,
+            accumulated_pause: std::time::Duration::ZERO,
         });
     }
 
@@ -238,8 +240,13 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
     let current =
         current.ok_or_else(|| AppError::Audio("No current recording info found".to_string()))?;
 
-    // Compute duration from elapsed time.
-    let duration_secs = current.started_at.elapsed().as_secs_f64();
+    // Compute duration excluding paused time.
+    let total_pause = current.accumulated_pause
+        + current
+            .paused_at
+            .map(|p| p.elapsed())
+            .unwrap_or(std::time::Duration::ZERO);
+    let duration_secs = (current.started_at.elapsed() - total_pause).as_secs_f64();
 
     // Get file size of the WAV file.
     let file_size = match std::fs::metadata(&current.wav_path) {
@@ -405,13 +412,20 @@ pub fn pause_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
         .capture_handle
         .lock()
         .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
-    match &handle_lock.0 {
-        Some(handle) => {
-            handle.pause();
-            Ok(())
-        }
-        None => Err(AppError::Audio("No active recording to pause".to_string())),
+    if handle_lock.0.is_none() {
+        return Err(AppError::Audio("No active recording to pause".to_string()));
     }
+    if let Some(handle) = &handle_lock.0 {
+        handle.pause();
+    }
+    // Record the pause start time so we can subtract it from duration.
+    if let Ok(mut rec_lock) = state.current_recording.lock()
+        && let Some(rec) = rec_lock.as_mut()
+        && rec.paused_at.is_none()
+    {
+        rec.paused_at = Some(Instant::now());
+    }
+    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -425,13 +439,20 @@ pub fn resume_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
         .capture_handle
         .lock()
         .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
-    match &handle_lock.0 {
-        Some(handle) => {
-            handle.resume();
-            Ok(())
-        }
-        None => Err(AppError::Audio("No active recording to resume".to_string())),
+    if handle_lock.0.is_none() {
+        return Err(AppError::Audio("No active recording to resume".to_string()));
     }
+    if let Some(handle) = &handle_lock.0 {
+        handle.resume();
+    }
+    // Accumulate the pause duration so stop_recording can subtract it.
+    if let Ok(mut rec_lock) = state.current_recording.lock()
+        && let Some(rec) = rec_lock.as_mut()
+        && let Some(paused_at) = rec.paused_at.take()
+    {
+        rec.accumulated_pause += paused_at.elapsed();
+    }
+    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
