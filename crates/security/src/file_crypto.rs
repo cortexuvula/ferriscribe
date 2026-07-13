@@ -155,11 +155,16 @@ pub fn decrypt_bytes(bytes: &[u8]) -> Result<Vec<u8>, FileCryptoError> {
 /// Returns true if the file at `path` begins with the encryption magic.
 ///
 /// Useful for deciding whether to decrypt a legacy file or read it as
-/// plaintext during a migration.
+/// plaintext during a migration. Reads only the first 3 bytes (the magic
+/// prefix) rather than slurping the entire file — important for large
+/// audio recordings checked during the startup encryption sweep.
 pub fn is_encrypted(path: &Path) -> bool {
-    std::fs::read(path)
-        .map(|bytes| bytes.starts_with(MAGIC))
-        .unwrap_or(false)
+    use std::io::Read;
+    let mut buf = [0u8; 3];
+    let ok = std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .is_ok();
+    ok && &buf == MAGIC
 }
 
 #[cfg(test)]

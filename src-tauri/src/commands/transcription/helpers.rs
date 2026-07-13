@@ -213,12 +213,18 @@ pub(super) fn filter_cross_segment_repetitions(
 /// Used by `export_audio` to get the full WAV (header + data) for
 /// re-encoding as standard 16-bit PCM. Handles both encrypted (FE1)
 /// and legacy plaintext files.
+///
+/// Reads the file **once** into memory, then branches on the in-memory
+/// bytes. This avoids a TOCTOU race where the background encryption
+/// task's atomic rename could land between `decrypt_file`'s read and
+/// the `NotEncrypted` fallback's second `std::fs::read`.
 pub(crate) fn open_recording_wav_raw(path: &std::path::Path) -> AppResult<Vec<u8>> {
-    use medical_security::file_crypto::{FileCryptoError, decrypt_file};
+    use medical_security::file_crypto::{FileCryptoError, decrypt_bytes};
 
-    match decrypt_file(path) {
+    let bytes = std::fs::read(path).map_err(AppError::from)?;
+    match decrypt_bytes(&bytes) {
         Ok(plaintext) => Ok(plaintext),
-        Err(FileCryptoError::NotEncrypted) => std::fs::read(path).map_err(AppError::from),
+        Err(FileCryptoError::NotEncrypted) => Ok(bytes), // legacy plaintext — use the bytes we already read
         Err(e) => Err(AppError::Processing(format!(
             "Failed to decrypt recording: {e}"
         ))),
@@ -265,15 +271,15 @@ pub(super) fn persist_orphaned_transcript(
 
 /// Compute the divisor used to normalize integer WAV samples to `[-1.0, 1.0]`.
 ///
-/// Returns an error for `bits_per_sample == 0`, which would otherwise
+/// Returns an error for `bits_per_sample == 0` or values > 32, which would
 /// trigger a shift-overflow panic in `1 << (bps - 1)` on debug builds and
-/// a wrap-then-shift-overflow on release. Such a WAV is malformed; reject
-/// it rather than crash the app.
+/// undefined behavior in release. Such a WAV is malformed; reject it rather
+/// than crash the app.
 fn compute_int_max_val(bits_per_sample: u16) -> AppResult<f32> {
-    if bits_per_sample == 0 {
-        return Err(AppError::Processing(
-            "Corrupt WAV: bits_per_sample is 0".to_string(),
-        ));
+    if bits_per_sample == 0 || bits_per_sample > 32 {
+        return Err(AppError::Processing(format!(
+            "Corrupt WAV: bits_per_sample is {bits_per_sample} (must be 1-32)"
+        )));
     }
     Ok((1u64 << (bits_per_sample - 1)) as f32)
 }
@@ -283,20 +289,25 @@ fn compute_int_max_val(bits_per_sample: u16) -> AppResult<f32> {
 ///
 /// Shared by `load_wav_to_audio_data` (transcription) and
 /// `compute_audio_levels` (audio-level check). Returns a `WavReader` backed
-/// by an in-memory buffer for encrypted files, or a file-backed reader for
-/// legacy plaintext WAVs. Both encrypted and legacy files work uniformly.
+/// by an in-memory buffer.
+///
+/// Reads the file **once** into memory, then branches on the in-memory
+/// bytes via `decrypt_bytes`. This eliminates a TOCTOU race where the
+/// background encryption task's atomic rename could land between
+/// `decrypt_file`'s internal read and the `NotEncrypted` fallback's
+/// second `std::fs::read` — which would cause hound to see encrypted
+/// bytes (FE1 magic) instead of the RIFF header it expects.
 pub(crate) fn open_recording_wav(
     path: &std::path::Path,
 ) -> Result<hound::WavReader<std::io::Cursor<Vec<u8>>>, AppError> {
-    use medical_security::file_crypto::{FileCryptoError, decrypt_file};
+    use medical_security::file_crypto::{FileCryptoError, decrypt_bytes};
 
-    let wav_bytes: Vec<u8> = match decrypt_file(path) {
+    let raw_bytes = std::fs::read(path)
+        .map_err(|e| AppError::Processing(format!("Failed to read WAV file: {e}")))?;
+
+    let wav_bytes: Vec<u8> = match decrypt_bytes(&raw_bytes) {
         Ok(plaintext) => plaintext,
-        Err(FileCryptoError::NotEncrypted) => {
-            // Legacy plaintext file — read as-is.
-            std::fs::read(path)
-                .map_err(|e| AppError::Processing(format!("Failed to read WAV: {e}")))?
-        }
+        Err(FileCryptoError::NotEncrypted) => raw_bytes, // legacy plaintext — use the bytes we already read
         Err(e) => {
             return Err(AppError::Processing(format!(
                 "Failed to decrypt recording: {e}"
