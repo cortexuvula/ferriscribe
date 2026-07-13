@@ -41,7 +41,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, Query, State as AxumState},
+    extract::{DefaultBodyLimit, Path, Query, State as AxumState},
     http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response,
@@ -160,6 +160,8 @@ pub async fn spawn(
             "/v1/content/audio/{recording_id}",
             get(content_audio_get_handler).put(content_audio_put_handler),
         )
+        // Allow large bodies (up to 256 MiB) for audio upload/download.
+        .layer(DefaultBodyLimit::max(256 * 1024 * 1024))
         .with_state(state);
 
     let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
@@ -1266,21 +1268,25 @@ async fn content_audio_put_handler(
         return Err(StatusCode::CONFLICT);
     }
 
-    // Write plaintext to a temp file, encrypt in place (atomic), then update
-    // the DB audio_path. We do the disk I/O in spawn_blocking.
+    // Encrypt in memory first, then write ciphertext directly to a unique temp
+    // file and atomically rename. This avoids ever writing plaintext PHI to
+    // disk — critical for HIPAA at-rest guarantees (H9 fix).
     let db2 = Arc::clone(&db);
     let path_for_db = target_path.clone();
     let body_vec = body.to_vec();
     tokio::task::spawn_blocking(move || -> Result<(), medical_core::error::AppError> {
-        let tmp_path = target_path.with_extension("enc.tmp");
-        std::fs::write(&tmp_path, &body_vec)?;
-        file_crypto::encrypt_file_in_place(&tmp_path).map_err(|e| {
-            // Clean up the temp plaintext on failure — never leave
-            // unencrypted PHI on disk.
-            let _ = std::fs::remove_file(&tmp_path);
+        // Encrypt the plaintext bytes in memory (no disk I/O).
+        let ciphertext = file_crypto::encrypt_bytes_in_memory(&body_vec).map_err(|e| {
             medical_core::error::AppError::Security(format!("audio encrypt failed: {e}"))
         })?;
-        std::fs::rename(&tmp_path, &target_path)?;
+
+        // Write ciphertext to a unique temp file, then atomic rename.
+        let tmp_path = target_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&tmp_path, &ciphertext)?;
+        if let Err(e) = std::fs::rename(&tmp_path, &target_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(medical_core::error::AppError::Io(e));
+        }
 
         // Update audio_path on the recording row.
         let conn = db2.conn()?;

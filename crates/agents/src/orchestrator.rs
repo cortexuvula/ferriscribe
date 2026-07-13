@@ -145,10 +145,16 @@ impl AgentOrchestrator {
                 .complete_with_tools(request, available_tool_defs.clone())
                 .await?;
 
-            // Accumulate token usage
-            total_usage.prompt_tokens += response.usage.prompt_tokens;
-            total_usage.completion_tokens += response.usage.completion_tokens;
-            total_usage.total_tokens += response.usage.total_tokens;
+            // Accumulate token usage (saturating to avoid overflow on long sessions)
+            total_usage.prompt_tokens = total_usage
+                .prompt_tokens
+                .saturating_add(response.usage.prompt_tokens);
+            total_usage.completion_tokens = total_usage
+                .completion_tokens
+                .saturating_add(response.usage.completion_tokens);
+            total_usage.total_tokens = total_usage
+                .total_tokens
+                .saturating_add(response.usage.total_tokens);
 
             if response.tool_calls.is_empty() {
                 // No tool calls — this is the final response

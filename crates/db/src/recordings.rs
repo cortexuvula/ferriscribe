@@ -214,11 +214,13 @@ impl RecordingsRepo {
             return Err(DbError::NotFound(format!("recording {id}")));
         }
         // Remove from FTS so search doesn't surface the soft-deleted recording.
-        let _ = conn.execute(
+        if let Err(e) = conn.execute(
             "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
              VALUES('delete', (SELECT rowid FROM recordings WHERE id = ?1), ?1, '', '', '', '', '', '')",
             [id.to_string()],
-        );
+        ) {
+            tracing::warn!(error = %e, "soft_delete: failed to remove recording from FTS index");
+        }
         Ok(())
     }
 

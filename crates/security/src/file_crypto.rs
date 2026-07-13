@@ -94,6 +94,14 @@ fn encrypt_with_key(cipher: &Aes256Gcm, plaintext: &[u8]) -> Result<Vec<u8>, Fil
     Ok(out)
 }
 
+/// Encrypt plaintext bytes in memory and return the ciphertext blob
+/// (magic + nonce + ciphertext). Use when you have the plaintext already
+/// in memory and want to write it without ever persisting plaintext to disk.
+pub fn encrypt_bytes_in_memory(plaintext: &[u8]) -> Result<Vec<u8>, FileCryptoError> {
+    let cipher = cipher()?;
+    encrypt_with_key(&cipher, plaintext)
+}
+
 /// Encrypt bytes and write to `path` with the magic + nonce + ciphertext
 /// format. **Atomic over in-place encryption**: writes to a sibling temp
 /// file, fsyncs, then renames over the original. The original file is

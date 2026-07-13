@@ -264,6 +264,13 @@ pub struct AppState {
     /// Pooled per-host; reuse this instead of constructing a fresh
     /// `reqwest::Client` per call.
     pub http_client: Arc<reqwest::Client>,
+    /// Mutex serializing content sync rounds (`run_sync`). Prevents
+    /// concurrent pulls from racing on the cursor or interleaving merges.
+    pub content_sync_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Cancellation token for the content sync SSE subscriber task.
+    /// Replaced on each `subscribe_content_sync` call so re-subscribes
+    /// don't leak eternal tasks.
+    pub content_sse_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -839,6 +846,8 @@ impl AppState {
             lmstudio_provider,
             remote_stt_provider,
             http_client,
+            content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            content_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 }

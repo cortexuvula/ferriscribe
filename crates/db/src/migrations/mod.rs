@@ -166,7 +166,7 @@ impl MigrationEngine {
                 let migrate_result = (migration.up)(conn).and_then(|()| {
                     conn.execute(
                         "INSERT INTO schema_version (version, name) VALUES (?1, ?2)",
-                        rusqlite::params![&migration.version.to_string(), migration.name],
+                        rusqlite::params![migration.version, migration.name],
                     )?;
                     Ok(())
                 });

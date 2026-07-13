@@ -584,6 +584,8 @@ mod preflight_tests {
             lmstudio_provider: RwLock::new(None),
             remote_stt_provider: RwLock::new(None),
             http_client,
+            content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            content_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
         };
 
         (state, tmp)

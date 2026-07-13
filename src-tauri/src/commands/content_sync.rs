@@ -200,6 +200,7 @@ fn build_sparse_fields(
 async fn run_sync(
     db: Arc<Database>,
     remote: &crate::content_remote::ContentRemote<'_>,
+    app: &tauri::AppHandle,
 ) -> AppResult<SyncSummary> {
     let mut summary = SyncSummary::default();
 
@@ -243,6 +244,11 @@ async fn run_sync(
         summary.pulled += batch_count;
         summary.merge_conflicts += merge_result.conflicts.len();
 
+        // Emit per-recording update events so the editor can refresh (C6 fix).
+        for id in &merge_result.changed_recording_ids {
+            let _ = app.emit("recording-updated", serde_json::json!({ "id": id }));
+        }
+
         // Advance the cursor if we made progress.
         if let Some(ref nc) = next_cursor {
             let cursor_db = Arc::clone(&db);
@@ -262,42 +268,48 @@ async fn run_sync(
 
     // ── Push ────────────────────────────────────────────────────────────
     // Collect local recordings changed since the (now-advanced) cursor and
-    // push them. We reuse the delta query: IDs whose updated_at exceeds the
-    // cursor are the ones the server hasn't seen since our last successful
-    // pull.
-    let push_db = Arc::clone(&db);
-    let to_push: Vec<SyncRecording> = tokio::task::spawn_blocking(move || {
-        let conn = push_db.conn()?;
-        let cursor = ContentSyncRepo::get_cursor(&conn)
-            .map_err(AppError::from)?
-            .cursor;
-        // Use a generous limit; changed_since caps a page but we want all
-        // local changes in one push batch.
-        let (ids, _has_more) = ContentSyncRepo::changed_since(&conn, cursor.as_deref(), 1000)
-            .map_err(AppError::from)?;
-        let mut out = Vec::with_capacity(ids.len());
-        for id in &ids {
-            match build_sync_recording(&conn, id) {
-                Ok(sr) => out.push(sr),
-                Err(e) => {
-                    tracing::warn!(
-                        recording_id_len = id.len(),
-                        error = %e,
-                        "content sync push: skipping unreadable recording"
-                    );
+    // push them. Loop pages until all local changes are pushed (H2).
+    loop {
+        let push_db = Arc::clone(&db);
+        let push_result = tokio::task::spawn_blocking(move || {
+            let conn = push_db.conn()?;
+            let cursor = ContentSyncRepo::get_cursor(&conn)
+                .map_err(AppError::from)?
+                .cursor;
+            let (ids, has_more) = ContentSyncRepo::changed_since(&conn, cursor.as_deref(), 200)
+                .map_err(AppError::from)?;
+            let mut out = Vec::with_capacity(ids.len());
+            for id in &ids {
+                match build_sync_recording(&conn, id) {
+                    Ok(sr) => out.push(sr),
+                    Err(e) => {
+                        tracing::warn!(
+                            recording_id_len = id.len(),
+                            error = %e,
+                            "content sync push: skipping unreadable recording"
+                        );
+                    }
                 }
             }
-        }
-        Ok::<Vec<SyncRecording>, AppError>(out)
-    })
-    .await
-    .map_err(crate::commands::join_err)??;
+            Ok::<(Vec<SyncRecording>, bool), AppError>((out, has_more))
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
 
-    if !to_push.is_empty() {
-        let push_count = to_push.len();
-        let push_resp = remote.push(to_push).await?;
-        summary.pushed = push_count;
-        summary.push_conflicts = push_resp.conflicts.len();
+        let has_more = push_result.1;
+        let batch = push_result.0;
+        let batch_was_empty = batch.is_empty();
+
+        if !batch_was_empty {
+            let push_count = batch.len();
+            let push_resp = remote.push(batch).await?;
+            summary.pushed += push_count;
+            summary.push_conflicts += push_resp.conflicts.len();
+        }
+
+        if !has_more || batch_was_empty {
+            break;
+        }
     }
 
     Ok(summary)
@@ -334,10 +346,12 @@ pub async fn sync_content_now(
         Some(r) => r,
         None => return Ok(SyncSummaryPayload::default()),
     };
-    let summary = run_sync(Arc::clone(&state.db), &remote).await?;
-    // Emit a counts-only event (no PHI). Failures to emit are non-fatal.
-    let _ = app.emit("content-sync-complete", SyncSummaryPayload::from(summary));
-    Ok(SyncSummaryPayload::default())
+    // Serialize sync rounds to prevent cursor races (H3).
+    let _guard = state.content_sync_lock.lock().await;
+    let summary = run_sync(Arc::clone(&state.db), &remote, &app).await?;
+    let payload = SyncSummaryPayload::from(summary);
+    let _ = app.emit("content-sync-complete", payload);
+    Ok(payload)
 }
 
 /// Startup initial sync — same logic as [`sync_content_now`] but takes
@@ -383,7 +397,7 @@ pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
         Some(r) => r,
         None => return,
     };
-    match run_sync(db, &remote).await {
+    match run_sync(db, &remote, &app).await {
         Ok(summary) => {
             tracing::info!(
                 pulled = summary.pulled,
@@ -440,13 +454,29 @@ pub async fn subscribe_content_sync(
     let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
         return Ok(());
     };
+
+    // Cancel any existing SSE subscriber task before spawning a new one (H1).
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    {
+        let mut guard = state
+            .content_sse_cancel
+            .lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("content_sse_cancel: {e}")))?;
+        if let Some(old) = guard.take() {
+            old.cancel();
+        }
+        *guard = Some(cancel_token.clone());
+    }
+
+    let mut backoff = Duration::from_secs(5);
+    let conn_owned = conn;
     tokio::spawn(async move {
-        let mut backoff = Duration::from_secs(5);
         loop {
-            // `conn` and `bearer` are owned by this task; `ContentRemote`
-            // borrows `conn` from within the task scope.
+            if cancel_token.is_cancelled() {
+                break;
+            }
             let remote = match crate::content_remote::ContentRemote::from(
-                &conn,
+                &conn_owned,
                 Some(bearer.clone()),
                 http_client.clone(),
             ) {
@@ -543,7 +573,8 @@ pub async fn fetch_audio_from_server(
     let target_for_task = target_path.clone();
     let rec_id_for_task = recording_id.clone();
     let path_str = tokio::task::spawn_blocking(move || -> AppResult<String> {
-        let tmp_path = target_for_task.with_extension("enc.tmp");
+        let tmp_path =
+            target_for_task.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
         std::fs::write(&tmp_path, &plaintext)?;
         medical_security::file_crypto::encrypt_file_in_place(&tmp_path).map_err(|e| {
             // Clean up the temp plaintext on failure — never leave
@@ -551,7 +582,10 @@ pub async fn fetch_audio_from_server(
             let _ = std::fs::remove_file(&tmp_path);
             AppError::Security(format!("audio re-encrypt failed: {e}"))
         })?;
-        std::fs::rename(&tmp_path, &target_for_task)?;
+        if let Err(e) = std::fs::rename(&tmp_path, &target_for_task) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(AppError::Io(e));
+        }
 
         // Update the recording's audio_path + file_size_bytes.
         let conn = db2.conn()?;

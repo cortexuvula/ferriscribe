@@ -236,25 +236,29 @@ impl ContentSyncRepo {
 
     /// Read the persisted sync cursor from the `sync_state` table.
     ///
-    /// Returns a default (empty) cursor if the keys are missing or NULL,
-    /// which happens on first run.
+    /// Returns a default (empty) cursor if the keys are NULL (first run).
+    /// Propagates actual DB errors rather than masking them as "first run,"
+    /// which would cause silent full re-pulls on transient failures.
     pub fn get_cursor(conn: &Connection) -> DbResult<SyncCursor> {
+        // The migration seeds rows with NULL values. We need to handle
+        // both "row not found" (shouldn't happen post-migration) and
+        // "row exists but value is NULL" (first run). Using `row.get`
+        // on a NULL column returns InvalidColumnType, so we use
+        // `row.get::<_, Option<String>>` which maps NULL → None.
         let cursor: Option<String> = conn
             .query_row(
                 "SELECT value FROM sync_state WHERE key = 'content_sync_cursor'",
                 [],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
-            .ok()
-            .flatten();
+            .unwrap_or(None);
         let last_pull: Option<String> = conn
             .query_row(
                 "SELECT value FROM sync_state WHERE key = 'content_sync_last_pull'",
                 [],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
-            .ok()
-            .flatten();
+            .unwrap_or(None);
         Ok(SyncCursor { cursor, last_pull })
     }
 
