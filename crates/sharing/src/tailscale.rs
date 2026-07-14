@@ -62,17 +62,39 @@ pub async fn run_tailscale_status_json() -> Option<Vec<u8>> {
         "/usr/bin/tailscale", // Linux package manager
     ];
     for candidate in candidates {
-        let out = tokio::process::Command::new(candidate)
+        match tokio::process::Command::new(candidate)
             .args(["status", "--json"])
             .output()
             .await
-            .ok()?;
-        if out.status.success() {
-            return Some(out.stdout);
+        {
+            Ok(out) => {
+                if out.status.success() {
+                    tracing::info!(
+                        binary = candidate,
+                        stdout_len = out.stdout.len(),
+                        "tailscale: status command succeeded"
+                    );
+                    return Some(out.stdout);
+                } else {
+                    tracing::warn!(
+                        binary = candidate,
+                        exit_code = out.status.code(),
+                        stderr_len = out.stderr.len(),
+                        "tailscale: command exited non-zero, trying next candidate"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    binary = candidate,
+                    error = %e,
+                    kind = ?e.kind(),
+                    "tailscale: command failed to spawn, trying next candidate"
+                );
+            }
         }
-        // Non-zero exit (e.g. binary exists but Tailscale daemon down):
-        // try the next candidate in case it's a different install.
     }
+    tracing::warn!("tailscale: no candidate binary succeeded (all 4 paths tried)");
     None
 }
 

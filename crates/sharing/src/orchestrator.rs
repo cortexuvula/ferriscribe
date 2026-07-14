@@ -560,7 +560,14 @@ impl SharingService {
         // subsequent watcher passes until it resolves (e.g. Tailscale
         // finishes coming up shortly after the app launches).
         if info.tailscale.is_none() {
-            info.tailscale = crate::tailscale::self_dns_name().await;
+            tracing::info!("rebuild_info_snapshot: looking up tailscale DNS name");
+            let result = crate::tailscale::self_dns_name().await;
+            if let Some(ref name) = result {
+                tracing::info!(tailscale = %name, "rebuild_info_snapshot: got tailscale DNS name");
+            } else {
+                tracing::warn!("rebuild_info_snapshot: tailscale DNS lookup returned None");
+            }
+            info.tailscale = result;
         }
     }
 
