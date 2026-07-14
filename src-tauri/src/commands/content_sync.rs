@@ -204,6 +204,25 @@ async fn run_sync(
 ) -> AppResult<SyncSummary> {
     let mut summary = SyncSummary::default();
 
+    // Capture the cursor BEFORE the pull loop advances it. The push loop
+    // needs the pre-pull watermark to find local recordings that haven't
+    // been pushed yet — if we used the post-pull cursor (advanced to the
+    // server's latest updated_at), local recordings older than the
+    // server's newest changes would never be pushed. This is especially
+    // critical on the first sync: pre-pull cursor is None → push sends
+    // all local recordings.
+    let pre_pull_cursor = tokio::task::spawn_blocking({
+        let db = Arc::clone(&db);
+        move || -> AppResult<Option<String>> {
+            let conn = db.conn()?;
+            Ok(ContentSyncRepo::get_cursor(&conn)
+                .map_err(AppError::from)?
+                .cursor)
+        }
+    })
+    .await
+    .map_err(crate::commands::join_err)??;
+
     // ── Pull loop ───────────────────────────────────────────────────────
     loop {
         // Read cursor and pull a batch on the blocking pool, then merge.
@@ -267,16 +286,17 @@ async fn run_sync(
     }
 
     // ── Push ────────────────────────────────────────────────────────────
-    // Collect local recordings changed since the (now-advanced) cursor and
-    // push them. Loop pages until all local changes are pushed (H2).
+    // Collect local recordings changed since the pre-pull cursor and push
+    // them. We use the PRE-PULL cursor (captured above), not the post-pull
+    // cursor, because the pull loop advanced the cursor to the server's
+    // latest updated_at — local recordings older than that would be missed.
+    // Loop pages until all local changes are pushed (H2).
     loop {
         let push_db = Arc::clone(&db);
+        let push_cursor = pre_pull_cursor.clone();
         let push_result = tokio::task::spawn_blocking(move || {
             let conn = push_db.conn()?;
-            let cursor = ContentSyncRepo::get_cursor(&conn)
-                .map_err(AppError::from)?
-                .cursor;
-            let (ids, has_more) = ContentSyncRepo::changed_since(&conn, cursor.as_deref(), 200)
+            let (ids, has_more) = ContentSyncRepo::changed_since(&conn, push_cursor.as_deref(), 200)
                 .map_err(AppError::from)?;
             let mut out = Vec::with_capacity(ids.len());
             for id in &ids {
