@@ -67,34 +67,27 @@ pub async fn run_tailscale_status_json() -> Option<Vec<u8>> {
             .output()
             .await
         {
+            Ok(out) if out.status.success() => {
+                tracing::debug!(binary = candidate, "tailscale status succeeded");
+                return Some(out.stdout);
+            }
             Ok(out) => {
-                if out.status.success() {
-                    tracing::info!(
-                        binary = candidate,
-                        stdout_len = out.stdout.len(),
-                        "tailscale: status command succeeded"
-                    );
-                    return Some(out.stdout);
-                } else {
-                    tracing::warn!(
-                        binary = candidate,
-                        exit_code = out.status.code(),
-                        stderr_len = out.stderr.len(),
-                        "tailscale: command exited non-zero, trying next candidate"
-                    );
-                }
+                tracing::debug!(
+                    binary = candidate,
+                    exit_code = out.status.code(),
+                    "tailscale: non-zero exit, trying next candidate"
+                );
             }
             Err(e) => {
-                tracing::warn!(
+                tracing::debug!(
                     binary = candidate,
-                    error = %e,
                     kind = ?e.kind(),
-                    "tailscale: command failed to spawn, trying next candidate"
+                    "tailscale: spawn failed, trying next candidate"
                 );
             }
         }
     }
-    tracing::warn!("tailscale: no candidate binary succeeded (all 4 paths tried)");
+    tracing::info!("tailscale: no candidate binary found (Tailscale not installed or not running)");
     None
 }
 
