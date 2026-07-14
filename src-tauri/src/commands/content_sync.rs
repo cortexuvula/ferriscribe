@@ -338,6 +338,10 @@ pub async fn sync_content_now(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> AppResult<SyncSummaryPayload> {
+    // Self-heal: backfill a missing Tailscale address before re-evaluating
+    // the sync gate. No-op when already populated or unreachable.
+    let _ = crate::commands::sharing::pairing::backfill_tailscale().await;
+
     let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
         return Ok(SyncSummaryPayload::default());
     };
@@ -374,6 +378,12 @@ pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
     if !enabled {
         return;
     }
+
+    // Self-heal: if paired over LAN without a Tailscale address, probe the
+    // server's /info endpoint to backfill it before the Tailscale gate below.
+    // Runs on every startup so it retries until the server is reachable.
+    let _ = crate::commands::sharing::pairing::backfill_tailscale().await;
+
     let Some(conn) = state::load_paired_connection() else {
         return;
     };

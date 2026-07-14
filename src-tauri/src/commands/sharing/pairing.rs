@@ -433,6 +433,108 @@ async fn tailscale_address() -> Option<String> {
     medical_sharing::tailscale::self_dns_name().await
 }
 
+/// Self-heal: backfill a missing `tailscale` field on an existing paired
+/// connection by probing the server's `/info` endpoint over LAN.
+///
+/// Clients that paired over mDNS before v0.30.5 have `tailscale: null` in
+/// their `sharing-paired.json`, which silently blocks content sync (the
+/// Tailscale-only transport gate fails). Instead of requiring a manual
+/// unpair + re-pair, this function probes the server's pairing-port `/info`
+/// endpoint (which now reports the server's Tailscale DNS name) and
+/// persists it.
+///
+/// Trigger condition: paired, `tailscale` is `None`, `lan` is present, and
+/// `ports.vocab` is present (so the server is new enough to have a vocab /
+/// content-sync port). Skips silently otherwise.
+///
+/// All failure paths return `Ok(())` — this is best-effort and must never
+/// block app startup or the downstream sync attempt. The manual re-pair
+/// path remains the fallback if the probe can't reach the server.
+pub async fn backfill_tailscale() -> AppResult<()> {
+    let Some(conn) = crate::state::load_paired_connection() else {
+        return Ok(()); // Not paired — nothing to backfill.
+    };
+    // Already have a Tailscale address → no-op.
+    if conn.tailscale.is_some() {
+        return Ok(());
+    }
+    // Need a LAN host to probe and a vocab port (new enough server).
+    let Some(lan) = &conn.lan else {
+        return Ok(());
+    };
+    let Some(vocab_port) = conn.ports.vocab else {
+        return Ok(());
+    };
+
+    tracing::info!(
+        lan = %lan,
+        vocab_port,
+        "backfill: probing server /info to fetch its Tailscale DNS name"
+    );
+
+    // Short-timeout probe matching the discovery pattern. The pairing port
+    // (11436) hosts the unauthenticated /info endpoint.
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "backfill: failed to build HTTP client");
+            return Ok(());
+        }
+    };
+
+    let pairing_port = conn.ports.pairing; // 11436 (required field, not Option)
+    let base = medical_core::types::endpoint::http_url(lan, pairing_port);
+    let url = format!("{base}/info");
+
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "backfill: /info probe failed (non-fatal)");
+            return Ok(());
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::warn!(status = %resp.status(), "backfill: /info returned non-200");
+        return Ok(());
+    }
+
+    // Minimal deserialization — we only need the tailscale field. Older
+    // servers omit it entirely (serde default → None).
+    #[derive(serde::Deserialize)]
+    struct InfoTailscale {
+        #[serde(default)]
+        tailscale: Option<String>,
+    }
+    let info: InfoTailscale = match resp.json().await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(error = %e, "backfill: failed to parse /info JSON");
+            return Ok(());
+        }
+    };
+
+    let Some(ts_name) = info.tailscale else {
+        tracing::info!("backfill: server /info did not report a Tailscale name (pre-0.30.5 server?)");
+        return Ok(());
+    };
+
+    // Persist the updated connection.
+    let mut updated = conn.clone();
+    updated.tailscale = Some(ts_name.clone());
+    let json = serde_json::to_string(&updated)?;
+    let path = paired_connection_path()?;
+    std::fs::write(&path, json)?;
+    tracing::info!(
+        tailscale = %ts_name,
+        "backfill: successfully saved Tailscale address to paired connection"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     //! Tests for `try_pair_at_base`. The full `pair_with_server` command depends
