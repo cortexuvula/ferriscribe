@@ -75,6 +75,9 @@ pub struct MdnsAdvertiser {
     fullname: String,
     instance_name: String,
     version: String,
+    /// Cached Tailscale DNS name so `update_ports` can preserve it across
+    /// re-registrations without the caller having to pass it each time.
+    tailscale: Option<String>,
 }
 
 impl MdnsAdvertiser {
@@ -83,8 +86,15 @@ impl MdnsAdvertiser {
     /// The `instance_name` appears in clients' discovery lists. Service ports
     /// and version are published as TXT records. The advertised listener
     /// port is `ports.pairing` (falling back to 11436) since that's the
-    /// endpoint clients need to contact first.
-    pub fn start(instance_name: &str, ports: &ServerPorts, version: &str) -> crate::Result<Self> {
+    /// endpoint clients need to contact first. `tailscale`, when present,
+    /// is published as a `tailscale` TXT property so LAN-discovered clients
+    /// learn the Tailscale DNS name they need for content sync.
+    pub fn start(
+        instance_name: &str,
+        ports: &ServerPorts,
+        version: &str,
+        tailscale: Option<&str>,
+    ) -> crate::Result<Self> {
         let daemon = ServiceDaemon::new().map_err(|e| crate::SharingError::Mdns(e.to_string()))?;
         let host = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
@@ -110,6 +120,9 @@ impl MdnsAdvertiser {
         if let Some(p) = ports.vocab {
             props.insert("vocab".into(), p.to_string());
         }
+        if let Some(ts) = tailscale {
+            props.insert("tailscale".into(), ts.to_string());
+        }
         props.insert("version".into(), version.to_string());
         let advertise_port = ports.pairing.unwrap_or(11436);
         let info = ServiceInfo::new(
@@ -130,6 +143,7 @@ impl MdnsAdvertiser {
             fullname: format!("{instance_name}.{SERVICE_TYPE}"),
             instance_name: instance_name.to_string(),
             version: version.to_string(),
+            tailscale: tailscale.map(|s| s.to_string()),
         })
     }
 
@@ -138,7 +152,17 @@ impl MdnsAdvertiser {
     ///
     /// Calls `unregister` on the old service then `register` on the new one.
     /// Used by the ReadinessWatcher when the ready set of upstreams changes.
-    pub fn update_ports(self, ports: &ServerPorts) -> Self {
+    /// The cached Tailscale DNS name is preserved across re-registrations;
+    /// pass `tailscale_override` to update it (e.g. if it was discovered
+    /// after the initial `start`).
+    pub fn update_ports(
+        mut self,
+        ports: &ServerPorts,
+        tailscale_override: Option<&str>,
+    ) -> Self {
+        if let Some(ts) = tailscale_override {
+            self.tailscale = Some(ts.to_string());
+        }
         let _ = self.daemon.unregister(&self.fullname);
         let host = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
@@ -163,6 +187,9 @@ impl MdnsAdvertiser {
         }
         if let Some(p) = ports.vocab {
             props.insert("vocab".into(), p.to_string());
+        }
+        if let Some(ts) = &self.tailscale {
+            props.insert("tailscale".into(), ts.clone());
         }
         props.insert("version".into(), self.version.clone());
         let advertise_port = ports.pairing.unwrap_or(11436);
@@ -226,11 +253,17 @@ pub fn browse(timeout: Duration) -> crate::Result<mpsc::Receiver<DiscoveredServe
                     let props = info.get_properties();
                     let prop = |k: &str| props.get_property_val_str(k).map(|s| s.to_string());
                     let parse_port = |k: &str| prop(k).and_then(|s| s.parse::<u16>().ok());
+                    // Read the server-advertised Tailscale DNS name from the
+                    // TXT record so LAN-discovered clients can populate their
+                    // `tailscale` slot without a separate Tailscale probe.
+                    let tailscale_addresses = prop("tailscale")
+                        .map(|ts| vec![ts])
+                        .unwrap_or_default();
                     let server = DiscoveredServer {
                         instance_name: info.get_fullname().to_string(),
                         host: info.get_hostname().trim_end_matches('.').to_string(),
                         addresses: info.get_addresses().iter().map(|a| a.to_string()).collect(),
-                        tailscale_addresses: Vec::new(),
+                        tailscale_addresses,
                         ports: ServerPorts {
                             ollama: parse_port("ollama"),
                             whisper: parse_port("whisper"),
@@ -270,7 +303,7 @@ mod tests {
             pairing: Some(11436),
             vocab: Some(11437),
         };
-        let adv = MdnsAdvertiser::start("test-instance", &ports, "0.0.0.0").unwrap();
+        let adv = MdnsAdvertiser::start("test-instance", &ports, "0.0.0.0", None).unwrap();
         // Give the daemon a moment to publish.
         tokio::time::sleep(Duration::from_millis(500)).await;
         let mut rx = browse(Duration::from_secs(3)).unwrap();
@@ -307,11 +340,11 @@ mod tests {
             pairing: Some(11436),
             vocab: Some(11437),
         };
-        let mut adv = MdnsAdvertiser::start("update-test", &ports_v1, "0.0.0.0").unwrap();
+        let mut adv = MdnsAdvertiser::start("update-test", &ports_v1, "0.0.0.0", None).unwrap();
         tokio::time::sleep(Duration::from_millis(400)).await;
 
         // Re-register with v2 ports (adds lmstudio).
-        adv = adv.update_ports(&ports_v2);
+        adv = adv.update_ports(&ports_v2, None);
         tokio::time::sleep(Duration::from_millis(400)).await;
 
         let mut rx = browse(Duration::from_secs(3)).unwrap();

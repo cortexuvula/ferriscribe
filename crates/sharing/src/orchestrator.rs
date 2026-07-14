@@ -242,6 +242,8 @@ impl SharingService {
                 pairing: Some(config.pairing_port),
                 vocab: Some(config.vocab_port),
             },
+            // Discovered once on the first rebuild_info_snapshot pass.
+            tailscale: None,
         };
         let (readiness_tx, _rx) = tokio::sync::watch::channel(readiness.clone());
         Ok(Self {
@@ -427,6 +429,10 @@ impl SharingService {
             &self.config.friendly_name,
             &self.info.read().await.ports,
             &self.config.version,
+            // Best-effort: if Tailscale isn't up yet, the TXT property is
+            // omitted and the watcher's update_ports re-advertise will add
+            // it once rebuild_info_snapshot resolves the name.
+            self.info.read().await.tailscale.as_deref(),
         ) {
             Ok(m) => m,
             Err(e) => {
@@ -547,6 +553,15 @@ impl SharingService {
         };
         let mut info = self.info.write().await;
         info.ports.lmstudio = lmstudio_port;
+
+        // One-shot Tailscale DNS discovery: the name doesn't change for the
+        // app's lifetime, so only look it up while it's still unknown. This
+        // runs on the first rebuild (right after start) and retries on
+        // subsequent watcher passes until it resolves (e.g. Tailscale
+        // finishes coming up shortly after the app launches).
+        if info.tailscale.is_none() {
+            info.tailscale = crate::tailscale::self_dns_name().await;
+        }
     }
 
     /// Spawn the long-lived ReadinessWatcher. Probes every 10s; on a change
@@ -617,8 +632,11 @@ impl SharingService {
             self.rebuild_info_snapshot().await;
             // Re-advertise mDNS with the new ports.
             if let Some(m) = self.mdns.lock().await.take() {
-                let ports = self.info.read().await.ports.clone();
-                *self.mdns.lock().await = Some(m.update_ports(&ports));
+                let snapshot = self.info.read().await;
+                let ports = snapshot.ports.clone();
+                let ts = snapshot.tailscale.clone();
+                drop(snapshot);
+                *self.mdns.lock().await = Some(m.update_ports(&ports, ts.as_deref()));
             }
             let r = self.readiness.read().await.clone();
             let _ = self.readiness_tx.send(r);
@@ -800,6 +818,15 @@ pub struct InfoSnapshot {
     pub host: String,
     pub version: String,
     pub ports: crate::mdns::ServerPorts,
+    /// This machine's Tailscale DNS name (e.g. `clinic.tail-abc.ts.net`),
+    /// discovered by shelling out to `tailscale status --json`. `None` when
+    /// Tailscale is absent or not authenticated. Published so clients that
+    /// pair over LAN (mDNS) or probe `/info` learn the Tailscale address
+    /// they need for content sync (which is Tailscale-only for PHI).
+    /// Skipped from the JSON when `None` for backward compatibility with
+    /// older clients whose wire type lacks the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tailscale: Option<String>,
 }
 
 pub(crate) fn build_pairing_router(
@@ -962,6 +989,7 @@ mod pairing_router_tests {
                 pairing: Some(11436),
                 vocab: Some(11437),
             },
+            tailscale: None,
         }
     }
 

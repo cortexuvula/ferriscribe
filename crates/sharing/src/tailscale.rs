@@ -2,7 +2,8 @@
 //!
 //! Extracted into a pure function so we can fixture-test it without running
 //! the Tailscale binary. Used by `src-tauri` to populate the Tailscale DNS
-//! name in the QR payload and mDNS advertisement.
+//! name in the QR payload, and by the orchestrator to advertise it in
+//! `InfoSnapshot` and the mDNS TXT record so LAN-paired clients learn it.
 
 use serde_json::Value;
 
@@ -24,6 +25,27 @@ pub fn parse_self_dns_name(json: &[u8]) -> Option<String> {
     let v: Value = serde_json::from_slice(json).ok()?;
     let dns = v.get("Self")?.get("DNSName")?.as_str()?;
     Some(dns.trim_end_matches('.').to_string())
+}
+
+/// Discover this machine's own Tailscale DNS name by shelling out to the
+/// `tailscale` CLI.
+///
+/// Wraps the pure [`parse_self_dns_name`] parser with the subprocess
+/// invocation. Returns `None` when the Tailscale binary is absent, not
+/// authenticated, or the machine has no Tailscale DNS name. The call is
+/// best-effort: callers (the orchestrator's `rebuild_info_snapshot`, the
+/// QR pairing path) treat `None` as "no Tailscale address available" and
+/// degrade gracefully.
+pub async fn self_dns_name() -> Option<String> {
+    let out = tokio::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_self_dns_name(&out.stdout)
 }
 
 #[cfg(test)]

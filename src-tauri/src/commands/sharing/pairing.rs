@@ -428,15 +428,9 @@ fn local_lan_address() -> Option<String> {
 }
 
 async fn tailscale_address() -> Option<String> {
-    let out = tokio::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .await
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    medical_sharing::tailscale::parse_self_dns_name(&out.stdout)
+    // Delegate to the library helper so the shell-out lives in one place
+    // (the orchestrator uses the same function to populate InfoSnapshot).
+    medical_sharing::tailscale::self_dns_name().await
 }
 
 #[cfg(test)]

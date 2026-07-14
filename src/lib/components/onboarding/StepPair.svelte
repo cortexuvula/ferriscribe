@@ -13,7 +13,7 @@
   type Discovered = {
     instance_name: string; host: string;
     addresses: string[]; tailscale_addresses?: string[];
-    ports: { ollama: number | null; whisper: number | null; lmstudio: number | null; pairing: number | null };
+    ports: { ollama: number | null; whisper: number | null; lmstudio: number | null; pairing: number | null; vocab: number | null };
     version: string;
   };
   type PairPorts = { ollama: number; whisper: number; pairing: number; lmstudio: number | null; vocab: number | null };
@@ -137,7 +137,7 @@
       whisper: d.ports.whisper ?? 8081,
       pairing: d.ports.pairing ?? 11436,
       lmstudio: d.ports.lmstudio ?? null,
-      vocab: (d.ports as { vocab?: number | null }).vocab ?? null,
+      vocab: d.ports.vocab ?? null,
     };
     const code = prompt('Enter the 6-digit code from the office server.') ?? '';
     if (!code) return;

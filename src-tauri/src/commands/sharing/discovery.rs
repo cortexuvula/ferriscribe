@@ -49,6 +49,11 @@ pub async fn discover_via_tailscale(timeout_ms: u64) -> AppResult<Vec<Discovered
                 return None;
             }
             let info: InfoSnapshotWire = resp.json().await.ok()?;
+            // Prefer the server-reported MagicDNS name (stable, resolvable)
+            // over the peer-dial address (may be a raw 100.x IP). Fall back
+            // to peer.dial when the server is an older version that doesn't
+            // report its own Tailscale name.
+            let ts_addr = info.tailscale.clone().unwrap_or_else(|| peer.dial.clone());
             Some(DiscoveredServer {
                 instance_name: format!("{}._ferriscribe._tcp.local.", info.host),
                 host: peer.host,
@@ -57,7 +62,7 @@ pub async fn discover_via_tailscale(timeout_ms: u64) -> AppResult<Vec<Discovered
                 // populate `tailscale_addresses` so the frontend can route
                 // this into the RemoteEndpoint.tailscale slot.
                 addresses: Vec::new(),
-                tailscale_addresses: vec![peer.dial],
+                tailscale_addresses: vec![ts_addr],
                 ports: medical_sharing::mdns::ServerPorts {
                     ollama: info.ports.ollama,
                     whisper: info.ports.whisper,
@@ -127,6 +132,10 @@ struct InfoSnapshotWire {
     host: String,
     version: String,
     ports: WirePorts,
+    /// Server-reported Tailscale DNS name. Absent on older servers; we fall
+    /// back to the peer-dial address in that case.
+    #[serde(default)]
+    tailscale: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
