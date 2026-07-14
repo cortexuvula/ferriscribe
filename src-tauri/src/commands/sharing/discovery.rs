@@ -88,15 +88,10 @@ struct TailscalePeer {
 }
 
 async fn tailscale_peers() -> Option<Vec<TailscalePeer>> {
-    let out = tokio::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .await
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    // Reuse the library helper so the macOS GUI-App PATH fallback
+    // (/opt/homebrew/bin etc.) applies here too.
+    let stdout = medical_sharing::tailscale::run_tailscale_status_json().await?;
+    let v: serde_json::Value = serde_json::from_slice(&stdout).ok()?;
     let peer_obj = v.get("Peer")?.as_object()?;
     let mut peers = Vec::new();
     for (_, p) in peer_obj {

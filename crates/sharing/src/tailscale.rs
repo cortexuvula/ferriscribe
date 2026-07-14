@@ -36,16 +36,44 @@ pub fn parse_self_dns_name(json: &[u8]) -> Option<String> {
 /// best-effort: callers (the orchestrator's `rebuild_info_snapshot`, the
 /// QR pairing path) treat `None` as "no Tailscale address available" and
 /// degrade gracefully.
+///
+/// macOS note: GUI apps launched from Finder/Dock inherit a minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`) that does NOT include Homebrew's
+/// `/opt/homebrew/bin` or `/usr/local/bin`. So in addition to relying on
+/// PATH, we probe known installation locations as a fallback.
 pub async fn self_dns_name() -> Option<String> {
-    let out = tokio::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .await
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    let output = run_tailscale_status_json().await?;
+    parse_self_dns_name(&output)
+}
+
+/// Run `tailscale status --json`, searching PATH first, then common known
+/// installation locations (Homebrew Apple Silicon + Intel, Linux/WSL).
+/// Returns the raw stdout bytes on success.
+///
+/// `pub` so the Tauri command layer (e.g. `tailscale_peers` in discovery.rs)
+/// can reuse the same location-fallback logic instead of duplicating it.
+pub async fn run_tailscale_status_json() -> Option<Vec<u8>> {
+    // Candidate binaries in order: bare name (PATH), then known absolute
+    // paths for macOS GUI apps and Linux.
+    let candidates: Vec<&str> = vec![
+        "tailscale", // PATH lookup (works for CLI/terminal-launched apps)
+        "/opt/homebrew/bin/tailscale", // macOS Homebrew (Apple Silicon)
+        "/usr/local/bin/tailscale", // macOS Homebrew (Intel) + Mac App Store CLI
+        "/usr/bin/tailscale", // Linux package manager
+    ];
+    for candidate in candidates {
+        let out = tokio::process::Command::new(candidate)
+            .args(["status", "--json"])
+            .output()
+            .await
+            .ok()?;
+        if out.status.success() {
+            return Some(out.stdout);
+        }
+        // Non-zero exit (e.g. binary exists but Tailscale daemon down):
+        // try the next candidate in case it's a different install.
     }
-    parse_self_dns_name(&out.stdout)
+    None
 }
 
 #[cfg(test)]

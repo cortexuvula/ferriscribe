@@ -1,6 +1,6 @@
 {
   "name": "rust-medical-assistant",
-  "version": "0.30.6",
+  "version": "0.30.7",
   "type": "module",
   "scripts": {
     "dev": "vite",
