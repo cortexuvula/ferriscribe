@@ -93,6 +93,9 @@
     {#if recording.has_peer_discussion}
       <span class="badge" role="img" aria-label="Has peer discussion" title="Peer Discussion">PD</span>
     {/if}
+    {#if recording.is_remote}
+      <span class="badge badge-remote" role="img" aria-label="Synced from remote" title="Synced from another device">☁</span>
+    {/if}
   </div>
 
   {#if onRetry}
@@ -196,6 +199,12 @@
     background-color: var(--accent-light);
     color: var(--accent);
     border: 1px solid var(--accent);
+  }
+
+  .badge-remote {
+    background-color: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+    border-color: #3b82f6;
   }
 
   .btn-delete {

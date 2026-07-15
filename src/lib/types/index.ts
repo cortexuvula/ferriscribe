@@ -58,6 +58,7 @@ export interface RecordingSummary {
   has_referral: boolean;
   has_letter: boolean;
   has_peer_discussion: boolean;
+  is_remote: boolean;
 }
 
 // ── Context Template ──────────────────────────────────────────────────────────

@@ -23,6 +23,7 @@ function makeSummary(id: string): RecordingSummary {
     has_referral: false,
     has_letter: false,
     has_peer_discussion: false,
+    is_remote: false,
   };
 }
 

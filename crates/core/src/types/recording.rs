@@ -197,6 +197,9 @@ pub struct RecordingSummary {
     pub has_letter: bool,
     /// Whether a peer discussion note exists (without loading it).
     pub has_peer_discussion: bool,
+    /// True if this recording was synced from a remote machine (metadata
+    /// contains a `synced_from` key).
+    pub is_remote: bool,
 }
 
 impl From<&Recording> for RecordingSummary {
@@ -214,6 +217,7 @@ impl From<&Recording> for RecordingSummary {
             has_referral: r.referral.is_some(),
             has_letter: r.letter.is_some(),
             has_peer_discussion: r.peer_discussion.is_some(),
+            is_remote: r.metadata.get("synced_from").is_some(),
         }
     }
 }

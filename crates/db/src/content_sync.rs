@@ -623,7 +623,15 @@ impl ContentSyncRepo {
     fn insert_remote_recording(conn: &Connection, remote: &SyncRecording) -> DbResult<()> {
         let tags_json = serde_json::json!([]).to_string();
         let status_json = serde_json::json!({"status": "pending"}).to_string();
-        let metadata_json = serde_json::Value::Null.to_string();
+        // Stamp metadata with a synced_from marker so the receiving machine
+        // can display a "remote" badge. Uses the first field revision's
+        // origin_device if available, otherwise "remote".
+        let origin = remote
+            .fields
+            .values()
+            .find_map(|v| v.origin_device.clone())
+            .unwrap_or_else(|| "remote".to_string());
+        let metadata_json = serde_json::json!({"synced_from": origin}).to_string();
         conn.execute(
             "INSERT INTO recordings (
                 id, filename, transcript, soap_note, referral, letter, peer_discussion, chat,

@@ -90,6 +90,7 @@ class RecordingsStore {
           has_referral: r.referral !== null,
           has_letter: r.letter !== null,
           has_peer_discussion: r.peer_discussion !== null,
+          is_remote: r.metadata?.synced_from != null,
         }));
         this.list = summaries;
         // Search has its own (smaller) limit and no pagination — treat the
