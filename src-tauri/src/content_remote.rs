@@ -184,12 +184,17 @@ impl<'a> ContentRemote<'a> {
         let url = format!("{base}/v1/content/sync");
         // Log the count only — never the payload (PHI).
         let count = recordings.len();
+        // Wrap in an object: the server expects { "recordings": [...] }, not a
+        // bare array. Sending a bare array caused HTTP 422 (deserialization
+        // failure) on every push — the client's recordings never reached the
+        // server.
+        let body = serde_json::json!({ "recordings": recordings });
         let resp = self
             .client
             .post(&url)
             .timeout(Duration::from_secs(30))
             .bearer_auth(&self.bearer)
-            .json(&recordings)
+            .json(&body)
             .send()
             .await
             .map_err(|e| AppError::Other(format!("content push: {e}")))?;
