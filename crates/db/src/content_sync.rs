@@ -291,10 +291,11 @@ impl ContentSyncRepo {
     /// was introduced would never sync.
     pub fn get_push_cursor(conn: &Connection) -> DbResult<Option<String>> {
         // One-time reset: clear any stale push cursor left by earlier
-        // versions that conflated pull and push cursors.
+        // versions that conflated pull and push cursors. Uses a versioned
+        // sentinel key so each version bump can trigger a fresh full re-push.
         let needs_reset: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM sync_state WHERE key = 'content_sync_push_v2_reset'",
+                "SELECT COUNT(*) FROM sync_state WHERE key = 'content_sync_push_v3_reset'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -302,14 +303,14 @@ impl ContentSyncRepo {
             == 0;
         if needs_reset {
             conn.execute(
-                "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('content_sync_push_v2_reset', '1')",
+                "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('content_sync_push_v3_reset', '1')",
                 [],
             )?;
             conn.execute(
                 "UPDATE sync_state SET value = NULL WHERE key = 'content_sync_push_cursor'",
                 [],
             )?;
-            tracing::info!("push cursor reset (one-time v2 migration): forcing full re-push");
+            tracing::info!("push cursor reset (one-time v3 migration): forcing full re-push");
             return Ok(None);
         }
 
