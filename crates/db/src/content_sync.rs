@@ -276,6 +276,38 @@ impl ContentSyncRepo {
         Ok(())
     }
 
+    /// Read the push cursor — a separate watermark tracking the newest
+    /// `updated_at` of recordings that have been successfully pushed to the
+    /// server. Independent from the pull cursor so that:
+    ///   - Pulling server recordings doesn't mark local recordings as "pushed"
+    ///   - Local recordings created before the first pull still get pushed
+    ///
+    /// Returns `None` on first run (nothing pushed yet → push everything).
+    pub fn get_push_cursor(conn: &Connection) -> DbResult<Option<String>> {
+        let cursor: Option<String> = conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = 'content_sync_push_cursor'",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap_or(None);
+        Ok(cursor)
+    }
+
+    /// Persist the push cursor after a successful push batch.
+    pub fn set_push_cursor(conn: &Connection, cursor: &str) -> DbResult<()> {
+        // INSERT OR IGNORE ensures the row exists; UPDATE sets the value.
+        conn.execute(
+            "INSERT OR IGNORE INTO sync_state (key, value) VALUES ('content_sync_push_cursor', NULL)",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE sync_state SET value = ?1 WHERE key = 'content_sync_push_cursor'",
+            params![cursor],
+        )?;
+        Ok(())
+    }
+
     /// Delta query: return recording IDs modified since the given cursor.
     ///
     /// `since` is an RFC 3339 `updated_at` watermark; `None` returns

@@ -204,25 +204,6 @@ async fn run_sync(
 ) -> AppResult<SyncSummary> {
     let mut summary = SyncSummary::default();
 
-    // Capture the cursor BEFORE the pull loop advances it. The push loop
-    // needs the pre-pull watermark to find local recordings that haven't
-    // been pushed yet — if we used the post-pull cursor (advanced to the
-    // server's latest updated_at), local recordings older than the
-    // server's newest changes would never be pushed. This is especially
-    // critical on the first sync: pre-pull cursor is None → push sends
-    // all local recordings.
-    let pre_pull_cursor = tokio::task::spawn_blocking({
-        let db = Arc::clone(&db);
-        move || -> AppResult<Option<String>> {
-            let conn = db.conn()?;
-            Ok(ContentSyncRepo::get_cursor(&conn)
-                .map_err(AppError::from)?
-                .cursor)
-        }
-    })
-    .await
-    .map_err(crate::commands::join_err)??;
-
     // ── Pull loop ───────────────────────────────────────────────────────
     loop {
         // Read cursor and pull a batch on the blocking pool, then merge.
@@ -286,16 +267,17 @@ async fn run_sync(
     }
 
     // ── Push ────────────────────────────────────────────────────────────
-    // Collect local recordings changed since the pre-pull cursor and push
-    // them. We use the PRE-PULL cursor (captured above), not the post-pull
-    // cursor, because the pull loop advanced the cursor to the server's
-    // latest updated_at — local recordings older than that would be missed.
-    // Loop pages until all local changes are pushed (H2).
+    // Use a SEPARATE push cursor (independent from the pull cursor) so that
+    // local recordings created before the first pull are still pushed.
+    // The pull cursor tracks what we've received from the server; the push
+    // cursor tracks what we've sent to the server. Without this separation,
+    // the pull loop would advance the shared cursor past local recordings,
+    // and they'd never be pushed.
     loop {
         let push_db = Arc::clone(&db);
-        let push_cursor = pre_pull_cursor.clone();
         let push_result = tokio::task::spawn_blocking(move || {
             let conn = push_db.conn()?;
+            let push_cursor = ContentSyncRepo::get_push_cursor(&conn).map_err(AppError::from)?;
             let (ids, has_more) = ContentSyncRepo::changed_since(&conn, push_cursor.as_deref(), 200)
                 .map_err(AppError::from)?;
             let mut out = Vec::with_capacity(ids.len());
@@ -322,9 +304,25 @@ async fn run_sync(
 
         if !batch_was_empty {
             let push_count = batch.len();
+            // Capture the max updated_at BEFORE moving the batch into push().
+            let max_ts = batch
+                .iter()
+                .map(|r| r.updated_at.as_str())
+                .max()
+                .map(|s| s.to_string());
             let push_resp = remote.push(batch).await?;
             summary.pushed += push_count;
             summary.push_conflicts += push_resp.conflicts.len();
+            // Advance the push cursor so we don't re-push these next time.
+            if let Some(ts) = max_ts {
+                let pc_db = Arc::clone(&db);
+                tokio::task::spawn_blocking(move || -> AppResult<()> {
+                    let conn = pc_db.conn()?;
+                    ContentSyncRepo::set_push_cursor(&conn, &ts).map_err(AppError::from)
+                })
+                .await
+                .map_err(crate::commands::join_err)??;
+            }
         }
 
         if !has_more || batch_was_empty {
