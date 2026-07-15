@@ -283,7 +283,36 @@ impl ContentSyncRepo {
     ///   - Local recordings created before the first pull still get pushed
     ///
     /// Returns `None` on first run (nothing pushed yet → push everything).
+    ///
+    /// Includes a one-time reset: if `content_sync_push_v2_reset` is not set,
+    /// the push cursor is cleared (set to NULL) so that the first push after
+    /// upgrading to the separate-push-cursor version sends ALL local
+    /// recordings. Without this, recordings created before the push cursor
+    /// was introduced would never sync.
     pub fn get_push_cursor(conn: &Connection) -> DbResult<Option<String>> {
+        // One-time reset: clear any stale push cursor left by earlier
+        // versions that conflated pull and push cursors.
+        let needs_reset: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_state WHERE key = 'content_sync_push_v2_reset'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            == 0;
+        if needs_reset {
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('content_sync_push_v2_reset', '1')",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE sync_state SET value = NULL WHERE key = 'content_sync_push_cursor'",
+                [],
+            )?;
+            tracing::info!("push cursor reset (one-time v2 migration): forcing full re-push");
+            return Ok(None);
+        }
+
         let cursor: Option<String> = conn
             .query_row(
                 "SELECT value FROM sync_state WHERE key = 'content_sync_push_cursor'",
