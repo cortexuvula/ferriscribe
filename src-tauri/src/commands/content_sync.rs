@@ -293,13 +293,34 @@ async fn run_sync(
                     }
                 }
             }
-            Ok::<(Vec<SyncRecording>, bool), AppError>((out, has_more))
+            // If the batch is empty but there were IDs, we need the max
+            // updated_at of those IDs so we can advance the push cursor past
+            // them. Otherwise the push loop will livelock, retrying the same
+            // unreadable recordings on every sync forever.
+            let skip_cursor = if out.is_empty() && !ids.is_empty() {
+                // Query the max updated_at of the IDs that failed to build.
+                let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let sql = format!(
+                    "SELECT MAX(updated_at) FROM recordings WHERE id IN ({placeholders})"
+                );
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+                conn.query_row(&sql, params.as_slice(), |row| {
+                    row.get::<_, Option<String>>(0)
+                })
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
+            Ok::<(Vec<SyncRecording>, bool, Option<String>), AppError>((out, has_more, skip_cursor))
         })
         .await
         .map_err(crate::commands::join_err)??;
 
         let has_more = push_result.1;
         let batch = push_result.0;
+        let skip_cursor = push_result.2;
         let batch_was_empty = batch.is_empty();
 
         if !batch_was_empty {
@@ -313,6 +334,12 @@ async fn run_sync(
             let push_resp = remote.push(batch).await?;
             summary.pushed += push_count;
             summary.push_conflicts += push_resp.conflicts.len();
+            // If the server won any fields, our local copy is now stale.
+            // Trigger a content-changed event so the next sync cycle re-pulls
+            // the server's authoritative version of those fields.
+            if !push_resp.conflicts.is_empty() {
+                let _ = app.emit("content-changed", ());
+            }
             // Advance the push cursor so we don't re-push these next time.
             if let Some(ts) = max_ts {
                 let pc_db = Arc::clone(&db);
@@ -323,6 +350,18 @@ async fn run_sync(
                 .await
                 .map_err(crate::commands::join_err)??;
             }
+        } else if let Some(ts) = skip_cursor {
+            // All recordings in this page were unreadable — advance the push
+            // cursor past them so they're not retried on every sync.
+            tracing::warn!(cursor = %ts, "content sync push: advancing cursor past unreadable recordings");
+            let pc_db = Arc::clone(&db);
+            let ts_owned = ts;
+            tokio::task::spawn_blocking(move || -> AppResult<()> {
+                let conn = pc_db.conn()?;
+                ContentSyncRepo::set_push_cursor(&conn, &ts_owned).map_err(AppError::from)
+            })
+            .await
+            .map_err(crate::commands::join_err)??;
         }
 
         if !has_more || batch_was_empty {
@@ -357,8 +396,14 @@ pub async fn sync_content_now(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<SyncSummaryPayload> {
     // Self-heal: backfill a missing Tailscale address before re-evaluating
-    // the sync gate. No-op when already populated or unreachable.
-    let _ = crate::commands::sharing::pairing::backfill_tailscale().await;
+    // the sync gate. Only runs when the paired connection doesn't already
+    // have a Tailscale address, avoiding up to 5s latency per sync.
+    if state::load_paired_connection()
+        .and_then(|c| c.tailscale)
+        .is_none()
+    {
+        let _ = crate::commands::sharing::pairing::backfill_tailscale().await;
+    }
 
     let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
         return Ok(SyncSummaryPayload::default());
@@ -388,6 +433,15 @@ pub async fn sync_content_now(
 /// from `lib.rs::run`.
 #[allow(dead_code)] // wired into AppState::initialize by the boot-sequence task
 pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
+    use tauri::Manager;
+
+    // Acquire the sync lock to prevent racing with a user-triggered
+    // sync_content_now. This is critical: without it, two concurrent sync
+    // rounds could read the same cursor, double-merge, and interleave
+    // writes at the SQLite level.
+    let sync_lock = app.state::<crate::state::AppState>().content_sync_lock.clone();
+    let _guard = sync_lock.lock().await;
+
     // Re-evaluate the gates without an AppState: load config + pairing from
     // disk directly. This mirrors content_sync_target but against raw state
     // helpers since AppState may not be fully wired yet at the call site.
@@ -521,13 +575,24 @@ pub async fn subscribe_content_sync(
                     tracing::info!("content SSE subscription connected");
                     backoff = Duration::from_secs(5);
                     let mut stream = resp.bytes_stream();
+                    // Buffer for incomplete SSE lines. TCP chunks can split a
+                    // `data: changed\n` across two reads; without buffering,
+                    // the split halves would never match and notifications
+                    // would be silently dropped.
+                    let mut sse_buffer = String::new();
                     while let Some(chunk) = stream.next().await {
                         match chunk {
                             Ok(bytes) => {
-                                let text = String::from_utf8_lossy(&bytes);
-                                for line in text.lines() {
-                                    if line.starts_with("data: changed") {
-                                        let _ = app.emit("content-changed", ());
+                                sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
+                                // SSE events are separated by blank lines
+                                // (\n\n). Process only complete events.
+                                while let Some(idx) = sse_buffer.find("\n\n") {
+                                    let event = sse_buffer[..idx].to_string();
+                                    sse_buffer = sse_buffer[idx + 2..].to_string();
+                                    for line in event.lines() {
+                                        if line.starts_with("data: changed") {
+                                            let _ = app.emit("content-changed", ());
+                                        }
                                     }
                                 }
                             }

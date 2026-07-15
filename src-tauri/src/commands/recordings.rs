@@ -152,40 +152,52 @@ fn delete_rag_vectors_best_effort(conn: &medical_db::Connection, recording_id: &
 pub fn delete_all_recordings(state: tauri::State<'_, AppState>) -> AppResult<u32> {
     let conn = state.db.conn()?;
 
-    // Delete all RAG vectors
-    if let Err(e) = conn.execute("DELETE FROM vectors", []) {
-        tracing::error!(error = %e, "RAG vector cleanup failed during delete_all_recordings; orphan vectors may remain");
-    }
+    // Wrap deletes + cursor resets in a single transaction so a crash
+    // between them can't leave diverged cursors.
+    conn.execute_batch("BEGIN").map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+    let result: AppResult<(Vec<std::path::PathBuf>, u32)> = (|| {
+        // Delete all RAG vectors
+        if let Err(e) = conn.execute("DELETE FROM vectors", []) {
+            tracing::error!(error = %e, "RAG vector cleanup failed during delete_all_recordings; orphan vectors may remain");
+        }
 
-    // Delete all recordings and get audio paths for file cleanup
-    let paths = RecordingsRepo::delete_all(&conn)?;
-    let count = paths.len() as u32;
+        // Delete all recordings and get audio paths for file cleanup
+        let paths = RecordingsRepo::delete_all(&conn).map_err(AppError::from)?;
+        let count = paths.len() as u32;
 
-    // Remove audio files from disk
+        // Reset content-sync cursors so the next sync re-syncs everything.
+        if let Err(e) = medical_db::content_sync::ContentSyncRepo::set_cursor(&conn, None) {
+            tracing::warn!(error = %e, "failed to reset pull cursor after Delete All");
+        }
+        if let Err(e) = conn.execute(
+            "UPDATE sync_state SET value = NULL WHERE key = 'content_sync_push_cursor'",
+            [],
+        ) {
+            tracing::warn!(error = %e, "failed to reset push cursor after Delete All");
+        }
+        tracing::info!("Delete All: content-sync cursors reset, next sync will re-pull everything");
+
+        Ok((paths, count))
+    })();
+
+    let (paths, count) = match result {
+        Ok(v) => {
+            conn.execute_batch("COMMIT").map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+            v
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
+    };
+
+    // Remove audio files from disk (after commit, so we only delete
+    // if the DB transaction succeeded).
     for path in &paths {
         if path.exists() {
             let _ = std::fs::remove_file(path);
         }
     }
-
-    // Reset content-sync cursors so the next sync re-syncs everything.
-    // Delete All is a local-only operation — the partner machine still has
-    // its recordings. Without resetting both cursors:
-    //   - Pull cursor: would skip the partner's recordings that were
-    //     previously pulled (the server's changed_since wouldn't return them)
-    //   - Push cursor: the partner already received these (but we deleted
-    //     them locally, so we have nothing to push — this is fine, but
-    //     resetting it is harmless and keeps the state clean)
-    if let Err(e) = medical_db::content_sync::ContentSyncRepo::set_cursor(&conn, None) {
-        tracing::warn!(error = %e, "failed to reset pull cursor after Delete All");
-    }
-    if let Err(e) = conn.execute(
-        "UPDATE sync_state SET value = NULL WHERE key = 'content_sync_push_cursor'",
-        [],
-    ) {
-        tracing::warn!(error = %e, "failed to reset push cursor after Delete All");
-    }
-    tracing::info!("Delete All: content-sync cursors reset, next sync will re-pull everything");
 
     Ok(count)
 }

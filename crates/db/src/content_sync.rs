@@ -284,7 +284,7 @@ impl ContentSyncRepo {
     ///
     /// Returns `None` on first run (nothing pushed yet → push everything).
     ///
-    /// Includes a one-time reset: if `content_sync_push_v2_reset` is not set,
+    /// Includes a one-time reset: if `content_sync_push_v3_reset` is not set,
     /// the push cursor is cleared (set to NULL) so that the first push after
     /// upgrading to the separate-push-cursor version sends ALL local
     /// recordings. Without this, recordings created before the push cursor
@@ -477,7 +477,15 @@ impl ContentSyncRepo {
                     // Stamp the synced_from marker AFTER the field merge loop,
                     // so it survives even if the sender's metadata field
                     // overwrites the initial value set by insert_remote_recording.
-                    Self::stamp_synced_origin(conn, id_str, remote)?;
+                    // Non-fatal: the badge is cosmetic and must never block
+                    // the data sync from completing.
+                    if let Err(e) = Self::stamp_synced_origin(conn, id_str, remote) {
+                        tracing::warn!(
+                            recording_id = %id_str,
+                            error = %e,
+                            "sync: stamp_synced_origin failed (non-fatal, badge will be missing)"
+                        );
+                    }
                     changed.push(id_str.clone());
                     continue;
                 }
