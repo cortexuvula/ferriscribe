@@ -474,6 +474,10 @@ impl ContentSyncRepo {
                             value.origin_device.as_deref(),
                         )?;
                     }
+                    // Stamp the synced_from marker AFTER the field merge loop,
+                    // so it survives even if the sender's metadata field
+                    // overwrites the initial value set by insert_remote_recording.
+                    Self::stamp_synced_origin(conn, id_str, remote)?;
                     changed.push(id_str.clone());
                     continue;
                 }
@@ -660,6 +664,40 @@ impl ContentSyncRepo {
                 remote.updated_at,
                 remote.deleted_at,
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Merge a `synced_from` key into the recording's metadata JSON after the
+    /// per-field merge loop has applied the sender's metadata. This ensures
+    /// the origin stamp survives even when the sender's metadata field
+    /// overwrites the placeholder set by `insert_remote_recording`.
+    fn stamp_synced_origin(conn: &Connection, id: &str, remote: &SyncRecording) -> DbResult<()> {
+        // Read the current metadata (may have been updated by apply_field).
+        let current: String = conn.query_row(
+            "SELECT metadata FROM recordings WHERE id = ?1",
+            [id],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&current).unwrap_or(serde_json::Value::Null);
+        if meta.is_null() {
+            meta = serde_json::json!({});
+        }
+        if let Some(obj) = meta.as_object_mut()
+            && !obj.contains_key("synced_from")
+        {
+            let origin = remote
+                .fields
+                .values()
+                .find_map(|v| v.origin_device.clone())
+                .unwrap_or_else(|| "remote".to_string());
+            obj.insert("synced_from".to_string(), serde_json::json!(origin));
+        }
+        let updated = meta.to_string();
+        conn.execute(
+            "UPDATE recordings SET metadata = ?1 WHERE id = ?2",
+            params![updated, id],
         )?;
         Ok(())
     }
