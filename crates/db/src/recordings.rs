@@ -98,6 +98,29 @@ impl RecordingsRepo {
     /// Results are ordered by `created_at DESC`. Use `limit` and `offset` for
     /// pagination.
     pub fn list_all(conn: &Connection, limit: u32, offset: u32) -> DbResult<Vec<RecordingSummary>> {
+        // Diagnostic: count total rows, deleted rows, and rows returned.
+        let total_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recordings", [], |row| row.get(0))
+            .unwrap_or(-1);
+        let deleted_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recordings WHERE deleted_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1);
+        let live_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recordings WHERE deleted_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1);
+        tracing::info!(
+            total_rows, deleted_rows, live_rows, limit, offset,
+            "list_all: DB recording counts"
+        );
+
         let mut stmt = conn.prepare(
             "SELECT id, filename, transcript, soap_note, referral, letter, peer_discussion, chat,
                     patient_name, audio_path, duration_seconds, file_size_bytes,
@@ -109,16 +132,27 @@ impl RecordingsRepo {
              LIMIT ?1 OFFSET ?2",
         )?;
 
-        let recordings = stmt
+        let mut dropped_count = 0i32;
+        let recordings: Vec<RecordingSummary> = stmt
             .query_map(rusqlite::params![limit, offset], |row| {
                 Self::row_to_recording(row)
             })?
-            .filter_map(|r| {
-                r.map_err(|e| tracing::warn!(error = %e, "dropping unreadable row"))
-                    .ok()
+            .filter_map(|r| match r {
+                Ok(rec) => Some(rec),
+                Err(e) => {
+                    dropped_count += 1;
+                    tracing::warn!(error = %e, "list_all: dropping unreadable row");
+                    None
+                }
             })
             .map(|rec| RecordingSummary::from(&rec))
             .collect();
+
+        tracing::info!(
+            returned = recordings.len(),
+            dropped = dropped_count,
+            "list_all: query complete"
+        );
 
         Ok(recordings)
     }
