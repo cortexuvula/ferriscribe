@@ -141,6 +141,13 @@ fn delete_rag_vectors_best_effort(conn: &medical_db::Connection, recording_id: &
 ///
 /// Removes all recording rows, RAG vectors, and WAV files from disk.
 /// Returns the number of recordings deleted.
+///
+/// Also resets the content-sync cursors so the next sync re-pulls
+/// everything from the partner machine. Without this, Delete All would
+/// permanently break sync — the partner's push cursor would already be
+/// advanced past its old recordings, and the local pull cursor would skip
+/// the partner's recordings that were already "seen" (but now deleted
+/// locally).
 #[tauri::command]
 pub fn delete_all_recordings(state: tauri::State<'_, AppState>) -> AppResult<u32> {
     let conn = state.db.conn()?;
@@ -160,6 +167,25 @@ pub fn delete_all_recordings(state: tauri::State<'_, AppState>) -> AppResult<u32
             let _ = std::fs::remove_file(path);
         }
     }
+
+    // Reset content-sync cursors so the next sync re-syncs everything.
+    // Delete All is a local-only operation — the partner machine still has
+    // its recordings. Without resetting both cursors:
+    //   - Pull cursor: would skip the partner's recordings that were
+    //     previously pulled (the server's changed_since wouldn't return them)
+    //   - Push cursor: the partner already received these (but we deleted
+    //     them locally, so we have nothing to push — this is fine, but
+    //     resetting it is harmless and keeps the state clean)
+    if let Err(e) = medical_db::content_sync::ContentSyncRepo::set_cursor(&conn, None) {
+        tracing::warn!(error = %e, "failed to reset pull cursor after Delete All");
+    }
+    if let Err(e) = conn.execute(
+        "UPDATE sync_state SET value = NULL WHERE key = 'content_sync_push_cursor'",
+        [],
+    ) {
+        tracing::warn!(error = %e, "failed to reset push cursor after Delete All");
+    }
+    tracing::info!("Delete All: content-sync cursors reset, next sync will re-pull everything");
 
     Ok(count)
 }
