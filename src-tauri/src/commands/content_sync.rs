@@ -266,6 +266,105 @@ async fn run_sync(
         }
     }
 
+    // ── Audio fetch for newly-synced recordings ────────────────────────
+    // After pulling metadata, fetch audio for recordings that arrived
+    // without it (audio_path is empty). Best-effort: errors are logged
+    // and don't abort the sync. Limit to 10 per cycle to bound latency.
+    let audio_fetch_db = Arc::clone(&db);
+    let audio_conn = crate::state::load_paired_connection();
+    let audio_tailscale = audio_conn.as_ref().and_then(|c| c.tailscale.clone());
+    let audio_vocab_port = audio_conn.as_ref().and_then(|c| c.ports.vocab);
+    let audio_bearer = crate::state::load_sharing_bearer();
+    if let (Some(ts), Some(vp), Some(bearer)) = (audio_tailscale, audio_vocab_port, audio_bearer) {
+        let audio_conn = crate::commands::sharing::PairedConnection {
+            lan: None,
+            tailscale: Some(ts),
+            ports: medical_sharing::qr::PairPorts {
+                ollama: 0,
+                whisper: 0,
+                pairing: 0,
+                lmstudio: None,
+                vocab: Some(vp),
+            },
+            label: String::new(),
+        };
+        let remote_for_audio = crate::content_remote::ContentRemote::from(
+            &audio_conn,
+            Some(bearer),
+            remote.client.clone(),
+        );
+        if let Some(audio_remote) = remote_for_audio {
+            // Find recordings with empty audio_path (synced metadata, no audio yet).
+            let missing_ids: Vec<String> = tokio::task::spawn_blocking({
+                let db = Arc::clone(&audio_fetch_db);
+                move || -> AppResult<Vec<String>> {
+                    let conn = db.conn()?;
+                    let mut stmt = conn.prepare(
+                        "SELECT id FROM recordings WHERE audio_path = '' AND deleted_at IS NULL LIMIT 10",
+                    ).map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+                    let ids = stmt.query_map([], |row| row.get::<_, String>(0))
+                        .map_err(|e| AppError::from(medical_db::DbError::from(e)))?
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    Ok(ids)
+                }
+            })
+            .await
+            .map_err(crate::commands::join_err)??;
+
+            for rec_id in &missing_ids {
+                match audio_remote.fetch_audio(rec_id).await {
+                    Ok(plaintext) => {
+                        let byte_count = plaintext.len();
+                        // Re-encrypt and save locally.
+                        let db2 = Arc::clone(&audio_fetch_db);
+                        let rec_id_owned = rec_id.clone();
+                        let plaintext_bytes = plaintext;
+                        match tokio::task::spawn_blocking(move || -> AppResult<String> {
+                            let conn = db2.conn()?;
+                            let data_dir = crate::commands::resolve_recordings_dir(&db2, &std::path::PathBuf::new())?;
+                            let target = data_dir.join(format!("{rec_id_owned}.enc"));
+                            if target.exists() {
+                                return Ok(target.to_string_lossy().into_owned());
+                            }
+                            let tmp = target.with_extension("tmp");
+                            std::fs::write(&tmp, &plaintext_bytes)?;
+                            medical_security::file_crypto::encrypt_file_in_place(&tmp)
+                                .map_err(|e| {
+                                    let _ = std::fs::remove_file(&tmp);
+                                    AppError::Security(format!("audio re-encrypt failed: {e}"))
+                                })?;
+                            std::fs::rename(&tmp, &target)?;
+                            // Update DB.
+                            let uuid = uuid::Uuid::parse_str(&rec_id_owned)
+                                .map_err(|e| AppError::Other(format!("invalid id: {e}")))?;
+                            let mut rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+                                .map_err(AppError::from)?;
+                            rec.audio_path = target.clone();
+                            rec.file_size_bytes = Some(byte_count as u64);
+                            medical_db::recordings::RecordingsRepo::update(&conn, &rec)
+                                .map_err(AppError::from)?;
+                            Ok(target.to_string_lossy().into_owned())
+                        })
+                        .await
+                        .map_err(crate::commands::join_err)
+                        {
+                            Ok(_) => {
+                                tracing::debug!(byte_count, "audio fetched and saved during sync");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "sync: failed to save fetched audio (non-fatal)");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "sync: audio fetch failed (may not be available yet)");
+                    }
+                }
+            }
+        }
+    }
+
     // ── Push ────────────────────────────────────────────────────────────
     // Use a SEPARATE push cursor (independent from the pull cursor) so that
     // local recordings created before the first pull are still pushed.
@@ -325,7 +424,8 @@ async fn run_sync(
 
         if !batch_was_empty {
             let push_count = batch.len();
-            // Capture the max updated_at BEFORE moving the batch into push().
+            // Capture recording IDs and max updated_at BEFORE moving batch.
+            let pushed_ids: Vec<String> = batch.iter().map(|r| r.id.clone()).collect();
             let max_ts = batch
                 .iter()
                 .map(|r| r.updated_at.as_str())
@@ -349,6 +449,41 @@ async fn run_sync(
                 })
                 .await
                 .map_err(crate::commands::join_err)??;
+            }
+            // Best-effort audio upload for pushed recordings. Decrypts local
+            // audio and uploads to server so the partner can fetch it.
+            // Limit to 10 per cycle to bound latency. Errors are non-fatal.
+            for rec_id in pushed_ids.iter().take(10) {
+                let upload_db = Arc::clone(&db);
+                let rec_id_owned = rec_id.clone();
+                let plaintext_result = tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
+                    let conn = upload_db.conn()?;
+                    let uuid = uuid::Uuid::parse_str(&rec_id_owned)
+                        .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+                    let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+                        .map_err(AppError::from)?;
+                    let path = &rec.audio_path;
+                    if path.as_os_str().is_empty() || !path.exists() {
+                        return Err(AppError::Other("no local audio".into()));
+                    }
+                    match medical_security::file_crypto::decrypt_file(path) {
+                        Ok(p) => Ok(p),
+                        Err(medical_security::file_crypto::FileCryptoError::NotEncrypted) => {
+                            std::fs::read(path).map_err(|e| AppError::Other(format!("audio read failed: {e}")))
+                        }
+                        Err(e) => Err(AppError::Security(format!("audio decrypt failed: {e}"))),
+                    }
+                })
+                .await
+                .map_err(crate::commands::join_err);
+                match plaintext_result {
+                    Ok(Ok(plaintext)) => {
+                        if let Err(e) = remote.upload_audio(rec_id, plaintext).await {
+                            tracing::debug!(error = %e, "sync: audio upload failed (may already exist)");
+                        }
+                    }
+                    Ok(Err(_)) | Err(_) => { /* no local audio — skip */ }
+                }
             }
         } else if let Some(ts) = skip_cursor {
             // All recordings in this page were unreadable — advance the push
@@ -584,6 +719,12 @@ pub async fn subscribe_content_sync(
                         match chunk {
                             Ok(bytes) => {
                                 sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
+                                // Normalize CRLF to LF so the \n\n split works
+                                // regardless of whether intermediaries
+                                // (proxies, Tailscale) upgrade to CRLF.
+                                if sse_buffer.contains("\r\n") {
+                                    sse_buffer = sse_buffer.replace("\r\n", "\n");
+                                }
                                 // SSE events are separated by blank lines
                                 // (\n\n). Process only complete events.
                                 while let Some(idx) = sse_buffer.find("\n\n") {

@@ -174,14 +174,24 @@ class RecordingsStore {
     }
   }
 
+  /// Debounce timer for batched `recording-updated` events. A sync pull
+  /// loop emits one event per merged recording; without debouncing, 200
+  /// recordings would fire 200 `load()` calls in rapid succession.
+  private remoteUpdateTimer: ReturnType<typeof setTimeout> | null = null;
+
   /// Handle a `recording-updated` event for a specific recording. If the
   /// affected recording is currently selected, re-fetch it so the open editor
-  /// shows the merged content; always reload the list to refresh summaries.
+  /// shows the merged content. The list reload is debounced (500ms) so
+  /// batch sync updates only trigger one `load()` call.
   handleRemoteUpdate(recordingId: string): void {
     if (this.selectedRecording?.id === recordingId) {
       void selectRecording(recordingId);
     }
-    this.load();
+    if (this.remoteUpdateTimer) clearTimeout(this.remoteUpdateTimer);
+    this.remoteUpdateTimer = setTimeout(() => {
+      this.remoteUpdateTimer = null;
+      this.load();
+    }, 500);
   }
 }
 

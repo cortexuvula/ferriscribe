@@ -604,6 +604,23 @@ impl ContentSyncRepo {
             other => Some(other.to_string()),
         };
 
+        // Validate processing_status before writing — a malformed wire value
+        // would be stored verbatim and silently deserialized to Pending by
+        // row_to_recording, downgrading a Completed recording with no log.
+        if field == "processing_status"
+            && let Some(ref val_str) = text_value
+        {
+            let parse_result: Result<medical_core::types::recording::ProcessingStatus, _> =
+                serde_json::from_str(val_str);
+            if parse_result.is_err() {
+                tracing::warn!(
+                    field = %field,
+                    "sync: apply_field received invalid processing_status value, skipping to avoid silent downgrade to Pending"
+                );
+                return Ok(());
+            }
+        }
+
         let column = match field {
             "transcript" | "soap_note" | "referral" | "letter" | "peer_discussion" | "chat"
             | "patient_name" => field,
@@ -692,9 +709,15 @@ impl ContentSyncRepo {
         if meta.is_null() {
             meta = serde_json::json!({});
         }
-        if let Some(obj) = meta.as_object_mut()
-            && !obj.contains_key("synced_from")
-        {
+        // Ensure metadata is a JSON object. If it's not (e.g. a string or
+        // number from a malformed peer), wrap it to preserve the original
+        // value rather than discarding it.
+        if !meta.is_object() {
+            meta = serde_json::json!({ "original": meta });
+        }
+        // After the above guards, meta is guaranteed to be a JSON object.
+        let obj = meta.as_object_mut().expect("metadata is object after guards");
+        if !obj.contains_key("synced_from") {
             let origin = remote
                 .fields
                 .values()
