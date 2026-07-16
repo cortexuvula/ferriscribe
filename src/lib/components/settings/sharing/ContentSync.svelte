@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
   import { settings } from '../../../stores/settings.svelte';
   import { recordings } from '../../../stores/recordings.svelte';
   import { syncContentNow, subscribeContentSync } from '../../../api/contentSync';
@@ -48,6 +50,26 @@
       stopBackgroundSync();
     }
   }
+
+  // Listen for sync-complete events so lastSyncedAt updates even when the
+  // sync was triggered by startup or background timer (not the Sync Now
+  // button in this component).
+  let unlistenSyncComplete: (() => void) | null = null;
+
+  onMount(async () => {
+    try {
+      unlistenSyncComplete = await listen('content-sync-complete', () => {
+        recordings.lastSyncedAt = new Date();
+      });
+    } catch {
+      // Non-fatal: event listener failure just means the timestamp won't update
+    }
+  });
+
+  onDestroy(() => {
+    unlistenSyncComplete?.();
+    stopBackgroundSync();
+  });
 
   async function handleSyncNow() {
     try {
