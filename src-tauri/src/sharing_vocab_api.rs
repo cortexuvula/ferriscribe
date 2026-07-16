@@ -895,7 +895,13 @@ fn build_sparse_fields(
     if let Ok(tags_json) = serde_json::to_value(&rec.tags) {
         push_json("tags", &tags_json);
     }
-    push_json("metadata", &rec.metadata);
+    // Strip synced_from from metadata before transmitting — it's a local-only
+    // marker that must not round-trip back to the origin machine.
+    let mut metadata_clean = rec.metadata.clone();
+    if let Some(obj) = metadata_clean.as_object_mut() {
+        obj.remove("synced_from");
+    }
+    push_json("metadata", &metadata_clean);
     let status_json = serde_json::to_value(&rec.status).unwrap_or(serde_json::Value::Null);
     push_json("processing_status", &status_json);
 

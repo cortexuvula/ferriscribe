@@ -93,7 +93,27 @@ pub(crate) fn build_sync_recording(
         .flatten();
 
     let revisions = ContentSyncRepo::revisions_for(conn, &uuid).map_err(AppError::from)?;
-    let fields = build_sparse_fields(&rec, &revisions);
+
+    // Strip the synced_from marker from metadata before building the wire
+    // payload. This is a local-only flag — it must NOT be transmitted back
+    // to the origin machine, or the origin would see its own recording as
+    // "remote" after the next sync round-trip.
+    let mut rec_clean = rec.clone();
+    if let Some(obj) = rec_clean.metadata.as_object_mut()
+        && obj.remove("synced_from").is_some()
+    {
+        // Write the cleaned metadata back to the DB so future queries
+        // also see it without the marker.
+        let cleaned = rec_clean.metadata.to_string();
+        if let Err(e) = conn.execute(
+            "UPDATE recordings SET metadata = ?1 WHERE id = ?2",
+            rusqlite::params![cleaned, rec_id],
+        ) {
+            tracing::warn!(error = %e, "failed to clean synced_from from metadata during push");
+        }
+    }
+
+    let fields = build_sparse_fields(&rec_clean, &revisions);
 
     Ok(SyncRecording {
         id: rec.id.to_string(),
