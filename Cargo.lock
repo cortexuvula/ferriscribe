@@ -5027,7 +5027,7 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.30.23"
+version = "0.30.24"
 dependencies = [
  "async-stream",
  "axum",
