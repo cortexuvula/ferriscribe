@@ -734,6 +734,43 @@ impl AppState {
                         tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
                         tracing::info!("running tombstone sweeper");
                         if let Ok(conn) = db_clone.conn() {
+                            // Get the IDs of recordings about to be purged,
+                            // so we can also clean up their RAG vectors.
+                            let ids_to_purge: Vec<String> = {
+                                let mut stmt = match conn.prepare(
+                                    "SELECT id FROM recordings
+                                     WHERE deleted_at IS NOT NULL
+                                     AND datetime(deleted_at) < datetime('now', '-30 days')",
+                                ) {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "tombstone sweeper: prepare failed");
+                                        continue;
+                                    }
+                                };
+                                stmt.query_map([], |row| row.get::<_, String>(0))
+                                    .ok()
+                                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    .unwrap_or_default()
+                            };
+
+                            if ids_to_purge.is_empty() {
+                                continue;
+                            }
+
+                            // Clean up RAG vectors for each purged recording.
+                            use medical_db::vectors::VectorsRepo;
+                            for id in &ids_to_purge {
+                                if let Err(e) = VectorsRepo::delete_by_document(&conn, id) {
+                                    tracing::warn!(
+                                        recording_id = %id,
+                                        error = %e,
+                                        "tombstone sweeper: failed to delete RAG vectors"
+                                    );
+                                }
+                            }
+
+                            // Now permanently delete the recording rows.
                             match conn.execute(
                                 "DELETE FROM recordings
                                  WHERE deleted_at IS NOT NULL
@@ -743,7 +780,8 @@ impl AppState {
                                 Ok(count) => {
                                     tracing::info!(
                                         purged = count,
-                                        "tombstone sweeper purged soft-deleted recordings"
+                                        vectors_cleaned = ids_to_purge.len(),
+                                        "tombstone sweeper purged soft-deleted recordings + RAG vectors"
                                     );
                                 }
                                 Err(e) => tracing::warn!(error = %e, "tombstone sweeper failed"),

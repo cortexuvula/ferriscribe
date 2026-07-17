@@ -1,5 +1,7 @@
 # FerriScribe — Code Review Report
 
+> **⚠️ DEPRECATED (v0.30+):** This report is from v0.24 and is kept for historical context only. All items have been resolved or are tracked in AGENTS.md "Known deferred debt". Do not use this as a current work list.
+
 **Date:** 2026-06-16
 **Reviewer:** Automated code review (OCR + manual analysis)
 **Repo:** rustMedicalAssistant

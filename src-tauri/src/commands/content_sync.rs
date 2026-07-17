@@ -586,7 +586,6 @@ pub async fn sync_content_now(
 ///
 /// This is `pub` (not a `#[tauri::command]`) so it can be invoked directly
 /// from `lib.rs::run`.
-#[allow(dead_code)] // wired into AppState::initialize by the boot-sequence task
 pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
     use tauri::Manager;
 

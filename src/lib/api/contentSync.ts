@@ -14,8 +14,3 @@ export async function subscribeContentSync(): Promise<void> {
 export async function fetchAudioFromServer(recordingId: string): Promise<void> {
   await invoke('fetch_audio_from_server', { recordingId });
 }
-
-/** Upload audio for a recording to the server. */
-export async function uploadAudioToServer(recordingId: string): Promise<void> {
-  await invoke('upload_audio_to_server', { recordingId });
-}

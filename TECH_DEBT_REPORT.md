@@ -1,5 +1,7 @@
 # FerriScribe — Technical Debt Report
 
+> **⚠️ DEPRECATED (v0.30+):** This report is from v0.20–v0.24 and is kept for historical context only. All open items have been resolved or are tracked in AGENTS.md "Known deferred debt". Do not use this as a current work list.
+
 **Generated:** 2026-06-24 (post v0.20.6)
 **Last updated:** 2026-06-28 (post v0.24.3)
 **Status:** The majority of items below are now RESOLVED (C1, H1-H10, M1, M4, M5, L1-L7, L11-L12, M17). Remaining open items are tracked in AGENTS.md "Known deferred debt". Treat this report as historical context, not a current work list.
