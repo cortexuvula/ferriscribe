@@ -1076,19 +1076,6 @@ async fn content_sync_push_handler(
             .emit("recording-updated", serde_json::json!({ "id": id }));
     }
 
-    // Emit `content-sync-complete` so the server's ContentSync settings panel
-    // updates its "Last synced" timestamp. Without this, the server's panel
-    // always shows "never" because run_sync only runs on clients.
-    let _ = state.app_handle.emit(
-        "content-sync-complete",
-        serde_json::json!({
-            "pulled": 0,
-            "pushed": incoming_count,
-            "merge_conflicts": result.conflicts.len(),
-            "push_conflicts": 0,
-        }),
-    );
-
     info!(
         incoming_count,
         conflict_count = result.conflicts.len(),

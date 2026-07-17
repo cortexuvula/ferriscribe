@@ -186,7 +186,12 @@ class RecordingsStore {
   /// batch sync updates only trigger one `load()` call.
   handleRemoteUpdate(recordingId: string): void {
     if (this.selectedRecording?.id === recordingId) {
-      void selectRecording(recordingId);
+      // If the recording was remotely deleted, selectRecording will fail
+      // (the row is now soft-deleted). Clear it so the editor doesn't
+      // show a stale, now-deleted recording.
+      selectRecording(recordingId).catch(() => {
+        this.selectedRecording = null;
+      });
     }
     if (this.remoteUpdateTimer) clearTimeout(this.remoteUpdateTimer);
     this.remoteUpdateTimer = setTimeout(() => {

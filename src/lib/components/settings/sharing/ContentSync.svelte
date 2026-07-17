@@ -74,15 +74,6 @@
     const diffHr = Math.floor(diffMin / 60);
     return `${diffHr}h ago`;
   }
-
-  // Start/stop background sync based on settings state.
-  $effect(() => {
-    if (settings.state.sync_content && visible) {
-      startBackgroundSync();
-    } else {
-      stopBackgroundSync();
-    }
-  });
 </script>
 
 {#if visible}

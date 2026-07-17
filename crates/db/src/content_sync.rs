@@ -651,7 +651,20 @@ impl ContentSyncRepo {
     /// revisions can reference it).
     fn insert_remote_recording(conn: &Connection, remote: &SyncRecording) -> DbResult<()> {
         let tags_json = serde_json::json!([]).to_string();
-        let status_json = serde_json::json!({"status": "pending"}).to_string();
+        // Use the remote's actual processing_status if present and valid,
+        // instead of a hardcoded "pending" that could silently downgrade
+        // a Completed recording.
+        let status_json = remote
+            .fields
+            .get("processing_status")
+            .map(|v| v.value.to_string())
+            .filter(|s| {
+                serde_json::from_str::<
+                    medical_core::types::recording::ProcessingStatus,
+                >(s)
+                .is_ok()
+            })
+            .unwrap_or_else(|| serde_json::json!({"status": "pending"}).to_string());
         // Stamp metadata with a synced_from marker so the receiving machine
         // can display a "remote" badge. Uses the first field revision's
         // origin_device if available, otherwise "remote".

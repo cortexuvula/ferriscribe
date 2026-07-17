@@ -97,20 +97,12 @@ pub(crate) fn build_sync_recording(
     // Strip the synced_from marker from metadata before building the wire
     // payload. This is a local-only flag — it must NOT be transmitted back
     // to the origin machine, or the origin would see its own recording as
-    // "remote" after the next sync round-trip.
+    // "remote" after the next sync round-trip. Strip in memory only — do
+    // NOT write back to DB (that would mutate local state as a side effect
+    // of a push read, and would skip the revision-tracking system).
     let mut rec_clean = rec.clone();
-    if let Some(obj) = rec_clean.metadata.as_object_mut()
-        && obj.remove("synced_from").is_some()
-    {
-        // Write the cleaned metadata back to the DB so future queries
-        // also see it without the marker.
-        let cleaned = rec_clean.metadata.to_string();
-        if let Err(e) = conn.execute(
-            "UPDATE recordings SET metadata = ?1 WHERE id = ?2",
-            rusqlite::params![cleaned, rec_id],
-        ) {
-            tracing::warn!(error = %e, "failed to clean synced_from from metadata during push");
-        }
+    if let Some(obj) = rec_clean.metadata.as_object_mut() {
+        obj.remove("synced_from");
     }
 
     let fields = build_sparse_fields(&rec_clean, &revisions);
@@ -259,7 +251,37 @@ async fn run_sync(
             ContentSyncRepo::merge_incoming(&conn, &batch.recordings).map_err(AppError::from)
         })
         .await
-        .map_err(crate::commands::join_err)??;
+        .map_err(crate::commands::join_err)?;
+
+        // If the merge failed, advance the cursor past this batch and
+        // continue to the push loop. Don't abort the entire sync —
+        // local pushes must still go through even if one pull batch
+        // had a bad recording.
+        let merge_result = match merge_result {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    batch_count,
+                    "sync: pull merge failed, advancing cursor past batch"
+                );
+                // Advance cursor to skip this batch
+                if let Some(ref nc) = next_cursor {
+                    let cursor_db = Arc::clone(&db);
+                    let nc = nc.clone();
+                    let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
+                        let conn = cursor_db.conn()?;
+                        ContentSyncRepo::set_cursor(&conn, Some(&nc)).map_err(AppError::from)
+                    })
+                    .await
+                    .map_err(crate::commands::join_err);
+                }
+                if !has_more || batch_count == 0 {
+                    break;
+                }
+                continue;
+            }
+        };
 
         summary.pulled += batch_count;
         summary.merge_conflicts += merge_result.conflicts.len();
@@ -345,6 +367,16 @@ async fn run_sync(
                             let data_dir = crate::commands::resolve_recordings_dir(&db2, &std::path::PathBuf::new())?;
                             let target = data_dir.join(format!("{rec_id_owned}.enc"));
                             if target.exists() {
+                                // File already exists (race with manual fetch).
+                                // Still update the DB audio_path since it was
+                                // empty when we selected this row.
+                                let uuid = uuid::Uuid::parse_str(&rec_id_owned)
+                                    .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+                                if let Ok(mut rec) = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid) {
+                                    rec.audio_path = target.clone();
+                                    rec.file_size_bytes = Some(std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0));
+                                    let _ = medical_db::recordings::RecordingsRepo::update(&conn, &rec);
+                                }
                                 return Ok(target.to_string_lossy().into_owned());
                             }
                             let tmp = target.with_extension("tmp");
@@ -451,15 +483,31 @@ async fn run_sync(
                 .map(|r| r.updated_at.as_str())
                 .max()
                 .map(|s| s.to_string());
-            let push_resp = remote.push(batch).await?;
+            let push_resp = match remote.push(batch).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    // Don't abort the entire sync on push failure. Advance
+                    // the push cursor past this batch so it's not retried
+                    // every cycle, and continue to the next iteration.
+                    tracing::warn!(error = %e, push_count, "sync: push batch failed, advancing cursor");
+                    if let Some(ts) = max_ts {
+                        let pc_db = Arc::clone(&db);
+                        let ts_owned = ts.clone();
+                        let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
+                            let conn = pc_db.conn()?;
+                            ContentSyncRepo::set_push_cursor(&conn, &ts_owned).map_err(AppError::from)
+                        })
+                        .await
+                        .map_err(crate::commands::join_err);
+                    }
+                    if !has_more {
+                        break;
+                    }
+                    continue;
+                }
+            };
             summary.pushed += push_count;
             summary.push_conflicts += push_resp.conflicts.len();
-            // If the server won any fields, our local copy is now stale.
-            // Trigger a content-changed event so the next sync cycle re-pulls
-            // the server's authoritative version of those fields.
-            if !push_resp.conflicts.is_empty() {
-                let _ = app.emit("content-changed", ());
-            }
             // Advance the push cursor so we don't re-push these next time.
             if let Some(ts) = max_ts {
                 let pc_db = Arc::clone(&db);
