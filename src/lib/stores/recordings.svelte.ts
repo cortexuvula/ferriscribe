@@ -8,6 +8,7 @@ import {
   restoreRecording,
   deleteAllRecordings,
 } from '../api/recordings';
+import { syncContentNow } from '../api/contentSync';
 
 /// Page size for the Recordings list. The list loads this many at a time and
 /// appends more on "Load more". A full page means there may be more; a short
@@ -196,6 +197,34 @@ class RecordingsStore {
 }
 
 export const recordings = new RecordingsStore();
+
+// ── Background sync ────────────────────────────────────────────────────────
+// Periodic background sync runs every 5 minutes for the app's entire lifetime,
+// NOT tied to the ContentSync settings component (which unmounts when the user
+// navigates away from Settings). This ensures recordings get pushed even when
+// the settings panel is closed.
+const BG_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+let bgSyncTimer: ReturnType<typeof setInterval> | null = null;
+
+export function startBackgroundSync(): void {
+  stopBackgroundSync();
+  bgSyncTimer = setInterval(async () => {
+    try {
+      await syncContentNow();
+    } catch (err) {
+      console.error('Background content sync failed:', err);
+    }
+  }, BG_SYNC_INTERVAL_MS);
+  console.info('Background content sync started (5 min interval)');
+}
+
+export function stopBackgroundSync(): void {
+  if (bgSyncTimer) {
+    clearInterval(bgSyncTimer);
+    bgSyncTimer = null;
+    console.info('Background content sync stopped');
+  }
+}
 
 export async function selectRecording(id: string): Promise<void> {
   try {

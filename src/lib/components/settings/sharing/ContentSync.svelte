@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { settings } from '../../../stores/settings.svelte';
-  import { recordings } from '../../../stores/recordings.svelte';
+  import { recordings, startBackgroundSync, stopBackgroundSync } from '../../../stores/recordings.svelte';
   import { syncContentNow, subscribeContentSync } from '../../../api/contentSync';
   import { toasts } from '../../../stores/toasts.svelte';
 
@@ -10,46 +10,6 @@
     visible: boolean;
   };
   let { visible }: Props = $props();
-
-  // Periodic background sync timer (5 minutes). Runs while content sync is
-  // enabled and the app is open. Ensures recordings created locally get
-  // pushed even without an SSE event from the server.
-  let bgSyncTimer: ReturnType<typeof setInterval> | null = null;
-  const BG_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-
-  function startBackgroundSync() {
-    stopBackgroundSync();
-    bgSyncTimer = setInterval(async () => {
-      try {
-        await syncContentNow();
-      } catch (err) {
-        console.error('Background content sync failed:', err);
-      }
-    }, BG_SYNC_INTERVAL_MS);
-  }
-
-  function stopBackgroundSync() {
-    if (bgSyncTimer) {
-      clearInterval(bgSyncTimer);
-      bgSyncTimer = null;
-    }
-  }
-
-  async function onChange(e: Event) {
-    const checked = (e.target as HTMLInputElement).checked;
-    settings.updateField('sync_content', checked);
-    if (checked) {
-      try {
-        await syncContentNow();
-        await subscribeContentSync();
-        startBackgroundSync();
-      } catch (err) {
-        console.error('Initial content sync failed:', err);
-      }
-    } else {
-      stopBackgroundSync();
-    }
-  }
 
   // Listen for sync-complete events so lastSyncedAt updates even when the
   // sync was triggered by startup or background timer (not the Sync Now
@@ -68,7 +28,31 @@
 
   onDestroy(() => {
     unlistenSyncComplete?.();
-    stopBackgroundSync();
+  });
+
+  async function onChange(e: Event) {
+    const checked = (e.target as HTMLInputElement).checked;
+    settings.updateField('sync_content', checked);
+    if (checked) {
+      try {
+        await syncContentNow();
+        await subscribeContentSync();
+        startBackgroundSync();
+      } catch (err) {
+        console.error('Initial content sync failed:', err);
+      }
+    } else {
+      stopBackgroundSync();
+    }
+  }
+
+  // Start/stop background sync based on settings state.
+  $effect(() => {
+    if (settings.state.sync_content) {
+      startBackgroundSync();
+    } else {
+      stopBackgroundSync();
+    }
   });
 
   async function handleSyncNow() {
