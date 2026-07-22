@@ -56,7 +56,8 @@
   }
 
   $effect(() => {
-    audio.state.waveformData;
+    // draw() reads audio.state.waveformData internally, so calling it here is
+    // what tracks that reactive dependency and re-runs this effect on change.
     draw();
   });
 

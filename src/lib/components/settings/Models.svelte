@@ -140,7 +140,7 @@
         {:else if availableModels.length === 0}
           <option value="">No models available</option>
         {:else}
-          {#each availableModels as model}
+          {#each availableModels as model (model.id)}
             <option value={model.id}>{model.name}</option>
           {/each}
         {/if}

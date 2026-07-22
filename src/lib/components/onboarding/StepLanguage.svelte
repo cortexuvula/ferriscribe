@@ -40,7 +40,7 @@
 <div class="field">
   <label for="ob-language">Language</label>
   <select id="ob-language" bind:value={selected}>
-    {#each LANGUAGES as lang}
+    {#each LANGUAGES as lang (lang.code)}
       <option value={lang.code}>{lang.label}</option>
     {/each}
   </select>

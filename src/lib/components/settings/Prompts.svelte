@@ -150,7 +150,7 @@
 
   <div class="prompts-layout">
     <aside class="prompts-sidebar">
-      {#each PROMPT_TYPES as pt}
+      {#each PROMPT_TYPES as pt (pt.key)}
         <button
           class="prompts-nav-item"
           class:active={activePromptKey === pt.key}
@@ -180,7 +180,7 @@
           <details class="prompts-placeholders">
             <summary>Available placeholders</summary>
             <ul>
-              {#each info.placeholders as ph}
+              {#each info.placeholders as ph (ph.token)}
                 <li>
                   <code>{ph.token}</code> — {ph.description}
                 </li>

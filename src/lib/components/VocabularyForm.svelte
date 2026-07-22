@@ -86,7 +86,7 @@
     <label class="field">
       <span>Category</span>
       <select bind:value={formCategory}>
-        {#each categories as cat}
+        {#each categories as cat (cat.value)}
           <option value={cat.value}>{cat.label}</option>
         {/each}
       </select>

@@ -14,7 +14,10 @@
   let testing = $state(false);
 
   $effect(() => {
-    resetSignal; // reactive read
+    // Reading resetSignal is the whole point of this effect — it re-runs and
+    // clears the panel each time the parent bumps the reset signal.
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    resetSignal;
     testResult = null;
     testError = null;
   });

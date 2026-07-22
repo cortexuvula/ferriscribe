@@ -73,7 +73,7 @@
   <div class="field">
     <label for="ob-model">Model</label>
     <select id="ob-model" bind:value={selected}>
-      {#each models as m}
+      {#each models as m (m.id)}
         <option value={m.id}>{m.id} — {m.description}</option>
       {/each}
     </select>

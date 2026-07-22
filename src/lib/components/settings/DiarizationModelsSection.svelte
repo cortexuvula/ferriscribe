@@ -26,7 +26,7 @@
   <span class="form-label">Diarization Models (Speaker Identification)</span>
   <span class="form-hint">Both models are required for speaker diarization. Without them, transcripts will not have speaker labels.</span>
   <div class="model-list">
-    {#each pyannoteModels as model}
+    {#each pyannoteModels as model (model.id)}
       <div class="model-row">
         <div class="model-info">
           <span class="model-name">{model.id}</span>

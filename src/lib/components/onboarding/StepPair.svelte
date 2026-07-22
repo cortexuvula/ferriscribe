@@ -38,6 +38,9 @@
   // recomputing whenever the raw discovered list changes. $derived (not
   // $effect) so there's no chance of a stale write or feedback loop.
   const deduped = $derived.by(() => {
+    // Local transient map used only to dedupe within this computation; not read
+    // in markup, so SvelteMap (reactivity) is unnecessary here.
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity
     const seen = new Map<string, Discovered>();
     for (const d of discovered) {
       const ex = seen.get(d.instance_name);
