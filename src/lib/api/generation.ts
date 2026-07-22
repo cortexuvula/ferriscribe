@@ -20,24 +20,28 @@ export async function generateSoap(
 export async function generateReferral(
   recordingId: string,
   recipientType?: string,
-  urgency?: string
+  urgency?: string,
+  context?: string,
 ): Promise<string> {
   return invokeWithOfflineHandling('generate_referral', {
     recordingId,
     recipientType: recipientType ?? null,
     urgency: urgency ?? null,
+    context: context ?? null,
   });
 }
 
 export async function generateLetter(
   recordingId: string,
   letterType?: string,
-  audienceId?: string
+  audienceId?: string,
+  context?: string,
 ): Promise<string> {
   return invokeWithOfflineHandling('generate_letter', {
     recordingId,
     letterType: letterType ?? null,
     audienceId: audienceId ?? null,
+    context: context ?? null,
   });
 }
 
@@ -52,11 +56,13 @@ export async function generatePeerDiscussion(
   physicianName: string,
   specialty: string,
   reason: string,
+  context?: string,
 ): Promise<string> {
   return invokeWithOfflineHandling('generate_peer_discussion', {
     recordingId,
     physicianName,
     specialty,
     reason,
+    context: context ?? null,
   });
 }
