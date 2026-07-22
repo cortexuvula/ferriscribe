@@ -73,6 +73,42 @@ fn read_text_file(path: &Path) -> Result<String, OcrError> {
     std::fs::read_to_string(path).map_err(|e| OcrError::ReadError(e.to_string()))
 }
 
+/// Encode raw image bytes as a base64 data URL.
+fn encode_image_as_data_url(data: &[u8], format: &str) -> String {
+    use base64::{engine::general_purpose, Engine};
+    let b64 = general_purpose::STANDARD.encode(data);
+    format!("data:image/{format};base64,{b64}")
+}
+
+/// The OCR system prompt instructing the model to extract text.
+const OCR_SYSTEM_PROMPT: &str = "Extract all text from this document image. \
+    Output only the extracted text, preserving the document's structure, headings, \
+    and table layout. Do not add commentary or descriptions.";
+
+/// Build a CompletionRequest for a single image OCR call.
+fn build_image_ocr_request(image_data_url: &str, model: &str) -> CompletionRequest {
+    CompletionRequest {
+        model: model.to_string(),
+        messages: vec![Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Extract all text from this document.".to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrlData {
+                        url: image_data_url.to_string(),
+                    },
+                },
+            ]),
+            tool_calls: vec![],
+        }],
+        temperature: Some(0.0),
+        max_tokens: None,
+        system_prompt: Some(OCR_SYSTEM_PROMPT.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +144,32 @@ mod tests {
     fn classify_docx_is_unsupported() {
         let path = Path::new("doc.docx");
         assert!(matches!(classify(path), Err(OcrError::UnsupportedType(_))));
+    }
+
+    #[test]
+    fn build_image_ocr_request_has_multipart_content() {
+        let req = build_image_ocr_request(
+            "data:image/png;base64,iVBOR=",
+            "glm-ocr",
+        );
+        assert_eq!(req.model, "glm-ocr");
+        assert_eq!(req.messages.len(), 1);
+        assert_eq!(req.messages[0].role, Role::User);
+        match &req.messages[0].content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2, "should have text + image parts");
+                assert!(matches!(parts[0], ContentPart::Text { .. }));
+                assert!(matches!(parts[1], ContentPart::ImageUrl { .. }));
+            }
+            other => panic!("expected Parts, got {other:?}"),
+        }
+        assert!(req.system_prompt.is_some());
+    }
+
+    #[test]
+    fn encode_image_as_data_url_produces_valid_prefix() {
+        let data = b"\x89PNG\r\n\x1a\n"; // PNG magic bytes
+        let url = encode_image_as_data_url(data, "png");
+        assert!(url.starts_with("data:image/png;base64,"));
     }
 }
