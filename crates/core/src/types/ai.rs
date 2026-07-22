@@ -75,6 +75,23 @@ pub enum Role {
     Tool,
 }
 
+/// A single content part in a multipart (vision) message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrlData },
+}
+
+/// The URL wrapper inside an image content part.
+/// Carries a data URL like `"data:image/png;base64,iVBORw0K..."`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageUrlData {
+    pub url: String,
+}
+
 /// The body of a message — either plain text or a tool result.
 ///
 /// Uses `#[serde(untagged)]` so that text messages serialize as bare
@@ -92,6 +109,9 @@ pub enum MessageContent {
         /// The tool's output as a string.
         content: String,
     },
+    /// Multipart content for vision models (OpenAI format).
+    /// Serialized as a JSON array of `{type: "text"|"image_url", ...}` parts.
+    Parts(Vec<ContentPart>),
 }
 
 /// A complete response from the AI provider.
@@ -239,5 +259,46 @@ mod tests {
         let back: CompletionResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.content, "Hello");
         assert_eq!(back.usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn parts_with_image_serializes_to_multipart_array() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Extract all text".to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrlData {
+                        url: "data:image/png;base64,iVBOR=".to_string(),
+                    },
+                },
+            ]),
+            tool_calls: vec![],
+        };
+        let json_val = serde_json::to_value(&msg).expect("serialize");
+        // content should be a JSON array (multipart), not a bare string
+        let content = json_val.get("content").expect("content field");
+        assert!(content.is_array(), "Parts should serialize as array: {content}");
+        let arr = content.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "Extract all text");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(arr[1]["image_url"]["url"], "data:image/png;base64,iVBOR=");
+    }
+
+    #[test]
+    fn text_variant_still_serializes_as_string() {
+        // Regression: the existing Text variant must still produce a bare JSON
+        // string, not be broken by adding Parts.
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Text("hello".to_string()),
+            tool_calls: vec![],
+        };
+        let json_val = serde_json::to_value(&msg).expect("serialize");
+        assert_eq!(json_val["content"], serde_json::json!("hello"));
     }
 }
