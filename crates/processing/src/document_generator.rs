@@ -72,9 +72,9 @@ fn format_now_for_prompt() -> String {
 /// unchanged.
 pub(crate) fn inject_context(user_prompt: &str, context: Option<&str>) -> String {
     match context {
-        Some(ctx) if !ctx.trim().is_empty() => format!(
-            "## Supporting Documents\n\n{ctx}\n\n---\n\n{user_prompt}"
-        ),
+        Some(ctx) if !ctx.trim().is_empty() => {
+            format!("## Supporting Documents\n\n{ctx}\n\n---\n\n{user_prompt}")
+        }
         _ => user_prompt.to_string(),
     }
 }

@@ -56,10 +56,10 @@ pub async fn run_tailscale_status_json() -> Option<Vec<u8>> {
     // Candidate binaries in order: bare name (PATH), then known absolute
     // paths for macOS GUI apps and Linux.
     let candidates: Vec<&str> = vec![
-        "tailscale", // PATH lookup (works for CLI/terminal-launched apps)
+        "tailscale",                   // PATH lookup (works for CLI/terminal-launched apps)
         "/opt/homebrew/bin/tailscale", // macOS Homebrew (Apple Silicon)
-        "/usr/local/bin/tailscale", // macOS Homebrew (Intel) + Mac App Store CLI
-        "/usr/bin/tailscale", // Linux package manager
+        "/usr/local/bin/tailscale",    // macOS Homebrew (Intel) + Mac App Store CLI
+        "/usr/bin/tailscale",          // Linux package manager
     ];
     for candidate in candidates {
         match tokio::process::Command::new(candidate)

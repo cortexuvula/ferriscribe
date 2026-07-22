@@ -280,7 +280,10 @@ mod tests {
         let json_val = serde_json::to_value(&msg).expect("serialize");
         // content should be a JSON array (multipart), not a bare string
         let content = json_val.get("content").expect("content field");
-        assert!(content.is_array(), "Parts should serialize as array: {content}");
+        assert!(
+            content.is_array(),
+            "Parts should serialize as array: {content}"
+        );
         let arr = content.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["type"], "text");

@@ -783,6 +783,9 @@ mod tests {
     fn ocr_model_defaults_to_none() {
         let json = r#"{"theme":"dark","language":"en"}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap_or_default();
-        assert!(config.ocr_model.is_none(), "ocr_model should default to None");
+        assert!(
+            config.ocr_model.is_none(),
+            "ocr_model should default to None"
+        );
     }
 }

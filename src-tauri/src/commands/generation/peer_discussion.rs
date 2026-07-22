@@ -35,14 +35,14 @@ pub async fn generate_peer_discussion(
             "Reason for discussion is required.".to_string(),
         ));
     }
-    if let Some(ref ctx) = context {
-        if ctx.len() > MAX_CONTEXT_CHARS {
-            return Err(AppError::Other(format!(
-                "Context too large: {} chars, limit is {}",
-                ctx.len(),
-                MAX_CONTEXT_CHARS
-            )));
-        }
+    if let Some(ref ctx) = context
+        && ctx.len() > MAX_CONTEXT_CHARS
+    {
+        return Err(AppError::Other(format!(
+            "Context too large: {} chars, limit is {}",
+            ctx.len(),
+            MAX_CONTEXT_CHARS
+        )));
     }
 
     let _ = app.emit(

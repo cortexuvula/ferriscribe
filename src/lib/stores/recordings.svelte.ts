@@ -220,14 +220,14 @@ export function startBackgroundSync(): void {
       console.error('Background content sync failed:', err);
     }
   }, BG_SYNC_INTERVAL_MS);
-  console.info('Background content sync started (5 min interval)');
+  console.warn('Background content sync started (5 min interval)');
 }
 
 export function stopBackgroundSync(): void {
   if (bgSyncTimer) {
     clearInterval(bgSyncTimer);
     bgSyncTimer = null;
-    console.info('Background content sync stopped');
+    console.warn('Background content sync stopped');
   }
 }
 

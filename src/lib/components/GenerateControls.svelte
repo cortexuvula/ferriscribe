@@ -179,7 +179,7 @@
                 value={selectedAudienceId ?? ''}
                 onchange={(e) => onAudienceChange(e.currentTarget.value || null)}
               >
-                {#each audiences as audience}
+                {#each audiences as audience (audience.id)}
                   <option value={audience.id}>{audience.name}</option>
                 {/each}
               </select>

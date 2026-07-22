@@ -47,7 +47,11 @@ fn field_value(field: &str, value: serde_json::Value, offset: i64) -> (String, S
 }
 
 /// Convenience: build a single-field map.
-fn single_field(field: &str, value: serde_json::Value, offset: i64) -> HashMap<String, SyncFieldValue> {
+fn single_field(
+    field: &str,
+    value: serde_json::Value,
+    offset: i64,
+) -> HashMap<String, SyncFieldValue> {
     let mut m = HashMap::new();
     let (k, v) = field_value(field, value, offset);
     m.insert(k, v);
@@ -377,8 +381,7 @@ fn merge_equal_timestamps_keeps_local() {
     let id = seed_recording(&conn);
 
     // Local revision at T5.
-    ContentSyncRepo::upsert_revision(&conn, &id, "soap_note", &now(5), None)
-        .expect("upsert local");
+    ContentSyncRepo::upsert_revision(&conn, &id, "soap_note", &now(5), None).expect("upsert local");
     {
         let mut r = RecordingsRepo::get_by_id(&conn, &id).expect("get");
         r.soap_note = Some("local content".to_string());
@@ -386,7 +389,11 @@ fn merge_equal_timestamps_keeps_local() {
     }
 
     // Remote at same timestamp T5.
-    let fields = single_field("soap_note", serde_json::json!("remote content at same time"), 5);
+    let fields = single_field(
+        "soap_note",
+        serde_json::json!("remote content at same time"),
+        5,
+    );
     let remote = remote_for(id, fields);
 
     let MergeResult { conflicts, .. } =

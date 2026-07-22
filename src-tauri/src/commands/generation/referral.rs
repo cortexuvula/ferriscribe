@@ -25,14 +25,14 @@ pub async fn generate_referral(
     context: Option<String>,
 ) -> AppResult<String> {
     // Validate context size before emitting started (fail fast, consistent with SOAP).
-    if let Some(ref ctx) = context {
-        if ctx.len() > MAX_CONTEXT_CHARS {
-            return Err(AppError::Other(format!(
-                "Context too large: {} chars, limit is {}",
-                ctx.len(),
-                MAX_CONTEXT_CHARS
-            )));
-        }
+    if let Some(ref ctx) = context
+        && ctx.len() > MAX_CONTEXT_CHARS
+    {
+        return Err(AppError::Other(format!(
+            "Context too large: {} chars, limit is {}",
+            ctx.len(),
+            MAX_CONTEXT_CHARS
+        )));
     }
 
     let _ = app.emit(

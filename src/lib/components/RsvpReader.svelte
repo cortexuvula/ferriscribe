@@ -210,7 +210,7 @@ function formatEta(secs: number): string {
         {:else if index >= tokens.length}
           <span class="empty">Done.</span>
         {:else}
-          {#each currentWords() as tok, i}
+          {#each currentWords() as tok, i (i)}
             {#if i === Math.floor(currentWords().length / 2)}
               {@const parts = splitOrp(tok.word)}
               <span class="word orp-word">
@@ -267,7 +267,7 @@ function formatEta(secs: number): string {
         </label>
 
         <div class="chunk-group" title="Chunk size (1/2/3)">
-          {#each [1, 2, 3] as n}
+          {#each [1, 2, 3] as n (n)}
             <button
               class:active={settings.state.rsvp_chunk_size === n}
               onclick={() => setChunk(n)}

@@ -155,11 +155,7 @@ impl MdnsAdvertiser {
     /// The cached Tailscale DNS name is preserved across re-registrations;
     /// pass `tailscale_override` to update it (e.g. if it was discovered
     /// after the initial `start`).
-    pub fn update_ports(
-        mut self,
-        ports: &ServerPorts,
-        tailscale_override: Option<&str>,
-    ) -> Self {
+    pub fn update_ports(mut self, ports: &ServerPorts, tailscale_override: Option<&str>) -> Self {
         if let Some(ts) = tailscale_override {
             self.tailscale = Some(ts.to_string());
         }
@@ -256,9 +252,8 @@ pub fn browse(timeout: Duration) -> crate::Result<mpsc::Receiver<DiscoveredServe
                     // Read the server-advertised Tailscale DNS name from the
                     // TXT record so LAN-discovered clients can populate their
                     // `tailscale` slot without a separate Tailscale probe.
-                    let tailscale_addresses = prop("tailscale")
-                        .map(|ts| vec![ts])
-                        .unwrap_or_default();
+                    let tailscale_addresses =
+                        prop("tailscale").map(|ts| vec![ts]).unwrap_or_default();
                     let server = DiscoveredServer {
                         instance_name: info.get_fullname().to_string(),
                         host: info.get_hostname().trim_end_matches('.').to_string(),

@@ -518,7 +518,9 @@ pub async fn backfill_tailscale() -> AppResult<()> {
     };
 
     let Some(ts_name) = info.tailscale else {
-        tracing::info!("backfill: server /info did not report a Tailscale name (pre-0.30.5 server?)");
+        tracing::info!(
+            "backfill: server /info did not report a Tailscale name (pre-0.30.5 server?)"
+        );
         return Ok(());
     };
 

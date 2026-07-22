@@ -76,7 +76,7 @@
       {#if icdCodes && icdCodes.length > 0}
         <div class="icd-codes">
           <span class="icd-label">ICD Codes:</span>
-          {#each icdCodes as code}
+          {#each icdCodes as code (code.raw)}
             <IcdChip code={code.raw} valid={code.valid} />
           {/each}
         </div>

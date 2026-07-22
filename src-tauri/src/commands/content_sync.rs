@@ -364,34 +364,45 @@ async fn run_sync(
                         let plaintext_bytes = plaintext;
                         match tokio::task::spawn_blocking(move || -> AppResult<String> {
                             let conn = db2.conn()?;
-                            let data_dir = crate::commands::resolve_recordings_dir(&db2, &std::path::PathBuf::new())?;
+                            let data_dir = crate::commands::resolve_recordings_dir(
+                                &db2,
+                                &std::path::PathBuf::new(),
+                            )?;
                             let target = data_dir.join(format!("{rec_id_owned}.enc"));
                             if target.exists() {
                                 // File already exists (race with manual fetch).
                                 // Still update the DB audio_path since it was
                                 // empty when we selected this row.
-                                let uuid = uuid::Uuid::parse_str(&rec_id_owned)
-                                    .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-                                if let Ok(mut rec) = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid) {
+                                let uuid = uuid::Uuid::parse_str(&rec_id_owned).map_err(|e| {
+                                    AppError::Other(format!("invalid recording id: {e}"))
+                                })?;
+                                if let Ok(mut rec) =
+                                    medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+                                {
                                     rec.audio_path = target.clone();
-                                    rec.file_size_bytes = Some(std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0));
-                                    let _ = medical_db::recordings::RecordingsRepo::update(&conn, &rec);
+                                    rec.file_size_bytes = Some(
+                                        std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0),
+                                    );
+                                    let _ =
+                                        medical_db::recordings::RecordingsRepo::update(&conn, &rec);
                                 }
                                 return Ok(target.to_string_lossy().into_owned());
                             }
                             let tmp = target.with_extension("tmp");
                             std::fs::write(&tmp, &plaintext_bytes)?;
-                            medical_security::file_crypto::encrypt_file_in_place(&tmp)
-                                .map_err(|e| {
+                            medical_security::file_crypto::encrypt_file_in_place(&tmp).map_err(
+                                |e| {
                                     let _ = std::fs::remove_file(&tmp);
                                     AppError::Security(format!("audio re-encrypt failed: {e}"))
-                                })?;
+                                },
+                            )?;
                             std::fs::rename(&tmp, &target)?;
                             // Update DB.
                             let uuid = uuid::Uuid::parse_str(&rec_id_owned)
                                 .map_err(|e| AppError::Other(format!("invalid id: {e}")))?;
-                            let mut rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
-                                .map_err(AppError::from)?;
+                            let mut rec =
+                                medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+                                    .map_err(AppError::from)?;
                             rec.audio_path = target.clone();
                             rec.file_size_bytes = Some(byte_count as u64);
                             medical_db::recordings::RecordingsRepo::update(&conn, &rec)
@@ -429,8 +440,9 @@ async fn run_sync(
         let push_result = tokio::task::spawn_blocking(move || {
             let conn = push_db.conn()?;
             let push_cursor = ContentSyncRepo::get_push_cursor(&conn).map_err(AppError::from)?;
-            let (ids, has_more) = ContentSyncRepo::changed_since(&conn, push_cursor.as_deref(), 200)
-                .map_err(AppError::from)?;
+            let (ids, has_more) =
+                ContentSyncRepo::changed_since(&conn, push_cursor.as_deref(), 200)
+                    .map_err(AppError::from)?;
             let mut out = Vec::with_capacity(ids.len());
             for id in &ids {
                 match build_sync_recording(&conn, id) {
@@ -451,9 +463,8 @@ async fn run_sync(
             let skip_cursor = if out.is_empty() && !ids.is_empty() {
                 // Query the max updated_at of the IDs that failed to build.
                 let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let sql = format!(
-                    "SELECT MAX(updated_at) FROM recordings WHERE id IN ({placeholders})"
-                );
+                let sql =
+                    format!("SELECT MAX(updated_at) FROM recordings WHERE id IN ({placeholders})");
                 let params: Vec<&dyn rusqlite::ToSql> =
                     ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
                 conn.query_row(&sql, params.as_slice(), |row| {
@@ -495,7 +506,8 @@ async fn run_sync(
                         let ts_owned = ts.clone();
                         let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
                             let conn = pc_db.conn()?;
-                            ContentSyncRepo::set_push_cursor(&conn, &ts_owned).map_err(AppError::from)
+                            ContentSyncRepo::set_push_cursor(&conn, &ts_owned)
+                                .map_err(AppError::from)
                         })
                         .await
                         .map_err(crate::commands::join_err);
@@ -524,26 +536,28 @@ async fn run_sync(
             for rec_id in pushed_ids.iter().take(10) {
                 let upload_db = Arc::clone(&db);
                 let rec_id_owned = rec_id.clone();
-                let plaintext_result = tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
-                    let conn = upload_db.conn()?;
-                    let uuid = uuid::Uuid::parse_str(&rec_id_owned)
-                        .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-                    let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
-                        .map_err(AppError::from)?;
-                    let path = &rec.audio_path;
-                    if path.as_os_str().is_empty() || !path.exists() {
-                        return Err(AppError::Other("no local audio".into()));
-                    }
-                    match medical_security::file_crypto::decrypt_file(path) {
-                        Ok(p) => Ok(p),
-                        Err(medical_security::file_crypto::FileCryptoError::NotEncrypted) => {
-                            std::fs::read(path).map_err(|e| AppError::Other(format!("audio read failed: {e}")))
+                let plaintext_result =
+                    tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
+                        let conn = upload_db.conn()?;
+                        let uuid = uuid::Uuid::parse_str(&rec_id_owned)
+                            .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+                        let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+                            .map_err(AppError::from)?;
+                        let path = &rec.audio_path;
+                        if path.as_os_str().is_empty() || !path.exists() {
+                            return Err(AppError::Other("no local audio".into()));
                         }
-                        Err(e) => Err(AppError::Security(format!("audio decrypt failed: {e}"))),
-                    }
-                })
-                .await
-                .map_err(crate::commands::join_err);
+                        match medical_security::file_crypto::decrypt_file(path) {
+                            Ok(p) => Ok(p),
+                            Err(medical_security::file_crypto::FileCryptoError::NotEncrypted) => {
+                                std::fs::read(path)
+                                    .map_err(|e| AppError::Other(format!("audio read failed: {e}")))
+                            }
+                            Err(e) => Err(AppError::Security(format!("audio decrypt failed: {e}"))),
+                        }
+                    })
+                    .await
+                    .map_err(crate::commands::join_err);
                 match plaintext_result {
                     Ok(Ok(plaintext)) => {
                         if let Err(e) = remote.upload_audio(rec_id, plaintext).await {
@@ -641,7 +655,10 @@ pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
     // sync_content_now. This is critical: without it, two concurrent sync
     // rounds could read the same cursor, double-merge, and interleave
     // writes at the SQLite level.
-    let sync_lock = app.state::<crate::state::AppState>().content_sync_lock.clone();
+    let sync_lock = app
+        .state::<crate::state::AppState>()
+        .content_sync_lock
+        .clone();
     let _guard = sync_lock.lock().await;
 
     // Re-evaluate the gates without an AppState: load config + pairing from

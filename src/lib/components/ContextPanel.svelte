@@ -184,7 +184,7 @@
 
       <label class="field-label" for="ctx-notes">Notes</label>
       <div class="context-templates">
-        {#each CONTEXT_TEMPLATES as tmpl}
+        {#each CONTEXT_TEMPLATES as tmpl (tmpl.label)}
           <button class="template-chip" onclick={() => onInsertTemplate(tmpl.text)}>
             {tmpl.label}
           </button>

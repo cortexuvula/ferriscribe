@@ -227,7 +227,8 @@ mod tests {
 
     #[test]
     fn user_prompt_without_context_omits_supporting_documents() {
-        let prompt = build_user_prompt("transcript body", "Smith", "Cardiology", "chest pain", None);
+        let prompt =
+            build_user_prompt("transcript body", "Smith", "Cardiology", "chest pain", None);
         assert!(!prompt.contains("Supporting Documents"));
     }
 

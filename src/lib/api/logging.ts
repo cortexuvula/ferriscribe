@@ -42,11 +42,11 @@ export const log = {
     frontendLog('warn', message, context).catch(() => {});
   },
   info(message: string, context?: Record<string, unknown>) {
-    console.info(`[FerriScribe] ${message}`, context ?? '');
+    console.warn(`[FerriScribe] ${message}`, context ?? '');
     frontendLog('info', message, context).catch(() => {});
   },
   debug(message: string, context?: Record<string, unknown>) {
-    console.debug(`[FerriScribe] ${message}`, context ?? '');
+    console.warn(`[FerriScribe] ${message}`, context ?? '');
     frontendLog('debug', message, context).catch(() => {});
   },
 };

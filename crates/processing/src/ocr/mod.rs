@@ -76,7 +76,7 @@ fn read_text_file(path: &Path) -> Result<String, OcrError> {
 
 /// Encode raw image bytes as a base64 data URL.
 fn encode_image_as_data_url(data: &[u8], format: &str) -> String {
-    use base64::{engine::general_purpose, Engine};
+    use base64::{Engine, engine::general_purpose};
     let b64 = general_purpose::STANDARD.encode(data);
     format!("data:image/{format};base64,{b64}")
 }
@@ -118,8 +118,8 @@ fn extract_pdf_text(path: &Path) -> Result<String, OcrError> {
     if !path.exists() {
         return Err(OcrError::FileNotFound(path.display().to_string()));
     }
-    let text = pdf_extract::extract_text(path)
-        .map_err(|e| OcrError::PdfExtraction(e.to_string()))?;
+    let text =
+        pdf_extract::extract_text(path).map_err(|e| OcrError::PdfExtraction(e.to_string()))?;
     Ok(text.trim().to_string())
 }
 
@@ -196,7 +196,11 @@ pub async fn extract_text(
             OcrStrategy::TextFile => match read_text_file(path) {
                 Ok(text) => {
                     tracing::info!(filename = %filename, chars = text.len(), "OCR: text file read");
-                    OcrPageResult { filename, text, page_count: 1 }
+                    OcrPageResult {
+                        filename,
+                        text,
+                        page_count: 1,
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(filename = %filename, error = %e, "OCR: text read failed, skipping");
@@ -209,13 +213,19 @@ pub async fn extract_text(
                         tracing::info!(filename = %filename, "OCR: PDF text extraction returned empty (likely scanned PDF)");
                         OcrPageResult {
                             filename,
-                            text: String::from("[No machine-readable text found in this PDF. \
-                                Scanned PDFs require image-based OCR, coming in a future update.]"),
+                            text: String::from(
+                                "[No machine-readable text found in this PDF. \
+                                Scanned PDFs require image-based OCR, coming in a future update.]",
+                            ),
                             page_count: 0,
                         }
                     } else {
                         tracing::info!(filename = %filename, chars = text.len(), "OCR: PDF text extracted");
-                        OcrPageResult { filename, text, page_count: 1 }
+                        OcrPageResult {
+                            filename,
+                            text,
+                            page_count: 1,
+                        }
                     }
                 }
                 Err(e) => {
@@ -231,10 +241,7 @@ pub async fn extract_text(
                         continue;
                     }
                 };
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("png");
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
                 let data_url = encode_image_as_data_url(&image_data, ext);
                 let request = build_image_ocr_request(&data_url, ocr_model);
 
@@ -245,7 +252,11 @@ pub async fn extract_text(
                         if text.is_empty() {
                             tracing::warn!(filename = %filename, "OCR: vision model returned empty text");
                         }
-                        OcrPageResult { filename, text, page_count: 1 }
+                        OcrPageResult {
+                            filename,
+                            text,
+                            page_count: 1,
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(filename = %filename, error = %e, "OCR: vision model error, skipping");
@@ -300,10 +311,7 @@ mod tests {
 
     #[test]
     fn build_image_ocr_request_has_multipart_content() {
-        let req = build_image_ocr_request(
-            "data:image/png;base64,iVBOR=",
-            "glm-ocr",
-        );
+        let req = build_image_ocr_request("data:image/png;base64,iVBOR=", "glm-ocr");
         assert_eq!(req.model, "glm-ocr");
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].role, Role::User);
@@ -330,8 +338,8 @@ mod tests {
         // Build a structurally valid PDF with lopdf containing the text
         // "Hello PDF". Hand-crafted minimal PDFs (incorrect xref offsets)
         // are rejected by pdf-extract, so we use a proper builder.
-        use lopdf::{dictionary, Dictionary, Document, Object, Stream};
         use lopdf::content::{Content, Operation};
+        use lopdf::{Dictionary, Document, Object, Stream, dictionary};
 
         let mut doc = Document::with_version("1.5");
         let pages_id = doc.new_object_id();
@@ -388,7 +396,11 @@ mod tests {
         let text = extract_pdf_text(&path);
         // pdf-extract should at least not crash. If it returns empty for this
         // minimal fixture, that's acceptable — assert is_ok() only.
-        assert!(text.is_ok(), "PDF extraction should not error: {:?}", text.err());
+        assert!(
+            text.is_ok(),
+            "PDF extraction should not error: {:?}",
+            text.err()
+        );
     }
 
     #[test]
@@ -397,13 +409,13 @@ mod tests {
         assert!(result.is_err());
     }
 
-    use std::sync::Arc;
+    use futures_core::Stream;
     use medical_core::error::{AppError, AppResult};
+    use medical_core::types::ToolDef;
     use medical_core::types::ai::{
         CompletionRequest, CompletionResponse, ModelInfo, StreamChunk, ToolCompletionResponse,
     };
-    use medical_core::types::ToolDef;
-    use futures_core::Stream;
+    use std::sync::Arc;
 
     /// A no-op provider for testing text-file paths (never actually called).
     struct NullProvider;
@@ -442,13 +454,9 @@ mod tests {
 
         // Pass a dummy provider — it should never be called for text files.
         let provider: Arc<dyn AiProvider> = Arc::new(NullProvider);
-        let results = extract_text(
-            &[path.to_string_lossy().to_string()],
-            "glm-ocr",
-            provider,
-        )
-        .await
-        .unwrap();
+        let results = extract_text(&[path.to_string_lossy().to_string()], "glm-ocr", provider)
+            .await
+            .unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].filename, "notes.txt");

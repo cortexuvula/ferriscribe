@@ -659,10 +659,7 @@ impl ContentSyncRepo {
             .get("processing_status")
             .map(|v| v.value.to_string())
             .filter(|s| {
-                serde_json::from_str::<
-                    medical_core::types::recording::ProcessingStatus,
-                >(s)
-                .is_ok()
+                serde_json::from_str::<medical_core::types::recording::ProcessingStatus>(s).is_ok()
             })
             .unwrap_or_else(|| serde_json::json!({"status": "pending"}).to_string());
         // Stamp metadata with a synced_from marker so the receiving machine
@@ -729,7 +726,9 @@ impl ContentSyncRepo {
             meta = serde_json::json!({ "original": meta });
         }
         // After the above guards, meta is guaranteed to be a JSON object.
-        let obj = meta.as_object_mut().expect("metadata is object after guards");
+        let obj = meta
+            .as_object_mut()
+            .expect("metadata is object after guards");
         if !obj.contains_key("synced_from") {
             let origin = remote
                 .fields

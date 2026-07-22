@@ -154,7 +154,8 @@ pub fn delete_all_recordings(state: tauri::State<'_, AppState>) -> AppResult<u32
 
     // Wrap deletes + cursor resets in a single transaction so a crash
     // between them can't leave diverged cursors.
-    conn.execute_batch("BEGIN").map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+    conn.execute_batch("BEGIN")
+        .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
     let result: AppResult<(Vec<std::path::PathBuf>, u32)> = (|| {
         // Delete all RAG vectors
         if let Err(e) = conn.execute("DELETE FROM vectors", []) {
@@ -182,7 +183,8 @@ pub fn delete_all_recordings(state: tauri::State<'_, AppState>) -> AppResult<u32
 
     let (paths, count) = match result {
         Ok(v) => {
-            conn.execute_batch("COMMIT").map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+            conn.execute_batch("COMMIT")
+                .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
             v
         }
         Err(e) => {
