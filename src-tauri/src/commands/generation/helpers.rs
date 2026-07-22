@@ -76,7 +76,11 @@ pub(super) async fn load_recording_and_settings(
 }
 
 /// Resolve the AI provider from the registry using the settings provider name.
-pub(super) async fn resolve_provider(
+///
+/// `pub` so it can be re-exported from `generation::mod` for `commands::ocr`;
+/// the `helpers` module itself is private to `generation`, so this does not
+/// widen the public surface beyond the crate.
+pub async fn resolve_provider(
     state: &AppState,
     provider_name: &str,
 ) -> AppResult<Arc<dyn AiProvider>> {

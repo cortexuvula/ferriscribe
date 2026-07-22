@@ -21,6 +21,10 @@ pub(super) mod test_helpers;
 // kicking off its own generation flow.
 pub(super) use helpers::validate_patient_context;
 
+// Re-exposed for `commands::ocr`, which needs to resolve the configured AI
+// provider before calling the OCR pipeline.
+pub(super) use helpers::resolve_provider;
+
 // ---------------------------------------------------------------------------
 // Input size bounds
 // ---------------------------------------------------------------------------

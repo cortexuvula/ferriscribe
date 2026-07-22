@@ -9,6 +9,7 @@ pub mod icd;
 pub mod letter_audiences;
 pub mod logging;
 pub mod models;
+pub mod ocr;
 pub mod pipeline;
 pub mod providers;
 pub mod recordings;

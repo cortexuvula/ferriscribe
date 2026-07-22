@@ -339,6 +339,7 @@ pub fn run() {
             commands::models::list_pyannote_models,
             commands::models::download_model,
             commands::models::delete_model,
+            commands::ocr::ocr_documents,
             commands::logging::get_log_path,
             commands::logging::get_recent_logs,
             commands::logging::frontend_log,
