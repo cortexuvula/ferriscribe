@@ -22,6 +22,7 @@ pub async fn generate_referral(
     recording_id: String,
     recipient_type: Option<String>,
     urgency: Option<String>,
+    context: Option<String>,
 ) -> AppResult<String> {
     let _ = app.emit(
         "generation-progress",
@@ -37,6 +38,7 @@ pub async fn generate_referral(
         &recording_id,
         recipient_type.as_deref(),
         urgency.as_deref(),
+        context.as_deref(),
     )
     .await;
 
@@ -71,6 +73,7 @@ async fn generate_referral_inner(
     recording_id: &str,
     recipient_type: Option<&str>,
     urgency: Option<&str>,
+    context: Option<&str>,
 ) -> AppResult<String> {
     let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
@@ -112,6 +115,7 @@ async fn generate_referral_inner(
         recipient,
         urg,
         settings.custom_referral_prompt.as_deref(),
+        context,
     );
 
     debug!(
@@ -180,6 +184,7 @@ mod preflight_tests {
             &recording_id,
             None, // recipient_type
             None, // urgency
+            None, // context
         )
         .await;
         let elapsed = start.elapsed();

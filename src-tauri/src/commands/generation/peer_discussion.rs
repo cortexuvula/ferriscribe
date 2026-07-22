@@ -25,6 +25,7 @@ pub async fn generate_peer_discussion(
     physician_name: String,
     specialty: String,
     reason: String,
+    context: Option<String>,
 ) -> AppResult<String> {
     if physician_name.trim().is_empty() {
         return Err(AppError::Other("Physician name is required.".to_string()));
@@ -44,9 +45,15 @@ pub async fn generate_peer_discussion(
         },
     );
 
-    let result =
-        generate_peer_discussion_inner(&state, &recording_id, &physician_name, &specialty, &reason)
-            .await;
+    let result = generate_peer_discussion_inner(
+        &state,
+        &recording_id,
+        &physician_name,
+        &specialty,
+        &reason,
+        context.as_deref(),
+    )
+    .await;
 
     match &result {
         Ok(_) => {
@@ -80,6 +87,7 @@ async fn generate_peer_discussion_inner(
     physician_name: &str,
     specialty: &str,
     reason: &str,
+    context: Option<&str>,
 ) -> AppResult<String> {
     let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
@@ -128,7 +136,7 @@ async fn generate_peer_discussion_inner(
 
     let system_prompt = peer_discussion::build_peer_discussion_prompt(&prompt_config);
     let user_prompt =
-        peer_discussion::build_user_prompt(transcript, physician_name, specialty, reason);
+        peer_discussion::build_user_prompt(transcript, physician_name, specialty, reason, context);
 
     debug!(
         "generate_peer_discussion: provider='{}', recording='{}'",
@@ -204,6 +212,7 @@ mod preflight_tests {
             "Smith",
             "Cardiology",
             "chest pain evaluation",
+            None, // context
         )
         .await;
         let elapsed = start.elapsed();

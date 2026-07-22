@@ -24,6 +24,7 @@ pub async fn generate_letter(
     recording_id: String,
     letter_type: Option<String>,
     audience_id: Option<Uuid>,
+    context: Option<String>,
 ) -> AppResult<String> {
     let _ = app.emit(
         "generation-progress",
@@ -39,6 +40,7 @@ pub async fn generate_letter(
         &recording_id,
         letter_type.as_deref(),
         audience_id.as_ref(),
+        context.as_deref(),
     )
     .await;
 
@@ -73,6 +75,7 @@ async fn generate_letter_inner(
     recording_id: &str,
     letter_type: Option<&str>,
     audience_id: Option<&Uuid>,
+    context: Option<&str>,
 ) -> AppResult<String> {
     let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
@@ -127,6 +130,7 @@ async fn generate_letter_inner(
         ltype,
         audience_context.as_ref(),
         settings.custom_letter_prompt.as_deref(),
+        context,
     );
 
     debug!(
@@ -194,6 +198,7 @@ mod preflight_tests {
             &recording_id,
             None, // letter_type
             None, // audience_id
+            None, // context
         )
         .await;
         let elapsed = start.elapsed();
