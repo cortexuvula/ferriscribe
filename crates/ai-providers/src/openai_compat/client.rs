@@ -158,6 +158,18 @@ impl OpenAiCompatibleClient {
                 tool_call_id: Some(tool_call_id.clone()),
                 tool_calls: None,
             },
+            MessageContent::Parts(parts) => {
+                let arr: Vec<serde_json::Value> = parts
+                    .iter()
+                    .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
+                    .collect();
+                ChatMessage {
+                    role: role.into(),
+                    content: Some(serde_json::Value::Array(arr)),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }
+            }
         }
     }
 
@@ -374,5 +386,32 @@ mod tests {
         assert_eq!(completion.model, "gpt-4o");
         assert_eq!(completion.usage.total_tokens, 15);
         assert!(completion.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn convert_message_parts_to_multipart_content() {
+        use medical_core::types::ai::{ContentPart, ImageUrlData};
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Describe this".to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrlData {
+                        url: "data:image/png;base64,abc=".to_string(),
+                    },
+                },
+            ]),
+            tool_calls: vec![],
+        };
+        let wire = OpenAiCompatibleClient::convert_message(&msg);
+        assert!(wire.content.is_some(), "content must be present for Parts");
+        let content = wire.content.as_ref().unwrap();
+        assert!(content.is_array(), "Parts must serialize to JSON array");
+        let arr = content.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[1]["type"], "image_url");
     }
 }
