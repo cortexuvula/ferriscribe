@@ -157,6 +157,29 @@
   </div>
 
   <div class="form-group">
+    <label for="ocr-model" class="form-label">OCR / Vision Model</label>
+    <div class="model-select-row">
+      <select
+        id="ocr-model"
+        value={settings.state.ocr_model ?? ''}
+        onchange={async (e) => {
+          const val = (e.currentTarget as HTMLSelectElement).value;
+          await settings.updateField('ocr_model', val || null);
+        }}
+      >
+        <option value="">(use generation model)</option>
+        {#each availableModels as m (m.id)}
+          <option value={m.id}>{m.name}</option>
+        {/each}
+      </select>
+    </div>
+    <p class="form-hint">
+      Vision model for extracting text from dropped documents (e.g. glm-ocr).
+      If not set, the generation model is used.
+    </p>
+  </div>
+
+  <div class="form-group">
     <label for="temperature" class="form-label">
       Temperature
       <span class="value-display">{settings.state.temperature.toFixed(1)}</span>
@@ -431,5 +454,12 @@
     padding: 6px 10px;
     margin-top: 4px;
     font-size: 0.85rem;
+  }
+
+  .form-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin: 4px 0 0;
+    line-height: 1.5;
   }
 </style>

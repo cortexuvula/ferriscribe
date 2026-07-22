@@ -81,6 +81,10 @@ export interface AppConfig {
   storage_path: string | null;
   ai_provider: string;
   ai_model: string;
+  /** Optional vision model for OCR (extracting text from dropped documents).
+   *  Mirrors `ocr_model: Option<String>` in crates/core/src/types/settings.rs.
+   *  When null, the generation model (`ai_model`) is used. */
+  ocr_model: string | null;
   whisper_model: string;
   tts_provider: string;
   tts_voice: string;
