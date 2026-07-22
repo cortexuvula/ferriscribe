@@ -324,6 +324,10 @@ pub struct AppConfig {
     pub ai_provider: String,
     #[serde(default = "default_ai_model")]
     pub ai_model: String,
+    /// Vision-capable model name for OCR (e.g. "glm-ocr").
+    /// If None, falls back to `ai_model` for OCR.
+    #[serde(default)]
+    pub ocr_model: Option<String>,
     #[serde(default = "default_whisper_model")]
     pub whisper_model: String,
     #[serde(default = "default_tts_provider")]
@@ -773,5 +777,12 @@ mod tests {
     fn allow_public_endpoint_defaults_to_false() {
         let cfg: AppConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.allow_public_endpoint);
+    }
+
+    #[test]
+    fn ocr_model_defaults_to_none() {
+        let json = r#"{"theme":"dark","language":"en"}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap_or_default();
+        assert!(config.ocr_model.is_none(), "ocr_model should default to None");
     }
 }
