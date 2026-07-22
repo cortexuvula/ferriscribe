@@ -21,6 +21,7 @@ base64 = "0.22"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"
+lopdf = "0.34"
 
 [lints]
 workspace = true
