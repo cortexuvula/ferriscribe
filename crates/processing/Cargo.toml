@@ -15,9 +15,12 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
 regex = { workspace = true }
+pdf-extract = "0.7"
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"
 
 [lints]
 workspace = true

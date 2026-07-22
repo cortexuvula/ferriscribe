@@ -35,6 +35,7 @@
 pub mod batch;
 pub mod document_generator;
 pub mod edit_distance;
+pub mod ocr;
 pub mod peer_discussion;
 pub mod pipeline;
 pub mod prompt_resolver;
