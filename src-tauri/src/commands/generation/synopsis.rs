@@ -59,6 +59,7 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
     let (system_prompt, user_prompt) = document_generator::build_synopsis_prompt(
         soap_note,
         settings.custom_synopsis_prompt.as_deref(),
+        None,
     );
 
     debug!(
