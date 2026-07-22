@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { recordings, selectRecording } from '../stores/recordings.svelte';
   import { generateSoap, generateReferral, generateLetter, generatePeerDiscussion } from '../api/generation';
+  import { ocrDocuments } from '../api/ocr';
   import { generation } from '../stores/generation.svelte';
   import { copyWithStatus } from '../utils/clipboard';
   import { buildPatientContext } from '../utils/patient_context';
@@ -15,7 +16,7 @@
   import { letterAudiences } from '../stores/letterAudiences.svelte';
 
   let selectedAudienceId = $state<string | null>(null);
-  let letterType = $state('follow-up');
+  let letterType = $state('');
   let physicianName = $state('');
   let specialty = $state('');
   let discussionReason = $state('');
@@ -42,6 +43,13 @@
   let conditionsText = $state('');
   let contextExpanded = $state(false);
   let lastContextRecordingId = $state<string | null>(null);
+
+  // OCR state: chips for each dropped document, the concatenated extracted
+  // text, and a loading flag. Owned here (not in a store) because the text is
+  // transient per-generation context, not persisted recording metadata.
+  let ocrFiles = $state<Array<{ id: string; filename: string; status: 'done' | 'loading' | 'error'; pageCount: number }>>([]);
+  let ocrText = $state('');
+  let ocrLoading = $state(false);
 
   // Load saved context + structured fields from recording metadata only when
   // the recording ID changes. Prevents overwriting user-typed values on the
@@ -105,21 +113,81 @@
     }
   }
 
+  async function handleOcrFilesSelected(paths: string[]) {
+    if (paths.length === 0) return;
+    ocrLoading = true;
+    // Add loading chips immediately so the user sees feedback.
+    const pendingChips = paths.map((p) => {
+      const filename = p.split(/[/\\]/).pop() || p;
+      return {
+        id: crypto.randomUUID(),
+        filename,
+        status: 'loading' as const,
+        pageCount: 0,
+      };
+    });
+    ocrFiles = [...ocrFiles, ...pendingChips];
+
+    try {
+      const results = await ocrDocuments(paths);
+      // Replace loading chips with done chips, matching by filename.
+      ocrFiles = ocrFiles.map((f) => {
+        if (f.status === 'loading') {
+          const result = results.find((r) => r.filename === f.filename);
+          if (result) {
+            return {
+              ...f,
+              status: 'done' as const,
+              pageCount: result.page_count,
+            };
+          }
+          return { ...f, status: 'error' as const };
+        }
+        return f;
+      });
+      // Append extracted text, one block per file.
+      const newText = results
+        .map((r) => `--- ${r.filename} ---\n${r.text}`)
+        .join('\n\n');
+      ocrText = ocrText ? `${ocrText}\n\n${newText}` : newText;
+    } catch (err) {
+      ocrFiles = ocrFiles.map((f) =>
+        f.status === 'loading' ? { ...f, status: 'error' as const } : f,
+      );
+      console.error('OCR failed:', err);
+    } finally {
+      ocrLoading = false;
+    }
+  }
+
+  function handleOcrTextChange(text: string) {
+    ocrText = text;
+  }
+
+  function handleRemoveOcrFile(id: string) {
+    ocrFiles = ocrFiles.filter((f) => f.id !== id);
+  }
+
   async function handleGenerate(type: 'soap' | 'referral' | 'letter' | 'peer_discussion') {
     if (!recordings.selectedRecording) return;
     const recordingId = recordings.selectedRecording.id;
     generation.startGenerating(type);
+    // Combine notes context + OCR text into a single context string threaded
+    // to every generation type. Empty/whitespace-only input yields undefined
+    // so the backend treats context as absent.
+    const combinedContext = [contextText.trim(), ocrText.trim()]
+      .filter(Boolean)
+      .join('\n\n') || undefined;
     try {
       if (type === 'soap') {
-        const ctx = contextText.trim() || undefined;
         const pc = buildPatientContext(medicationsText, allergiesText, conditionsText);
-        await generateSoap(recordingId, undefined, ctx, pc);
+        await generateSoap(recordingId, undefined, combinedContext, pc);
       } else if (type === 'referral') {
-        await generateReferral(recordingId);
+        await generateReferral(recordingId, undefined, undefined, combinedContext);
       } else if (type === 'letter') {
-        await generateLetter(recordingId, letterType || undefined, selectedAudienceId ?? undefined);
+        await generateLetter(recordingId, letterType || undefined, selectedAudienceId ?? undefined, combinedContext);
       } else if (type === 'peer_discussion') {
-        await generatePeerDiscussion(recordingId, physicianName, specialty, discussionReason);
+        await generatePeerDiscussion(recordingId, physicianName, specialty, discussionReason, combinedContext);
       }
       await Promise.all([
         selectRecording(recordingId),
@@ -169,6 +237,12 @@
         onAllergiesChange={(value) => (allergiesText = value)}
         onConditionsChange={(value) => (conditionsText = value)}
         onContextChange={(value) => (contextText = value)}
+        {ocrFiles}
+        {ocrText}
+        {ocrLoading}
+        onOcrFilesSelected={handleOcrFilesSelected}
+        onOcrTextChange={handleOcrTextChange}
+        onRemoveOcrFile={handleRemoveOcrFile}
       />
 
       <GenerateControls
