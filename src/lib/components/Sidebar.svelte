@@ -30,7 +30,7 @@
 
     <nav aria-label="Main navigation">
       <div class="nav-section-label">Workflow</div>
-      {#each workflowNav as item}
+      {#each workflowNav as item (item.id)}
         <button
           class="nav-item"
           class:active={activeTab === item.id}
@@ -43,7 +43,7 @@
       {/each}
 
       <div class="nav-section-label" style="margin-top: 16px;">Documents</div>
-      {#each documentNav as item}
+      {#each documentNav as item (item.id)}
         <button
           class="nav-item"
           class:active={activeTab === item.id}

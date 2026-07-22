@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { SvelteMap } from 'svelte/reactivity';
+
   interface SpeakerSection {
     speaker: string | null;
     text: string;
@@ -16,12 +18,10 @@
 
   let editing = $state(false);
   // svelte-ignore state_referenced_locally
+  // editText is initialized from the prop and re-synced in startEdit()
+  // before the editor is shown, so it always reflects the latest external
+  // value when editing begins.
   let editText = $state(value);
-
-  // Re-sync editText when the external value changes (e.g. different recording selected).
-  $effect(() => {
-    editText = value;
-  });
 
   // Debounce the transcript parse so typing into the editor doesn't
   // re-parse the entire transcript on every keystroke. The parent
@@ -61,8 +61,9 @@
   // Reads `parseVersion` (tracked — re-runs on debounce tick) and
   // `parseCache` (untracked — the debounced value).
   const sections: SpeakerSection[] = $derived.by(() => {
-    // Touch parseVersion so this re-runs when the debounce fires.
-    parseVersion;
+    // Read parseVersion so this re-runs when the debounce fires.
+    // The conditional keeps this a valid statement (not a bare expression).
+    if (parseVersion < 0) return [];
     if (segments && segments.length > 0) {
       return groupSegmentsIntoSections(segments);
     }
@@ -114,7 +115,7 @@
   }
 
   // Deterministic color per speaker — hash the speaker label to a hue.
-  const speakerColors = new Map<string, string>();
+  const speakerColors = new SvelteMap<string, string>();
   const palette = [
     { bg: 'rgba(59, 130, 246, 0.12)', border: '#3b82f6', text: '#3b82f6' },  // blue
     { bg: 'rgba(16, 185, 129, 0.12)', border: '#10b981', text: '#10b981' },  // emerald
@@ -162,7 +163,7 @@
       <button class="btn-edit" onclick={startEdit}>Edit</button>
     </div>
     <div class="sections">
-      {#each sections as section}
+      {#each sections as section, i (i)}
         {#if section.speaker}
           {@const colors = getSpeakerColor(section.speaker)}
           <div class="speaker-section" style="border-left-color: {colors.border}">

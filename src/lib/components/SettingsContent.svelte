@@ -38,7 +38,7 @@
 
 <div class="settings-layout">
   <nav class="settings-nav">
-    {#each navItems as item}
+    {#each navItems as item (item.id)}
       <button
         class="nav-item"
         class:active={activeSection === item.id}

@@ -1,9 +1,10 @@
 <script lang="ts">
   import { rsvp } from '../stores/rsvp.svelte';
   import { settings } from '../stores/settings.svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { tokenize, type Section } from '../rsvp/engine';
 
-  let selected = $state<Set<string>>(new Set());
+  const selected = new SvelteSet<string>();
   let rememberChoice = $state(false);
   let initialised = false;
 
@@ -20,17 +21,16 @@
     const useRemembered =
       settings.state.rsvp_remember_sections && remembered.size > 0;
 
-    selected = new Set(
-      rsvp.state.picker.sections
-        .filter((s) => (useRemembered ? remembered.has(s.name) : true))
-        .map((s) => s.name),
-    );
+    selected.clear();
+    for (const s of rsvp.state.picker.sections) {
+      if (useRemembered ? remembered.has(s.name) : true) {
+        selected.add(s.name);
+      }
+    }
   });
 
   function toggle(name: string): void {
-    const next = new Set(selected);
-    if (next.has(name)) next.delete(name); else next.add(name);
-    selected = next;
+    if (selected.has(name)) selected.delete(name); else selected.add(name);
   }
 
   function start(): void {

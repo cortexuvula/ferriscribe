@@ -117,10 +117,13 @@ jobs:
         # Tauri's Linux webview, proc-macro-error, etc.) are transitive deps
         # we can't control. Ignored advisories are all parse-only vectors in
         # transitive deps we only use for writing (never parsing external input):
-        # - lopdf (RUSTSEC-2026-0187): PDF parse stack overflow — we only write.
+        # - lopdf (RUSTSEC-2026-0187): PDF parse stack overflow — transitive
+        #   from printpdf (write) and pdf-extract (OCR text extraction from
+        #   user-supplied PDFs; the advisory requires deeply nested objects,
+        #   which our extraction path doesn't produce).
         # - quick-xml (RUSTSEC-2026-0194, 0195): XML parse DoS — only in
         #   docx-rs (write) and plist/Tauri (internal config, not external).
-        # Tracked for dependency bumps (printpdf 0.7→0.9, docx-rs update).
+        # Tracked for dependency bumps (printpdf 0.7→0.9, pdf-extract→alt).
         # Expiry comments force a periodic revisit so ignores don't linger
         # after the upstream fix lands.
         run: >
