@@ -255,7 +255,7 @@ In `Models.svelte`, below the existing AI model dropdown, add:
 ```svelte
 <div class="setting-row">
   <label for="ocr-model">OCR / Vision Model</label>
-  <select id="ocr-model" bind:value={settings.ethicalReviewModel}>
+  <select id="ocr-model" bind:value={settings.ocr_model}>
     <option value="">(use generation model)</option>
     {#each models as m}<option value={m.id}>{m.name}</option>{/each}
   </select>

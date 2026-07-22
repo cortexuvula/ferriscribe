@@ -9,6 +9,8 @@
     filename: string;
     status: 'done' | 'loading' | 'error';
     pageCount: number;
+    text?: string;
+    path?: string;
   }
 
   interface Props {
@@ -47,12 +49,12 @@
     onAllergiesChange,
     onConditionsChange,
     onContextChange,
-    ocrFiles,
-    ocrText,
-    ocrLoading,
-    onOcrFilesSelected,
-    onOcrTextChange,
-    onRemoveOcrFile,
+    ocrFiles = [],
+    ocrText = '',
+    ocrLoading = false,
+    onOcrFilesSelected = () => {},
+    onOcrTextChange = () => {},
+    onRemoveOcrFile = () => {},
   }: Props = $props();
 
   let isDragging = $state(false);
@@ -72,30 +74,36 @@
     onOcrFilesSelected(paths);
   }
 
-  function handleDragOver(e: DragEvent) {
-    e.preventDefault();
-    isDragging = true;
-  }
+  // Tauri v2 intercepts OS file drops at the window layer — HTML5 dragover/drop
+  // events never receive real file paths. We use Tauri's native onDragDropEvent
+  // instead, which delivers { paths } payloads directly.
+  $effect(() => {
+    let unlisten: (() => void) | undefined;
+    let cleanup = false;
 
-  function handleDragLeave() {
-    isDragging = false;
-  }
+    (async () => {
+      const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+      unlisten = await getCurrentWebview().onDragDropEvent((event) => {
+        if (event.payload.type === 'over' || event.payload.type === 'enter') {
+          isDragging = true;
+        } else if (event.payload.type === 'leave') {
+          isDragging = false;
+        } else if (event.payload.type === 'drop') {
+          isDragging = false;
+          const paths = event.payload.paths;
+          if (paths && paths.length > 0) {
+            onOcrFilesSelected(paths);
+          }
+        }
+      });
+      if (cleanup) unlisten?.();
+    })();
 
-  function handleDrop(e: DragEvent) {
-    e.preventDefault();
-    isDragging = false;
-    const files = e.dataTransfer?.files;
-    if (files && files.length > 0) {
-      const paths: string[] = [];
-      for (let i = 0; i < files.length; i++) {
-        const f = files[i] as unknown as { path?: string };
-        if (f.path) paths.push(f.path);
-      }
-      if (paths.length > 0) {
-        onOcrFilesSelected(paths);
-      }
-    }
-  }
+    return () => {
+      cleanup = true;
+      unlisten?.();
+    };
+  });
 
   const CONTEXT_TEMPLATES = [
     { label: 'Follow-up', text: 'Follow-up visit for ongoing condition. Previous visit findings:\n\n' },
@@ -208,14 +216,11 @@
         </button>
       {/if}
 
-      <!-- OCR Drop Zone -->
+      <!-- OCR Drop Zone — uses Tauri native drag-drop (see $effect above) -->
       <div class="ocr-section">
         <div
           class="dropzone"
           class:dragging={isDragging}
-          ondragover={handleDragOver}
-          ondragleave={handleDragLeave}
-          ondrop={handleDrop}
           onclick={handleBrowse}
           role="button"
           tabindex="0"

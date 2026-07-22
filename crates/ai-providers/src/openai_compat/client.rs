@@ -161,7 +161,10 @@ impl OpenAiCompatibleClient {
             MessageContent::Parts(parts) => {
                 let arr: Vec<serde_json::Value> = parts
                     .iter()
-                    .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null))
+                    .map(|p| {
+                        serde_json::to_value(p)
+                            .expect("ContentPart is always serializable (String fields only)")
+                    })
                     .collect();
                 ChatMessage {
                     role: role.into(),

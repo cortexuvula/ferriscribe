@@ -10,7 +10,7 @@ use crate::state::AppState;
 use super::helpers::{
     build_completion_request, load_recording_and_settings, persist_recording, resolve_provider,
 };
-use super::{GenerationProgress, MAX_SOAP_NOTE_CHARS, format_progress_error};
+use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_SOAP_NOTE_CHARS, format_progress_error};
 
 /// Generate a referral letter from a recording's SOAP note.
 ///
@@ -24,6 +24,17 @@ pub async fn generate_referral(
     urgency: Option<String>,
     context: Option<String>,
 ) -> AppResult<String> {
+    // Validate context size before emitting started (fail fast, consistent with SOAP).
+    if let Some(ref ctx) = context {
+        if ctx.len() > MAX_CONTEXT_CHARS {
+            return Err(AppError::Other(format!(
+                "Context too large: {} chars, limit is {}",
+                ctx.len(),
+                MAX_CONTEXT_CHARS
+            )));
+        }
+    }
+
     let _ = app.emit(
         "generation-progress",
         GenerationProgress {

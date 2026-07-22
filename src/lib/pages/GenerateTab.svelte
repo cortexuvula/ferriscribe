@@ -44,12 +44,27 @@
   let contextExpanded = $state(false);
   let lastContextRecordingId = $state<string | null>(null);
 
-  // OCR state: chips for each dropped document, the concatenated extracted
-  // text, and a loading flag. Owned here (not in a store) because the text is
+  // OCR state: chips for each dropped document, the extracted text per file,
+  // and a loading flag. Owned here (not in a store) because the text is
   // transient per-generation context, not persisted recording metadata.
-  let ocrFiles = $state<Array<{ id: string; filename: string; status: 'done' | 'loading' | 'error'; pageCount: number }>>([]);
-  let ocrText = $state('');
+  // Each chip carries its own text block so removal cleans up properly.
+  let ocrFiles = $state<Array<{ id: string; filename: string; status: 'done' | 'loading' | 'error'; pageCount: number; text: string }>>([]);
   let ocrLoading = $state(false);
+
+  /// Derived: concatenation of all done-file text blocks. The user edits this
+  /// in the preview textarea, but we rebuild from chips on removal. Using a
+  /// derived value ensures consistency.
+  let ocrText = $derived(
+    ocrFiles
+      .filter((f) => f.status === 'done' && f.text)
+      .map((f) => `--- ${f.filename} ---\n${f.text}`)
+      .join('\n\n'),
+  );
+
+  /// Mutable copy of the derived text — the user can edit the preview, which
+  /// overrides the derived value until a file is added/removed.
+  let ocrTextOverride = $state<string | null>(null);
+  let ocrTextDisplay = $derived(ocrTextOverride ?? ocrText);
 
   // Load saved context + structured fields from recording metadata only when
   // the recording ID changes. Prevents overwriting user-typed values on the
@@ -72,6 +87,10 @@
       allergiesText = '';
       conditionsText = '';
     }
+    // Clear OCR state on recording switch — OCR text from a previous patient
+    // must never leak into the next patient's generation context.
+    ocrFiles = [];
+    ocrTextOverride = null;
   });
 
   // The Active badge lights up if ANY field has user input — derived state.
@@ -116,57 +135,72 @@
   async function handleOcrFilesSelected(paths: string[]) {
     if (paths.length === 0) return;
     ocrLoading = true;
-    // Add loading chips immediately so the user sees feedback.
+    ocrTextOverride = null; // reset manual edits when new files arrive
+    // Add loading chips immediately so the user sees feedback. Track the chip
+    // IDs created by THIS invocation so concurrent drops don't interfere.
+    const chipIds: string[] = [];
     const pendingChips = paths.map((p) => {
+      const id = crypto.randomUUID();
+      chipIds.push(id);
       const filename = p.split(/[/\\]/).pop() || p;
       return {
-        id: crypto.randomUUID(),
+        id,
         filename,
+        path: p,
         status: 'loading' as const,
         pageCount: 0,
+        text: '',
       };
     });
     ocrFiles = [...ocrFiles, ...pendingChips];
+    const idSet = new Set(chipIds);
 
     try {
       const results = await ocrDocuments(paths);
-      // Replace loading chips with done chips, matching by filename.
+      // Match results to THIS invocation's chips by filename within our batch.
       ocrFiles = ocrFiles.map((f) => {
-        if (f.status === 'loading') {
-          const result = results.find((r) => r.filename === f.filename);
-          if (result) {
-            return {
-              ...f,
-              status: 'done' as const,
-              pageCount: result.page_count,
-            };
-          }
-          return { ...f, status: 'error' as const };
+        if (!idSet.has(f.id)) return f; // not our chip
+        const result = results.find((r) => r.filename === f.filename);
+        if (result) {
+          return {
+            ...f,
+            status: 'done' as const,
+            pageCount: result.page_count,
+            text: result.text,
+          };
         }
-        return f;
+        return { ...f, status: 'error' as const };
       });
-      // Append extracted text, one block per file.
-      const newText = results
-        .map((r) => `--- ${r.filename} ---\n${r.text}`)
-        .join('\n\n');
-      ocrText = ocrText ? `${ocrText}\n\n${newText}` : newText;
-    } catch (err) {
-      ocrFiles = ocrFiles.map((f) =>
-        f.status === 'loading' ? { ...f, status: 'error' as const } : f,
-      );
-      console.error('OCR failed:', err);
+    } catch (e) {
+      if (e instanceof OfflineCancelled) {
+        // Dialog already informed the user; mark chips as error.
+        ocrFiles = ocrFiles.map((f) =>
+          idSet.has(f.id) ? { ...f, status: 'error' as const } : f,
+        );
+      } else {
+        ocrFiles = ocrFiles.map((f) =>
+          idSet.has(f.id) ? { ...f, status: 'error' as const } : f,
+        );
+        console.error('OCR failed:', e);
+      }
     } finally {
-      ocrLoading = false;
+      // Only clear the loading flag if no other batch is in flight.
+      ocrLoading = ocrFiles.some((f) => f.status === 'loading');
     }
   }
 
   function handleOcrTextChange(text: string) {
-    ocrText = text;
+    ocrTextOverride = text;
   }
 
   function handleRemoveOcrFile(id: string) {
     ocrFiles = ocrFiles.filter((f) => f.id !== id);
+    ocrTextOverride = null; // rebuild from remaining chips
   }
+
+  /// Maximum context string length. Mirrors the backend MAX_CONTEXT_CHARS.
+  /// If OCR text + notes exceed this, the user must trim the preview.
+  const MAX_CONTEXT_CHARS = 50_000;
 
   async function handleGenerate(type: 'soap' | 'referral' | 'letter' | 'peer_discussion') {
     if (!recordings.selectedRecording) return;
@@ -175,9 +209,18 @@
     // Combine notes context + OCR text into a single context string threaded
     // to every generation type. Empty/whitespace-only input yields undefined
     // so the backend treats context as absent.
-    const combinedContext = [contextText.trim(), ocrText.trim()]
+    const combinedContext = [contextText.trim(), ocrTextDisplay.trim()]
       .filter(Boolean)
       .join('\n\n') || undefined;
+
+    // Guard against oversized context — the backend enforces this for SOAP,
+    // but letter/referral/peer-discussion don't have the check yet.
+    if (combinedContext && combinedContext.length > MAX_CONTEXT_CHARS) {
+      generation.setError(
+        `Supporting context is ${combinedContext.length.toLocaleString()} characters (max ${MAX_CONTEXT_CHARS.toLocaleString()}). Please trim the OCR preview or notes.`,
+      );
+      return;
+    }
     try {
       if (type === 'soap') {
         const pc = buildPatientContext(medicationsText, allergiesText, conditionsText);
@@ -238,7 +281,7 @@
         onConditionsChange={(value) => (conditionsText = value)}
         onContextChange={(value) => (contextText = value)}
         {ocrFiles}
-        {ocrText}
+        ocrText={ocrTextDisplay}
         {ocrLoading}
         onOcrFilesSelected={handleOcrFilesSelected}
         onOcrTextChange={handleOcrTextChange}

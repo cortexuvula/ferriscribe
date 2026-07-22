@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invokeWithOfflineHandling } from './invokeWithOfflineHandling';
 
 export interface OcrPageResult {
   filename: string;
@@ -8,5 +8,5 @@ export interface OcrPageResult {
 
 /** OCR document files and return extracted text. */
 export async function ocrDocuments(filePaths: string[]): Promise<OcrPageResult[]> {
-  return invoke<OcrPageResult[]>('ocr_documents', { filePaths });
+  return invokeWithOfflineHandling<OcrPageResult[]>('ocr_documents', { filePaths });
 }

@@ -35,8 +35,8 @@ pub enum OcrError {
     PdfExtraction(String),
     #[error("OCR model error: {0}")]
     ModelError(String),
-    #[error("no text extracted from: {0}")]
-    EmptyExtraction(String),
+    #[error("file too large for OCR: {0} bytes (limit: {1} bytes)")]
+    FileTooLarge(u64, u64),
 }
 
 /// Supported file extensions for OCR.
@@ -123,6 +123,10 @@ fn extract_pdf_text(path: &Path) -> Result<String, OcrError> {
     Ok(text.trim().to_string())
 }
 
+/// Maximum file size for OCR processing (25 MB). Guards against OOM when
+/// reading large images or PDFs into memory and base64-encoding them.
+const MAX_OCR_FILE_BYTES: u64 = 25 * 1024 * 1024;
+
 /// Extract text from a list of document file paths.
 ///
 /// Each file is classified by extension and processed accordingly:
@@ -130,16 +134,24 @@ fn extract_pdf_text(path: &Path) -> Result<String, OcrError> {
 /// - Images (png/jpg/jpeg/bmp/webp): base64-encode and send to the vision model
 /// - PDFs: extract embedded text via pdf-extract; empty result = scanned PDF
 ///
-/// Returns one `OcrPageResult` per successfully processed file. Files that
-/// error are logged and skipped (the caller sees which files succeeded).
+/// Returns one `OcrPageResult` per **successfully** processed file. Files that
+/// error (read failure, model error, too large) are logged and skipped — the
+/// caller sees which files succeeded via the returned vector. Duplicate paths
+/// are deduplicated.
 pub async fn extract_text(
     file_paths: &[String],
     ocr_model: &str,
     provider: Arc<dyn AiProvider>,
 ) -> Result<Vec<OcrPageResult>, OcrError> {
     let mut results = Vec::with_capacity(file_paths.len());
+    let mut seen = std::collections::HashSet::new();
 
     for path_str in file_paths {
+        // Dedup: skip if we've already processed this exact path.
+        if !seen.insert(path_str.clone()) {
+            continue;
+        }
+
         let path = Path::new(path_str);
         let filename = path
             .file_name()
@@ -152,6 +164,24 @@ pub async fn extract_text(
             continue;
         }
 
+        // Size guard: prevent OOM on huge files.
+        let file_size = match path.metadata() {
+            Ok(m) => m.len(),
+            Err(e) => {
+                tracing::warn!(filename = %filename, error = %e, "OCR: cannot read metadata, skipping");
+                continue;
+            }
+        };
+        if file_size > MAX_OCR_FILE_BYTES {
+            tracing::warn!(
+                filename = %filename,
+                size_bytes = file_size,
+                limit_bytes = MAX_OCR_FILE_BYTES,
+                "OCR: file exceeds size limit, skipping"
+            );
+            continue;
+        }
+
         let strategy = match classify(path) {
             Ok(s) => s,
             Err(e) => {
@@ -160,41 +190,47 @@ pub async fn extract_text(
             }
         };
 
+        // Each strategy extracts text independently. Errors are logged and
+        // the file is skipped — one bad file must NOT abort the whole batch.
         let result = match strategy {
-            OcrStrategy::TextFile => {
-                let text = read_text_file(path)?;
-                tracing::info!(filename = %filename, chars = text.len(), "OCR: text file read");
-                OcrPageResult {
-                    filename,
-                    text,
-                    page_count: 1,
+            OcrStrategy::TextFile => match read_text_file(path) {
+                Ok(text) => {
+                    tracing::info!(filename = %filename, chars = text.len(), "OCR: text file read");
+                    OcrPageResult { filename, text, page_count: 1 }
                 }
-            }
-            OcrStrategy::Pdf => {
-                let text = extract_pdf_text(path)?;
-                if text.is_empty() {
-                    tracing::info!(
-                        filename = %filename,
-                        "OCR: PDF text extraction returned empty (likely scanned PDF — v2 will rasterize)"
-                    );
-                    OcrPageResult {
-                        filename,
-                        text: String::from("[No machine-readable text found in this PDF. \
-                            Scanned PDFs require image-based OCR, coming in a future update.]"),
-                        page_count: 0,
-                    }
-                } else {
-                    tracing::info!(filename = %filename, chars = text.len(), "OCR: PDF text extracted");
-                    OcrPageResult {
-                        filename,
-                        text,
-                        page_count: 1,
+                Err(e) => {
+                    tracing::warn!(filename = %filename, error = %e, "OCR: text read failed, skipping");
+                    continue;
+                }
+            },
+            OcrStrategy::Pdf => match extract_pdf_text(path) {
+                Ok(text) => {
+                    if text.is_empty() {
+                        tracing::info!(filename = %filename, "OCR: PDF text extraction returned empty (likely scanned PDF)");
+                        OcrPageResult {
+                            filename,
+                            text: String::from("[No machine-readable text found in this PDF. \
+                                Scanned PDFs require image-based OCR, coming in a future update.]"),
+                            page_count: 0,
+                        }
+                    } else {
+                        tracing::info!(filename = %filename, chars = text.len(), "OCR: PDF text extracted");
+                        OcrPageResult { filename, text, page_count: 1 }
                     }
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(filename = %filename, error = %e, "OCR: PDF extraction failed, skipping");
+                    continue;
+                }
+            },
             OcrStrategy::Image => {
-                let image_data = std::fs::read(path)
-                    .map_err(|e| OcrError::ReadError(e.to_string()))?;
+                let image_data = match std::fs::read(path) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(filename = %filename, error = %e, "OCR: image read failed, skipping");
+                        continue;
+                    }
+                };
                 let ext = path
                     .extension()
                     .and_then(|e| e.to_str())
@@ -203,19 +239,18 @@ pub async fn extract_text(
                 let request = build_image_ocr_request(&data_url, ocr_model);
 
                 tracing::info!(filename = %filename, bytes = image_data.len(), "OCR: sending image to vision model");
-                let response = provider
-                    .complete(request)
-                    .await
-                    .map_err(|e| OcrError::ModelError(e.to_string()))?;
-
-                let text = response.content.trim().to_string();
-                if text.is_empty() {
-                    tracing::warn!(filename = %filename, "OCR: vision model returned empty text");
-                }
-                OcrPageResult {
-                    filename,
-                    text,
-                    page_count: 1,
+                match provider.complete(request).await {
+                    Ok(response) => {
+                        let text = response.content.trim().to_string();
+                        if text.is_empty() {
+                            tracing::warn!(filename = %filename, "OCR: vision model returned empty text");
+                        }
+                        OcrPageResult { filename, text, page_count: 1 }
+                    }
+                    Err(e) => {
+                        tracing::warn!(filename = %filename, error = %e, "OCR: vision model error, skipping");
+                        continue;
+                    }
                 }
             }
         };

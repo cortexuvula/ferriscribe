@@ -11,7 +11,7 @@ use crate::state::AppState;
 use super::helpers::{
     build_completion_request, load_recording_and_settings, persist_recording, resolve_provider,
 };
-use super::{GenerationProgress, MAX_TRANSCRIPT_CHARS, format_progress_error};
+use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_TRANSCRIPT_CHARS, format_progress_error};
 
 /// Generate a peer discussion note from a recording's transcript.
 ///
@@ -34,6 +34,15 @@ pub async fn generate_peer_discussion(
         return Err(AppError::Other(
             "Reason for discussion is required.".to_string(),
         ));
+    }
+    if let Some(ref ctx) = context {
+        if ctx.len() > MAX_CONTEXT_CHARS {
+            return Err(AppError::Other(format!(
+                "Context too large: {} chars, limit is {}",
+                ctx.len(),
+                MAX_CONTEXT_CHARS
+            )));
+        }
     }
 
     let _ = app.emit(

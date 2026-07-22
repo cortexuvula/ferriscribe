@@ -1,25 +1,27 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+// Mock the offline-handling wrapper so we control the invoke result.
+const mockInvokeWithOfflineHandling = vi.fn();
+vi.mock('./invokeWithOfflineHandling', () => ({
+  invokeWithOfflineHandling: (...args: unknown[]) => mockInvokeWithOfflineHandling(...args),
+  OfflineCancelled: class OfflineCancelled extends Error {},
+}));
 
-import { invoke } from '@tauri-apps/api/core';
 import { ocrDocuments } from './ocr';
 
-const invokeMock = vi.mocked(invoke);
-
 beforeEach(() => {
-  invokeMock.mockReset();
+  mockInvokeWithOfflineHandling.mockReset();
 });
 
 describe('ocr api', () => {
   it('passes filePaths to ocr_documents command', async () => {
-    invokeMock.mockResolvedValue([
+    mockInvokeWithOfflineHandling.mockResolvedValue([
       { filename: 'test.pdf', text: 'extracted text', page_count: 1 },
     ]);
 
     const results = await ocrDocuments(['/path/to/test.pdf']);
 
-    expect(invokeMock).toHaveBeenCalledWith('ocr_documents', {
+    expect(mockInvokeWithOfflineHandling).toHaveBeenCalledWith('ocr_documents', {
       filePaths: ['/path/to/test.pdf'],
     });
     expect(results).toHaveLength(1);
@@ -27,8 +29,13 @@ describe('ocr api', () => {
   });
 
   it('returns empty array for empty input', async () => {
-    invokeMock.mockResolvedValue([]);
+    mockInvokeWithOfflineHandling.mockResolvedValue([]);
     const results = await ocrDocuments([]);
     expect(results).toEqual([]);
+  });
+
+  it('propagates errors from invokeWithOfflineHandling', async () => {
+    mockInvokeWithOfflineHandling.mockRejectedValue(new Error('model not loaded'));
+    await expect(ocrDocuments(['/path/to/img.png'])).rejects.toThrow('model not loaded');
   });
 });
