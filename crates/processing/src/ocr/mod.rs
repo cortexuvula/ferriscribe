@@ -7,6 +7,7 @@
 //! page/character counts appear in tracing.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use medical_core::traits::ai_provider::AiProvider;
 use medical_core::types::ai::{
@@ -120,6 +121,109 @@ fn extract_pdf_text(path: &Path) -> Result<String, OcrError> {
     let text = pdf_extract::extract_text(path)
         .map_err(|e| OcrError::PdfExtraction(e.to_string()))?;
     Ok(text.trim().to_string())
+}
+
+/// Extract text from a list of document file paths.
+///
+/// Each file is classified by extension and processed accordingly:
+/// - Text files (txt/md/csv): read directly, no model call
+/// - Images (png/jpg/jpeg/bmp/webp): base64-encode and send to the vision model
+/// - PDFs: extract embedded text via pdf-extract; empty result = scanned PDF
+///
+/// Returns one `OcrPageResult` per successfully processed file. Files that
+/// error are logged and skipped (the caller sees which files succeeded).
+pub async fn extract_text(
+    file_paths: &[String],
+    ocr_model: &str,
+    provider: Arc<dyn AiProvider>,
+) -> Result<Vec<OcrPageResult>, OcrError> {
+    let mut results = Vec::with_capacity(file_paths.len());
+
+    for path_str in file_paths {
+        let path = Path::new(path_str);
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        if !path.exists() {
+            tracing::warn!(filename = %filename, "OCR: file not found, skipping");
+            continue;
+        }
+
+        let strategy = match classify(path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(filename = %filename, error = %e, "OCR: unsupported file, skipping");
+                continue;
+            }
+        };
+
+        let result = match strategy {
+            OcrStrategy::TextFile => {
+                let text = read_text_file(path)?;
+                tracing::info!(filename = %filename, chars = text.len(), "OCR: text file read");
+                OcrPageResult {
+                    filename,
+                    text,
+                    page_count: 1,
+                }
+            }
+            OcrStrategy::Pdf => {
+                let text = extract_pdf_text(path)?;
+                if text.is_empty() {
+                    tracing::info!(
+                        filename = %filename,
+                        "OCR: PDF text extraction returned empty (likely scanned PDF — v2 will rasterize)"
+                    );
+                    OcrPageResult {
+                        filename,
+                        text: String::from("[No machine-readable text found in this PDF. \
+                            Scanned PDFs require image-based OCR, coming in a future update.]"),
+                        page_count: 0,
+                    }
+                } else {
+                    tracing::info!(filename = %filename, chars = text.len(), "OCR: PDF text extracted");
+                    OcrPageResult {
+                        filename,
+                        text,
+                        page_count: 1,
+                    }
+                }
+            }
+            OcrStrategy::Image => {
+                let image_data = std::fs::read(path)
+                    .map_err(|e| OcrError::ReadError(e.to_string()))?;
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("png");
+                let data_url = encode_image_as_data_url(&image_data, ext);
+                let request = build_image_ocr_request(&data_url, ocr_model);
+
+                tracing::info!(filename = %filename, bytes = image_data.len(), "OCR: sending image to vision model");
+                let response = provider
+                    .complete(request)
+                    .await
+                    .map_err(|e| OcrError::ModelError(e.to_string()))?;
+
+                let text = response.content.trim().to_string();
+                if text.is_empty() {
+                    tracing::warn!(filename = %filename, "OCR: vision model returned empty text");
+                }
+                OcrPageResult {
+                    filename,
+                    text,
+                    page_count: 1,
+                }
+            }
+        };
+
+        results.push(result);
+    }
+
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -256,5 +360,64 @@ mod tests {
     fn extract_pdf_text_returns_error_for_nonexistent_file() {
         let result = extract_pdf_text(Path::new("/nonexistent/path/test.pdf"));
         assert!(result.is_err());
+    }
+
+    use std::sync::Arc;
+    use medical_core::error::{AppError, AppResult};
+    use medical_core::types::ai::{
+        CompletionRequest, CompletionResponse, ModelInfo, StreamChunk, ToolCompletionResponse,
+    };
+    use medical_core::types::ToolDef;
+    use futures_core::Stream;
+
+    /// A no-op provider for testing text-file paths (never actually called).
+    struct NullProvider;
+    #[async_trait::async_trait]
+    impl AiProvider for NullProvider {
+        fn name(&self) -> &str {
+            "null"
+        }
+        async fn available_models(&self) -> AppResult<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn complete(&self, _req: CompletionRequest) -> AppResult<CompletionResponse> {
+            Err(AppError::Other("null provider".into()))
+        }
+        async fn complete_stream(
+            &self,
+            _req: CompletionRequest,
+        ) -> AppResult<Box<dyn Stream<Item = AppResult<StreamChunk>> + Send + Unpin>> {
+            Err(AppError::Other("null provider".into()))
+        }
+        async fn complete_with_tools(
+            &self,
+            _req: CompletionRequest,
+            _tools: Vec<ToolDef>,
+        ) -> AppResult<ToolCompletionResponse> {
+            Err(AppError::Other("null provider".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn extract_text_txt_file_returns_content_directly() {
+        // A text file should be read directly without any provider call.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "Patient has hypertension.").unwrap();
+
+        // Pass a dummy provider — it should never be called for text files.
+        let provider: Arc<dyn AiProvider> = Arc::new(NullProvider);
+        let results = extract_text(
+            &[path.to_string_lossy().to_string()],
+            "glm-ocr",
+            provider,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].filename, "notes.txt");
+        assert!(results[0].text.contains("hypertension"));
+        assert_eq!(results[0].page_count, 1);
     }
 }
