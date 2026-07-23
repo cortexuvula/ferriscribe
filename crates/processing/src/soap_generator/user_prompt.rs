@@ -60,7 +60,7 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 /// for enforcing length limits at the appropriate layer (transcripts are
 /// bounded at the command layer, context is bounded by `MAX_CONTEXT_LENGTH`
 /// inside `build_user_prompt`).
-fn sanitize_prompt(text: &str) -> String {
+pub(crate) fn sanitize_prompt(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }

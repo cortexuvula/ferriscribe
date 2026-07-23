@@ -275,6 +275,12 @@ pub async fn chat_stream(
     // spinning forever.
     let worker_app = app.clone();
     let worker = tokio::spawn(async move {
+        // Tracks whether the worker has already emitted a terminal `chat-done`
+        // event. If the provider closes the SSE stream without ever sending a
+        // `Usage` or `Done` chunk (e.g. a server crash mid-stream), the loop
+        // below exits normally and `emitted_done` stays false — in which case
+        // we emit a `chat-done` ourselves so the frontend spinner doesn't hang.
+        let mut emitted_done = false;
         while let Some(result) = stream.next().await {
             match result {
                 Ok(chunk) => match chunk {
@@ -292,6 +298,7 @@ pub async fn chat_stream(
                                 finish_reason: Some("stop".to_string()),
                             },
                         );
+                        emitted_done = true;
                     }
                     StreamChunk::Done => {
                         let _ = worker_app.emit(
@@ -301,6 +308,7 @@ pub async fn chat_stream(
                                 finish_reason: Some("stop".to_string()),
                             },
                         );
+                        emitted_done = true;
                     }
                 },
                 Err(e) => {
@@ -309,6 +317,18 @@ pub async fn chat_stream(
                     return Err(e);
                 }
             }
+        }
+        // If the provider closed the SSE stream without sending a terminal
+        // chunk, emit `chat-done` so the frontend stops its spinner.
+        if !emitted_done {
+            error!("chat_stream: stream ended without a usage/Done chunk; emitting chat-done");
+            let _ = worker_app.emit(
+                "chat-done",
+                DonePayload {
+                    usage: None,
+                    finish_reason: Some("stream ended".to_string()),
+                },
+            );
         }
         Ok::<(), AppError>(())
     });

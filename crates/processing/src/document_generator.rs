@@ -73,7 +73,13 @@ fn format_now_for_prompt() -> String {
 pub(crate) fn inject_context(user_prompt: &str, context: Option<&str>) -> String {
     match context {
         Some(ctx) if !ctx.trim().is_empty() => {
-            format!("## Supporting Documents\n\n{ctx}\n\n---\n\n{user_prompt}")
+            // Sanitize user-supplied context to strip prompt-injection patterns
+            // (same patterns the SOAP generator strips via sanitize_prompt).
+            let sanitized = crate::soap_generator::user_prompt::sanitize_prompt(ctx);
+            if sanitized.is_empty() {
+                return user_prompt.to_string();
+            }
+            format!("## Supporting Documents\n\n{sanitized}\n\n---\n\n{user_prompt}")
         }
         _ => user_prompt.to_string(),
     }

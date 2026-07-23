@@ -30,7 +30,7 @@ use medical_core::types::settings::SoapTemplate;
 
 mod postprocess;
 mod prompt_template;
-mod user_prompt;
+pub(crate) mod user_prompt;
 
 pub mod icd_selector;
 
