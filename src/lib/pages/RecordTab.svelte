@@ -49,6 +49,21 @@
   );
   let ocrTextDisplay = $derived(ocrTextOverride ?? ocrText);
 
+  /// Maximum context string length. Mirrors the backend MAX_CONTEXT_CHARS.
+  const MAX_CONTEXT_CHARS = 50_000;
+
+  // Clear OCR state when the active recording changes to prevent
+  // cross-patient PHI leakage (same guard as GenerateTab).
+  let lastOcrRecordingId: string | null = null;
+  $effect(() => {
+    const id = pipelineRecordingId;
+    if (id !== lastOcrRecordingId && lastOcrRecordingId !== null) {
+      ocrFiles = [];
+      ocrTextOverride = null;
+    }
+    lastOcrRecordingId = id;
+  });
+
   // Sidebar UI state — synced with the persisted recordSidebar store.
   let sidebarOpen = $state(true);
   let sidebarWidth = $state(360);
@@ -153,7 +168,27 @@
 
   /** Combine notes + OCR text into the pipeline context string. */
   function buildPipelineContext(): string | undefined {
-    return [contextText.trim(), ocrTextDisplay.trim()].filter(Boolean).join('\n\n') || undefined;
+    const combined = [contextText.trim(), ocrTextDisplay.trim()]
+      .filter(Boolean)
+      .join('\n\n') || undefined;
+    if (combined && combined.length > MAX_CONTEXT_CHARS) {
+      toasts.error(
+        `Supporting context is ${combined.length.toLocaleString()} characters (max ${MAX_CONTEXT_CHARS.toLocaleString()}). Please trim the OCR preview or notes.`,
+      );
+      return undefined;
+    }
+    return combined;
+  }
+
+  /** Wait for in-flight OCR to finish (up to 60s) so its text is included
+   *  in the pipeline context. Prevents the race where recording stops while
+   *  OCR chips are still in 'loading' status. */
+  async function waitForOcrSettled(): Promise<void> {
+    if (!ocrLoading) return;
+    const deadline = Date.now() + 60_000;
+    while (ocrLoading && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
   }
 
   async function handleOcrFilesSelected(paths: string[]) {
@@ -172,6 +207,10 @@
 
     try {
       const results = await ocrDocuments(paths);
+      // Match results to chips by filename within this batch. The backend
+      // returns { filename, text, page_count } for each successfully processed
+      // file. Filename collisions (same basename from different folders) are a
+      // known edge case — the first match wins.
       ocrFiles = ocrFiles.map((f) => {
         if (!idSet.has(f.id)) return f;
         const result = results.find((r) => r.filename === f.filename);
@@ -230,6 +269,8 @@
   }
 
   async function maybeLaunchPipeline(recordingId: string) {
+    // Wait for any in-flight OCR to finish so its text is included.
+    await waitForOcrSettled();
     try {
       const levels = await checkRecordingAudioLevels(recordingId);
       if (levels.is_silent) {
