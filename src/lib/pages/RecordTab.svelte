@@ -41,6 +41,10 @@
   let ocrFiles = $state<OcrFileStatus[]>([]);
   let ocrLoading = $state(false);
   let ocrTextOverride = $state<string | null>(null);
+  /// Monotonic batch token — incremented when context is cleared. In-flight
+  /// OCR callbacks check this token before writing state, preventing cross-
+  /// patient PHI leak when the user starts a new recording during OCR.
+  let ocrBatchToken = 0;
   let ocrText = $derived(
     ocrFiles
       .filter((f) => f.status === 'done' && f.text)
@@ -164,6 +168,7 @@
     conditionsText = '';
     ocrFiles = [];
     ocrTextOverride = null;
+    ocrBatchToken++; // Invalidate any in-flight OCR callbacks.
   }
 
   /** Combine notes + OCR text into the pipeline context string. */
@@ -195,6 +200,7 @@
     if (paths.length === 0) return;
     ocrLoading = true;
     ocrTextOverride = null;
+    const myToken = ++ocrBatchToken; // Capture token for this batch.
     const chipIds: string[] = [];
     const pendingChips = paths.map((p) => {
       const id = crypto.randomUUID();
@@ -207,6 +213,8 @@
 
     try {
       const results = await ocrDocuments(paths);
+      // Guard against stale callbacks after context was cleared.
+      if (myToken !== ocrBatchToken) return;
       // Match results to chips by filename within this batch. The backend
       // returns { filename, text, page_count } for each successfully processed
       // file. Filename collisions (same basename from different folders) are a
@@ -220,6 +228,7 @@
         return { ...f, status: 'error' as const };
       });
     } catch (e) {
+      if (myToken !== ocrBatchToken) return; // Stale — context was cleared.
       ocrFiles = ocrFiles.map((f) =>
         idSet.has(f.id) ? { ...f, status: 'error' as const } : f,
       );

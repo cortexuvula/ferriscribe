@@ -50,6 +50,10 @@
   // Each chip carries its own text block so removal cleans up properly.
   let ocrFiles = $state<Array<{ id: string; filename: string; status: 'done' | 'loading' | 'error'; pageCount: number; text: string }>>([]);
   let ocrLoading = $state(false);
+  /// Monotonic batch token — incremented on recording switch. In-flight
+  /// OCR callbacks check this before writing state, preventing cross-patient
+  /// PHI leak when recordings switch during OCR.
+  let ocrBatchToken = 0;
 
   /// Derived: concatenation of all done-file text blocks. The user edits this
   /// in the preview textarea, but we rebuild from chips on removal. Using a
@@ -91,6 +95,7 @@
     // must never leak into the next patient's generation context.
     ocrFiles = [];
     ocrTextOverride = null;
+    ocrBatchToken++; // Invalidate any in-flight OCR callbacks.
   });
 
   // The Active badge lights up if ANY field has user input — derived state.
@@ -136,6 +141,7 @@
     if (paths.length === 0) return;
     ocrLoading = true;
     ocrTextOverride = null; // reset manual edits when new files arrive
+    const myToken = ++ocrBatchToken; // Capture token for this batch.
     // Add loading chips immediately so the user sees feedback. Track the chip
     // IDs created by THIS invocation so concurrent drops don't interfere.
     const chipIds: string[] = [];
@@ -157,6 +163,7 @@
 
     try {
       const results = await ocrDocuments(paths);
+      if (myToken !== ocrBatchToken) return; // Stale — recording switched.
       // Match results to THIS invocation's chips by filename within our batch.
       ocrFiles = ocrFiles.map((f) => {
         if (!idSet.has(f.id)) return f; // not our chip
@@ -172,6 +179,7 @@
         return { ...f, status: 'error' as const };
       });
     } catch (e) {
+      if (myToken !== ocrBatchToken) return; // Stale — recording switched.
       if (e instanceof OfflineCancelled) {
         // Dialog already informed the user; mark chips as error.
         ocrFiles = ocrFiles.map((f) =>
