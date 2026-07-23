@@ -113,6 +113,9 @@
   let progressUnlisten: UnlistenFn | null = null;
   let pipelineCompleteUnlisten: UnlistenFn | null = null;
   let pipelineFailedUnlisten: UnlistenFn | null = null;
+  let contentChangedUnlisten: UnlistenFn | null = null;
+  let recordingUpdatedUnlisten: UnlistenFn | null = null;
+  let syncCompleteUnlisten: UnlistenFn | null = null;
   // Theme sync is handled reactively via $effect below.
   let onGlobalKeydown: ((e: KeyboardEvent) => void) | null = null;
 
@@ -149,6 +152,9 @@
     progressUnlisten?.();
     pipelineCompleteUnlisten?.();
     pipelineFailedUnlisten?.();
+    contentChangedUnlisten?.();
+    recordingUpdatedUnlisten?.();
+    syncCompleteUnlisten?.();
     pipeline.destroy();
 
     // Listen for generation progress events globally so state persists across tab switches
@@ -241,6 +247,27 @@
         }
       },
     );
+
+    // Content sync event listeners — registered globally so they survive
+    // tab switches. Previously these were in RecordingsTab.svelte's onMount,
+    // meaning sync updates were missed while the user was on another tab.
+    const { subscribeContentSync } = await import('./lib/api/contentSync');
+    contentChangedUnlisten = await listen('content-changed', () => {
+      recordings.syncNow();
+    });
+    recordingUpdatedUnlisten = await listen('recording-updated', (e) => {
+      const payload = e.payload as { id: string };
+      recordings.handleRemoteUpdate(payload.id);
+    });
+    syncCompleteUnlisten = await listen('content-sync-complete', () => {
+      recordings.lastSyncedAt = new Date();
+    });
+    // Start the SSE subscription (long-lived backend task).
+    try {
+      await subscribeContentSync();
+    } catch (err) {
+      console.error('Failed to start content sync subscription:', err);
+    }
   });
 
   onDestroy(() => {
@@ -249,6 +276,9 @@
     pipeline.destroy();
     pipelineCompleteUnlisten?.();
     pipelineFailedUnlisten?.();
+    contentChangedUnlisten?.();
+    recordingUpdatedUnlisten?.();
+    syncCompleteUnlisten?.();
     updater.stopAutoCheck();
     audio.destroy();
   });

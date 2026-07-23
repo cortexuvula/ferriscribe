@@ -75,10 +75,18 @@ fn read_text_file(path: &Path) -> Result<String, OcrError> {
 }
 
 /// Encode raw image bytes as a base64 data URL.
+/// Normalizes the format to a valid MIME subtype (jpg → jpeg).
 fn encode_image_as_data_url(data: &[u8], format: &str) -> String {
     use base64::{Engine, engine::general_purpose};
+    let mime = match format.to_lowercase().as_str() {
+        "jpg" | "jpeg" => "jpeg",
+        "png" => "png",
+        "bmp" => "bmp",
+        "webp" => "webp",
+        _ => "png", // safe fallback
+    };
     let b64 = general_purpose::STANDARD.encode(data);
-    format!("data:image/{format};base64,{b64}")
+    format!("data:image/{mime};base64,{b64}")
 }
 
 /// The OCR system prompt instructing the model to extract text.

@@ -122,11 +122,17 @@ pub async fn start_recording(
         let _ = tx.send(result);
     });
 
+    // Receive the capture result on a blocking thread so we don't stall
+    // the Tokio async runtime worker while waiting for audio device init.
     let (send_handle, waveform_rx) = try_or_reset!(
         state,
-        rx.recv()
-            .map_err(|_| AppError::Audio("Audio capture thread panicked".to_string()))
-            .and_then(|r| r)
+        tokio::task::spawn_blocking(move || {
+            rx.recv()
+                .map_err(|_| AppError::Audio("Audio capture thread panicked".to_string()))
+                .and_then(|r| r)
+        })
+        .await
+        .map_err(|e| AppError::Audio(format!("capture join: {e}")))?
     );
 
     // Store capture handle in AppState.

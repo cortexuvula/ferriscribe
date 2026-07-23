@@ -65,13 +65,14 @@
       },
       onUpdate: ({ editor }) => {
         // Read Markdown out via the Markdown extension storage.
-        // Strip trailing backslash line-break escapes: tiptap-markdown
-        // emits `\` before single newlines (hard breaks) when breaks:true.
-        // These are markdown syntax that shouldn't appear in the stored text
-        // or when copying — they show up as literal `\` at line ends.
+        // Strip tiptap-markdown's hard-break escapes: it emits `\` before
+        // single newlines when breaks:true. Only strip when preceded by a
+        // non-whitespace character (the tiptap pattern) — a literal trailing
+        // backslash in a Windows path or formula at a line boundary would
+        // have whitespace or nothing before it.
         const raw = (editor.storage as { markdown?: { getMarkdown: () => string } })
           .markdown?.getMarkdown() ?? editor.getText();
-        const md = raw.replace(/\\\n/g, '\n');
+        const md = raw.replace(/(?<=\S)\\\n/g, '\n');
         onChange(md);
       },
     });
