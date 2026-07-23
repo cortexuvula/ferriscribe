@@ -211,6 +211,7 @@ fn build_sparse_fields(
 /// propagated so the caller can decide whether to surface them.
 async fn run_sync(
     db: Arc<Database>,
+    data_dir: &std::path::Path,
     remote: &crate::content_remote::ContentRemote<'_>,
     app: &tauri::AppHandle,
 ) -> AppResult<SyncSummary> {
@@ -362,13 +363,12 @@ async fn run_sync(
                         let db2 = Arc::clone(&audio_fetch_db);
                         let rec_id_owned = rec_id.clone();
                         let plaintext_bytes = plaintext;
+                        let data_dir_owned = data_dir.to_path_buf();
                         match tokio::task::spawn_blocking(move || -> AppResult<String> {
                             let conn = db2.conn()?;
-                            let data_dir = crate::commands::resolve_recordings_dir(
-                                &db2,
-                                &std::path::PathBuf::new(),
-                            )?;
-                            let target = data_dir.join(format!("{rec_id_owned}.enc"));
+                            let recordings_dir =
+                                crate::commands::resolve_recordings_dir(&db2, &data_dir_owned)?;
+                            let target = recordings_dir.join(format!("{rec_id_owned}.enc"));
                             if target.exists() {
                                 // File already exists (race with manual fetch).
                                 // Still update the DB audio_path since it was
@@ -632,7 +632,7 @@ pub async fn sync_content_now(
     };
     // Serialize sync rounds to prevent cursor races (H3).
     let _guard = state.content_sync_lock.lock().await;
-    let summary = run_sync(Arc::clone(&state.db), &remote, &app).await?;
+    let summary = run_sync(Arc::clone(&state.db), &state.data_dir, &remote, &app).await?;
     let payload = SyncSummaryPayload::from(summary);
     let _ = app.emit("content-sync-complete", payload);
     Ok(payload)
@@ -659,6 +659,7 @@ pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
         .state::<crate::state::AppState>()
         .content_sync_lock
         .clone();
+    let data_dir = app.state::<crate::state::AppState>().data_dir.clone();
     let _guard = sync_lock.lock().await;
 
     // Re-evaluate the gates without an AppState: load config + pairing from
@@ -698,7 +699,7 @@ pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
         Some(r) => r,
         None => return,
     };
-    match run_sync(db, &remote, &app).await {
+    match run_sync(db, &data_dir, &remote, &app).await {
         Ok(summary) => {
             tracing::info!(
                 pulled = summary.pulled,
