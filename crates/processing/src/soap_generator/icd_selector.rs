@@ -29,18 +29,20 @@ use medical_core::types::PatientContext;
 const MAX_CANDIDATES: usize = 40;
 
 /// High-frequency BC primary-care codes, always included as a floor so
-/// the selector never blanks out common presentations or the routine-
-/// encounter fallback.
+/// the selector never blanks out common presentations.
 ///
 /// Verified against the bundled MSP list — these codes all exist. Where
 /// the MSP list uses parent codes without trailing zeros (e.g. `786.5`
 /// not `786.50`), the MSP form is used.
 ///
-/// Kept to **25 entries** so the guaranteed slots never overflow
+/// Kept to **28 entries** so the guaranteed slots never overflow
 /// [`MAX_CANDIDATES`] and leave room for transcript-scored additions.
 ///
 /// **Clinical review note:** curated for a BC family-practice context.
-/// Adjust if the deployment context changes.
+/// V70.0 (routine exam) is intentionally NOT in the baseline — MSP
+/// prefers specific codes. Screening/preventive codes are included
+/// instead so the selector surfaces them for wellness visits. Adjust
+/// if the deployment context changes.
 const PRIMARY_CARE_BASELINE: &[&str] = &[
     // Cardiovascular / metabolic
     "401.9", // Essential hypertension, unspecified
@@ -72,8 +74,12 @@ const PRIMARY_CARE_BASELINE: &[&str] = &[
     // Mental health
     "311",   // Depressive disorder, NEC
     "300.0", // Anxiety states
-    // Encounter / administrative
-    "V70.0", // Routine general medical examination
+    // Screening / preventive (V70.0 intentionally omitted — MSP prefers
+    // specific codes; these surface for wellness/screening visits)
+    "V77.0", // Special screening for thyroid disorders
+    "V77.1", // Special screening for diabetes mellitus
+    "V16.0", // Family history of malignant neoplasm, GI tract
+    "V17.3", // Family history of ischaemic heart disease
 ];
 
 /// English stopwords excluded from tokenization.
@@ -165,7 +171,7 @@ pub fn select_icd9_candidates(
         let desc_set = &desc_sets[idx];
 
         let overlap = source_set.intersection(desc_set).count();
-        let mut score = overlap;
+        let mut score = overlap as i32;
 
         // Bonus: the bare code is mentioned verbatim in the source text.
         // Use a word-boundary match so bare 3-digit numeric codes (130, 250,
@@ -176,13 +182,19 @@ pub fn select_icd9_candidates(
             score += 3;
         }
 
+        // Specificity adjustment: MSP billing prefers specific codes.
+        // Boost specific codes (4-5 digit, V-screening) and penalize
+        // non-specific codes (V70.x routine exam) so they rank lower.
+        score += specificity_adjustment(&entry.code);
+
         if score > 0 {
-            scored.push((score, entry));
+            scored.push((score as usize, entry));
         }
     }
 
     // 3. Always-include baseline — these survive the cap regardless of
-    //    score, so a paperwork visit always has a valid code (V70.0) and
+    //    score, so common presentations are never blanked out by
+    //    incidental noise.
     //    common presentations are never blanked out by incidental noise.
     let baseline_floor = 1;
     let mut baseline: Vec<(usize, &'static Icd9Entry)> = Vec::new();
@@ -295,6 +307,40 @@ fn code_mentioned(code: &str, source_lower: &str) -> bool {
     false
 }
 
+/// Specificity scoring adjustment for MSP billing preference.
+///
+/// MSP prefers specific codes over vague ones. This function returns a
+/// small bonus or penalty:
+/// - **+1** for 4-5 digit codes (e.g. 250.40, 401.9) — more specific
+/// - **+1** for V-screening / family-history codes (V77.x, V16.x, V17.x,
+///   V18.x, V20.x) — preferred for wellness visits over V70.x
+/// - **-1** for V70.x codes — routine exam, MSP's least preferred
+/// - **0** for everything else (3-digit unspecified, other V/E codes)
+fn specificity_adjustment(code: &str) -> i32 {
+    if code.starts_with("V70.") || code == "V70" {
+        return -1; // Non-specific routine exam
+    }
+    // V-screening / family-history codes get a boost
+    if code.starts_with("V81.")
+        || code.starts_with("V77.")
+        || code.starts_with("V16.")
+        || code.starts_with("V17.")
+        || code.starts_with("V18.")
+        || code.starts_with("V20.")
+    {
+        return 1;
+    }
+    // 4-5 digit numeric codes (has a dot and at least 2 digits after)
+    let dot_count = code.matches('.').count();
+    if dot_count == 1 {
+        let after_dot = code.split('.').nth(1).unwrap_or("");
+        if after_dot.len() >= 2 {
+            return 1; // e.g. 250.40, 401.90
+        }
+    }
+    0
+}
+
 /// Returns true if the byte is an alphanumeric "word" character (for the
 /// word-boundary check in [`code_mentioned`]).
 fn is_word_char(b: &u8) -> bool {
@@ -340,21 +386,9 @@ mod tests {
     }
 
     #[test]
-    fn always_includes_routine_exam_v700() {
-        // Even with an empty/irrelevant transcript, V70.0 must appear
-        // via the baseline so a paperwork visit has a valid code.
-        let selected = select_icd9_candidates("nothing relevant here xyzzy", None, None);
-        let codes: Vec<&str> = selected.iter().map(|e| e.code.as_str()).collect();
-        assert!(
-            codes.contains(&"V70.0"),
-            "V70.0 must always be in selection"
-        );
-    }
-
-    #[test]
     fn empty_transcript_returns_baseline_only() {
         let selected = select_icd9_candidates("", None, None);
-        // Baseline has 25 entries, all guaranteed slots under the 40 cap;
+        // Baseline has 28 entries, all guaranteed slots under the 40 cap;
         // with no transcript matches nothing else is added.
         assert_eq!(
             selected.len(),
@@ -500,15 +534,23 @@ mod tests {
     fn baseline_codes_survive_cap_under_heavy_transcript_scoring() {
         // A transcript that scores many non-baseline entries must NOT push
         // baseline codes out of the 40-slot result. The baseline is the
-        // billing-critical floor (V70.0 etc. must always be available).
+        // billing-critical floor (screening / family-history V-codes must
+        // always be available).
         let transcript = "fever headache cough sore throat sinus pain congestion wheeze dyspnea chest pain abdominal pain nausea rash itching dizziness fatigue malaise myalgia arthralgia back pain";
         let selected = select_icd9_candidates(transcript, None, None);
         let codes: HashSet<&str> = selected.iter().map(|e| e.code.as_str()).collect();
-        // V70.0 is the last baseline entry by file order and the most likely
-        // to be starved if the cap logic regresses.
+        // V16.0 (family hx GI cancer) and V77.0 (thyroid screening) are
+        // late baseline entries and the most likely to be starved if the
+        // cap logic regresses — they never match this acute-symptom
+        // transcript, so they survive only via the baseline floor.
         assert!(
-            codes.contains("V70.0"),
-            "V70.0 must survive the cap even under heavy scoring: {:?}",
+            codes.contains("V16.0"),
+            "V16.0 must survive the cap even under heavy scoring: {:?}",
+            codes
+        );
+        assert!(
+            codes.contains("V77.0"),
+            "V77.0 must survive the cap even under heavy scoring: {:?}",
             codes
         );
         // Spot-check a few other high-frequency baselines.
