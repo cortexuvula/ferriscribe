@@ -38,6 +38,32 @@ use medical_db::recordings::RecordingsRepo;
 use crate::commands::sharing::PairedConnection;
 use crate::state::{self, AppState};
 
+/// Advance a cursor timestamp by 1 microsecond past the batch boundary.
+///
+/// After a push/pull batch succeeds, the cursor is set to the batch's
+/// `max(updated_at)`. Because `changed_since` uses strict `>` comparison,
+/// two recordings sharing the same `updated_at` would silently lose the
+/// second one (its timestamp is not `>` the cursor). Advancing the cursor
+/// by 1 microsecond guarantees it is strictly greater than every timestamp
+/// in the batch while still including same-timestamp recordings that were
+/// not part of this batch.
+///
+/// Parses the RFC3339 timestamp, adds 1 microsecond, re-serializes. If the
+/// input fails to parse, it is returned unchanged (the raw `max_ts` is
+/// still a safe-enough cursor — the data-loss window only affects rows
+/// sharing that exact timestamp).
+fn advance_cursor(ts: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(ts) {
+        Ok(dt) => {
+            let advanced = dt
+                .checked_add_signed(chrono::Duration::microseconds(1))
+                .unwrap_or(dt);
+            advanced.to_rfc3339()
+        }
+        Err(_) => ts.to_string(),
+    }
+}
+
 /// Returns `Some((conn, bearer, http_client))` when content sync should route
 /// through the office server. Three gates must all pass:
 ///
@@ -269,7 +295,7 @@ async fn run_sync(
                 // Advance cursor to skip this batch
                 if let Some(ref nc) = next_cursor {
                     let cursor_db = Arc::clone(&db);
-                    let nc = nc.clone();
+                    let nc = advance_cursor(nc);
                     let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
                         let conn = cursor_db.conn()?;
                         ContentSyncRepo::set_cursor(&conn, Some(&nc)).map_err(AppError::from)
@@ -295,7 +321,7 @@ async fn run_sync(
         // Advance the cursor if we made progress.
         if let Some(ref nc) = next_cursor {
             let cursor_db = Arc::clone(&db);
-            let nc = nc.clone();
+            let nc = advance_cursor(nc);
             tokio::task::spawn_blocking(move || {
                 let conn = cursor_db.conn()?;
                 ContentSyncRepo::set_cursor(&conn, Some(&nc)).map_err(AppError::from)
@@ -503,7 +529,7 @@ async fn run_sync(
                     tracing::warn!(error = %e, push_count, "sync: push batch failed, advancing cursor");
                     if let Some(ts) = max_ts {
                         let pc_db = Arc::clone(&db);
-                        let ts_owned = ts.clone();
+                        let ts_owned = advance_cursor(&ts);
                         let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
                             let conn = pc_db.conn()?;
                             ContentSyncRepo::set_push_cursor(&conn, &ts_owned)
@@ -523,6 +549,7 @@ async fn run_sync(
             // Advance the push cursor so we don't re-push these next time.
             if let Some(ts) = max_ts {
                 let pc_db = Arc::clone(&db);
+                let ts = advance_cursor(&ts);
                 tokio::task::spawn_blocking(move || -> AppResult<()> {
                     let conn = pc_db.conn()?;
                     ContentSyncRepo::set_push_cursor(&conn, &ts).map_err(AppError::from)
@@ -572,7 +599,7 @@ async fn run_sync(
             // cursor past them so they're not retried on every sync.
             tracing::warn!(cursor = %ts, "content sync push: advancing cursor past unreadable recordings");
             let pc_db = Arc::clone(&db);
-            let ts_owned = ts;
+            let ts_owned = advance_cursor(&ts);
             tokio::task::spawn_blocking(move || -> AppResult<()> {
                 let conn = pc_db.conn()?;
                 ContentSyncRepo::set_push_cursor(&conn, &ts_owned).map_err(AppError::from)

@@ -35,6 +35,20 @@ static CODE_LIKE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?:\d{3}\.\d+[a-z]?|[ve]\d+\.\d+)").expect("code-like regex compiles")
 });
 
+/// Pre-compiled abbreviation expansion patterns. Case-insensitive so
+/// "mi", "MI", "Mi" all expand. Compiled once via LazyLock instead of
+/// recompiling 20 regexes on every SOAP generation call.
+static ABBREV_PATTERNS: LazyLock<Vec<(regex::Regex, &'static str)>> = LazyLock::new(|| {
+    CLINICAL_ABBREVIATIONS
+        .iter()
+        .map(|(abbr, exp)| {
+            let re = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(abbr)))
+                .expect("abbreviation regex compiles");
+            (re, *exp)
+        })
+        .collect()
+});
+
 /// Clinical abbreviations expanded before tokenization so the selector can
 /// match them against ICD-9 description tokens. These are common 1-2 letter
 /// abbreviations that the <3-char token filter would otherwise drop.
@@ -276,15 +290,12 @@ pub fn select_icd9_candidates(
 fn tokenize(text: &str) -> Vec<String> {
     // Expand clinical abbreviations before tokenizing. This replaces
     // short tokens like "MI" with their full form so the <3-char filter
-    // doesn't drop them and they can match description tokens.
+    // doesn't drop them and they can match description tokens. Uses the
+    // precompiled case-insensitive ABBREV_PATTERNS (compiled once via
+    // LazyLock) instead of recompiling 20 regexes per call.
     let mut expanded = text.to_string();
-    for (abbr, expansion) in CLINICAL_ABBREVIATIONS {
-        // Case-insensitive whole-word replacement. Use word boundaries
-        // to avoid replacing substrings (e.g. "MI" inside "METFORMIN").
-        let pattern = format!(r"\b{}\b", regex::escape(abbr));
-        if let Ok(re) = regex::Regex::new(&pattern) {
-            expanded = re.replace_all(&expanded, *expansion).to_string();
-        }
+    for (re, expansion) in ABBREV_PATTERNS.iter() {
+        expanded = re.replace_all(&expanded, *expansion).to_string();
     }
 
     expanded
