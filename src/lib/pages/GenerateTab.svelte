@@ -202,14 +202,31 @@
   /// If OCR text + notes exceed this, the user must trim the preview.
   const MAX_CONTEXT_CHARS = 50_000;
 
+  /** Format medications/allergies/conditions as context text for non-SOAP docs. */
+  function formatStructuredContext(): string {
+    const parts: string[] = [];
+    if (medicationsText.trim()) {
+      parts.push(`Medications:\n${medicationsText.trim()}`);
+    }
+    if (allergiesText.trim()) {
+      parts.push(`Allergies:\n${allergiesText.trim()}`);
+    }
+    if (conditionsText.trim()) {
+      parts.push(`Known conditions:\n${conditionsText.trim()}`);
+    }
+    return parts.join('\n\n');
+  }
+
   async function handleGenerate(type: 'soap' | 'referral' | 'letter' | 'peer_discussion') {
     if (!recordings.selectedRecording) return;
     const recordingId = recordings.selectedRecording.id;
     generation.startGenerating(type);
-    // Combine notes context + OCR text into a single context string threaded
-    // to every generation type. Empty/whitespace-only input yields undefined
-    // so the backend treats context as absent.
-    const combinedContext = [contextText.trim(), ocrTextDisplay.trim()]
+    // Combine structured patient context + notes context + OCR text into a
+    // single context string threaded to every generation type. SOAP already
+    // passes the structured fields via buildPatientContext, but including them
+    // here too is harmless redundancy. Empty/whitespace-only input yields
+    // undefined so the backend treats context as absent.
+    const combinedContext = [formatStructuredContext(), contextText.trim(), ocrTextDisplay.trim()]
       .filter(Boolean)
       .join('\n\n') || undefined;
 
