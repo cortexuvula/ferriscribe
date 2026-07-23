@@ -19,6 +19,7 @@
 //! 5. Sort by score desc, dedupe, cap at [`MAX_CANDIDATES`].
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use medical_core::icd9::{self, Icd9Entry};
 use medical_core::types::PatientContext;
@@ -27,6 +28,38 @@ use medical_core::types::PatientContext;
 /// The baseline occupies guaranteed slots; the remainder are filled by
 /// transcript-scored matches.
 const MAX_CANDIDATES: usize = 40;
+
+/// Compiled once — matches code-like substrings (dotted numeric or V/E codes)
+/// in the lowercased source text. Previously recompiled on every SOAP generation.
+static CODE_LIKE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?:\d{3}\.\d+[a-z]?|[ve]\d+\.\d+)").expect("code-like regex compiles")
+});
+
+/// Clinical abbreviations expanded before tokenization so the selector can
+/// match them against ICD-9 description tokens. These are common 1-2 letter
+/// abbreviations that the <3-char token filter would otherwise drop.
+const CLINICAL_ABBREVIATIONS: &[(&str, &str)] = &[
+    ("MI", "myocardial infarction"),
+    ("CP", "chest pain"),
+    ("DM", "diabetes mellitus"),
+    ("UTI", "urinary tract infection"),
+    ("GERD", "gastroesophageal reflux"),
+    ("COPD", "chronic obstructive pulmonary disease"),
+    ("CHF", "congestive heart failure"),
+    ("CKD", "chronic kidney disease"),
+    ("AKI", "acute kidney injury"),
+    ("AFib", "atrial fibrillation"),
+    ("BPH", "benign prostatic hypertrophy"),
+    ("DVT", "deep venous thrombosis"),
+    ("PE", "pulmonary embolism"),
+    ("TIA", "transient ischemic attack"),
+    ("OA", "osteoarthritis"),
+    ("MSK", "musculoskeletal"),
+    ("URI", "upper respiratory infection"),
+    ("PUD", "peptic ulcer disease"),
+    ("IBS", "irritable bowel syndrome"),
+    ("IBD", "inflammatory bowel disease"),
+];
 
 /// High-frequency BC primary-care codes, always included as a floor so
 /// the selector never blanks out common presentations.
@@ -83,6 +116,8 @@ const PRIMARY_CARE_BASELINE: &[&str] = &[
 ];
 
 /// English stopwords excluded from tokenization.
+/// Note: "back", "side", "left", "right" are intentionally KEPT — they
+/// carry clinical meaning (back pain, right-sided weakness, left arm).
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "that", "this", "with", "from", "have", "has", "was", "were", "are",
     "been", "not", "but", "his", "her", "she", "him", "you", "your", "they", "their", "will",
@@ -91,8 +126,9 @@ const STOPWORDS: &[&str] = &[
     "three", "also", "just", "like", "what", "when", "where", "which", "how", "who", "whom",
     "patient", "doctor", "today", "visit", "come", "came", "going", "get", "got", "yes", "yeah",
     "okay", "ok", "well", "know", "think", "feel", "feeling", "really", "very", "kind", "sort",
-    "bit", "lot", "stuff", "thing", "things", "here", "there", "right", "left", "back", "side",
-    "been", "being", "had",
+    "bit", "lot", "stuff", "thing", "things", "here", "there",
+    // "right", "left", "back", "side" intentionally KEPT — clinically meaningful
+    "being", "had",
 ];
 
 /// Selects a relevant subset of ICD-9 codes for the SOAP prompt.
@@ -147,20 +183,11 @@ pub fn select_icd9_candidates(
     // Add entries whose code appears verbatim in the source. The
     // tokenization splits dotted codes (786.5 → "786" + "5"), so we scan
     // the source for code-like substrings directly and look them up in
-    // the O(1) code index. Only distinctive codes (dotted or alpha) are
-    // worth checking — bare 3-digit codes collide with lab values.
-    let code_index = icd9::code_index();
-    // Extract code-like tokens: substrings matching \d{3}\.\d or [VE]\d+\.\d
-    // from the lowercased source. This is a lightweight scan, not the full
-    // per-entry code_mentioned regex.
-    for m in regex::Regex::new(r"(?P<code>(?:\d{3}\.\d+[a-z]?|[ve]\d+\.\d+))")
-        .expect("code-like regex compiles")
-        .find_iter(&source_lower)
-    {
+    // the O(1) code→index map.
+    let code_to_idx = icd9::code_to_idx();
+    for m in CODE_LIKE_RE.find_iter(&source_lower) {
         let code = m.as_str().to_uppercase();
-        if let Some(entry) = code_index.get(&code)
-            && let Some(idx) = entries.iter().position(|e| std::ptr::eq(e, *entry))
-        {
+        if let Some(&idx) = code_to_idx.get(&code) {
             candidate_indices.insert(idx);
         }
     }
@@ -239,11 +266,29 @@ pub fn select_icd9_candidates(
 
 /// Lowercase alphanumeric tokenization with stopword + short-token removal.
 ///
+/// Before tokenizing, expands common clinical abbreviations (MI → myocardial
+/// infarction, CP → chest pain, etc.) so 1-2 letter abbreviations that the
+/// <3-char filter would drop can still match ICD-9 descriptions.
+///
 /// Returns owned lowercased strings so the resulting sets can be compared
 /// case-insensitively — MSP descriptions are stored ALL UPPERCASE while
 /// transcripts are mixed-case, so both sides must be normalized to match.
 fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
+    // Expand clinical abbreviations before tokenizing. This replaces
+    // short tokens like "MI" with their full form so the <3-char filter
+    // doesn't drop them and they can match description tokens.
+    let mut expanded = text.to_string();
+    for (abbr, expansion) in CLINICAL_ABBREVIATIONS {
+        // Case-insensitive whole-word replacement. Use word boundaries
+        // to avoid replacing substrings (e.g. "MI" inside "METFORMIN").
+        let pattern = format!(r"\b{}\b", regex::escape(abbr));
+        if let Ok(re) = regex::Regex::new(&pattern) {
+            expanded = re.replace_all(&expanded, *expansion).to_string();
+        }
+    }
+
+    expanded
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|s| {
             if s.len() < 3 {
                 return false;

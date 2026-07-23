@@ -81,6 +81,18 @@ static CODE_SET: LazyLock<BTreeSet<String>> =
 static CODE_INDEX: LazyLock<HashMap<String, &'static Icd9Entry>> =
     LazyLock::new(|| ENTRIES.iter().map(|e| (e.code.clone(), e)).collect());
 
+/// HashMap index: code → entry index (usize), for O(1) position lookups.
+/// The selector needs the index (not the entry ref) to access parallel
+/// arrays like `DESC_TOKEN_SETS`. Without this, it had to do an O(7,122)
+/// linear scan per regex-matched code.
+static CODE_TO_IDX: LazyLock<HashMap<String, usize>> = LazyLock::new(|| {
+    ENTRIES
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.code.clone(), i))
+        .collect()
+});
+
 /// Pre-tokenized (lowercased) description token sets, one per entry.
 /// Avoids re-tokenizing all 7,122 descriptions on every SOAP generation.
 /// Allocated once; the selector reads these without allocation.
@@ -118,6 +130,12 @@ pub fn code_set() -> &'static BTreeSet<String> {
 /// Returns the code→entry HashMap index for O(1) lookups.
 pub fn code_index() -> &'static HashMap<String, &'static Icd9Entry> {
     &CODE_INDEX
+}
+
+/// Returns the code→index HashMap for O(1) position lookups.
+/// Used by the selector to avoid O(n) linear scans.
+pub fn code_to_idx() -> &'static HashMap<String, usize> {
+    &CODE_TO_IDX
 }
 
 /// Returns the pre-tokenized description token sets (one per entry,
