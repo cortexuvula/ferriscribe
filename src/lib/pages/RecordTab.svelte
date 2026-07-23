@@ -22,6 +22,9 @@
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
   import { generateSoap } from '../api/generation';
+  import { ocrDocuments } from '../api/ocr';
+  import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
+  import type { OcrFileStatus } from '../components/OcrDropZone.svelte';
 
   type Props = {
     onopenSettings?: (target: 'models' | 'audio') => void;
@@ -33,6 +36,18 @@
   let medicationsText = $state('');
   let allergiesText = $state('');
   let conditionsText = $state('');
+
+  // OCR state: mirrors the GenerateTab pattern. Transient — cleared on new recording.
+  let ocrFiles = $state<OcrFileStatus[]>([]);
+  let ocrLoading = $state(false);
+  let ocrTextOverride = $state<string | null>(null);
+  let ocrText = $derived(
+    ocrFiles
+      .filter((f) => f.status === 'done' && f.text)
+      .map((f) => `--- ${f.filename} ---\n${f.text}`)
+      .join('\n\n'),
+  );
+  let ocrTextDisplay = $derived(ocrTextOverride ?? ocrText);
 
   // Sidebar UI state — synced with the persisted recordSidebar store.
   let sidebarOpen = $state(true);
@@ -132,6 +147,58 @@
     medicationsText = '';
     allergiesText = '';
     conditionsText = '';
+    ocrFiles = [];
+    ocrTextOverride = null;
+  }
+
+  /** Combine notes + OCR text into the pipeline context string. */
+  function buildPipelineContext(): string | undefined {
+    return [contextText.trim(), ocrTextDisplay.trim()].filter(Boolean).join('\n\n') || undefined;
+  }
+
+  async function handleOcrFilesSelected(paths: string[]) {
+    if (paths.length === 0) return;
+    ocrLoading = true;
+    ocrTextOverride = null;
+    const chipIds: string[] = [];
+    const pendingChips = paths.map((p) => {
+      const id = crypto.randomUUID();
+      chipIds.push(id);
+      const filename = p.split(/[/\\]/).pop() || p;
+      return { id, filename, path: p, status: 'loading' as const, pageCount: 0, text: '' };
+    });
+    ocrFiles = [...ocrFiles, ...pendingChips];
+    const idSet = new Set(chipIds);
+
+    try {
+      const results = await ocrDocuments(paths);
+      ocrFiles = ocrFiles.map((f) => {
+        if (!idSet.has(f.id)) return f;
+        const result = results.find((r) => r.filename === f.filename);
+        if (result) {
+          return { ...f, status: 'done' as const, pageCount: result.page_count, text: result.text };
+        }
+        return { ...f, status: 'error' as const };
+      });
+    } catch (e) {
+      ocrFiles = ocrFiles.map((f) =>
+        idSet.has(f.id) ? { ...f, status: 'error' as const } : f,
+      );
+      if (!(e instanceof OfflineCancelled)) {
+        console.error('OCR failed:', e);
+      }
+    } finally {
+      ocrLoading = ocrFiles.some((f) => f.status === 'loading');
+    }
+  }
+
+  function handleOcrTextChange(text: string) {
+    ocrTextOverride = text;
+  }
+
+  function handleRemoveOcrFile(id: string) {
+    ocrFiles = ocrFiles.filter((f) => f.id !== id);
+    ocrTextOverride = null;
   }
 
   function handleStartRecording() {
@@ -174,7 +241,7 @@
     } catch (_e) {
       // If the silence check itself fails, don't block the pipeline.
     }
-    pipeline.launch(recordingId, contextText || undefined, undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
+    pipeline.launch(recordingId, buildPipelineContext(), undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
   }
 
   async function warnIfSilent(recordingId: string) {
@@ -196,7 +263,7 @@
     silenceDialogRecordingId = null;
     if (id) {
       pipelineRecordingId = id;
-      pipeline.launch(id, contextText || undefined, undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
+      pipeline.launch(id, buildPipelineContext(), undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
     }
   }
 
@@ -229,7 +296,7 @@
 
   function handleRetry() {
     if (!pipelineRecordingId) return;
-    pipeline.retry(pipelineRecordingId, contextText || undefined, undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
+    pipeline.retry(pipelineRecordingId, buildPipelineContext(), undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
   }
 
   // Regenerate the SOAP note using the current Patient Context, without
@@ -404,6 +471,12 @@
       open={sidebarOpen}
       width={sidebarWidth}
       onToggle={toggleSidebar}
+      {ocrFiles}
+      ocrText={ocrTextDisplay}
+      {ocrLoading}
+      onOcrFilesSelected={handleOcrFilesSelected}
+      onOcrTextChange={handleOcrTextChange}
+      onRemoveOcrFile={handleRemoveOcrFile}
     />
   </div>
 </div>
