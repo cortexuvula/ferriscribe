@@ -127,9 +127,10 @@ class RecordingsStore {
   async restore(id: string): Promise<void> {
     try {
       await restoreRecording(id);
-      // Re-insert the cached summary at its original position (front, since
-      // recordings are sorted newest-first and it was the most recent action).
-      if (this.lastDeleted) {
+      // Re-insert the cached summary ONLY if it matches the id being restored.
+      // Without this guard, undoing deletion A after deletion B (which
+      // overwrote lastDeleted) would insert B's summary where A should be.
+      if (this.lastDeleted && this.lastDeleted.id === id) {
         this.list = [this.lastDeleted, ...this.list];
         this.lastDeleted = null;
       }

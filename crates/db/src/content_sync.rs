@@ -245,20 +245,27 @@ impl ContentSyncRepo {
         // "row exists but value is NULL" (first run). Using `row.get`
         // on a NULL column returns InvalidColumnType, so we use
         // `row.get::<_, Option<String>>` which maps NULL → None.
-        let cursor: Option<String> = conn
-            .query_row(
-                "SELECT value FROM sync_state WHERE key = 'content_sync_cursor'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .unwrap_or(None);
-        let last_pull: Option<String> = conn
-            .query_row(
-                "SELECT value FROM sync_state WHERE key = 'content_sync_last_pull'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .unwrap_or(None);
+        //
+        // QueryResultNoRows (row missing entirely) is treated as first run.
+        // Other errors (SQLITE_BUSY, disk I/O, corruption) are propagated.
+        let cursor: Option<String> = match conn.query_row(
+            "SELECT value FROM sync_state WHERE key = 'content_sync_cursor'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(DbError::from(e)),
+        };
+        let last_pull: Option<String> = match conn.query_row(
+            "SELECT value FROM sync_state WHERE key = 'content_sync_last_pull'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(DbError::from(e)),
+        };
         Ok(SyncCursor { cursor, last_pull })
     }
 
@@ -293,14 +300,17 @@ impl ContentSyncRepo {
         // One-time reset: clear any stale push cursor left by earlier
         // versions that conflated pull and push cursors. Uses a versioned
         // sentinel key so each version bump can trigger a fresh full re-push.
-        let needs_reset: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sync_state WHERE key = 'content_sync_push_v3_reset'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-            == 0;
+        let needs_reset: bool = match conn.query_row(
+            "SELECT COUNT(*) FROM sync_state WHERE key = 'content_sync_push_v3_reset'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(0) => true,
+            Ok(_) => false,
+            // Row should always exist (COUNT always returns a row), but if
+            // something goes wrong, skip the reset rather than failing.
+            Err(_) => false,
+        };
         if needs_reset {
             conn.execute(
                 "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('content_sync_push_v3_reset', '1')",
@@ -314,13 +324,15 @@ impl ContentSyncRepo {
             return Ok(None);
         }
 
-        let cursor: Option<String> = conn
-            .query_row(
-                "SELECT value FROM sync_state WHERE key = 'content_sync_push_cursor'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .unwrap_or(None);
+        let cursor: Option<String> = match conn.query_row(
+            "SELECT value FROM sync_state WHERE key = 'content_sync_push_cursor'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(DbError::from(e)),
+        };
         Ok(cursor)
     }
 

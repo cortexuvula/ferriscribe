@@ -46,6 +46,16 @@ pub async fn process_recording(
     if let Some(ref pc) = patient_context {
         super::generation::validate_patient_context(pc)?;
     }
+    // Validate context size up-front (fail fast before transcription runs).
+    if let Some(ref ctx) = context
+        && ctx.len() > super::generation::MAX_CONTEXT_CHARS
+    {
+        return Err(AppError::Other(format!(
+            "Context too large: {} chars, limit is {}",
+            ctx.len(),
+            super::generation::MAX_CONTEXT_CHARS
+        )));
+    }
 
     let rid = recording_id.clone();
 
