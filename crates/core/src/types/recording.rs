@@ -15,7 +15,13 @@ use uuid::Uuid;
 /// freeform `context` (string) and structured `patient_context`
 /// ([`PatientContext`](super::agent::PatientContext) shape). New metadata
 /// keys are non-breaking.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # PHI note
+///
+/// Manual `Debug` impl redacts transcript, SOAP note, referral, letter,
+/// peer discussion, chat, and patient name — these are PHI and must never
+/// appear in logs or panic backtraces.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Recording {
     /// Unique identifier (UUIDv4, assigned at creation).
     pub id: Uuid,
@@ -57,6 +63,65 @@ pub struct Recording {
     /// delta filtering. Set to `created_at` on insert, bumped on every update.
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// Manual Debug impl that redacts PHI-bearing fields. Only logs structural
+/// metadata (id, filename, status, timestamps, provider names, sizes) —
+/// never transcript, SOAP note, referral, letter, chat, or patient name.
+impl std::fmt::Debug for Recording {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recording")
+            .field("id", &self.id)
+            .field("filename", &self.filename)
+            .field(
+                "transcript",
+                &self
+                    .transcript
+                    .as_ref()
+                    .map(|t| format!("<{} chars>", t.len())),
+            )
+            .field(
+                "soap_note",
+                &self
+                    .soap_note
+                    .as_ref()
+                    .map(|t| format!("<{} chars>", t.len())),
+            )
+            .field(
+                "referral",
+                &self
+                    .referral
+                    .as_ref()
+                    .map(|t| format!("<{} chars>", t.len())),
+            )
+            .field(
+                "letter",
+                &self.letter.as_ref().map(|t| format!("<{} chars>", t.len())),
+            )
+            .field(
+                "peer_discussion",
+                &self
+                    .peer_discussion
+                    .as_ref()
+                    .map(|t| format!("<{} chars>", t.len())),
+            )
+            .field(
+                "chat",
+                &self.chat.as_ref().map(|t| format!("<{} chars>", t.len())),
+            )
+            .field("patient_name", &"<redacted>")
+            .field("audio_path", &self.audio_path)
+            .field("duration_seconds", &self.duration_seconds)
+            .field("file_size_bytes", &self.file_size_bytes)
+            .field("stt_provider", &self.stt_provider)
+            .field("ai_provider", &self.ai_provider)
+            .field("tags", &self.tags)
+            .field("status", &self.status)
+            .field("created_at", &self.created_at)
+            .field("metadata", &"<redacted>")
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 impl Recording {

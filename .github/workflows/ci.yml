@@ -115,12 +115,15 @@ jobs:
         # default, and exits zero on "unmaintained" warnings. We don't use
         # --deny warnings because unmaintained crates (GTK3 bindings from
         # Tauri's Linux webview, proc-macro-error, etc.) are transitive deps
-        # we can't control. Ignored advisories are all parse-only vectors in
-        # transitive deps we only use for writing (never parsing external input):
-        # - lopdf (RUSTSEC-2026-0187): PDF parse stack overflow — transitive
-        #   from printpdf (write) and pdf-extract (OCR text extraction from
-        #   user-supplied PDFs; the advisory requires deeply nested objects,
-        #   which our extraction path doesn't produce).
+        # we can't control. Ignored advisories are parse-only vectors in
+        # transitive deps:
+        # - lopdf (RUSTSEC-2026-0187): PDF parse stack overflow via deeply
+        #   nested objects. Transitive from printpdf (write-only, no risk)
+        #   and pdf-extract (OCR text extraction from USER-SUPPLIED PDFs —
+        #   a crafted PDF COULD trigger this). Risk accepted: pdf-extract
+        #   runs locally, crash is non-exploitable (DoS only, no RCE), and
+        #   the user explicitly dropped the file for OCR. TODO: migrate to
+        #   a sandboxed PDF parser or lopdf >=0.42 by 2026-10-01.
         # - quick-xml (RUSTSEC-2026-0194, 0195): XML parse DoS — only in
         #   docx-rs (write) and plist/Tauri (internal config, not external).
         # Tracked for dependency bumps (printpdf 0.7→0.9, pdf-extract→alt).

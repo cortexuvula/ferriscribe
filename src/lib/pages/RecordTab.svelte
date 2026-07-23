@@ -187,9 +187,15 @@
 
   /** Wait for in-flight OCR to finish (up to 60s) so its text is included
    *  in the pipeline context. Prevents the race where recording stops while
-   *  OCR chips are still in 'loading' status. */
+   *  OCR chips are still in 'loading' status. Shows a toast so the user
+   *  knows why the pipeline hasn't started yet. */
   async function waitForOcrSettled(): Promise<void> {
     if (!ocrLoading) return;
+    toasts.add({
+      message: 'Waiting for document OCR to complete before processing…',
+      type: 'success',
+      autoDismiss: true,
+    });
     const deadline = Date.now() + 60_000;
     while (ocrLoading && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 200));
