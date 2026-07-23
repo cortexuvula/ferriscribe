@@ -78,6 +78,8 @@
     <span class="status-provider">AI: {settings.state.ai_provider}/{settings.state.ai_model}</span>
     <span class="status-sep">·</span>
     <span class="status-provider">STT: {settings.state.whisper_model}</span>
+    <span class="status-sep">·</span>
+    <span class="status-provider">OCR: {settings.state.ocr_model ?? settings.state.ai_model}</span>
   </div>
 </div>
 
