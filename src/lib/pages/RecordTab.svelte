@@ -309,7 +309,7 @@
     if (!rid || regenerating) return;
     regenerating = true;
     try {
-      const ctx = contextText.trim() || undefined;
+      const ctx = buildPipelineContext();
       const pc = buildPatientContext(medicationsText, allergiesText, conditionsText);
       await generateSoap(rid, undefined, ctx, pc);
       // Re-fetch so soapNoteText (and the editor) reflect the new note.
