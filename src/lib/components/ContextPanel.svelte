@@ -228,7 +228,7 @@
         >
           <span class="dropzone-icon">📎</span>
           <span class="dropzone-text">Drop documents here</span>
-          <span class="dropzone-hint">or click to browse — PDF, PNG, JPG, TXT</span>
+          <span class="dropzone-hint">or click to browse — PDF, PNG, JPG, TXT — max 100 MB per file</span>
         </div>
 
         {#if ocrFiles.length > 0}

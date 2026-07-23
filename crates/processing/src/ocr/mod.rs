@@ -123,9 +123,9 @@ fn extract_pdf_text(path: &Path) -> Result<String, OcrError> {
     Ok(text.trim().to_string())
 }
 
-/// Maximum file size for OCR processing (25 MB). Guards against OOM when
+/// Maximum file size for OCR processing (100 MB). Guards against OOM when
 /// reading large images or PDFs into memory and base64-encoding them.
-const MAX_OCR_FILE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_OCR_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Extract text from a list of document file paths.
 ///
@@ -173,12 +173,23 @@ pub async fn extract_text(
             }
         };
         if file_size > MAX_OCR_FILE_BYTES {
+            let limit_mb = MAX_OCR_FILE_BYTES / (1024 * 1024);
+            let size_mb = file_size / (1024 * 1024);
             tracing::warn!(
                 filename = %filename,
                 size_bytes = file_size,
                 limit_bytes = MAX_OCR_FILE_BYTES,
-                "OCR: file exceeds size limit, skipping"
+                "OCR: file exceeds size limit, returning error result"
             );
+            // Return a result with an explanatory message so the user sees
+            // WHY the file wasn't processed, rather than a silent skip.
+            results.push(OcrPageResult {
+                filename,
+                text: format!(
+                    "[File too large for OCR: {size_mb} MB exceeds the {limit_mb} MB limit.]"
+                ),
+                page_count: 0,
+            });
             continue;
         }
 
