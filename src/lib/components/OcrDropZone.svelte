@@ -31,13 +31,28 @@
 
   let isDragging = $state(false);
 
+  /// Allowed extensions for drop-path filtering (must match the browse dialog).
+  const SUPPORTED_EXTENSIONS = new Set([
+    'pdf', 'png', 'jpg', 'jpeg', 'bmp', 'webp', 'tiff', 'tif',
+    'txt', 'md', 'csv', 'docx', 'xlsx',
+  ]);
+
+  /// Filter dropped/browsed paths to only supported extensions.
+  /// Returns only paths whose extension is in the allow-list.
+  function filterSupported(paths: string[]): string[] {
+    return paths.filter((p) => {
+      const ext = p.split('.').pop()?.toLowerCase() ?? '';
+      return SUPPORTED_EXTENSIONS.has(ext);
+    });
+  }
+
   async function handleBrowse() {
     const selected = await open({
       multiple: true,
       filters: [
         {
           name: 'Documents',
-          extensions: ['pdf', 'png', 'jpg', 'jpeg', 'bmp', 'webp', 'tiff', 'tif', 'txt', 'md', 'csv', 'docx', 'xlsx'],
+          extensions: [...SUPPORTED_EXTENSIONS],
         },
       ],
     });
@@ -64,7 +79,10 @@
           isDragging = false;
           const paths = event.payload.paths;
           if (paths && paths.length > 0) {
-            onOcrFilesSelected(paths);
+            const supported = filterSupported(paths);
+            if (supported.length > 0) {
+              onOcrFilesSelected(supported);
+            }
           }
         }
       });
