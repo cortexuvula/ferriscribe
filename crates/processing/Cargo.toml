@@ -21,6 +21,10 @@ zip = "2.4"
 quick-xml = "0.36"
 calamine = "0.26"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "tiff"] }
+
+# HEIC/HEIF support via libheif (embedded build). Skipped on Windows where
+# the embedded build requires vcpkg infrastructure not available in CI.
+[target.'cfg(not(target_os = "windows"))'.dependencies]
 libheif-rs = { version = "2.7", default-features = false, features = ["v1_17"] }
 libheif-sys = { version = "5.3", features = ["embedded-libheif"] }
 

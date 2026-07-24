@@ -113,6 +113,9 @@ fn encode_image_as_data_url(data: &[u8], format: &str) -> String {
 ///
 /// Vision models don't accept HEIC, so we convert to PNG before sending.
 /// Uses libheif (compiled from embedded sources via `embedded-libheif`).
+///
+/// Not available on Windows (libheif embedded build requires vcpkg).
+#[cfg(not(target_os = "windows"))]
 fn heic_to_png(heic_data: &[u8]) -> Result<Vec<u8>, String> {
     use libheif_rs::{ColorSpace, HeifContext, RgbChroma};
 
@@ -608,7 +611,7 @@ pub async fn extract_text(
                 let image_data = match tokio::task::spawn_blocking(move || {
                     let raw =
                         std::fs::read(&path_buf).map_err(|e| OcrError::ReadError(e.to_string()))?;
-                    // Convert TIFF or HEIC to PNG — vision models don't accept these directly.
+                    // Convert TIFF to PNG — vision models don't accept TIFF directly.
                     if ext_for_capture == "tiff" || ext_for_capture == "tif" {
                         let img =
                             image::load_from_memory_with_format(&raw, image::ImageFormat::Tiff)
@@ -622,9 +625,21 @@ pub async fn extract_text(
                         Ok::<Vec<u8>, OcrError>(png_bytes)
                     } else if ext_for_capture == "heic" || ext_for_capture == "heif" {
                         // Decode HEIC via libheif, then re-encode as PNG.
-                        let img = heic_to_png(&raw)
-                            .map_err(|e| OcrError::ReadError(format!("HEIC decode: {e}")))?;
-                        Ok::<Vec<u8>, OcrError>(img)
+                        // Not available on Windows (libheif requires vcpkg).
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            let img = heic_to_png(&raw)
+                                .map_err(|e| OcrError::ReadError(format!("HEIC decode: {e}")))?;
+                            Ok::<Vec<u8>, OcrError>(img)
+                        }
+                        // On Windows, HEIC is not supported — return a clear error.
+                        #[cfg(target_os = "windows")]
+                        {
+                            let _ = raw;
+                            Err(OcrError::ReadError(
+                                "HEIC is not supported on Windows. Convert to JPG or PNG.".into(),
+                            ))
+                        }
                     } else {
                         Ok(raw)
                     }
