@@ -33,6 +33,10 @@ pub enum OcrError {
     ReadError(String),
     #[error("PDF text extraction failed: {0}")]
     PdfExtraction(String),
+    #[error("DOCX extraction failed: {0}")]
+    DocxExtraction(String),
+    #[error("XLSX extraction failed: {0}")]
+    XlsxExtraction(String),
     #[error("OCR model error: {0}")]
     ModelError(String),
     #[error("file too large for OCR: {0} bytes (limit: {1} bytes)")]
@@ -167,24 +171,24 @@ const OCR_PER_FILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 fn extract_docx_text(path: &Path) -> Result<String, OcrError> {
     let file = std::fs::File::open(path).map_err(|e| OcrError::ReadError(e.to_string()))?;
     let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| OcrError::PdfExtraction(format!("docx open: {e}")))?;
+        .map_err(|e| OcrError::DocxExtraction(format!("docx open: {e}")))?;
 
     let mut document_xml = String::new();
     for i in 0..archive.len() {
         let zf = archive
             .by_index(i)
-            .map_err(|e| OcrError::PdfExtraction(format!("docx read: {e}")))?;
+            .map_err(|e| OcrError::DocxExtraction(format!("docx read: {e}")))?;
         if zf.name() == "word/document.xml" {
             use std::io::Read;
             zf.take(10 * 1024 * 1024) // 10MB cap on XML
                 .read_to_string(&mut document_xml)
-                .map_err(|e| OcrError::PdfExtraction(format!("docx xml read: {e}")))?;
+                .map_err(|e| OcrError::DocxExtraction(format!("docx xml read: {e}")))?;
             break;
         }
     }
 
     if document_xml.is_empty() {
-        return Err(OcrError::PdfExtraction(
+        return Err(OcrError::DocxExtraction(
             "docx: word/document.xml not found".into(),
         ));
     }
@@ -241,7 +245,7 @@ fn extract_xlsx_text(path: &Path) -> Result<String, OcrError> {
     use calamine::{Data, Reader, Xlsx, open_workbook};
 
     let mut workbook: Xlsx<_> =
-        open_workbook(path).map_err(|e| OcrError::PdfExtraction(format!("xlsx open: {e}")))?;
+        open_workbook(path).map_err(|e| OcrError::XlsxExtraction(format!("xlsx open: {e}")))?;
 
     let mut lines = Vec::new();
     for sheet_name in workbook.sheet_names().clone() {
@@ -307,6 +311,11 @@ pub async fn extract_text(
 
         if !path.exists() {
             tracing::warn!(filename = %filename, "OCR: file not found, skipping");
+            results.push(OcrPageResult {
+                filename,
+                text: "[File not found. It may have been moved or deleted.]".to_string(),
+                page_count: 0,
+            });
             continue;
         }
 
@@ -315,6 +324,11 @@ pub async fn extract_text(
             Ok(m) => m.len(),
             Err(e) => {
                 tracing::warn!(filename = %filename, error = %e, "OCR: cannot read metadata, skipping");
+                results.push(OcrPageResult {
+                    filename,
+                    text: format!("[Cannot read file properties: {e}]"),
+                    page_count: 0,
+                });
                 continue;
             }
         };
@@ -362,7 +376,15 @@ pub async fn extract_text(
         let strategy = match classify(path) {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(filename = %filename, error = %e, "OCR: unsupported file, skipping");
+                let ext_str = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                tracing::warn!(filename = %filename, error = %e, "OCR: unsupported file type");
+                results.push(OcrPageResult {
+                    filename,
+                    text: format!(
+                        "[Unsupported file type: .{ext_str}. Supported: PDF, PNG, JPG, BMP, WebP, TIFF, TXT, MD, CSV, DOCX, XLSX.]"
+                    ),
+                    page_count: 0,
+                });
                 continue;
             }
         };
@@ -380,7 +402,12 @@ pub async fn extract_text(
                     });
                 }
                 Err(e) => {
-                    tracing::warn!(filename = %filename, error = %e, "OCR: text read failed, skipping");
+                    tracing::warn!(filename = %filename, error = %e, "OCR: text read failed");
+                    results.push(OcrPageResult {
+                        filename,
+                        text: format!("[Could not read text file: {e}]"),
+                        page_count: 0,
+                    });
                     continue;
                 }
             },
@@ -443,6 +470,11 @@ pub async fn extract_text(
                     }
                     Err(e) => {
                         tracing::warn!(filename = %filename, error = %e, "OCR: PDF task failed");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: format!("[PDF processing failed unexpectedly: {e}]"),
+                            page_count: 0,
+                        });
                         continue;
                     }
                 }
@@ -490,6 +522,11 @@ pub async fn extract_text(
                     }
                     Err(e) => {
                         tracing::warn!(filename = %filename, error = %e, "OCR: docx task failed");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: format!("[Word document processing failed unexpectedly: {e}]"),
+                            page_count: 0,
+                        });
                         continue;
                     }
                 }
@@ -537,6 +574,11 @@ pub async fn extract_text(
                     }
                     Err(e) => {
                         tracing::warn!(filename = %filename, error = %e, "OCR: xlsx task failed");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: format!("[Spreadsheet processing failed unexpectedly: {e}]"),
+                            page_count: 0,
+                        });
                         continue;
                     }
                 }
@@ -578,11 +620,21 @@ pub async fn extract_text(
                 {
                     Ok(Ok(data)) => data,
                     Ok(Err(e)) => {
-                        tracing::warn!(filename = %filename, error = %e, "OCR: image read/convert failed, skipping");
+                        tracing::warn!(filename = %filename, error = %e, "OCR: image read/convert failed");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: format!("[Could not read image file: {e}]"),
+                            page_count: 0,
+                        });
                         continue;
                     }
                     Err(e) => {
-                        tracing::warn!(filename = %filename, error = %e, "OCR: image task failed, skipping");
+                        tracing::warn!(filename = %filename, error = %e, "OCR: image task failed");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: format!("[Image processing failed unexpectedly: {e}]"),
+                            page_count: 0,
+                        });
                         continue;
                     }
                 };
@@ -598,16 +650,32 @@ pub async fn extract_text(
                         }
                         results.push(OcrPageResult {
                             filename,
-                            text,
+                            text: if text.is_empty() {
+                                "[No text detected in this image. The model may not have recognized any text, or the image quality may be too low.]".to_string()
+                            } else {
+                                text
+                            },
                             page_count: 1,
                         });
                     }
                     Ok(Err(e)) => {
-                        tracing::warn!(filename = %filename, error = %e, "OCR: vision model error, skipping");
+                        tracing::warn!(filename = %filename, error = %e, "OCR: vision model error");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: format!(
+                                "[Vision model error: {e}. Check that your OCR model is running.]"
+                            ),
+                            page_count: 0,
+                        });
                         continue;
                     }
                     Err(_) => {
-                        tracing::warn!(filename = %filename, "OCR: per-file timeout (120s), skipping");
+                        tracing::warn!(filename = %filename, "OCR: per-file timeout (120s)");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: "[OCR timed out after 120 seconds. The file may be too large or the model too slow.]".to_string(),
+                            page_count: 0,
+                        });
                         continue;
                     }
                 }
