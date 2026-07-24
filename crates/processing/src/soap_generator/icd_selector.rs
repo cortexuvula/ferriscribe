@@ -82,7 +82,7 @@ const CLINICAL_ABBREVIATIONS: &[(&str, &str)] = &[
 /// the MSP list uses parent codes without trailing zeros (e.g. `786.5`
 /// not `786.50`), the MSP form is used.
 ///
-/// Kept to **28 entries** so the guaranteed slots never overflow
+/// Kept to **29 entries** so the guaranteed slots never overflow
 /// [`MAX_CANDIDATES`] and leave room for transcript-scored additions.
 ///
 /// **Clinical review note:** curated for a BC family-practice context.
@@ -104,6 +104,7 @@ const PRIMARY_CARE_BASELINE: &[&str] = &[
     "496",   // Chronic airways obstruction (COPD)
     "786.2", // Cough
     // Musculoskeletal
+    "723.1", // Cervicalgia (neck pain)
     "724.5", // Backache, unspecified
     "724.2", // Lumbago
     "847.2", // Sprain of lumbar (back strain)
@@ -444,7 +445,7 @@ mod tests {
     #[test]
     fn empty_transcript_returns_baseline_only() {
         let selected = select_icd9_candidates("", None, None);
-        // Baseline has 28 entries, all guaranteed slots under the 40 cap;
+        // Baseline has 29 entries, all guaranteed slots under the 40 cap;
         // with no transcript matches nothing else is added.
         assert_eq!(
             selected.len(),
@@ -691,6 +692,24 @@ mod tests {
         assert!(
             tokens.iter().any(|t| t.contains("hypertension")),
             "ASCII terms kept"
+        );
+    }
+
+    #[test]
+    fn neck_pain_transcript_surfaces_cervicalgia() {
+        // Regression: a "neck pain" transcript must surface 723.1
+        // (CERVICALGIA) in the candidates. Previously this failed because
+        // the description "CERVICALGIA" is a single token that doesn't
+        // match "neck" or "pain" in the transcript.
+        let selected = select_icd9_candidates(
+            "Patient reports left-sided neck pain. Previously had right neck pain.",
+            None,
+            None,
+        );
+        let codes: Vec<&str> = selected.iter().map(|e| e.code.as_str()).collect();
+        assert!(
+            codes.contains(&"723.1"),
+            "723.1 (CERVICALGIA) must be in candidates for a neck-pain transcript. Got: {codes:?}"
         );
     }
 }

@@ -94,12 +94,20 @@ static CODE_TO_IDX: LazyLock<HashMap<String, usize>> = LazyLock::new(|| {
 });
 
 /// Pre-tokenized (lowercased) description token sets, one per entry.
+/// Enriched with medical synonyms so terse MSP descriptions match
+/// lay-language transcripts (e.g. "CERVICALGIA" gains "neck" and "pain").
 /// Avoids re-tokenizing all 7,122 descriptions on every SOAP generation.
 /// Allocated once; the selector reads these without allocation.
 static DESC_TOKEN_SETS: LazyLock<Vec<HashSet<String>>> = LazyLock::new(|| {
     ENTRIES
         .iter()
-        .map(|e| tokenize_desc(&e.description))
+        .map(|e| {
+            let mut tokens = tokenize_desc(&e.description);
+            // Inject synonyms based on the description text (case-insensitive).
+            let desc_lower = e.description.to_lowercase();
+            enrich_with_synonyms(&mut tokens, &desc_lower);
+            tokens
+        })
         .collect()
 });
 
@@ -156,6 +164,70 @@ pub fn tokenize_desc(desc: &str) -> HashSet<String> {
         .filter(|s| s.len() >= 3)
         .map(|s| s.to_lowercase())
         .collect()
+}
+
+/// Add medical synonyms to a description's token set so terse MSP
+/// descriptions match lay-language clinical transcripts.
+///
+/// MSP descriptions are often single clinical terms (e.g. "CERVICALGIA")
+/// that a patient transcript would express as common words ("neck pain").
+/// Without enrichment, the inverted index never connects them.
+fn enrich_with_synonyms(tokens: &mut HashSet<String>, desc_lower: &str) {
+    // Each rule: if the description contains the trigger substring,
+    // inject the synonym tokens.
+    const SYNONYM_RULES: &[(&str, &[&str])] = &[
+        // Cervical / neck
+        ("cervical", &["neck"]),
+        ("cervicalgia", &["neck", "pain"]),
+        ("neck", &["cervical"]),
+        // Lumbar / lower back
+        ("lumbar", &["back", "lower"]),
+        ("lumbago", &["back", "lower", "pain"]),
+        ("backache", &["back", "pain"]),
+        // Thoracic
+        ("thoracic", &["chest", "spine"]),
+        // Cardiac
+        ("hypertension", &["blood", "pressure", "high"]),
+        ("myocardial", &["heart"]),
+        ("cardiac", &["heart"]),
+        // Metabolic
+        ("hyperlipidemia", &["cholesterol", "lipid"]),
+        ("diabetes", &["diabetic", "glucose", "blood", "sugar"]),
+        // Respiratory
+        ("bronchitis", &["cough", "respiratory"]),
+        ("asthma", &["wheeze", "respiratory", "breathing"]),
+        ("sinusitis", &["sinus", "nasal"]),
+        ("pharyngitis", &["throat"]),
+        ("nasopharyngitis", &["cold", "nasal", "throat"]),
+        // Gastrointestinal
+        ("esophagitis", &["heartburn", "reflux"]),
+        ("gastritis", &["stomach"]),
+        // Neurological
+        ("headache", &["cephalgia", "head"]),
+        ("migraine", &["headache", "head"]),
+        // Musculoskeletal
+        ("arthros", &["joint", "arthritis"]), // osteoarthrosis
+        ("osteoarthritis", &["joint", "arthritis"]),
+        ("arthropath", &["joint"]),
+        ("sprain", &["strain", "injury"]),
+        // Renal
+        ("cystitis", &["bladder", "urinary"]),
+        ("nephropath", &["kidney"]),
+        // Dermatological
+        ("dermatitis", &["skin", "rash"]),
+        ("eczema", &["skin", "rash"]),
+        // Mental health
+        ("depressive", &["depression"]),
+        ("anxiety", &["anxious", "worry"]),
+    ];
+
+    for (trigger, synonyms) in SYNONYM_RULES {
+        if desc_lower.contains(trigger) {
+            for &syn in *synonyms {
+                tokens.insert(syn.to_string());
+            }
+        }
+    }
 }
 
 /// Looks up a single entry by exact bare-code match (O(1) via the
