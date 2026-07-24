@@ -17,6 +17,10 @@ async-trait = { workspace = true }
 regex = { workspace = true }
 pdf-extract = "0.7"
 base64 = "0.22"
+zip = "2.4"
+quick-xml = "0.36"
+calamine = "0.26"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "tiff"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -40,9 +40,10 @@ pub enum OcrError {
 }
 
 /// Supported file extensions for OCR.
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "webp"];
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "webp", "tiff", "tif"];
 const TEXT_EXTENSIONS: &[&str] = &["txt", "md", "csv"];
 const PDF_EXTENSIONS: &[&str] = &["pdf"];
+const OFFICE_EXTENSIONS: &[&str] = &["docx", "xlsx"];
 
 /// Classify a file by its extension into an OCR strategy.
 fn classify(path: &Path) -> Result<OcrStrategy, OcrError> {
@@ -57,6 +58,13 @@ fn classify(path: &Path) -> Result<OcrStrategy, OcrError> {
         Ok(OcrStrategy::Image)
     } else if PDF_EXTENSIONS.contains(&ext.as_str()) {
         Ok(OcrStrategy::Pdf)
+    } else if OFFICE_EXTENSIONS.contains(&ext.as_str()) {
+        // Sub-classify office docs — docx and xlsx use different extractors.
+        match ext.as_str() {
+            "docx" => Ok(OcrStrategy::Docx),
+            "xlsx" => Ok(OcrStrategy::Xlsx),
+            _ => Err(OcrError::UnsupportedType(ext)),
+        }
     } else {
         Err(OcrError::UnsupportedType(ext))
     }
@@ -67,6 +75,8 @@ enum OcrStrategy {
     TextFile,
     Image,
     Pdf,
+    Docx,
+    Xlsx,
 }
 
 /// Read a text file directly — no model call needed.
@@ -152,12 +162,124 @@ const MAX_OCR_FILE_BYTES: u64 = 100 * 1024 * 1024;
 /// hung image from stalling the whole batch indefinitely.
 const OCR_PER_FILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// Extract text from a .docx file by reading word/document.xml from the ZIP
+/// archive and concatenating all `<w:t>` element contents.
+fn extract_docx_text(path: &Path) -> Result<String, OcrError> {
+    let file = std::fs::File::open(path).map_err(|e| OcrError::ReadError(e.to_string()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| OcrError::PdfExtraction(format!("docx open: {e}")))?;
+
+    let mut document_xml = String::new();
+    for i in 0..archive.len() {
+        let zf = archive
+            .by_index(i)
+            .map_err(|e| OcrError::PdfExtraction(format!("docx read: {e}")))?;
+        if zf.name() == "word/document.xml" {
+            use std::io::Read;
+            zf.take(10 * 1024 * 1024) // 10MB cap on XML
+                .read_to_string(&mut document_xml)
+                .map_err(|e| OcrError::PdfExtraction(format!("docx xml read: {e}")))?;
+            break;
+        }
+    }
+
+    if document_xml.is_empty() {
+        return Err(OcrError::PdfExtraction(
+            "docx: word/document.xml not found".into(),
+        ));
+    }
+
+    // Parse XML and extract text from <w:t> elements.
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    let mut reader = Reader::from_str(&document_xml);
+    reader.config_mut().trim_text(true);
+    let mut text_parts = Vec::new();
+    let mut buf = Vec::new();
+    let mut in_paragraph = false;
+    let mut in_t = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                if name.as_ref() == b"w:t" {
+                    in_t = true;
+                } else if name.as_ref() == b"w:p" {
+                    in_paragraph = true;
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name();
+                if name.as_ref() == b"w:t" {
+                    in_t = false;
+                } else if name.as_ref() == b"w:p" && in_paragraph {
+                    text_parts.push("\n".to_string());
+                    in_paragraph = false;
+                }
+            }
+            Ok(Event::Text(e)) if in_t => {
+                if let Ok(text) = e.unescape() {
+                    text_parts.push(text.into_owned());
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                tracing::warn!(error = %e, "docx XML parse error, partial extraction");
+                break;
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(text_parts.join("").trim().to_string())
+}
+
+/// Extract cell values from an .xlsx file using calamine.
+fn extract_xlsx_text(path: &Path) -> Result<String, OcrError> {
+    use calamine::{Data, Reader, Xlsx, open_workbook};
+
+    let mut workbook: Xlsx<_> =
+        open_workbook(path).map_err(|e| OcrError::PdfExtraction(format!("xlsx open: {e}")))?;
+
+    let mut lines = Vec::new();
+    for sheet_name in workbook.sheet_names().clone() {
+        lines.push(format!("--- Sheet: {} ---", sheet_name));
+        if let Ok(range) = workbook.worksheet_range(&sheet_name) {
+            for row in range.rows() {
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|cell| match cell {
+                        Data::Empty => String::new(),
+                        Data::String(s) => s.clone(),
+                        Data::DateTime(dt) => dt.to_string(),
+                        Data::DateTimeIso(s) => s.clone(),
+                        Data::DurationIso(s) => s.clone(),
+                        Data::Int(n) => n.to_string(),
+                        Data::Float(n) => n.to_string(),
+                        Data::Bool(b) => b.to_string(),
+                        Data::Error(e) => format!("#ERR:{:?}", e),
+                    })
+                    .collect();
+                lines.push(cells.join("\t"));
+            }
+        }
+        lines.push(String::new()); // blank line between sheets
+    }
+
+    Ok(lines.join("\n").trim().to_string())
+}
+
 /// Extract text from a list of document file paths.
 ///
 /// Each file is classified by extension and processed accordingly:
 /// - Text files (txt/md/csv): read directly, no model call
-/// - Images (png/jpg/jpeg/bmp/webp): base64-encode and send to the vision model
+/// - Images (png/jpg/jpeg/bmp/webp/tiff/tif): base64-encode and send to the
+///   vision model (TIFF is converted to PNG first since vision models reject TIFF)
 /// - PDFs: extract embedded text via pdf-extract; empty result = scanned PDF
+/// - DOCX: extract text from word/document.xml via ZIP + quick-xml
+/// - XLSX: extract cell values from all sheets via calamine
 ///
 /// Returns one `OcrPageResult` per **successfully** processed file. Files that
 /// error (read failure, model error, too large) are logged and skipped — the
@@ -325,24 +447,146 @@ pub async fn extract_text(
                     }
                 }
             }
+            OcrStrategy::Docx => {
+                let path_buf = path.to_path_buf();
+                match tokio::task::spawn_blocking(move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        extract_docx_text(&path_buf)
+                    }))
+                })
+                .await
+                {
+                    Ok(Ok(Ok(text))) => {
+                        if text.is_empty() {
+                            results.push(OcrPageResult {
+                                filename,
+                                text: "[No text found in this Word document.]".to_string(),
+                                page_count: 0,
+                            });
+                        } else {
+                            tracing::info!(filename = %filename, chars = text.len(), "OCR: docx text extracted");
+                            results.push(OcrPageResult {
+                                filename,
+                                text,
+                                page_count: 1,
+                            });
+                        }
+                    }
+                    Ok(Ok(Err(e))) => {
+                        tracing::warn!(filename = %filename, error = %e, "OCR: docx extraction failed");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: format!("[Could not read Word document: {e}]"),
+                            page_count: 0,
+                        });
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!(filename = %filename, "OCR: docx parser panicked (corrupt file)");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: "[Word document appears to be corrupt or malformed.]".to_string(),
+                            page_count: 0,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(filename = %filename, error = %e, "OCR: docx task failed");
+                        continue;
+                    }
+                }
+            }
+            OcrStrategy::Xlsx => {
+                let path_buf = path.to_path_buf();
+                match tokio::task::spawn_blocking(move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        extract_xlsx_text(&path_buf)
+                    }))
+                })
+                .await
+                {
+                    Ok(Ok(Ok(text))) => {
+                        if text.is_empty() {
+                            results.push(OcrPageResult {
+                                filename,
+                                text: "[No data found in this spreadsheet.]".to_string(),
+                                page_count: 0,
+                            });
+                        } else {
+                            tracing::info!(filename = %filename, chars = text.len(), "OCR: xlsx data extracted");
+                            results.push(OcrPageResult {
+                                filename,
+                                text,
+                                page_count: 1,
+                            });
+                        }
+                    }
+                    Ok(Ok(Err(e))) => {
+                        tracing::warn!(filename = %filename, error = %e, "OCR: xlsx extraction failed");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: format!("[Could not read spreadsheet: {e}]"),
+                            page_count: 0,
+                        });
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!(filename = %filename, "OCR: xlsx parser panicked (corrupt file)");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: "[Spreadsheet appears to be corrupt or malformed.]".to_string(),
+                            page_count: 0,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(filename = %filename, error = %e, "OCR: xlsx task failed");
+                        continue;
+                    }
+                }
+            }
             OcrStrategy::Image => {
                 // Move the sync file read off the async executor.
                 let path_buf = path.to_path_buf();
-                let image_data = match tokio::task::spawn_blocking(move || std::fs::read(&path_buf))
-                    .await
+                let ext_str = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_lowercase())
+                    .unwrap_or_else(|| "png".to_string());
+                let ext_for_url = if ext_str == "tiff" || ext_str == "tif" {
+                    "png"
+                } else {
+                    ext_str.as_str()
+                };
+                let ext_for_capture = ext_str.clone();
+                let image_data = match tokio::task::spawn_blocking(move || {
+                    let raw =
+                        std::fs::read(&path_buf).map_err(|e| OcrError::ReadError(e.to_string()))?;
+                    // Convert TIFF to PNG — vision models don't accept TIFF directly.
+                    if ext_for_capture == "tiff" || ext_for_capture == "tif" {
+                        let img =
+                            image::load_from_memory_with_format(&raw, image::ImageFormat::Tiff)
+                                .map_err(|e| OcrError::ReadError(format!("TIFF decode: {e}")))?;
+                        let mut png_bytes = Vec::new();
+                        img.write_to(
+                            &mut std::io::Cursor::new(&mut png_bytes),
+                            image::ImageFormat::Png,
+                        )
+                        .map_err(|e| OcrError::ReadError(format!("PNG encode: {e}")))?;
+                        Ok::<Vec<u8>, OcrError>(png_bytes)
+                    } else {
+                        Ok(raw)
+                    }
+                })
+                .await
                 {
-                    Ok(Ok(d)) => d,
+                    Ok(Ok(data)) => data,
                     Ok(Err(e)) => {
-                        tracing::warn!(filename = %filename, error = %e, "OCR: image read failed, skipping");
+                        tracing::warn!(filename = %filename, error = %e, "OCR: image read/convert failed, skipping");
                         continue;
                     }
                     Err(e) => {
-                        tracing::warn!(filename = %filename, error = %e, "OCR: image read task failed, skipping");
+                        tracing::warn!(filename = %filename, error = %e, "OCR: image task failed, skipping");
                         continue;
                     }
                 };
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
-                let data_url = encode_image_as_data_url(&image_data, ext);
+                let data_url = encode_image_as_data_url(&image_data, ext_for_url);
                 let request = build_image_ocr_request(&data_url, ocr_model);
 
                 tracing::info!(filename = %filename, bytes = image_data.len(), "OCR: sending image to vision model");
@@ -406,9 +650,21 @@ mod tests {
     }
 
     #[test]
-    fn classify_docx_is_unsupported() {
+    fn classify_docx_is_office() {
         let path = Path::new("doc.docx");
-        assert!(matches!(classify(path), Err(OcrError::UnsupportedType(_))));
+        assert_eq!(classify(path).unwrap(), OcrStrategy::Docx);
+    }
+
+    #[test]
+    fn classify_xlsx_is_office() {
+        let path = Path::new("sheet.xlsx");
+        assert_eq!(classify(path).unwrap(), OcrStrategy::Xlsx);
+    }
+
+    #[test]
+    fn classify_tiff_is_image() {
+        let path = Path::new("scan.tiff");
+        assert_eq!(classify(path).unwrap(), OcrStrategy::Image);
     }
 
     #[test]

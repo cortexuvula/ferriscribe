@@ -37,7 +37,7 @@
       filters: [
         {
           name: 'Documents',
-          extensions: ['pdf', 'png', 'jpg', 'jpeg', 'bmp', 'webp', 'txt', 'md', 'csv'],
+          extensions: ['pdf', 'png', 'jpg', 'jpeg', 'bmp', 'webp', 'tiff', 'tif', 'txt', 'md', 'csv', 'docx', 'xlsx'],
         },
       ],
     });
@@ -89,7 +89,7 @@
   >
     <span class="dropzone-icon">📎</span>
     <span class="dropzone-text">Drop documents here</span>
-    <span class="dropzone-hint">or click to browse — PDF, PNG, JPG, TXT — max 100 MB per file</span>
+    <span class="dropzone-hint">or click to browse — PDF, PNG, JPG, DOCX, XLSX, TIFF, TXT — max 100 MB per file</span>
   </div>
 
   {#if ocrFiles.length > 0}
