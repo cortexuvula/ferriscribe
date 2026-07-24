@@ -21,6 +21,8 @@ zip = "2.4"
 quick-xml = "0.36"
 calamine = "0.26"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "tiff"] }
+libheif-rs = { version = "2.7", default-features = false, features = ["v1_17"] }
+libheif-sys = { version = "5.3", features = ["embedded-libheif"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

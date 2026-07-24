@@ -40,7 +40,9 @@ pub enum OcrError {
 }
 
 /// Supported file extensions for OCR.
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "bmp", "webp", "tiff", "tif"];
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "bmp", "webp", "tiff", "tif", "heic", "heif",
+];
 const TEXT_EXTENSIONS: &[&str] = &["txt", "md", "csv"];
 const PDF_EXTENSIONS: &[&str] = &["pdf"];
 const OFFICE_EXTENSIONS: &[&str] = &["docx", "xlsx"];
@@ -105,6 +107,50 @@ fn encode_image_as_data_url(data: &[u8], format: &str) -> String {
     };
     let b64 = general_purpose::STANDARD.encode(data);
     format!("data:image/{mime};base64,{b64}")
+}
+
+/// Decode a HEIC/HEIF image and re-encode as PNG bytes.
+///
+/// Vision models don't accept HEIC, so we convert to PNG before sending.
+/// Uses libheif (compiled from embedded sources via `embedded-libheif`).
+fn heic_to_png(heic_data: &[u8]) -> Result<Vec<u8>, String> {
+    use libheif_rs::{ColorSpace, HeifContext, RgbChroma};
+
+    // Parse the HEIC container.
+    let ctx =
+        HeifContext::read_from_bytes(heic_data).map_err(|e| format!("libheif context: {e:?}"))?;
+    let handle = ctx
+        .primary_image_handle()
+        .map_err(|e| format!("libheif primary image: {e:?}"))?;
+
+    // Decode to interleaved RGBA.
+    let lib = libheif_rs::LibHeif::new();
+    let img = lib
+        .decode(&handle, ColorSpace::Rgb(RgbChroma::Rgba), None)
+        .map_err(|e| format!("libheif decode: {e:?}"))?;
+    let width = img.width();
+    let height = img.height();
+    let planes = img.planes();
+
+    // Get interleaved RGBA data.
+    let interleaved = planes
+        .interleaved
+        .as_ref()
+        .ok_or_else(|| "HEIC: no interleaved plane available".to_string())?;
+    let rgba_data = interleaved.data.to_vec();
+
+    // Wrap in image::DynamicImage and re-encode as PNG.
+    let rgba_image = image::RgbaImage::from_raw(width, height, rgba_data)
+        .ok_or_else(|| "failed to create image from HEIC RGBA data".to_string())?;
+
+    let mut png_bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(rgba_image)
+        .write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .map_err(|e| format!("PNG encode: {e}"))?;
+    Ok(png_bytes)
 }
 
 /// The OCR system prompt instructing the model to extract text.
@@ -549,7 +595,11 @@ pub async fn extract_text(
                     .and_then(|e| e.to_str())
                     .map(|e| e.to_lowercase())
                     .unwrap_or_else(|| "png".to_string());
-                let ext_for_url = if ext_str == "tiff" || ext_str == "tif" {
+                let ext_for_url = if ext_str == "tiff"
+                    || ext_str == "tif"
+                    || ext_str == "heic"
+                    || ext_str == "heif"
+                {
                     "png"
                 } else {
                     ext_str.as_str()
@@ -558,7 +608,7 @@ pub async fn extract_text(
                 let image_data = match tokio::task::spawn_blocking(move || {
                     let raw =
                         std::fs::read(&path_buf).map_err(|e| OcrError::ReadError(e.to_string()))?;
-                    // Convert TIFF to PNG — vision models don't accept TIFF directly.
+                    // Convert TIFF or HEIC to PNG — vision models don't accept these directly.
                     if ext_for_capture == "tiff" || ext_for_capture == "tif" {
                         let img =
                             image::load_from_memory_with_format(&raw, image::ImageFormat::Tiff)
@@ -570,6 +620,11 @@ pub async fn extract_text(
                         )
                         .map_err(|e| OcrError::ReadError(format!("PNG encode: {e}")))?;
                         Ok::<Vec<u8>, OcrError>(png_bytes)
+                    } else if ext_for_capture == "heic" || ext_for_capture == "heif" {
+                        // Decode HEIC via libheif, then re-encode as PNG.
+                        let img = heic_to_png(&raw)
+                            .map_err(|e| OcrError::ReadError(format!("HEIC decode: {e}")))?;
+                        Ok::<Vec<u8>, OcrError>(img)
                     } else {
                         Ok(raw)
                     }
@@ -664,6 +719,12 @@ mod tests {
     #[test]
     fn classify_tiff_is_image() {
         let path = Path::new("scan.tiff");
+        assert_eq!(classify(path).unwrap(), OcrStrategy::Image);
+    }
+
+    #[test]
+    fn classify_heic_is_image() {
+        let path = Path::new("photo.heic");
         assert_eq!(classify(path).unwrap(), OcrStrategy::Image);
     }
 
