@@ -19,8 +19,24 @@ pub async fn ocr_documents(
     state: tauri::State<'_, AppState>,
     file_paths: Vec<String>,
 ) -> AppResult<Vec<OcrPageResult>> {
+    /// Maximum number of files accepted in a single OCR batch. Guards against
+    /// unbounded processing time from accidental large drops.
+    const MAX_BATCH_FILES: usize = 25;
+
+    // Filter empty/whitespace paths.
+    let file_paths: Vec<String> = file_paths
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     if file_paths.is_empty() {
         return Ok(vec![]);
+    }
+    if file_paths.len() > MAX_BATCH_FILES {
+        return Err(AppError::Other(format!(
+            "Too many files: {} (limit {MAX_BATCH_FILES}). Process in smaller groups.",
+            file_paths.len()
+        )));
     }
 
     // Load config to get the OCR model name.

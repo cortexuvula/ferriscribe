@@ -138,14 +138,15 @@
   }
 
   async function handleOcrFilesSelected(paths: string[]) {
-    if (paths.length === 0) return;
+    const uniquePaths = [...new Set(paths)];
+    if (uniquePaths.length === 0) return;
     ocrLoading = true;
     ocrTextOverride = null; // reset manual edits when new files arrive
     const myToken = ++ocrBatchToken; // Capture token for this batch.
     // Add loading chips immediately so the user sees feedback. Track the chip
     // IDs created by THIS invocation so concurrent drops don't interfere.
     const chipIds: string[] = [];
-    const pendingChips = paths.map((p) => {
+    const pendingChips = uniquePaths.map((p) => {
       const id = crypto.randomUUID();
       chipIds.push(id);
       const filename = p.split(/[/\\]/).pop() || p;
@@ -162,7 +163,7 @@
     const idSet = new Set(chipIds);
 
     try {
-      const results = await ocrDocuments(paths);
+      const results = await ocrDocuments(uniquePaths);
       if (myToken !== ocrBatchToken) return; // Stale — recording switched.
       // Match results to THIS invocation's chips by filename within our batch.
       ocrFiles = ocrFiles.map((f) => {

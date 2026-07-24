@@ -70,8 +70,16 @@ enum OcrStrategy {
 }
 
 /// Read a text file directly — no model call needed.
+/// Uses lossy decoding so non-UTF-8 files (Latin-1, Windows-1252, etc.)
+/// still produce usable text instead of a hard error.
 fn read_text_file(path: &Path) -> Result<String, OcrError> {
-    std::fs::read_to_string(path).map_err(|e| OcrError::ReadError(e.to_string()))
+    let bytes = std::fs::read(path).map_err(|e| OcrError::ReadError(e.to_string()))?;
+    // Try UTF-8 first, fall back to lossy decode for Latin-1/Windows-1252 etc.
+    Ok(String::from_utf8(bytes).unwrap_or_else(|e| {
+        let lossy = String::from_utf8_lossy(e.as_bytes()).into_owned();
+        tracing::warn!("OCR: text file was not valid UTF-8, decoded lossily");
+        lossy
+    }))
 }
 
 /// Encode raw image bytes as a base64 data URL.
@@ -122,6 +130,11 @@ fn build_image_ocr_request(image_data_url: &str, model: &str) -> CompletionReque
 ///
 /// Returns the concatenated text content. For scanned PDFs (image-only),
 /// this will return empty — rasterization + vision OCR is deferred to v2.
+///
+/// Kept as a synchronous helper for unit tests; the production path in
+/// `extract_text` calls `pdf_extract::extract_text` inline inside
+/// `spawn_blocking` so panics can be caught.
+#[allow(dead_code)]
 fn extract_pdf_text(path: &Path) -> Result<String, OcrError> {
     if !path.exists() {
         return Err(OcrError::FileNotFound(path.display().to_string()));
@@ -134,6 +147,10 @@ fn extract_pdf_text(path: &Path) -> Result<String, OcrError> {
 /// Maximum file size for OCR processing (100 MB). Guards against OOM when
 /// reading large images or PDFs into memory and base64-encoding them.
 const MAX_OCR_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Per-file timeout for vision model OCR calls. Prevents a single slow or
+/// hung image from stalling the whole batch indefinitely.
+const OCR_PER_FILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Extract text from a list of document file paths.
 ///
@@ -163,9 +180,8 @@ pub async fn extract_text(
         let path = Path::new(path_str);
         let filename = path
             .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unknown".to_string());
 
         if !path.exists() {
             tracing::warn!(filename = %filename, "OCR: file not found, skipping");
@@ -201,6 +217,26 @@ pub async fn extract_text(
             continue;
         }
 
+        // Check for directories.
+        if path.is_dir() {
+            results.push(OcrPageResult {
+                filename,
+                text: "[Folders are not supported. Drop individual files.]".to_string(),
+                page_count: 0,
+            });
+            continue;
+        }
+
+        // Check for empty files.
+        if file_size == 0 {
+            results.push(OcrPageResult {
+                filename,
+                text: "[File is empty (0 bytes).]".to_string(),
+                page_count: 0,
+            });
+            continue;
+        }
+
         let strategy = match classify(path) {
             Ok(s) => s,
             Err(e) => {
@@ -211,52 +247,97 @@ pub async fn extract_text(
 
         // Each strategy extracts text independently. Errors are logged and
         // the file is skipped — one bad file must NOT abort the whole batch.
-        let result = match strategy {
+        match strategy {
             OcrStrategy::TextFile => match read_text_file(path) {
                 Ok(text) => {
                     tracing::info!(filename = %filename, chars = text.len(), "OCR: text file read");
-                    OcrPageResult {
+                    results.push(OcrPageResult {
                         filename,
                         text,
                         page_count: 1,
-                    }
+                    });
                 }
                 Err(e) => {
                     tracing::warn!(filename = %filename, error = %e, "OCR: text read failed, skipping");
                     continue;
                 }
             },
-            OcrStrategy::Pdf => match extract_pdf_text(path) {
-                Ok(text) => {
-                    if text.is_empty() {
-                        tracing::info!(filename = %filename, "OCR: PDF text extraction returned empty (likely scanned PDF)");
-                        OcrPageResult {
-                            filename,
-                            text: String::from(
-                                "[No machine-readable text found in this PDF. \
+            OcrStrategy::Pdf => {
+                let path_buf = path.to_path_buf();
+                match tokio::task::spawn_blocking(move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        pdf_extract::extract_text(&path_buf)
+                    }))
+                })
+                .await
+                {
+                    Ok(Ok(Ok(text))) => {
+                        let text = text.trim().to_string();
+                        if text.is_empty() {
+                            tracing::info!(filename = %filename, "OCR: PDF text extraction returned empty (likely scanned PDF)");
+                            results.push(OcrPageResult {
+                                filename,
+                                text: String::from(
+                                    "[No machine-readable text found in this PDF. \
                                 Scanned PDFs require image-based OCR, coming in a future update.]",
-                            ),
-                            page_count: 0,
-                        }
-                    } else {
-                        tracing::info!(filename = %filename, chars = text.len(), "OCR: PDF text extracted");
-                        OcrPageResult {
-                            filename,
-                            text,
-                            page_count: 1,
+                                ),
+                                page_count: 0,
+                            });
+                        } else {
+                            tracing::info!(filename = %filename, chars = text.len(), "OCR: PDF text extracted");
+                            results.push(OcrPageResult {
+                                filename,
+                                text,
+                                page_count: 1,
+                            });
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(filename = %filename, error = %e, "OCR: PDF extraction failed, skipping");
-                    continue;
-                }
-            },
-            OcrStrategy::Image => {
-                let image_data = match std::fs::read(path) {
-                    Ok(d) => d,
+                    Ok(Ok(Err(e))) => {
+                        let err_str = e.to_string();
+                        let msg = if err_str.to_lowercase().contains("password")
+                            || err_str.to_lowercase().contains("encrypt")
+                        {
+                            "[This PDF is password-protected. Remove the password and retry.]"
+                                .to_string()
+                        } else {
+                            format!("[PDF could not be parsed: {err_str}]")
+                        };
+                        tracing::warn!(filename = %filename, error = %err_str, "OCR: PDF extraction failed");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: msg,
+                            page_count: 0,
+                        });
+                        continue;
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!(filename = %filename, "OCR: PDF parser panicked (corrupt file)");
+                        results.push(OcrPageResult {
+                            filename,
+                            text: "[PDF appears to be corrupt or malformed.]".to_string(),
+                            page_count: 0,
+                        });
+                        continue;
+                    }
                     Err(e) => {
+                        tracing::warn!(filename = %filename, error = %e, "OCR: PDF task failed");
+                        continue;
+                    }
+                }
+            }
+            OcrStrategy::Image => {
+                // Move the sync file read off the async executor.
+                let path_buf = path.to_path_buf();
+                let image_data = match tokio::task::spawn_blocking(move || std::fs::read(&path_buf))
+                    .await
+                {
+                    Ok(Ok(d)) => d,
+                    Ok(Err(e)) => {
                         tracing::warn!(filename = %filename, error = %e, "OCR: image read failed, skipping");
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(filename = %filename, error = %e, "OCR: image read task failed, skipping");
                         continue;
                     }
                 };
@@ -265,27 +346,29 @@ pub async fn extract_text(
                 let request = build_image_ocr_request(&data_url, ocr_model);
 
                 tracing::info!(filename = %filename, bytes = image_data.len(), "OCR: sending image to vision model");
-                match provider.complete(request).await {
-                    Ok(response) => {
+                match tokio::time::timeout(OCR_PER_FILE_TIMEOUT, provider.complete(request)).await {
+                    Ok(Ok(response)) => {
                         let text = response.content.trim().to_string();
                         if text.is_empty() {
                             tracing::warn!(filename = %filename, "OCR: vision model returned empty text");
                         }
-                        OcrPageResult {
+                        results.push(OcrPageResult {
                             filename,
                             text,
                             page_count: 1,
-                        }
+                        });
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::warn!(filename = %filename, error = %e, "OCR: vision model error, skipping");
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(filename = %filename, "OCR: per-file timeout (120s), skipping");
                         continue;
                     }
                 }
             }
-        };
-
-        results.push(result);
+        }
     }
 
     Ok(results)
