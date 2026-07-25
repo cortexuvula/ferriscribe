@@ -388,6 +388,8 @@
   async function handleUploadAudio() {
     importError = null;
     try {
+      // Clear context from any previous patient before importing.
+      clearAllContextFields();
       const selected = await open({
         multiple: false,
         filters: [

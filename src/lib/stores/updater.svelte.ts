@@ -35,15 +35,16 @@ class UpdaterStore {
         this.state = 'idle';
       }
     } catch (e) {
+      this.availableVersion = null;
       this.state = 'error';
       const raw = e instanceof Error ? e.message : String(e);
       // Common transient error: the release was published (latest.json
       // exists) but not all platform assets are uploaded yet. The user
       // checked for updates during the ~5-15 minute release build window.
       if (raw.includes('fallback platforms') || raw.includes('were found in the response')) {
-        this.errorMessage = `Update v${this.availableVersion ?? ''} is still being built. Please try again in a few minutes.`;
+        this.errorMessage = 'Update assets are still being built. Please try again in a few minutes.';
       } else {
-        this.errorMessage = raw;
+        this.errorMessage = 'Could not check for updates. You may be offline or the update server is unavailable.';
       }
     }
   }

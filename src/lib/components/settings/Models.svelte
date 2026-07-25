@@ -23,10 +23,13 @@
   async function fetchModelsForProvider(provider: string) {
     modelsLoading = true;
     try {
-      availableModels = await listModels(provider);
+      const models = await listModels(provider);
+      availableModels = models;
+      return models;
     } catch (e) {
       console.error('Failed to fetch models:', e);
       availableModels = [];
+      return [];
     } finally {
       modelsLoading = false;
     }
@@ -51,12 +54,12 @@
     }
     await settings.updateField('ai_provider', newProvider);
     await setActiveProvider(newProvider);
-    await fetchModelsForProvider(newProvider);
+    const models = await fetchModelsForProvider(newProvider);
     const remembered = modelMemory[newProvider];
-    if (remembered && availableModels.some((m) => m.id === remembered)) {
+    if (remembered && models.some((m) => m.id === remembered)) {
       await settings.updateField('ai_model', remembered);
-    } else if (availableModels.length > 0) {
-      await settings.updateField('ai_model', availableModels[0].id);
+    } else if (models.length > 0) {
+      await settings.updateField('ai_model', models[0].id);
     }
   }
 

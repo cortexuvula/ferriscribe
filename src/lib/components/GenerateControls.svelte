@@ -64,6 +64,13 @@
 
   let letterFieldsExpanded = $state(true);
   let peerFieldsExpanded = $state(true);
+
+  $effect(() => {
+    // Reset field collapse state when the recording changes.
+    recording?.id;
+    letterFieldsExpanded = true;
+    peerFieldsExpanded = true;
+  });
 </script>
 
 {#if generationState.error}
@@ -113,7 +120,7 @@
       />
       <div class="letter-card">
         {#if recording?.peer_discussion && !peerFieldsExpanded}
-          <div class="compact-settings" onclick={() => (peerFieldsExpanded = true)} role="button" tabindex="0">
+          <div class="compact-settings" onclick={() => (peerFieldsExpanded = true)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); peerFieldsExpanded = true; } }}>
             👥 {physicianName} · {specialty} · <span class="edit-hint">Edit</span>
           </div>
         {:else}
@@ -196,7 +203,7 @@
       />
       <div class="letter-card">
         {#if recording?.letter && !letterFieldsExpanded}
-          <div class="compact-settings" onclick={() => (letterFieldsExpanded = true)} role="button" tabindex="0">
+          <div class="compact-settings" onclick={() => (letterFieldsExpanded = true)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); letterFieldsExpanded = true; } }}>
             📋 {(audiences.find((a) => a.id === selectedAudienceId)?.name) || 'Patient'} · {letterType || 'general'} · <span class="edit-hint">Edit</span>
           </div>
         {:else}

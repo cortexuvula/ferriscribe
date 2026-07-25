@@ -161,7 +161,9 @@
     progressUnlisten = await listen<{ type: string; status: string }>(
       'generation-progress',
       (event) => {
-        generation.setProgress(`${event.payload.type}: ${event.payload.status}`);
+        const prettyType = event.payload.type === 'peer_discussion' ? 'Peer discussion'
+          : event.payload.type.charAt(0).toUpperCase() + event.payload.type.slice(1);
+        generation.setProgress(`${prettyType}: ${event.payload.status}`);
       }
     );
 

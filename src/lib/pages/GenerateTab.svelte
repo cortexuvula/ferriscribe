@@ -114,7 +114,10 @@
       ocrTextDisplay.trim().length > 0,
   );
 
-  const contextCharCount = $derived(contextText.length + ocrTextDisplay.length);
+  const contextCharCount = $derived(
+    contextText.length + ocrTextDisplay.length +
+    medicationsText.length + allergiesText.length + conditionsText.length
+  );
 
   function insertTemplate(text: string) {
     contextText = contextText ? contextText + '\n' + text : text;
@@ -273,7 +276,8 @@
         recordings.load(),
       ]);
       generation.finish();
-      toasts.success(`${type === 'soap' ? 'SOAP' : type === 'peer_discussion' ? 'Peer discussion' : type.charAt(0).toUpperCase() + type.slice(1)} note generated`);
+      const label = type === 'soap' ? 'SOAP note' : type === 'referral' ? 'Referral letter' : type === 'letter' ? 'Letter' : 'Peer discussion note';
+      toasts.success(`${label} generated`);
     } catch (e) {
       if (e instanceof OfflineCancelled) {
         // Dialog already informed the user; restore idle state without an error banner.

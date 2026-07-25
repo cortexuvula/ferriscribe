@@ -270,7 +270,6 @@
   }
 
   .generated-preview {
-    grid-column: 1 / -1;
     margin-top: 8px;
   }
 

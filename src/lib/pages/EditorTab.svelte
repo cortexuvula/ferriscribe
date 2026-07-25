@@ -136,11 +136,29 @@
     // Whenever the key changes (different recording or different tab),
     // reset debounce state to prevent cross-contamination.
     if (currentKey !== lastSeenKey) {
-      if (saveTimer !== null) {
+      if (pendingValue !== null && saveTimer !== null) {
+        // Flush any pending edit before switching tabs so it isn't lost.
         clearTimeout(saveTimer);
         saveTimer = null;
+        const value = pendingValue;
+        const prevKey = lastSeenKey;
+        pendingValue = null;
+        // Fire-and-forget the save — don't block the tab switch.
+        if (prevKey) {
+          const [recordingId, field] = prevKey.split('::');
+          invoke('save_recording_field', {
+            recordingId,
+            field,
+            value,
+          }).catch(() => {});
+        }
+      } else {
+        if (saveTimer !== null) {
+          clearTimeout(saveTimer);
+          saveTimer = null;
+        }
+        pendingValue = null;
       }
-      pendingValue = null;
       lastSeenKey = currentKey;
       saveStatus = 'idle';
       saveError = null;
