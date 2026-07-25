@@ -45,7 +45,7 @@ pub(super) async fn load_recording_and_settings(
     recording_id: &str,
 ) -> AppResult<(Recording, GenerationSettings, AppConfig)> {
     let uuid = Uuid::parse_str(recording_id)
-        .map_err(|e| AppError::Other(format!("Invalid recording ID: {e}")))?;
+        .map_err(|e| AppError::InvalidInput(format!("Invalid recording ID: {e}")))?;
     let db = Arc::clone(db);
 
     tokio::task::spawn_blocking(move || {
@@ -131,7 +131,7 @@ pub(super) async fn run_generation_command(
     if let Some(ctx) = context
         && ctx.len() > MAX_CONTEXT_CHARS
     {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "Context too large: {} chars, limit is {}",
             ctx.len(),
             MAX_CONTEXT_CHARS
@@ -228,7 +228,7 @@ where
         })?;
 
     if soap_note.len() > MAX_SOAP_NOTE_CHARS {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "SOAP note too large: {} chars, limit is {}",
             soap_note.len(),
             MAX_SOAP_NOTE_CHARS
@@ -322,7 +322,7 @@ pub(crate) fn validate_patient_context(pc: &PatientContext) -> AppResult<()> {
     let mut total: usize = 0;
     for (label, items) in lists {
         if items.len() > PATIENT_CTX_MAX_ITEMS_PER_LIST {
-            return Err(AppError::Other(format!(
+            return Err(AppError::InvalidInput(format!(
                 "Too many {label} entries: {} (limit is {})",
                 items.len(),
                 PATIENT_CTX_MAX_ITEMS_PER_LIST
@@ -330,7 +330,7 @@ pub(crate) fn validate_patient_context(pc: &PatientContext) -> AppResult<()> {
         }
         for item in items {
             if item.len() > PATIENT_CTX_MAX_ITEM_CHARS {
-                return Err(AppError::Other(format!(
+                return Err(AppError::InvalidInput(format!(
                     "Patient context entry too long in {label}: {} chars (limit is {})",
                     item.len(),
                     PATIENT_CTX_MAX_ITEM_CHARS
@@ -341,7 +341,7 @@ pub(crate) fn validate_patient_context(pc: &PatientContext) -> AppResult<()> {
     }
 
     if total > MAX_CONTEXT_CHARS {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "Patient context too large: {total} chars (limit is {MAX_CONTEXT_CHARS})"
         )));
     }

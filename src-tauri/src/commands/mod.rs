@@ -147,6 +147,7 @@ pub(super) fn unwrap_app_error_message(err: AppError) -> String {
         | AppError::Export(s)
         | AppError::Translation(s)
         | AppError::Config(s)
+        | AppError::InvalidInput(s)
         | AppError::MutexPoisoned(s)
         | AppError::HttpClient(s)
         | AppError::Other(s) => s,
@@ -177,6 +178,7 @@ pub(super) fn unwrap_app_error_message_ref(err: &AppError) -> String {
         | AppError::Export(s)
         | AppError::Translation(s)
         | AppError::Config(s)
+        | AppError::InvalidInput(s)
         | AppError::MutexPoisoned(s)
         | AppError::HttpClient(s)
         | AppError::Other(s) => s.clone(),

@@ -50,7 +50,7 @@ pub async fn process_recording(
     if let Some(ref ctx) = context
         && ctx.len() > super::generation::MAX_CONTEXT_CHARS
     {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "Context too large: {} chars, limit is {}",
             ctx.len(),
             super::generation::MAX_CONTEXT_CHARS

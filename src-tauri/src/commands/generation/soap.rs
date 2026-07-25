@@ -35,7 +35,7 @@ pub async fn generate_soap(
     if let Some(ref ctx) = context
         && ctx.len() > MAX_CONTEXT_CHARS
     {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "Context too large: {} chars, limit is {}",
             ctx.len(),
             MAX_CONTEXT_CHARS
@@ -123,7 +123,7 @@ async fn generate_soap_inner(
         })?;
 
     if transcript.len() > MAX_TRANSCRIPT_CHARS {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "Transcript too large: {} chars, limit is {}",
             transcript.len(),
             MAX_TRANSCRIPT_CHARS

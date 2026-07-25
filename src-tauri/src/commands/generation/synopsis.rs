@@ -49,7 +49,7 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
         })?;
 
     if soap_note.len() > MAX_SOAP_NOTE_CHARS {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "SOAP note too large: {} chars, limit is {}",
             soap_note.len(),
             MAX_SOAP_NOTE_CHARS

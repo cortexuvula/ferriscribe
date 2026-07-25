@@ -28,7 +28,9 @@ pub async fn generate_peer_discussion(
     context: Option<String>,
 ) -> AppResult<String> {
     if physician_name.trim().is_empty() {
-        return Err(AppError::Other("Physician name is required.".to_string()));
+        return Err(AppError::InvalidInput(
+            "Physician name is required.".to_string(),
+        ));
     }
     if reason.trim().is_empty() {
         return Err(AppError::Other(
@@ -38,7 +40,7 @@ pub async fn generate_peer_discussion(
     if let Some(ref ctx) = context
         && ctx.len() > MAX_CONTEXT_CHARS
     {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "Context too large: {} chars, limit is {}",
             ctx.len(),
             MAX_CONTEXT_CHARS
@@ -120,7 +122,7 @@ async fn generate_peer_discussion_inner(
         })?;
 
     if transcript.len() > MAX_TRANSCRIPT_CHARS {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "Transcript too large: {} chars, limit is {}",
             transcript.len(),
             MAX_TRANSCRIPT_CHARS

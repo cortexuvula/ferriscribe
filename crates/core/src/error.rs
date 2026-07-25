@@ -139,6 +139,11 @@ pub enum AppError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// User-supplied input failed validation (e.g. missing required field,
+    /// oversized context, invalid recording ID).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     /// An endpoint URL was rejected by the local-only endpoint policy.
     #[error(
         "invalid endpoint '{host}' for {field}: public/unknown endpoints are blocked (kind={kind:?}). Enable 'Allow public endpoints' in Advanced settings to override."
@@ -200,6 +205,7 @@ impl AppError {
             AppError::Export(_) => "Export",
             AppError::Translation(_) => "Translation",
             AppError::Config(_) => "Config",
+            AppError::InvalidInput(_) => "InvalidInput",
             AppError::InvalidEndpoint { .. } => "InvalidEndpoint",
             AppError::Io(_) => "Io",
             AppError::Serialization(_) => "Serialization",
