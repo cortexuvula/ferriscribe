@@ -33,4 +33,4 @@ pub mod preflight;
 pub mod traits;
 pub mod types;
 
-pub use error::{AppError, AppResult, ErrorContext, ErrorSeverity};
+pub use error::{AppError, AppResult};

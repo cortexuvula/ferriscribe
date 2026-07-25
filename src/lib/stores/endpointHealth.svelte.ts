@@ -46,8 +46,7 @@ class EndpointHealthStore {
   private visibilityHandler: (() => void) | null = null;
   private primed = false;
   private lastProbedKey = '';
-  private subscriberCount = 0;
-  private subscribers = new Set<(value: EndpointHealthState) => void>();
+  private consumerCount = 0;
 
   private probedKey(cfg: AppConfig): string {
     return [
@@ -153,12 +152,7 @@ class EndpointHealthStore {
     this.primed = true;
     const [ai, stt] = await Promise.all([this.probeAi(cfg), this.probeStt(cfg)]);
     const overall = computeOverall(ai, stt);
-    const next: EndpointHealthState = { ai, stt, lastCheckedAt: Date.now(), overall };
-    this.state = next;
-    // Notify Svelte-store-compatible subscribers (used by tests and legacy consumers).
-    for (const cb of this.subscribers) {
-      cb(next);
-    }
+    this.state = { ai, stt, lastCheckedAt: Date.now(), overall };
   }
 
   private startPolling(): void {
@@ -201,24 +195,27 @@ class EndpointHealthStore {
     this.lastProbedKey = '';
   }
 
-  /** Svelte-store-compatible subscribe for lifecycle management and legacy consumers. */
-  subscribe(cb: (value: EndpointHealthState) => void): () => void {
-    // Emit current value immediately (Svelte store contract).
-    cb(this.state);
-    this.subscribers.add(cb);
-    this.subscriberCount++;
-    if (this.subscriberCount === 1) {
-      // First subscriber — start polling.
+  /**
+   * Register an active consumer. Refcounted: the first consumer starts the
+   * polling loop + settings subscription + visibility listener; the last
+   * consumer tears them down. Returns a stop function the caller can invoke
+   * in onDestroy (or just call `stop()` directly). Idempotent if a
+   * component mounts/unmounts repeatedly.
+   */
+  start(): () => void {
+    this.consumerCount++;
+    if (this.consumerCount === 1) {
       this.startPolling();
     }
-    return () => {
-      this.subscribers.delete(cb);
-      this.subscriberCount--;
-      if (this.subscriberCount === 0) {
-        // Last subscriber gone — stop polling.
-        this.stopPolling();
-      }
-    };
+    return () => this.stop();
+  }
+
+  /** Release a consumer. Pairs with `start()`. */
+  stop(): void {
+    this.consumerCount = Math.max(0, this.consumerCount - 1);
+    if (this.consumerCount === 0) {
+      this.stopPolling();
+    }
   }
 
   /** Force an immediate probe (used by settings-change and visibilitychange triggers). */

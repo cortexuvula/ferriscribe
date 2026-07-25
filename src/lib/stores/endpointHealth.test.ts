@@ -258,8 +258,8 @@ describe('endpointHealth store', () => {
     } as any);
     invokeMock.mockResolvedValue('Connected');
 
-    const unsub = endpointHealth.subscribe(() => {});
-    // First probe fires immediately on subscribe: get_api_key + test_lmstudio_connection = 2 calls.
+    const stop = endpointHealth.start();
+    // First probe fires immediately on start: get_api_key + test_lmstudio_connection = 2 calls.
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
@@ -269,7 +269,7 @@ describe('endpointHealth store', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(invokeMock).toHaveBeenCalledTimes(4);
 
-    unsub();
+    stop();
   });
 
   it('clears the interval when the last subscriber unsubscribes', async () => {
@@ -286,12 +286,12 @@ describe('endpointHealth store', () => {
     } as any);
     invokeMock.mockResolvedValue('Connected');
 
-    const unsub = endpointHealth.subscribe(() => {});
+    const stop = endpointHealth.start();
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
     const callsAfterSubscribe = invokeMock.mock.calls.length;
-    unsub();
+    stop();
 
     await vi.advanceTimersByTimeAsync(30_000);
     expect(invokeMock).toHaveBeenCalledTimes(callsAfterSubscribe);
@@ -314,7 +314,7 @@ describe('endpointHealth store', () => {
       return Promise.resolve('Connected');
     });
 
-    const unsub = endpointHealth.subscribe(() => {});
+    const stop = endpointHealth.start();
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
@@ -335,7 +335,7 @@ describe('endpointHealth store', () => {
       probePath: '/api/tags',
       apiKey: undefined,
     });
-    unsub();
+    stop();
   });
 
   it('fetches stt_remote_api_key from keychain and forwards it to the STT probe', async () => {
@@ -541,7 +541,7 @@ describe('endpointHealth store', () => {
     } as any);
     invokeMock.mockResolvedValue('Connected');
 
-    const unsub = endpointHealth.subscribe(() => {});
+    const stop = endpointHealth.start();
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
@@ -563,7 +563,7 @@ describe('endpointHealth store', () => {
     await Promise.resolve();
     expect(invokeMock.mock.calls.length).toBeGreaterThan(initialCalls);
 
-    unsub();
+    stop();
 
     // Clean up the document stub.
     Object.defineProperty(globalThis, 'document', {

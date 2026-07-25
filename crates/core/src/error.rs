@@ -313,80 +313,6 @@ impl AppError {
 /// Every fallible function in the workspace returns this type.
 pub type AppResult<T> = Result<T, AppError>;
 
-/// Severity level for error logging and UI display.
-///
-/// Used inside [`ErrorContext`] to classify how urgently an error needs
-/// attention. The frontend maps these to toast styling and log filters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ErrorSeverity {
-    /// The application cannot continue — data loss or crash.
-    Critical,
-    /// A user-visible operation failed but the app remains functional.
-    Error,
-    /// Something unexpected happened but the operation succeeded.
-    Warning,
-    /// Informational — no action required.
-    Info,
-}
-
-/// Structured error context for logging and debugging.
-///
-/// Builder pattern: start with [`ErrorContext::new`], then chain
-/// [`with_severity`](ErrorContext::with_severity) and
-/// [`with_code`](ErrorContext::with_code). Serializes to JSON for
-/// structured logging and frontend consumption.
-///
-/// # Example
-///
-/// ```ignore
-/// let ctx = ErrorContext::new("save_recording", "disk full")
-///     .with_severity(ErrorSeverity::Critical)
-///     .with_code("DISK_FULL");
-/// ```
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ErrorContext {
-    /// The operation that was being attempted (e.g. `"save_recording"`).
-    pub operation: String,
-    /// Human-readable error description.
-    pub error: String,
-    /// How severe this error is.
-    pub severity: ErrorSeverity,
-    /// Optional machine-readable error code (e.g. `"DISK_FULL"`).
-    pub error_code: Option<String>,
-    /// UTC timestamp when the error was created.
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// Arbitrary extra context (defaults to `null`).
-    pub additional_info: serde_json::Value,
-}
-
-impl ErrorContext {
-    /// Create a new context with [`ErrorSeverity::Error`] and the current
-    /// UTC timestamp. Chain [`with_severity`](Self::with_severity) and
-    /// [`with_code`](Self::with_code) to customize.
-    pub fn new(operation: impl Into<String>, error: impl Into<String>) -> Self {
-        Self {
-            operation: operation.into(),
-            error: error.into(),
-            severity: ErrorSeverity::Error,
-            error_code: None,
-            timestamp: chrono::Utc::now(),
-            additional_info: serde_json::Value::Null,
-        }
-    }
-
-    /// Override the default severity level.
-    pub fn with_severity(mut self, severity: ErrorSeverity) -> Self {
-        self.severity = severity;
-        self
-    }
-
-    /// Attach a machine-readable error code.
-    pub fn with_code(mut self, code: impl Into<String>) -> Self {
-        self.error_code = Some(code.into());
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,25 +351,6 @@ mod tests {
         let app_err = AppError::database("simple error");
         let source = std::error::Error::source(&app_err);
         assert!(source.is_none(), "source should be None when not provided");
-    }
-
-    #[test]
-    fn error_context_builder() {
-        let ctx = ErrorContext::new("save_recording", "disk full")
-            .with_severity(ErrorSeverity::Critical)
-            .with_code("DISK_FULL");
-        assert_eq!(ctx.operation, "save_recording");
-        assert_eq!(ctx.severity, ErrorSeverity::Critical);
-        assert_eq!(ctx.error_code.as_deref(), Some("DISK_FULL"));
-    }
-
-    #[test]
-    fn error_context_serializes_to_json() {
-        let ctx = ErrorContext::new("test_op", "test_err");
-        let json = serde_json::to_value(&ctx).unwrap();
-        assert_eq!(json["operation"], "test_op");
-        assert_eq!(json["error"], "test_err");
-        assert!(json["timestamp"].is_string());
     }
 
     #[test]

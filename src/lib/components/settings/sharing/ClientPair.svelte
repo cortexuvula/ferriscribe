@@ -26,14 +26,14 @@
     label: string;
   };
 
-  let discovered: Discovered[] = [];
-  let scanning = false;
-  let pasteUrl = '';
-  let label = '';
-  let busy = false;
-  let error: string | null = null;
-  let pairedConn: PairedConnection | null = null;
-  let unpairBusy = false;
+  let discovered = $state<Discovered[]>([]);
+  let scanning = $state(false);
+  let pasteUrl = $state('');
+  let label = $state('');
+  let busy = $state(false);
+  let error = $state<string | null>(null);
+  let pairedConn = $state<PairedConnection | null>(null);
+  let unpairBusy = $state(false);
 
   // Strip the mDNS suffix `._ferriscribe._tcp.local.` to recover the
   // human-readable friendly name the office-server admin set in the wizard.
@@ -54,7 +54,7 @@
   // addresses (`addresses`) and the tailnet addresses
   // (`tailscale_addresses`) into a single entry, keeping each channel's
   // set separate so the slot routing in `pairDiscovered` is correct.
-  $: deduped = (() => {
+  const deduped = $derived.by(() => {
     const seen = new Map<string, Discovered>();
     for (const d of discovered) {
       const existing = seen.get(d.instance_name);
@@ -75,7 +75,7 @@
       }
     }
     return Array.from(seen.values());
-  })();
+  });
 
   // Pick the most useful address from a set of resolved addresses:
   //   1. RFC1918 IPv4 (192.168/10/172.16-31) — almost always the right answer
