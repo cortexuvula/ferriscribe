@@ -5,6 +5,7 @@
 
   let input = $state('');
   let messagesEl: HTMLDivElement | undefined = $state();
+  let userNearBottom = $state(true);
 
   onDestroy(() => {
     chat.cancel();
@@ -17,10 +18,19 @@
     }
   }
 
-  // Scroll to bottom whenever messages change
+  function onScroll(e: Event) {
+    const el = e.currentTarget as HTMLElement;
+    // "Near bottom" = within 100px of the bottom
+    userNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+  }
+
+  // Auto-scroll to bottom on new messages only when the user is already near
+  // the bottom — otherwise we'd fight a user who has scrolled up to read.
   $effect(() => {
     chat.messages.length;
-    scrollToBottom();
+    if (userNearBottom) {
+      scrollToBottom();
+    }
   });
 
   async function sendMessage() {
@@ -40,7 +50,7 @@
 </script>
 
 <div class="chat-tab">
-  <div class="messages-area" bind:this={messagesEl}>
+  <div class="messages-area" bind:this={messagesEl} onscroll={onScroll}>
     {#if chat.messages.length === 0}
       <div class="welcome">
         <div class="welcome-icon">💬</div>

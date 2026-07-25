@@ -18,7 +18,7 @@
   let whisperModels = $state<WhisperModelInfo[]>([]);
   let pyannoteModels = $state<WhisperModelInfo[]>([]);
   let modelsRefreshing = $state(false);
-  let downloadingModel = $state<string | null>(null);
+  let downloadingModels = $state<Set<string>>(new Set());
   let downloadProgress = $state<Record<string, { downloaded: number; total: number }>>({});
   let sttMode = $state<'local' | 'remote'>((settings.state.stt_mode as 'local' | 'remote') ?? 'local');
   let progressUnlisten: UnlistenFn | null = null;
@@ -56,14 +56,17 @@
   }
 
   async function handleDownloadModel(modelId: string) {
-    downloadingModel = modelId;
+    if (downloadingModels.has(modelId)) return; // Already downloading
+    downloadingModels = new Set([...downloadingModels, modelId]);
     try {
       await downloadModel(modelId);
       await Promise.all([fetchWhisperModels(), fetchPyannoteModels()]);
     } catch (e) {
       console.error(`Failed to download model ${modelId}:`, e);
     } finally {
-      downloadingModel = null;
+      const next = new Set(downloadingModels);
+      next.delete(modelId);
+      downloadingModels = next;
     }
   }
 
@@ -162,7 +165,7 @@
     <WhisperLocalSection
       {whisperModels}
       {modelsRefreshing}
-      {downloadingModel}
+      downloadingModels={downloadingModels}
       {downloadProgress}
       onModelChange={handleWhisperModelChange}
       onDownload={handleDownloadModel}
@@ -175,7 +178,7 @@
 
   <DiarizationModelsSection
     {pyannoteModels}
-    {downloadingModel}
+    downloadingModels={downloadingModels}
     {downloadProgress}
     onDownload={handleDownloadModel}
     onDelete={handleDeleteModel}

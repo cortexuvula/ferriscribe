@@ -3,7 +3,7 @@
 
   interface Props {
     pyannoteModels: WhisperModelInfo[];
-    downloadingModel: string | null;
+    downloadingModels: Set<string>;
     downloadProgress: Record<string, { downloaded: number; total: number }>;
     onDownload: (modelId: string) => Promise<void>;
     onDelete: (modelId: string) => Promise<void>;
@@ -12,7 +12,7 @@
 
   const {
     pyannoteModels,
-    downloadingModel,
+    downloadingModels,
     downloadProgress,
     onDownload,
     onDelete,
@@ -42,7 +42,7 @@
             >
               Delete
             </button>
-          {:else if downloadingModel === model.id}
+          {:else if downloadingModels.has(model.id)}
             <span class="download-progress">
               {#if downloadProgress[model.id]}
                 {Math.round((downloadProgress[model.id].downloaded / (downloadProgress[model.id].total || 1)) * 100)}%
@@ -54,7 +54,7 @@
             <button
               class="btn-download-model"
               onclick={() => onDownload(model.id)}
-              disabled={downloadingModel !== null}
+              disabled={downloadingModels.size > 0}
             >
               Download
             </button>

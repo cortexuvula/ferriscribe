@@ -94,7 +94,9 @@
   }
 
   async function handlePromptSelect(docType: DocType) {
-    if (promptDirty) {
+    // Suppress the discard dialog while a save is in flight — the dirty flag
+    // will be cleared once the save resolves, so prompting mid-save is spurious.
+    if (promptDirty && promptSaveStatus !== 'saving') {
       const confirmed = confirm('You have unsaved changes. Discard them?');
       if (!confirmed) return;
     }

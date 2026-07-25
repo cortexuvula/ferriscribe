@@ -56,6 +56,20 @@ class ChatStore {
     this.messages = [...this.messages.slice(0, -1), updated];
   }
 
+  /**
+   * Append to the last message, but if its content is currently empty (e.g. a
+   * fresh streaming placeholder), replace the content instead of appending.
+   * This avoids producing a leading blank line when an error or status notice
+   * is the first thing written to the message.
+   */
+  appendOrOverwriteLast(text: string) {
+    if (this.messages.length === 0) return;
+    const last = this.messages[this.messages.length - 1];
+    const content = last.content === '' ? text : last.content + text;
+    const updated: ChatMessage = { ...last, content };
+    this.messages = [...this.messages.slice(0, -1), updated];
+  }
+
   startStreaming() {
     const msg: ChatMessage = {
       id: generateId(),
@@ -101,7 +115,7 @@ class ChatStore {
     // stream silently ends), clean up after 5 minutes so chat isn't stuck.
     this._safetyTimeout = setTimeout(() => {
       if (!cleaned) {
-        this.appendToLast('\n\n(Stream timed out — no response received)');
+        this.appendOrOverwriteLast('\n\n(Stream timed out — no response received)');
         cleanup();
       }
     }, 5 * 60 * 1000);
@@ -113,7 +127,7 @@ class ChatStore {
         if (this._safetyTimeout) clearTimeout(this._safetyTimeout);
         this._safetyTimeout = setTimeout(() => {
           if (!cleaned) {
-            this.appendToLast('\n\n(Stream timed out)');
+            this.appendOrOverwriteLast('\n\n(Stream timed out)');
             cleanup();
           }
         }, 5 * 60 * 1000);
@@ -122,7 +136,7 @@ class ChatStore {
         cleanup();
       });
       this._errorUnlisten = await listen<{ message: string } | string>('chat-error', (event) => {
-        this.appendToLast(`\n\nError: ${formatError(event.payload)}`);
+        this.appendOrOverwriteLast(`\n\nError: ${formatError(event.payload)}`);
         cleanup();
       });
 
@@ -143,7 +157,7 @@ class ChatStore {
         cleanup();
         return;
       }
-      this.appendToLast(`\n\nError: ${formatError(e) || 'Chat failed'}`);
+      this.appendOrOverwriteLast(`\n\nError: ${formatError(e) || 'Chat failed'}`);
       cleanup();
     }
   }

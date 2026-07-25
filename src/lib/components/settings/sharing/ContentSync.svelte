@@ -31,17 +31,24 @@
   });
 
   async function onChange(e: Event) {
-    const checked = (e.target as HTMLInputElement).checked;
-    settings.updateField('sync_content', checked);
+    const target = e.target as HTMLInputElement;
+    const checked = target.checked;
     if (checked) {
       try {
         await syncContentNow();
         await subscribeContentSync();
+        // Persist the toggle only after setup completed; the $effect below
+        // will start background sync in response to the settings change.
+        settings.updateField('sync_content', true);
         startBackgroundSync();
       } catch (err) {
-        console.error('Initial content sync failed:', err);
+        // Rollback: sync setup failed, don't persist the toggle.
+        target.checked = false;
+        console.error('Failed to enable content sync:', err);
+        toasts.error('Could not enable content sync. Check your connection.');
       }
     } else {
+      settings.updateField('sync_content', false);
       stopBackgroundSync();
     }
   }
