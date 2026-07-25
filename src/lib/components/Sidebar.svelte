@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { theme } from '../stores/theme.svelte.ts';
+  import { theme } from '../stores/theme.svelte';
   import { settings } from '../stores/settings.svelte';
 
   interface Props {

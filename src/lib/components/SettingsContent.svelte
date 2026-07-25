@@ -8,7 +8,7 @@
   import TrainingCorpus from './settings/TrainingCorpus.svelte';
   import LetterAudiences from './settings/LetterAudiences.svelte';
   import About from './settings/About.svelte';
-  import { settingsNav, type SettingsSection } from '../stores/settingsNav.svelte.ts';
+  import { settingsNav, type SettingsSection } from '../stores/settingsNav.svelte';
 
   type Section = SettingsSection;
   let activeSection = $state<Section>('general');

@@ -8,7 +8,7 @@ const WIDTH_KEY = 'record.sidebar.width';
 // initialization (which reads localStorage) reflects the current mock state.
 async function freshStore() {
   vi.resetModules();
-  return await import('./recordSidebar.svelte.ts');
+  return await import('./recordSidebar.svelte');
 }
 
 describe('recordSidebar store', () => {

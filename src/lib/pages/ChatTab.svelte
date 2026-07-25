@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
-  import { chat, isStreaming } from '../stores/chat.svelte.ts';
+  import { chat, isStreaming } from '../stores/chat.svelte';
   import ChatMessage from '../components/ChatMessage.svelte';
 
   let input = $state('');

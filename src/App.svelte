@@ -3,7 +3,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { settings } from './lib/stores/settings.svelte';
   import { icd9 as icd9Store } from './lib/stores/icd9.svelte';
-  import { theme } from './lib/stores/theme.svelte.ts';
+  import { theme } from './lib/stores/theme.svelte';
   import { generation } from './lib/stores/generation.svelte';
   import { updater } from './lib/stores/updater.svelte';
   import { invoke } from '@tauri-apps/api/core';
@@ -19,7 +19,7 @@
   import FatalErrorDialog from './lib/dialogs/FatalErrorDialog.svelte';
   import OnboardingWizard from './lib/components/OnboardingWizard.svelte';
   import EndpointOfflineDialog from './lib/components/EndpointOfflineDialog.svelte';
-  import { settingsNav } from './lib/stores/settingsNav.svelte.ts';
+  import { settingsNav } from './lib/stores/settingsNav.svelte';
   import type { ServiceKind } from './lib/api/invokeWithOfflineHandling';
   import { recordings, selectRecording } from './lib/stores/recordings.svelte';
   import { pipeline } from './lib/stores/pipeline.svelte';

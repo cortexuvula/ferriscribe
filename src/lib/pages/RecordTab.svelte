@@ -7,7 +7,7 @@
   import { checkRecordingAudioLevels } from '../api/audio';
   import { copyWithStatus } from '../utils/clipboard';
   import { clampSidebarWidth } from '../utils/resize';
-  import { recordSidebar } from '../stores/recordSidebar.svelte.ts';
+  import { recordSidebar } from '../stores/recordSidebar.svelte';
   import RecordingHeader from '../components/RecordingHeader.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import RecordingStateCards from './record/RecordingStateCards.svelte';
