@@ -331,7 +331,7 @@
     {:else if activeTab === 'recordings'}
       <RecordingsTab />
     {:else if activeTab === 'generate'}
-      <GenerateTab />
+      <GenerateTab onNavigateRecordings={() => (activeTab = 'recordings')} />
     {:else if activeTab === 'chat'}
       <ChatTab />
     {:else if activeTab === 'transcript'}

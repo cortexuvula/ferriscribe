@@ -12,6 +12,9 @@
     done: boolean;
     copyStatus: 'idle' | 'copying' | 'copied' | undefined;
     icdCodes?: ValidatedIcdCode[];
+    generatedText?: string | null;
+    progressText?: string | null;
+    failed?: boolean;
     onGenerate: () => void;
     onCopy: () => void;
     onSpeedRead?: () => void;
@@ -27,13 +30,16 @@
     done,
     copyStatus,
     icdCodes,
+    generatedText = null,
+    progressText = null,
+    failed = false,
     onGenerate,
     onCopy,
     onSpeedRead,
   }: Props = $props();
 </script>
 
-<div class="generate-item">
+<div class="generate-item" class:failed>
   {#if icon}<span class="item-icon" aria-hidden="true">{icon}</span>{/if}
   <div class="item-info">
     <div class="item-title">{title}</div>
@@ -45,6 +51,9 @@
       <button class="btn-generate" disabled>
         <span class="spinner"></span> Generating...
       </button>
+      {#if progressText}
+        <span class="progress-phase" role="status" aria-live="polite">{progressText}</span>
+      {/if}
     {:else if done}
       <div class="done-group">
         <span class="done-badge">Done</span>
@@ -80,6 +89,12 @@
             <IcdChip code={code.raw} valid={code.valid} />
           {/each}
         </div>
+      {/if}
+      {#if generatedText}
+        <details class="generated-preview">
+          <summary>Preview</summary>
+          <pre class="preview-text">{generatedText}</pre>
+        </details>
       {/if}
     {:else}
       <button
@@ -252,5 +267,45 @@
     font-size: 12px;
     font-weight: 600;
     color: var(--text-secondary);
+  }
+
+  .generated-preview {
+    grid-column: 1 / -1;
+    margin-top: 8px;
+  }
+
+  .generated-preview summary {
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+
+  .preview-text {
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 12px;
+    background-color: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: inherit;
+    margin: 0;
+  }
+
+  .progress-phase {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-style: italic;
+    margin-top: 4px;
+  }
+
+  .generate-item.failed {
+    border-left: 3px solid var(--danger, #ef4444);
+    padding-left: 8px;
   }
 </style>

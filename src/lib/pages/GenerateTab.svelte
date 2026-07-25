@@ -14,6 +14,13 @@
   import { formatError } from '../types/errors';
   import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
   import { letterAudiences } from '../stores/letterAudiences.svelte';
+  import { toasts } from '../stores/toasts.svelte';
+
+  interface Props {
+    onNavigateRecordings?: () => void;
+  }
+
+  const { onNavigateRecordings = () => {} }: Props = $props();
 
   let selectedAudienceId = $state<string | null>(null);
   let letterType = $state('');
@@ -103,8 +110,11 @@
     contextText.trim().length > 0 ||
       medicationsText.trim().length > 0 ||
       allergiesText.trim().length > 0 ||
-      conditionsText.trim().length > 0,
+      conditionsText.trim().length > 0 ||
+      ocrTextDisplay.trim().length > 0,
   );
+
+  const contextCharCount = $derived(contextText.length + ocrTextDisplay.length);
 
   function insertTemplate(text: string) {
     contextText = contextText ? contextText + '\n' + text : text;
@@ -263,6 +273,7 @@
         recordings.load(),
       ]);
       generation.finish();
+      toasts.success(`${type === 'soap' ? 'SOAP' : type === 'peer_discussion' ? 'Peer discussion' : type.charAt(0).toUpperCase() + type.slice(1)} note generated`);
     } catch (e) {
       if (e instanceof OfflineCancelled) {
         // Dialog already informed the user; restore idle state without an error banner.
@@ -280,6 +291,9 @@
       <div class="empty-icon">⚡</div>
       <h2>Generate Documentation</h2>
       <p>Select a recording from the <strong>Recordings</strong> tab first.</p>
+      <button class="btn-goto-recordings" onclick={() => onNavigateRecordings()}>
+        Go to Recordings
+      </button>
     </div>
 
   {:else}
@@ -306,6 +320,7 @@
         onAllergiesChange={(value) => (allergiesText = value)}
         onConditionsChange={(value) => (conditionsText = value)}
         onContextChange={(value) => (contextText = value)}
+        {contextCharCount}
         {ocrFiles}
         ocrText={ocrTextDisplay}
         {ocrLoading}
@@ -333,6 +348,10 @@
         onPhysicianNameChange={(name) => (physicianName = name)}
         onSpecialtyChange={(s) => (specialty = s)}
         onDiscussionReasonChange={(reason) => (discussionReason = reason)}
+        generatedSoap={recordings.selectedRecording.soap_note}
+        generatedReferral={recordings.selectedRecording.referral}
+        generatedLetter={recordings.selectedRecording.letter}
+        generatedPeerDiscussion={recordings.selectedRecording.peer_discussion}
       />
     </div>
   {/if}
@@ -398,5 +417,22 @@
   .patient {
     font-size: 13px;
     color: var(--text-muted);
+  }
+
+  .btn-goto-recordings {
+    margin-top: 12px;
+    padding: 8px 20px;
+    font-size: 14px;
+    font-weight: 500;
+    color: white;
+    background-color: var(--accent);
+    border: none;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+  }
+
+  .btn-goto-recordings:hover {
+    opacity: 0.9;
   }
 </style>

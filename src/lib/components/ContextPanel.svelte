@@ -10,6 +10,7 @@
     contextText: string;
     expanded: boolean;
     hasActiveContext: boolean;
+    contextCharCount?: number;
     onToggle: () => void;
     onInsertTemplate: (text: string) => void;
     onClearContext: () => void;
@@ -32,6 +33,7 @@
     contextText,
     expanded,
     hasActiveContext,
+    contextCharCount = 0,
     onToggle,
     onInsertTemplate,
     onClearContext,
@@ -157,6 +159,10 @@
           Clear notes
         </button>
       {/if}
+
+      <span class="char-counter" class:warning={contextCharCount > 40000} class:danger={contextCharCount > 50000}>
+        {contextCharCount.toLocaleString()} / 50,000 chars
+      </span>
 
       <!-- OCR Drop Zone — shared component -->
       <OcrDropZone
@@ -330,5 +336,19 @@
   .context-clear:hover {
     color: var(--danger, #ef4444);
     border-color: var(--danger, #ef4444);
+  }
+
+  .char-counter {
+    font-size: 11px;
+    color: var(--text-muted);
+    align-self: flex-end;
+  }
+
+  .char-counter.warning {
+    color: var(--warning, #f59e0b);
+  }
+
+  .char-counter.danger {
+    color: var(--danger, #ef4444);
   }
 </style>

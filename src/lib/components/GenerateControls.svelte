@@ -22,6 +22,10 @@
     physicianName: string;
     specialty: string;
     discussionReason: string;
+    generatedSoap?: string | null;
+    generatedReferral?: string | null;
+    generatedLetter?: string | null;
+    generatedPeerDiscussion?: string | null;
     onPhysicianNameChange: (name: string) => void;
     onSpecialtyChange: (specialty: string) => void;
     onDiscussionReasonChange: (reason: string) => void;
@@ -43,6 +47,10 @@
     physicianName,
     specialty,
     discussionReason,
+    generatedSoap = null,
+    generatedReferral = null,
+    generatedLetter = null,
+    generatedPeerDiscussion = null,
     onPhysicianNameChange,
     onSpecialtyChange,
     onDiscussionReasonChange,
@@ -53,6 +61,9 @@
     onAudienceChange,
     onLetterTypeChange,
   }: Props = $props();
+
+  let letterFieldsExpanded = $state(true);
+  let peerFieldsExpanded = $state(true);
 </script>
 
 {#if generationState.error}
@@ -93,48 +104,57 @@
         done={!!recording?.soap_note}
         copyStatus={copyStatus['soap']}
         icdCodes={recording?.soap_note ? extractIcdCodesValidated(recording.soap_note, icd9Store.codeSet, settings.state.icd_version) : undefined}
+        generatedText={generatedSoap}
+        progressText={generationState.generating === 'soap' ? generationState.progressStatus : null}
+        failed={!!generationState.error && generationState.lastFailedType === 'soap'}
         onGenerate={() => onGenerate('soap')}
         onCopy={() => onCopy('soap')}
         onSpeedRead={() => onSpeedRead('soap')}
       />
       <div class="letter-card">
-        <div class="letter-card-header">
-          <div class="letter-card-fields">
-            <div class="letter-field">
-              <label class="field-label" for="pd-physician">Physician Name</label>
-              <input
-                id="pd-physician"
-                type="text"
-                class="letter-input"
-                placeholder="e.g. Dr. Jane Smith"
-                value={physicianName}
-                oninput={(e) => onPhysicianNameChange(e.currentTarget.value)}
-              />
-            </div>
-            <div class="letter-field">
-              <label class="field-label" for="pd-specialty">Specialty</label>
-              <input
-                id="pd-specialty"
-                type="text"
-                class="letter-input"
-                placeholder="e.g. Cardiology"
-                value={specialty}
-                oninput={(e) => onSpecialtyChange(e.currentTarget.value)}
-              />
-            </div>
-            <div class="letter-field">
-              <label class="field-label" for="pd-reason">Reason for Discussion</label>
-              <input
-                id="pd-reason"
-                type="text"
-                class="letter-input"
-                placeholder="e.g. Review of abnormal ECG findings"
-                value={discussionReason}
-                oninput={(e) => onDiscussionReasonChange(e.currentTarget.value)}
-              />
+        {#if recording?.peer_discussion && !peerFieldsExpanded}
+          <div class="compact-settings" onclick={() => (peerFieldsExpanded = true)} role="button" tabindex="0">
+            👥 {physicianName} · {specialty} · <span class="edit-hint">Edit</span>
+          </div>
+        {:else}
+          <div class="letter-card-header">
+            <div class="letter-card-fields">
+              <div class="letter-field">
+                <label class="field-label" for="pd-physician">Physician Name</label>
+                <input
+                  id="pd-physician"
+                  type="text"
+                  class="letter-input"
+                  placeholder="e.g. Dr. Jane Smith"
+                  value={physicianName}
+                  oninput={(e) => onPhysicianNameChange(e.currentTarget.value)}
+                />
+              </div>
+              <div class="letter-field">
+                <label class="field-label" for="pd-specialty">Specialty</label>
+                <input
+                  id="pd-specialty"
+                  type="text"
+                  class="letter-input"
+                  placeholder="e.g. Cardiology"
+                  value={specialty}
+                  oninput={(e) => onSpecialtyChange(e.currentTarget.value)}
+                />
+              </div>
+              <div class="letter-field">
+                <label class="field-label" for="pd-reason">Reason for Discussion</label>
+                <input
+                  id="pd-reason"
+                  type="text"
+                  class="letter-input"
+                  placeholder="e.g. Review of abnormal ECG findings"
+                  value={discussionReason}
+                  oninput={(e) => onDiscussionReasonChange(e.currentTarget.value)}
+                />
+              </div>
             </div>
           </div>
-        </div>
+        {/if}
         <GenerateItem
           title="Peer Discussion"
           icon="👥"
@@ -144,6 +164,9 @@
           anyGenerating={generationState.generating !== null}
           done={!!recording?.peer_discussion}
           copyStatus={copyStatus['peer_discussion']}
+          generatedText={generatedPeerDiscussion}
+          progressText={generationState.generating === 'peer_discussion' ? generationState.progressStatus : null}
+          failed={!!generationState.error && generationState.lastFailedType === 'peer_discussion'}
           onGenerate={() => onGenerate('peer_discussion')}
           onCopy={() => onCopy('peer_discussion')}
           onSpeedRead={() => onSpeedRead('peer_discussion')}
@@ -164,39 +187,48 @@
         anyGenerating={generationState.generating !== null}
         done={!!recording?.referral}
         copyStatus={copyStatus['referral']}
+        generatedText={generatedReferral}
+        progressText={generationState.generating === 'referral' ? generationState.progressStatus : null}
+        failed={!!generationState.error && generationState.lastFailedType === 'referral'}
         onGenerate={() => onGenerate('referral')}
         onCopy={() => onCopy('referral')}
         onSpeedRead={() => onSpeedRead('referral')}
       />
       <div class="letter-card">
-        <div class="letter-card-header">
-          <div class="letter-card-fields">
-            <div class="letter-field">
-              <label class="field-label" for="letter-audience">Audience</label>
-              <select
-                id="letter-audience"
-                class="letter-select"
-                value={selectedAudienceId ?? ''}
-                onchange={(e) => onAudienceChange(e.currentTarget.value || null)}
-              >
-                {#each audiences as audience (audience.id)}
-                  <option value={audience.id}>{audience.name}</option>
-                {/each}
-              </select>
-            </div>
-            <div class="letter-field">
-              <label class="field-label" for="letter-type">Purpose</label>
-              <input
-                id="letter-type"
-                type="text"
-                class="letter-input"
-                placeholder="e.g. follow-up, pre-authorization"
-                value={letterType}
-                oninput={(e) => onLetterTypeChange(e.currentTarget.value)}
-              />
+        {#if recording?.letter && !letterFieldsExpanded}
+          <div class="compact-settings" onclick={() => (letterFieldsExpanded = true)} role="button" tabindex="0">
+            📋 {(audiences.find((a) => a.id === selectedAudienceId)?.name) || 'Patient'} · {letterType || 'general'} · <span class="edit-hint">Edit</span>
+          </div>
+        {:else}
+          <div class="letter-card-header">
+            <div class="letter-card-fields">
+              <div class="letter-field">
+                <label class="field-label" for="letter-audience">Audience</label>
+                <select
+                  id="letter-audience"
+                  class="letter-select"
+                  value={selectedAudienceId ?? ''}
+                  onchange={(e) => onAudienceChange(e.currentTarget.value || null)}
+                >
+                  {#each audiences as audience (audience.id)}
+                    <option value={audience.id}>{audience.name}</option>
+                  {/each}
+                </select>
+              </div>
+              <div class="letter-field">
+                <label class="field-label" for="letter-type">Purpose</label>
+                <input
+                  id="letter-type"
+                  type="text"
+                  class="letter-input"
+                  placeholder="e.g. follow-up, pre-authorization"
+                  value={letterType}
+                  oninput={(e) => onLetterTypeChange(e.currentTarget.value)}
+                />
+              </div>
             </div>
           </div>
-        </div>
+        {/if}
         <GenerateItem
           title="Letter"
           icon="✉️"
@@ -211,6 +243,9 @@
           anyGenerating={generationState.generating !== null}
           done={!!recording?.letter}
           copyStatus={copyStatus['letter']}
+          generatedText={generatedLetter}
+          progressText={generationState.generating === 'letter' ? generationState.progressStatus : null}
+          failed={!!generationState.error && generationState.lastFailedType === 'letter'}
           onGenerate={() => onGenerate('letter')}
           onCopy={() => onCopy('letter')}
           onSpeedRead={() => onSpeedRead('letter')}
@@ -381,5 +416,27 @@
   .letter-card > :global(.generate-item) {
     border: none;
     border-radius: 0;
+  }
+
+  .compact-settings {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    background-color: var(--bg-hover);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    margin-bottom: 8px;
+  }
+
+  .compact-settings:hover {
+    color: var(--text-secondary);
+  }
+
+  .edit-hint {
+    color: var(--accent);
+    font-weight: 500;
   }
 </style>
