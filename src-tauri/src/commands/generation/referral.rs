@@ -1,16 +1,13 @@
 //! `generate_referral` Tauri command — turns a recording's SOAP note into a referral.
 
-use medical_core::error::{AppError, AppResult};
+use medical_core::error::AppResult;
 use medical_processing::document_generator;
-use tauri::Emitter;
-use tracing::debug;
 
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, load_recording_and_settings, persist_recording, resolve_provider,
+    generate_from_soap, load_recording_and_settings, persist_recording, run_generation_command,
 };
-use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_SOAP_NOTE_CHARS, format_progress_error};
 
 /// Generate a referral letter from a recording's SOAP note.
 ///
@@ -24,149 +21,43 @@ pub async fn generate_referral(
     urgency: Option<String>,
     context: Option<String>,
 ) -> AppResult<String> {
-    // Validate context size before emitting started (fail fast, consistent with SOAP).
-    if let Some(ref ctx) = context
-        && ctx.len() > MAX_CONTEXT_CHARS
-    {
-        return Err(AppError::Other(format!(
-            "Context too large: {} chars, limit is {}",
-            ctx.len(),
-            MAX_CONTEXT_CHARS
-        )));
-    }
+    let recipient = recipient_type.unwrap_or_else(|| "Specialist".to_string());
+    let urg = urgency.unwrap_or_else(|| "routine".to_string());
+    let ctx = context.clone();
 
-    let _ = app.emit(
-        "generation-progress",
-        GenerationProgress {
-            doc_type: "referral".into(),
-            status: "started".into(),
-            recording_id: recording_id.clone(),
-        },
-    );
+    run_generation_command(&app, &recording_id, "referral", context.as_deref(), async {
+        let (mut recording, settings, config) =
+            load_recording_and_settings(&state.db, &recording_id).await?;
 
-    let result = generate_referral_inner(
-        &state,
-        &recording_id,
-        recipient_type.as_deref(),
-        urgency.as_deref(),
-        context.as_deref(),
-    )
-    .await;
+        let recipient = recipient.clone();
+        let urg = urg.clone();
+        let ctx2 = ctx.clone();
+        let text = generate_from_soap(
+            &state,
+            &mut recording,
+            &settings,
+            &config,
+            medical_core::preflight::CommandKind::GenerateReferral,
+            "referral letter",
+            move |soap_note, settings| {
+                document_generator::build_referral_prompt(
+                    soap_note,
+                    &recipient,
+                    &urg,
+                    settings.custom_referral_prompt.as_deref(),
+                    ctx2.as_deref(),
+                )
+            },
+            |rec, text| {
+                rec.referral = Some(text);
+            },
+        )
+        .await?;
 
-    match &result {
-        Ok(_) => {
-            let _ = app.emit(
-                "generation-progress",
-                GenerationProgress {
-                    doc_type: "referral".into(),
-                    status: "completed".into(),
-                    recording_id: recording_id.clone(),
-                },
-            );
-        }
-        Err(err) => {
-            let _ = app.emit(
-                "generation-progress",
-                GenerationProgress {
-                    doc_type: "referral".into(),
-                    status: format_progress_error(err),
-                    recording_id: recording_id.clone(),
-                },
-            );
-        }
-    }
-
-    result
-}
-
-async fn generate_referral_inner(
-    state: &AppState,
-    recording_id: &str,
-    recipient_type: Option<&str>,
-    urgency: Option<&str>,
-    context: Option<&str>,
-) -> AppResult<String> {
-    let (mut recording, settings, config) =
-        load_recording_and_settings(&state.db, recording_id).await?;
-
-    // Pre-flight: probe the remote AI endpoint before doing any work.
-    // Skipped for loopback hosts; returns EndpointOffline on failure
-    // without ever invoking the provider.
-    medical_core::preflight::preflight_for_command(
-        medical_core::preflight::CommandKind::GenerateReferral,
-        &config,
-    )
-    .await?;
-
-    let provider = resolve_provider(state, &settings.ai_provider).await?;
-
-    let soap_note = recording
-        .soap_note
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            AppError::Processing(
-                "Recording has no SOAP note. Generate a SOAP note first.".to_string(),
-            )
-        })?;
-
-    if soap_note.len() > MAX_SOAP_NOTE_CHARS {
-        return Err(AppError::Other(format!(
-            "SOAP note too large: {} chars, limit is {}",
-            soap_note.len(),
-            MAX_SOAP_NOTE_CHARS
-        )));
-    }
-
-    let recipient = recipient_type.unwrap_or("Specialist");
-    let urg = urgency.unwrap_or("routine");
-
-    let (system_prompt, user_prompt) = document_generator::build_referral_prompt(
-        soap_note,
-        recipient,
-        urg,
-        settings.custom_referral_prompt.as_deref(),
-        context,
-    );
-
-    debug!(
-        "generate_referral: provider='{}', recording='{}', recipient='{}', urgency='{}'",
-        provider.name(),
-        recording_id,
-        recipient,
-        urg,
-    );
-
-    let request = build_completion_request(
-        system_prompt,
-        user_prompt,
-        settings.model,
-        settings.temperature,
-        None,
-    );
-
-    let response = provider.complete(request).await.map_err(|e| match e {
-        // Preserve EndpointOffline as-is so the frontend dialog can fire.
-        AppError::EndpointOffline { .. } => e,
-        // For other errors, keep the existing nicer wrapping.
-        _ => AppError::AiProvider(format!(
-            "AI completion failed: {}",
-            crate::commands::unwrap_app_error_message(e)
-        )),
-    })?;
-
-    let referral_text = medical_processing::document_generator::strip_markdown(&response.content);
-    if referral_text.trim().is_empty() {
-        return Err(AppError::AiProvider(
-            "AI returned an empty referral letter.".to_string(),
-        ));
-    }
-
-    // Persist to DB (on blocking thread)
-    recording.referral = Some(referral_text.clone());
-    persist_recording(&state.db, recording).await?;
-
-    Ok(referral_text)
+        persist_recording(&state.db, recording).await?;
+        Ok(text)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -190,12 +81,31 @@ mod preflight_tests {
             build_test_state_with_recording(config, "Patient reports headache and fatigue.").await;
 
         let start = std::time::Instant::now();
-        let result = generate_referral_inner(
+        // Drive the inner logic directly: load recording + settings, then run
+        // the shared SOAP-based generator with a no-op prompt builder.
+        let (mut recording, settings, config) =
+            load_recording_and_settings(&state.db, &recording_id)
+                .await
+                .unwrap();
+        let result = generate_from_soap(
             &state,
-            &recording_id,
-            None, // recipient_type
-            None, // urgency
-            None, // context
+            &mut recording,
+            &settings,
+            &config,
+            medical_core::preflight::CommandKind::GenerateReferral,
+            "referral letter",
+            |soap_note, settings| {
+                document_generator::build_referral_prompt(
+                    soap_note,
+                    "Specialist",
+                    "routine",
+                    settings.custom_referral_prompt.as_deref(),
+                    None,
+                )
+            },
+            |rec, text| {
+                rec.referral = Some(text);
+            },
         )
         .await;
         let elapsed = start.elapsed();

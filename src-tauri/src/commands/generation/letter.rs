@@ -1,18 +1,15 @@
 //! `generate_letter` Tauri command — turns a recording's SOAP note into a patient letter.
 
-use medical_core::error::{AppError, AppResult};
+use medical_core::error::AppResult;
 use medical_db::LetterAudiencesRepo;
 use medical_processing::document_generator::{self, LetterAudienceContext};
-use tauri::Emitter;
-use tracing::debug;
 use uuid::Uuid;
 
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, load_recording_and_settings, persist_recording, resolve_provider,
+    generate_from_soap, load_recording_and_settings, persist_recording, run_generation_command,
 };
-use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_SOAP_NOTE_CHARS, format_progress_error};
 
 /// Generate a patient letter from a recording's SOAP note.
 ///
@@ -26,161 +23,58 @@ pub async fn generate_letter(
     audience_id: Option<Uuid>,
     context: Option<String>,
 ) -> AppResult<String> {
-    // Validate context size before emitting started (fail fast, consistent with SOAP).
-    if let Some(ref ctx) = context
-        && ctx.len() > MAX_CONTEXT_CHARS
-    {
-        return Err(AppError::Other(format!(
-            "Context too large: {} chars, limit is {}",
-            ctx.len(),
-            MAX_CONTEXT_CHARS
-        )));
-    }
+    let ltype = letter_type.unwrap_or_else(|| "follow-up".to_string());
+    let ctx = context.clone();
 
-    let _ = app.emit(
-        "generation-progress",
-        GenerationProgress {
-            doc_type: "letter".into(),
-            status: "started".into(),
-            recording_id: recording_id.clone(),
-        },
-    );
+    run_generation_command(&app, &recording_id, "letter", context.as_deref(), async {
+        // Single DB load: settings + recording + config. The audience lookup
+        // runs after the load, matching the original inner-function ordering,
+        // and uses the same DB connection.
+        let (mut recording, settings, config) =
+            load_recording_and_settings(&state.db, &recording_id).await?;
 
-    let result = generate_letter_inner(
-        &state,
-        &recording_id,
-        letter_type.as_deref(),
-        audience_id.as_ref(),
-        context.as_deref(),
-    )
-    .await;
+        let audience_context: Option<LetterAudienceContext> = match audience_id {
+            Some(id) => {
+                let conn = state.db.conn()?;
+                let audience = LetterAudiencesRepo::get_by_id(&conn, &id)?;
+                Some(LetterAudienceContext {
+                    name: audience.name,
+                    system_prompt: audience.system_prompt,
+                    user_template: audience.user_template,
+                })
+            }
+            None => None,
+        };
 
-    match &result {
-        Ok(_) => {
-            let _ = app.emit(
-                "generation-progress",
-                GenerationProgress {
-                    doc_type: "letter".into(),
-                    status: "completed".into(),
-                    recording_id: recording_id.clone(),
-                },
-            );
-        }
-        Err(err) => {
-            let _ = app.emit(
-                "generation-progress",
-                GenerationProgress {
-                    doc_type: "letter".into(),
-                    status: format_progress_error(err),
-                    recording_id: recording_id.clone(),
-                },
-            );
-        }
-    }
+        let lt = ltype.clone();
+        let aud = audience_context;
+        let ctx2 = ctx.clone();
+        let text = generate_from_soap(
+            &state,
+            &mut recording,
+            &settings,
+            &config,
+            medical_core::preflight::CommandKind::GenerateLetter,
+            "letter",
+            move |soap_note, settings| {
+                document_generator::build_letter_prompt(
+                    soap_note,
+                    &lt,
+                    aud.as_ref(),
+                    settings.custom_letter_prompt.as_deref(),
+                    ctx2.as_deref(),
+                )
+            },
+            |rec, text| {
+                rec.letter = Some(text);
+            },
+        )
+        .await?;
 
-    result
-}
-
-async fn generate_letter_inner(
-    state: &AppState,
-    recording_id: &str,
-    letter_type: Option<&str>,
-    audience_id: Option<&Uuid>,
-    context: Option<&str>,
-) -> AppResult<String> {
-    let (mut recording, settings, config) =
-        load_recording_and_settings(&state.db, recording_id).await?;
-
-    // If an audience_id is provided, fetch it from the DB and convert to context.
-    let audience_context: Option<LetterAudienceContext> = match audience_id {
-        Some(id) => {
-            let conn = state.db.conn()?;
-            let audience = LetterAudiencesRepo::get_by_id(&conn, id)?;
-            Some(LetterAudienceContext {
-                name: audience.name,
-                system_prompt: audience.system_prompt,
-                user_template: audience.user_template,
-            })
-        }
-        None => None,
-    };
-
-    // Pre-flight: probe the remote AI endpoint before doing any work.
-    // Skipped for loopback hosts; returns EndpointOffline on failure
-    // without ever invoking the provider.
-    medical_core::preflight::preflight_for_command(
-        medical_core::preflight::CommandKind::GenerateLetter,
-        &config,
-    )
-    .await?;
-
-    let provider = resolve_provider(state, &settings.ai_provider).await?;
-
-    let soap_note = recording
-        .soap_note
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            AppError::Processing(
-                "Recording has no SOAP note. Generate a SOAP note first.".to_string(),
-            )
-        })?;
-
-    if soap_note.len() > MAX_SOAP_NOTE_CHARS {
-        return Err(AppError::Other(format!(
-            "SOAP note too large: {} chars, limit is {}",
-            soap_note.len(),
-            MAX_SOAP_NOTE_CHARS
-        )));
-    }
-
-    let ltype = letter_type.unwrap_or("follow-up");
-
-    let (system_prompt, user_prompt) = document_generator::build_letter_prompt(
-        soap_note,
-        ltype,
-        audience_context.as_ref(),
-        settings.custom_letter_prompt.as_deref(),
-        context,
-    );
-
-    debug!(
-        "generate_letter: provider='{}', recording='{}', letter_type='{}'",
-        provider.name(),
-        recording_id,
-        ltype,
-    );
-
-    let request = build_completion_request(
-        system_prompt,
-        user_prompt,
-        settings.model,
-        settings.temperature,
-        None,
-    );
-
-    let response = provider.complete(request).await.map_err(|e| match e {
-        // Preserve EndpointOffline as-is so the frontend dialog can fire.
-        AppError::EndpointOffline { .. } => e,
-        // For other errors, keep the existing nicer wrapping.
-        _ => AppError::AiProvider(format!(
-            "AI completion failed: {}",
-            crate::commands::unwrap_app_error_message(e)
-        )),
-    })?;
-
-    let letter_text = medical_processing::document_generator::strip_markdown(&response.content);
-    if letter_text.trim().is_empty() {
-        return Err(AppError::AiProvider(
-            "AI returned an empty letter.".to_string(),
-        ));
-    }
-
-    // Persist to DB (on blocking thread)
-    recording.letter = Some(letter_text.clone());
-    persist_recording(&state.db, recording).await?;
-
-    Ok(letter_text)
+        persist_recording(&state.db, recording).await?;
+        Ok(text)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -204,12 +98,31 @@ mod preflight_tests {
             build_test_state_with_recording(config, "Patient reports headache and fatigue.").await;
 
         let start = std::time::Instant::now();
-        let result = generate_letter_inner(
+        // Drive the inner logic directly: load recording + settings, then run
+        // the shared SOAP-based generator with a no-op prompt builder.
+        let (mut recording, settings, config) =
+            load_recording_and_settings(&state.db, &recording_id)
+                .await
+                .unwrap();
+        let result = generate_from_soap(
             &state,
-            &recording_id,
-            None, // letter_type
-            None, // audience_id
-            None, // context
+            &mut recording,
+            &settings,
+            &config,
+            medical_core::preflight::CommandKind::GenerateLetter,
+            "letter",
+            |soap_note, settings| {
+                document_generator::build_letter_prompt(
+                    soap_note,
+                    "follow-up",
+                    None,
+                    settings.custom_letter_prompt.as_deref(),
+                    None,
+                )
+            },
+            |rec, text| {
+                rec.letter = Some(text);
+            },
         )
         .await;
         let elapsed = start.elapsed();

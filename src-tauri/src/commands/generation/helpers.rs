@@ -8,11 +8,15 @@ use medical_core::types::recording::Recording;
 use medical_core::types::settings::{AppConfig, SoapTemplate};
 use medical_core::types::{CompletionRequest, Message, MessageContent, PatientContext, Role};
 use medical_db::recordings::RecordingsRepo;
+use tauri::Emitter;
 use uuid::Uuid;
 
 use crate::state::AppState;
 
-use super::{MAX_CONTEXT_CHARS, PATIENT_CTX_MAX_ITEM_CHARS, PATIENT_CTX_MAX_ITEMS_PER_LIST};
+use super::{
+    GenerationProgress, MAX_CONTEXT_CHARS, MAX_SOAP_NOTE_CHARS, PATIENT_CTX_MAX_ITEM_CHARS,
+    PATIENT_CTX_MAX_ITEMS_PER_LIST, format_progress_error,
+};
 
 /// Loaded settings needed for generation.
 pub(super) struct GenerationSettings {
@@ -107,6 +111,166 @@ pub(super) async fn persist_recording(
     })
     .await
     .map_err(crate::commands::join_err)?
+}
+
+/// Runs a generation command with the standard progress-event lifecycle:
+/// validates context size, emits "started", calls the inner function,
+/// then emits "completed" or "failed".
+///
+/// `doc_type` is the string literal sent to the frontend in progress events
+/// (e.g. `"letter"`, `"referral"`). `context` is the user-supplied freeform
+/// context, validated against [`MAX_CONTEXT_CHARS`] before any work begins.
+pub(super) async fn run_generation_command(
+    app: &tauri::AppHandle,
+    recording_id: &str,
+    doc_type: &str,
+    context: Option<&str>,
+    inner: impl std::future::Future<Output = AppResult<String>>,
+) -> AppResult<String> {
+    // Validate context size before emitting started (fail fast, consistent with SOAP).
+    if let Some(ctx) = context
+        && ctx.len() > MAX_CONTEXT_CHARS
+    {
+        return Err(AppError::Other(format!(
+            "Context too large: {} chars, limit is {}",
+            ctx.len(),
+            MAX_CONTEXT_CHARS
+        )));
+    }
+
+    let _ = app.emit(
+        "generation-progress",
+        GenerationProgress {
+            doc_type: doc_type.into(),
+            status: "started".into(),
+            recording_id: recording_id.to_string(),
+        },
+    );
+
+    let result = inner.await;
+
+    match &result {
+        Ok(_) => {
+            let _ = app.emit(
+                "generation-progress",
+                GenerationProgress {
+                    doc_type: doc_type.into(),
+                    status: "completed".into(),
+                    recording_id: recording_id.to_string(),
+                },
+            );
+        }
+        Err(err) => {
+            let _ = app.emit(
+                "generation-progress",
+                GenerationProgress {
+                    doc_type: doc_type.into(),
+                    status: format_progress_error(err),
+                    recording_id: recording_id.to_string(),
+                },
+            );
+        }
+    }
+
+    result
+}
+
+/// Shared inner logic for document types generated from a SOAP note (referral,
+/// letter, synopsis). Handles: preflight, resolve provider, validate SOAP note,
+/// build completion request, call provider, strip markdown, check empty,
+/// persist.
+///
+/// The recording, settings, and config must already be loaded by the caller
+/// (via [`load_recording_and_settings`]); this keeps the loading I/O to a
+/// single DB round-trip and lets callers (e.g. `generate_letter`) do extra
+/// DB work between the load and the generation.
+///
+/// The unique per-call pieces are passed in:
+/// - `command_kind` / `config`: forwarded to `preflight_for_command`.
+/// - `doc_type_label`: human-readable name used in the "empty response" error
+///   and the success debug log (e.g. `"letter"`, `"referral letter"`).
+/// - `build_prompt`: closure `(soap_note, &settings) -> (system_prompt,
+///   user_prompt)`.
+/// - `set_field`: closure `(&mut Recording, String)` that assigns the
+///   generated text to the right recording field.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn generate_from_soap<F, S>(
+    state: &AppState,
+    recording: &mut Recording,
+    settings: &GenerationSettings,
+    config: &AppConfig,
+    command_kind: medical_core::preflight::CommandKind,
+    doc_type_label: &str,
+    build_prompt: F,
+    set_field: S,
+) -> AppResult<String>
+where
+    F: FnOnce(&str, &GenerationSettings) -> (String, String),
+    S: FnOnce(&mut Recording, String),
+{
+    use medical_processing::document_generator;
+
+    // Pre-flight: probe the remote AI endpoint before doing any work.
+    // Skipped for loopback hosts; returns EndpointOffline on failure
+    // without ever invoking the provider.
+    medical_core::preflight::preflight_for_command(command_kind, config).await?;
+
+    let provider = resolve_provider(state, &settings.ai_provider).await?;
+
+    let soap_note = recording
+        .soap_note
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::Processing(
+                "Recording has no SOAP note. Generate a SOAP note first.".to_string(),
+            )
+        })?;
+
+    if soap_note.len() > MAX_SOAP_NOTE_CHARS {
+        return Err(AppError::Other(format!(
+            "SOAP note too large: {} chars, limit is {}",
+            soap_note.len(),
+            MAX_SOAP_NOTE_CHARS
+        )));
+    }
+
+    let (system_prompt, user_prompt) = build_prompt(soap_note, settings);
+
+    tracing::debug!(
+        doc_type = doc_type_label,
+        provider = %provider.name(),
+        recording_id = %recording.id,
+        "generating document from SOAP note"
+    );
+
+    let request = build_completion_request(
+        system_prompt,
+        user_prompt,
+        settings.model.clone(),
+        settings.temperature,
+        None,
+    );
+
+    let response = provider.complete(request).await.map_err(|e| match e {
+        // Preserve EndpointOffline as-is so the frontend dialog can fire.
+        AppError::EndpointOffline { .. } => e,
+        // For other errors, keep the existing nicer wrapping.
+        _ => AppError::AiProvider(format!(
+            "AI completion failed: {}",
+            crate::commands::unwrap_app_error_message(e)
+        )),
+    })?;
+
+    let text = document_generator::strip_markdown(&response.content);
+    if text.trim().is_empty() {
+        return Err(AppError::AiProvider(format!(
+            "AI returned an empty {doc_type_label}."
+        )));
+    }
+
+    set_field(recording, text.clone());
+    Ok(text)
 }
 
 /// Parse a template string into the `SoapTemplate` enum.
