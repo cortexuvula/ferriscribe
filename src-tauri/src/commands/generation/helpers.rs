@@ -5,7 +5,7 @@ use std::sync::Arc;
 use medical_core::error::{AppError, AppResult};
 use medical_core::traits::AiProvider;
 use medical_core::types::recording::Recording;
-use medical_core::types::settings::{AppConfig, SoapTemplate};
+use medical_core::types::settings::{AppConfig, IcdVersion, SoapTemplate};
 use medical_core::types::{CompletionRequest, Message, MessageContent, PatientContext, Role};
 use medical_db::recordings::RecordingsRepo;
 use tauri::Emitter;
@@ -22,7 +22,7 @@ use super::{
 pub(super) struct GenerationSettings {
     pub model: String,
     pub temperature: f32,
-    pub icd_version: String,
+    pub icd_version: IcdVersion,
     pub ai_provider: String,
     pub custom_soap_prompt: Option<String>,
     pub custom_referral_prompt: Option<String>,
@@ -56,15 +56,10 @@ pub(super) async fn load_recording_and_settings(
         let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
         config.migrate();
 
-        let icd = match config.icd_version {
-            medical_core::types::settings::IcdVersion::Icd9 => "ICD-9".to_string(),
-            medical_core::types::settings::IcdVersion::Icd10 => "ICD-10".to_string(),
-            medical_core::types::settings::IcdVersion::Both => "both".to_string(),
-        };
         let settings = GenerationSettings {
             model: config.ai_model.clone(),
             temperature: config.temperature,
-            icd_version: icd,
+            icd_version: config.icd_version.clone(),
             ai_provider: config.ai_provider.clone(),
             custom_soap_prompt: config.custom_soap_prompt.clone(),
             custom_referral_prompt: config.custom_referral_prompt.clone(),

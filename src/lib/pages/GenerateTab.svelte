@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { recordings, selectRecording } from '../stores/recordings.svelte';
   import { generateSoap, generateReferral, generateLetter, generatePeerDiscussion } from '../api/generation';
-  import { ocrDocuments } from '../api/ocr';
   import { generation } from '../stores/generation.svelte';
   import { copyWithStatus } from '../utils/clipboard';
   import { buildPatientContext } from '../utils/patient_context';
@@ -15,6 +14,7 @@
   import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
   import { letterAudiences } from '../stores/letterAudiences.svelte';
   import { toasts } from '../stores/toasts.svelte';
+  import { useOcr } from '../composables/useOcr.svelte';
 
   interface Props {
     onNavigateRecordings?: () => void;
@@ -51,31 +51,10 @@
   let contextExpanded = $state(false);
   let lastContextRecordingId = $state<string | null>(null);
 
-  // OCR state: chips for each dropped document, the extracted text per file,
-  // and a loading flag. Owned here (not in a store) because the text is
-  // transient per-generation context, not persisted recording metadata.
-  // Each chip carries its own text block so removal cleans up properly.
-  let ocrFiles = $state<Array<{ id: string; filename: string; status: 'done' | 'loading' | 'error'; pageCount: number; text: string }>>([]);
-  let ocrLoading = $state(false);
-  /// Monotonic batch token — incremented on recording switch. In-flight
-  /// OCR callbacks check this before writing state, preventing cross-patient
-  /// PHI leak when recordings switch during OCR.
-  let ocrBatchToken = 0;
-
-  /// Derived: concatenation of all done-file text blocks. The user edits this
-  /// in the preview textarea, but we rebuild from chips on removal. Using a
-  /// derived value ensures consistency.
-  let ocrText = $derived(
-    ocrFiles
-      .filter((f) => f.status === 'done' && f.text)
-      .map((f) => `--- ${f.filename} ---\n${f.text}`)
-      .join('\n\n'),
-  );
-
-  /// Mutable copy of the derived text — the user can edit the preview, which
-  /// overrides the derived value until a file is added/removed.
-  let ocrTextOverride = $state<string | null>(null);
-  let ocrTextDisplay = $derived(ocrTextOverride ?? ocrText);
+  // OCR state: shared composable (same logic as RecordTab). Owned here (not
+  // in a store) because the text is transient per-generation context, not
+  // persisted recording metadata.
+  const ocr = useOcr();
 
   // Load saved context + structured fields from recording metadata only when
   // the recording ID changes. Prevents overwriting user-typed values on the
@@ -100,9 +79,7 @@
     }
     // Clear OCR state on recording switch — OCR text from a previous patient
     // must never leak into the next patient's generation context.
-    ocrFiles = [];
-    ocrTextOverride = null;
-    ocrBatchToken++; // Invalidate any in-flight OCR callbacks.
+    ocr.clearOcr();
   });
 
   // The Active badge lights up if ANY field has user input — derived state.
@@ -111,11 +88,11 @@
       medicationsText.trim().length > 0 ||
       allergiesText.trim().length > 0 ||
       conditionsText.trim().length > 0 ||
-      ocrTextDisplay.trim().length > 0,
+      ocr.ocrTextDisplay.trim().length > 0,
   );
 
   const contextCharCount = $derived(
-    contextText.length + ocrTextDisplay.length +
+    contextText.length + ocr.ocrTextDisplay.length +
     medicationsText.length + allergiesText.length + conditionsText.length
   );
 
@@ -150,76 +127,6 @@
     }
   }
 
-  async function handleOcrFilesSelected(paths: string[]) {
-    const uniquePaths = [...new Set(paths)];
-    if (uniquePaths.length === 0) return;
-    ocrLoading = true;
-    ocrTextOverride = null; // reset manual edits when new files arrive
-    const myToken = ++ocrBatchToken; // Capture token for this batch.
-    // Add loading chips immediately so the user sees feedback. Track the chip
-    // IDs created by THIS invocation so concurrent drops don't interfere.
-    const chipIds: string[] = [];
-    const pendingChips = uniquePaths.map((p) => {
-      const id = crypto.randomUUID();
-      chipIds.push(id);
-      const filename = p.split(/[/\\]/).pop() || p;
-      return {
-        id,
-        filename,
-        path: p,
-        status: 'loading' as const,
-        pageCount: 0,
-        text: '',
-      };
-    });
-    ocrFiles = [...ocrFiles, ...pendingChips];
-    const idSet = new Set(chipIds);
-
-    try {
-      const results = await ocrDocuments(uniquePaths);
-      if (myToken !== ocrBatchToken) return; // Stale — recording switched.
-      // Match results to THIS invocation's chips by filename within our batch.
-      ocrFiles = ocrFiles.map((f) => {
-        if (!idSet.has(f.id)) return f; // not our chip
-        const result = results.find((r) => r.filename === f.filename);
-        if (result) {
-          return {
-            ...f,
-            status: 'done' as const,
-            pageCount: result.page_count,
-            text: result.text,
-          };
-        }
-        return { ...f, status: 'error' as const };
-      });
-    } catch (e) {
-      if (myToken !== ocrBatchToken) return; // Stale — recording switched.
-      if (e instanceof OfflineCancelled) {
-        // Dialog already informed the user; mark chips as error.
-        ocrFiles = ocrFiles.map((f) =>
-          idSet.has(f.id) ? { ...f, status: 'error' as const } : f,
-        );
-      } else {
-        ocrFiles = ocrFiles.map((f) =>
-          idSet.has(f.id) ? { ...f, status: 'error' as const } : f,
-        );
-        console.error('OCR failed:', e);
-      }
-    } finally {
-      // Only clear the loading flag if no other batch is in flight.
-      ocrLoading = ocrFiles.some((f) => f.status === 'loading');
-    }
-  }
-
-  function handleOcrTextChange(text: string) {
-    ocrTextOverride = text;
-  }
-
-  function handleRemoveOcrFile(id: string) {
-    ocrFiles = ocrFiles.filter((f) => f.id !== id);
-    ocrTextOverride = null; // rebuild from remaining chips
-  }
-
   /// Maximum context string length. Mirrors the backend MAX_CONTEXT_CHARS.
   /// If OCR text + notes exceed this, the user must trim the preview.
   const MAX_CONTEXT_CHARS = 50_000;
@@ -248,7 +155,7 @@
     // passes the structured fields via buildPatientContext, but including them
     // here too is harmless redundancy. Empty/whitespace-only input yields
     // undefined so the backend treats context as absent.
-    const combinedContext = [formatStructuredContext(), contextText.trim(), ocrTextDisplay.trim()]
+    const combinedContext = [formatStructuredContext(), contextText.trim(), ocr.ocrTextDisplay.trim()]
       .filter(Boolean)
       .join('\n\n') || undefined;
 
@@ -325,12 +232,12 @@
         onConditionsChange={(value) => (conditionsText = value)}
         onContextChange={(value) => (contextText = value)}
         {contextCharCount}
-        {ocrFiles}
-        ocrText={ocrTextDisplay}
-        {ocrLoading}
-        onOcrFilesSelected={handleOcrFilesSelected}
-        onOcrTextChange={handleOcrTextChange}
-        onRemoveOcrFile={handleRemoveOcrFile}
+        ocrFiles={ocr.ocrFiles}
+        ocrText={ocr.ocrTextDisplay}
+        ocrLoading={ocr.ocrLoading}
+        onOcrFilesSelected={ocr.handleOcrFilesSelected}
+        onOcrTextChange={ocr.handleOcrTextChange}
+        onRemoveOcrFile={ocr.handleRemoveOcrFile}
       />
 
       <GenerateControls

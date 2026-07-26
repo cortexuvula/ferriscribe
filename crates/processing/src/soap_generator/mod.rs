@@ -26,7 +26,7 @@
 //! and fabrication guards.
 
 use medical_core::icd9::Icd9Entry;
-use medical_core::types::settings::SoapTemplate;
+use medical_core::types::settings::{IcdVersion, SoapTemplate};
 
 mod postprocess;
 mod prompt_template;
@@ -47,9 +47,11 @@ pub struct SoapPromptConfig {
     /// Template variant that selects template-specific guidance text
     /// (e.g., "focus on changes since last visit" for FollowUp).
     pub template: SoapTemplate,
-    /// One of `"ICD-9"`, `"ICD-10"`, `"both"` (case-sensitive).
-    /// Determines the ICD code label and instruction placeholders.
-    pub icd_version: String,
+    /// ICD version used to select the ICD code label and instruction
+    /// placeholders. Threaded as an enum rather than a display string so
+    /// a typo in one of the three call sites cannot silently disable
+    /// ICD-9 selection.
+    pub icd_version: IcdVersion,
     /// User-supplied override for the entire system prompt. Empty string is
     /// treated as absent and falls back to the default template.
     pub custom_prompt: Option<String>,
@@ -64,7 +66,7 @@ impl Default for SoapPromptConfig {
     fn default() -> Self {
         Self {
             template: SoapTemplate::FollowUp,
-            icd_version: "ICD-10".into(),
+            icd_version: IcdVersion::Icd10,
             custom_prompt: None,
             icd9_candidates: vec![],
         }

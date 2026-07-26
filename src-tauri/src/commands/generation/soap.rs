@@ -148,15 +148,16 @@ async fn generate_soap_inner(
     // computed for ICD-9 / both modes; empty for ICD-10-only. The
     // selector reads the transcript + context + patient conditions so
     // the prompt surfaces the most likely billable codes.
-    let icd9_candidates = match settings.icd_version.as_str() {
-        "ICD-9" | "both" => {
+    let icd9_candidates = match settings.icd_version {
+        medical_core::types::settings::IcdVersion::Icd9
+        | medical_core::types::settings::IcdVersion::Both => {
             medical_processing::soap_generator::icd_selector::select_icd9_candidates(
                 transcript,
                 context,
                 patient_context,
             )
         }
-        _ => Vec::new(),
+        medical_core::types::settings::IcdVersion::Icd10 => Vec::new(),
     };
     info!(
         icd9_candidates_selected = icd9_candidates.len(),

@@ -22,9 +22,7 @@
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
   import { generateSoap } from '../api/generation';
-  import { ocrDocuments } from '../api/ocr';
-  import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
-  import type { OcrFileStatus } from '../components/OcrDropZone.svelte';
+  import { useOcr } from '../composables/useOcr.svelte';
 
   type Props = {
     onopenSettings?: (target: 'models' | 'audio') => void;
@@ -37,21 +35,9 @@
   let allergiesText = $state('');
   let conditionsText = $state('');
 
-  // OCR state: mirrors the GenerateTab pattern. Transient — cleared on new recording.
-  let ocrFiles = $state<OcrFileStatus[]>([]);
-  let ocrLoading = $state(false);
-  let ocrTextOverride = $state<string | null>(null);
-  /// Monotonic batch token — incremented when context is cleared. In-flight
-  /// OCR callbacks check this token before writing state, preventing cross-
-  /// patient PHI leak when the user starts a new recording during OCR.
-  let ocrBatchToken = 0;
-  let ocrText = $derived(
-    ocrFiles
-      .filter((f) => f.status === 'done' && f.text)
-      .map((f) => `--- ${f.filename} ---\n${f.text}`)
-      .join('\n\n'),
-  );
-  let ocrTextDisplay = $derived(ocrTextOverride ?? ocrText);
+  // OCR state: shared composable (same logic as GenerateTab). Transient —
+  // cleared on new recording via ocr.clearOcr().
+  const ocr = useOcr();
 
   /// Maximum context string length. Mirrors the backend MAX_CONTEXT_CHARS.
   const MAX_CONTEXT_CHARS = 50_000;
@@ -62,8 +48,7 @@
   $effect(() => {
     const id = pipelineRecordingId;
     if (id !== lastOcrRecordingId && lastOcrRecordingId !== null) {
-      ocrFiles = [];
-      ocrTextOverride = null;
+      ocr.clearOcr();
     }
     lastOcrRecordingId = id;
   });
@@ -166,14 +151,12 @@
     medicationsText = '';
     allergiesText = '';
     conditionsText = '';
-    ocrFiles = [];
-    ocrTextOverride = null;
-    ocrBatchToken++; // Invalidate any in-flight OCR callbacks.
+    ocr.clearOcr();
   }
 
   /** Combine notes + OCR text into the pipeline context string. */
   function buildPipelineContext(): string | undefined {
-    const combined = [contextText.trim(), ocrTextDisplay.trim()]
+    const combined = [contextText.trim(), ocr.ocrTextDisplay.trim()]
       .filter(Boolean)
       .join('\n\n') || undefined;
     if (combined && combined.length > MAX_CONTEXT_CHARS) {
@@ -190,70 +173,16 @@
    *  OCR chips are still in 'loading' status. Shows a toast so the user
    *  knows why the pipeline hasn't started yet. */
   async function waitForOcrSettled(): Promise<void> {
-    if (!ocrLoading) return;
+    if (!ocr.ocrLoading) return;
     toasts.add({
       message: 'Waiting for document OCR to complete before processing…',
       type: 'success',
       autoDismiss: true,
     });
     const deadline = Date.now() + 60_000;
-    while (ocrLoading && Date.now() < deadline) {
+    while (ocr.ocrLoading && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 200));
     }
-  }
-
-  async function handleOcrFilesSelected(paths: string[]) {
-    const uniquePaths = [...new Set(paths)];
-    if (uniquePaths.length === 0) return;
-    ocrLoading = true;
-    ocrTextOverride = null;
-    const myToken = ++ocrBatchToken; // Capture token for this batch.
-    const chipIds: string[] = [];
-    const pendingChips = uniquePaths.map((p) => {
-      const id = crypto.randomUUID();
-      chipIds.push(id);
-      const filename = p.split(/[/\\]/).pop() || p;
-      return { id, filename, path: p, status: 'loading' as const, pageCount: 0, text: '' };
-    });
-    ocrFiles = [...ocrFiles, ...pendingChips];
-    const idSet = new Set(chipIds);
-
-    try {
-      const results = await ocrDocuments(uniquePaths);
-      // Guard against stale callbacks after context was cleared.
-      if (myToken !== ocrBatchToken) return;
-      // Match results to chips by filename within this batch. The backend
-      // returns { filename, text, page_count } for each successfully processed
-      // file. Filename collisions (same basename from different folders) are a
-      // known edge case — the first match wins.
-      ocrFiles = ocrFiles.map((f) => {
-        if (!idSet.has(f.id)) return f;
-        const result = results.find((r) => r.filename === f.filename);
-        if (result) {
-          return { ...f, status: 'done' as const, pageCount: result.page_count, text: result.text };
-        }
-        return { ...f, status: 'error' as const };
-      });
-    } catch (e) {
-      if (myToken !== ocrBatchToken) return; // Stale — context was cleared.
-      ocrFiles = ocrFiles.map((f) =>
-        idSet.has(f.id) ? { ...f, status: 'error' as const } : f,
-      );
-      if (!(e instanceof OfflineCancelled)) {
-        console.error('OCR failed:', e);
-      }
-    } finally {
-      ocrLoading = ocrFiles.some((f) => f.status === 'loading');
-    }
-  }
-
-  function handleOcrTextChange(text: string) {
-    ocrTextOverride = text;
-  }
-
-  function handleRemoveOcrFile(id: string) {
-    ocrFiles = ocrFiles.filter((f) => f.id !== id);
-    ocrTextOverride = null;
   }
 
   function handleStartRecording() {
@@ -530,12 +459,12 @@
       open={sidebarOpen}
       width={sidebarWidth}
       onToggle={toggleSidebar}
-      {ocrFiles}
-      ocrText={ocrTextDisplay}
-      {ocrLoading}
-      onOcrFilesSelected={handleOcrFilesSelected}
-      onOcrTextChange={handleOcrTextChange}
-      onRemoveOcrFile={handleRemoveOcrFile}
+      ocrFiles={ocr.ocrFiles}
+      ocrText={ocr.ocrTextDisplay}
+      ocrLoading={ocr.ocrLoading}
+      onOcrFilesSelected={ocr.handleOcrFilesSelected}
+      onOcrTextChange={ocr.handleOcrTextChange}
+      onRemoveOcrFile={ocr.handleRemoveOcrFile}
     />
   </div>
 </div>
