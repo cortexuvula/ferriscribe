@@ -82,20 +82,6 @@
           Regenerate
         </button>
       </div>
-      {#if icdCodes && icdCodes.length > 0}
-        <div class="icd-codes">
-          <span class="icd-label">ICD Codes:</span>
-          {#each icdCodes as code (code.raw)}
-            <IcdChip code={code.raw} valid={code.valid} />
-          {/each}
-        </div>
-      {/if}
-      {#if generatedText}
-        <details class="generated-preview">
-          <summary>Preview</summary>
-          <pre class="preview-text">{generatedText}</pre>
-        </details>
-      {/if}
     {:else}
       <button
         class="btn-generate"
@@ -106,11 +92,26 @@
       </button>
     {/if}
   </div>
+  {#if done && icdCodes && icdCodes.length > 0}
+    <div class="icd-codes">
+      <span class="icd-label">ICD Codes:</span>
+      {#each icdCodes as code (code.raw)}
+        <IcdChip code={code.raw} valid={code.valid} />
+      {/each}
+    </div>
+  {/if}
+  {#if done && generatedText}
+    <details class="generated-preview">
+      <summary>Preview</summary>
+      <pre class="preview-text">{generatedText}</pre>
+    </details>
+  {/if}
 </div>
 
 <style>
   .generate-item {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 16px;
     padding: 16px;
@@ -261,6 +262,7 @@
     gap: 8px;
     margin-top: 8px;
     flex-wrap: wrap;
+    width: 100%;
   }
 
   .icd-label {
@@ -270,6 +272,7 @@
   }
 
   .generated-preview {
+    width: 100%;
     margin-top: 8px;
   }
 

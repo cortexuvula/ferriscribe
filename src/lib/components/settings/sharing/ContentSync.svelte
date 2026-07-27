@@ -64,7 +64,7 @@
 
   async function handleSyncNow() {
     try {
-      await syncContentNow();
+      await recordings.syncNow();
       toasts.success('Content sync complete');
     } catch (err) {
       toasts.error(`Sync failed: ${err}`);
@@ -111,7 +111,12 @@
           onclick={handleSyncNow}
           disabled={recordings.syncing}
         >
-          {recordings.syncing ? 'Syncing…' : 'Sync Now'}
+          {#if recordings.syncing}
+            <span class="sync-spinner"></span>
+            Syncing…
+          {:else}
+            Sync Now
+          {/if}
         </button>
         <span class="last-synced">
           Last synced: {formatLastSynced(recordings.lastSyncedAt)}
@@ -154,6 +159,22 @@
   .btn-sync-now:disabled {
     opacity: 0.6;
     cursor: wait;
+  }
+
+  .sync-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--text-muted, #888);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: sync-spin 0.6s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+
+  @keyframes sync-spin {
+    to { transform: rotate(360deg); }
   }
 
   .last-synced {
