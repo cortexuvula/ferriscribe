@@ -27,7 +27,11 @@
 //! - The internal `file_lock` mutex serializes writes; reads are lock-free.
 //!   A poisoned mutex surfaces as `SecurityError::Other`.
 
-use aes_gcm::aead::rand_core::RngCore;
+// Two `RngCore` traits coexist in the dep graph: rand 0.9 (rand_core 0.9)
+// and aes_gcm's re-exported rand_core 0.6. We use `aes_gcm::aead::OsRng`
+// (0.6) for nonces, but `rand::rng()` (0.9) for salt generation, so both
+// traits must be in scope. The 0.6 trait is aliased to disambiguate.
+use aes_gcm::aead::rand_core::RngCore as AeadRngCore;
 use aes_gcm::{
     Aes256Gcm, Key, Nonce,
     aead::{Aead, KeyInit, OsRng},
@@ -36,6 +40,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::Utc;
 use pbkdf2::pbkdf2_hmac;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -295,7 +300,7 @@ fn load_or_create_salt(config_dir: &Path) -> SecurityResult<Vec<u8>> {
         return Ok(std::fs::read(&path)?);
     }
     let mut salt = vec![0u8; SALT_LENGTH];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
     std::fs::write(&path, &salt)?;
     Ok(salt)
 }

@@ -44,6 +44,9 @@ pub enum KeychainError {
     Access(String),
     #[error("keychain entry malformed: {0}")]
     Malformed(String),
+    // Entropy is no longer constructible after the rand 0.9 migration
+    // (fill_bytes is infallible on ThreadRng). Retained for API/doc stability.
+    #[allow(dead_code)]
     #[error("entropy source failed: {0}")]
     Entropy(String),
 }
@@ -99,9 +102,7 @@ pub fn get_or_create_db_key() -> KeychainResult<[u8; 32]> {
         return Ok(key);
     }
     let mut key = [0u8; 32];
-    rand::thread_rng()
-        .try_fill_bytes(&mut key)
-        .map_err(|e| KeychainError::Entropy(e.to_string()))?;
+    rand::rng().fill_bytes(&mut key);
     let entry = Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_DB_KEY_ACCOUNT)
         .map_err(|e| KeychainError::Access(e.to_string()))?;
     entry

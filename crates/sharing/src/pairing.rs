@@ -146,11 +146,11 @@ impl PairingState {
 
 /// Generate a cryptographically random 6-digit zero-padded code (000000-999999).
 ///
-/// Uses `rand::thread_rng()` for entropy. The output space is 1 million
+/// Uses `rand::rng()` for entropy. The output space is 1 million
 /// values -- sufficient for a one-shot, time-limited pairing code that a
 /// human types in.
 pub fn generate_code() -> String {
-    let n: u32 = rand::thread_rng().gen_range(0..1_000_000);
+    let n: u32 = rand::rng().random_range(0..1_000_000);
     format!("{n:06}")
 }
 

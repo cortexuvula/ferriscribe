@@ -82,7 +82,7 @@ fn cipher() -> Result<Aes256Gcm, FileCryptoError> {
 /// `encrypt_file` and by tests to avoid concurrent keychain access).
 fn encrypt_with_key(cipher: &Aes256Gcm, plaintext: &[u8]) -> Result<Vec<u8>, FileCryptoError> {
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, plaintext)

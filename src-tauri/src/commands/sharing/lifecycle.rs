@@ -315,9 +315,7 @@ async fn build_sharing_config(friendly_name: String) -> AppResult<SharingConfig>
         .join("rust-medical-assistant");
     std::fs::create_dir_all(&app_data)?;
     let mut whisper_api = [0u8; 16];
-    rand::thread_rng()
-        .try_fill_bytes(&mut whisper_api)
-        .map_err(|e| AppError::Other(e.to_string()))?;
+    rand::rng().fill_bytes(&mut whisper_api);
     // LM Studio is always a candidate in office mode. The start() gate probes
     // it once; the ReadinessWatcher brings it online later if it boots after
     // the gate (the login-launch race we're fixing). No Stop+Start needed.

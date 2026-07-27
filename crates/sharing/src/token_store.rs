@@ -18,6 +18,9 @@ pub enum TokenStoreError {
     #[error("sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
     /// Random number generator failure during token generation.
+    // Entropy is no longer constructible after the rand 0.9 migration
+    // (fill_bytes is infallible on ThreadRng). Retained for API/doc stability.
+    #[allow(dead_code)]
     #[error("entropy: {0}")]
     Entropy(String),
     /// Internal mutex was poisoned (a thread panicked while holding the lock).
@@ -123,9 +126,7 @@ impl TokenStore {
     /// Returns [`TokenStoreError::Entropy`] if the system RNG fails.
     pub fn issue(&self, label: &str) -> Result<IssuedToken> {
         let mut raw = [0u8; 32];
-        rand::thread_rng()
-            .try_fill_bytes(&mut raw)
-            .map_err(|e| TokenStoreError::Entropy(e.to_string()))?;
+        rand::rng().fill_bytes(&mut raw);
         let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, raw);
         let hash = Sha256::digest(token.as_bytes()).to_vec();
         let now = Utc::now().to_rfc3339();

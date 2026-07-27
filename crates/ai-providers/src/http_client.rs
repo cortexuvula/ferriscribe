@@ -125,7 +125,7 @@ impl RetryConfig {
         if base.is_zero() {
             return base;
         }
-        let factor = rng.gen_range(0.75..=1.25);
+        let factor = rng.random_range(0.75..=1.25);
         let millis = (base.as_millis() as f64 * factor) as u64;
         Duration::from_millis(millis)
     }
@@ -273,7 +273,7 @@ pub async fn send_with_retry<F>(
 where
     F: Fn() -> reqwest::RequestBuilder + Send,
 {
-    use rand::thread_rng;
+    use rand::rng;
 
     let mut attempt: u32 = 0;
     loop {
@@ -294,7 +294,7 @@ where
                 if attempt >= policy.max_retries {
                     return result;
                 }
-                policy.jittered(policy.delay_for_attempt(attempt), &mut thread_rng())
+                policy.jittered(policy.delay_for_attempt(attempt), &mut rng())
             }
             RetryDecision::TransientWithDelay(server_delay) => {
                 if attempt >= policy.max_retries {
