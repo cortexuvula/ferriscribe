@@ -1,6 +1,6 @@
 # FerriScribe
 
-A privacy-first medical transcription desktop application built with Rust and Svelte. Record doctor-patient encounters, transcribe them locally with speaker diarization, generate SOAP notes and clinical documents, and export to PDF, DOCX, or FHIR.
+A privacy-first medical transcription desktop application built with Rust and Svelte. Record doctor-patient encounters, transcribe them locally with speaker diarization, generate SOAP notes and clinical documents, OCR supporting documents, sync across machines, and export to PDF, DOCX, or FHIR.
 
 ## Features
 
@@ -12,6 +12,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 
 ### Documents & Review
 - **SOAP Note Generation** — AI-powered Subjective / Objective / Assessment / Plan notes from transcripts.
+- **ICD-9 Billing Codes** — BC MSP-accepted ICD-9 codes (7,122 codes) with intelligent candidate selection. The selector scores codes against the transcript using a keyword-overlap inverted index enriched with medical synonyms, plus a specificity adjustment favoring precise codes over generic ones (e.g. cervicalgia over backache). Off-list codes are flagged with amber chips in the UI.
 - **Referral, Clinical Letter, and Synopsis Generation** — Templated AI generation with per-document custom prompts.
 - **Letter Audiences** — Generate letters tailored to different recipients:
   - **Patient** — Plain language, empathetic
@@ -24,6 +25,22 @@ A privacy-first medical transcription desktop application built with Rust and Sv
   Create custom audiences in **Settings → Letter Audiences** with your own system prompts and user templates.
 - **Context Templates** — Pre-built visit types (e.g. Follow-up, New Patient) with custom instructions layered on top of the base prompt; import/export as JSON.
 - **RSVP Speed Reader** — Rapid-serial-visual-presentation review mode for SOAP notes and transcripts — chunk-size, WPM, and per-section filters configurable in Settings.
+- **Inline Preview** — Generated documents display in a collapsible preview directly in the Generate tab, no need to switch tabs.
+
+### Document OCR
+- **Multi-Format OCR** — Drop documents into the context panel to extract text via a local vision model (e.g. glm-ocr). Supported formats:
+  - **Text** — `.txt`, `.md`, `.csv` (read directly, no model needed)
+  - **Images** — `.png`, `.jpg`, `.jpeg`, `.bmp`, `.webp`, `.tiff` (sent to vision model)
+  - **PDF** — `.pdf` (text extraction via pdf-extract; scanned PDFs return a message)
+  - **Office** — `.docx` (text from Word XML), `.xlsx` (cell data from all sheets)
+- **OCR Model Setting** — Configure a dedicated vision model for OCR separately from the text generation model in **Settings → Models**.
+- **Integration** — OCR'd text is combined with notes and structured patient context (medications, allergies, conditions) and threaded into all generation types (SOAP, referral, letter, peer discussion). Available in both the Record and Generate tabs.
+
+### Content Sync
+- **Bidirectional Sync** — Sync transcripts, SOAP notes, letters, referrals, peer discussions, and audio between machines over Tailscale. Per-field last-write-wins merge with separate push/pull cursors.
+- **Background Sync** — Automatic sync every 5 minutes when enabled, with a manual "Sync Now" button and last-synced timestamp.
+- **Cloud Badge** — Remote-synced recordings display a cloud badge for easy identification.
+- **Real-time Updates** — SSE-based change notifications refresh the recordings list instantly when new content arrives.
 
 ### AI providers
 - **Local and LAN-accessible only** — Ollama and LM Studio, each configurable with a remote host/port so you can run the heavy model on a separate machine over LAN or Tailscale.
@@ -31,8 +48,9 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 - **Agentic Workflows** — Multi-step orchestrator with tool use (RAG search, note generation) for chat sessions.
 
 ### Data
-- **Recording Management** — Record, import, search, tag, and organize audio. SQLite-backed.
+- **Recording Management** — Record, import, search, tag, and organize audio. SQLite-backed with soft-delete and undo (8-second window).
 - **Export** — PDF, DOCX, and FHIR R4 (healthcare interoperability standard).
+- **Encrypted Storage** — Audio recordings encrypted at rest with AES-256-GCM. Database uses SQLCipher (AES-256) via the OS keychain.
 - **Secure Key Storage** — API keys encrypted at rest with AES-256-GCM; the master cipher key is derived via PBKDF2-HMAC-SHA256 (600 000 iterations) from an optional `MEDICAL_ASSISTANT_MASTER_KEY` env var or a per-machine identifier.
 
 ### Platform
@@ -45,10 +63,11 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 | Frontend | Svelte 5 (runes mode), TypeScript, Vite |
 | Backend | Rust (edition 2024), Tauri v2 |
 | STT | whisper-rs (whisper.cpp), ort (ONNX Runtime), knf-rs, rubato |
-| Database | SQLite (via rusqlite) |
+| Database | SQLite with SQLCipher (AES-256 encryption) |
 | AI | Ollama, LM Studio (OpenAI-compatible wire protocol) |
+| OCR | Vision models via Ollama/LM Studio, pdf-extract, calamine, quick-xml |
 | Export | PDF (printpdf), DOCX (docx-rs), FHIR R4 |
-| Security | AES-256-GCM + PBKDF2 (aes-gcm + pbkdf2 crates) |
+| Security | AES-256-GCM + PBKDF2 (aes-gcm + pbkdf2 crates), SQLCipher |
 
 ## Architecture
 
@@ -56,19 +75,19 @@ FerriScribe is organized as a Cargo workspace with 13 crates:
 
 ```
 crates/
-  core/           — shared types, traits, error handling
-  db/             — SQLite database, settings, recordings
-  security/       — AES-256-GCM API-key storage
+  core/           — shared types, traits, error handling, ICD-9 codes
+  db/             — SQLite database, settings, recordings, content sync
+  security/       — AES-256-GCM file/key encryption
   audio/          — microphone capture (cpal)
-  ai-providers/   — Ollama + LM Studio (OpenAI-compat wire)
+  ai-providers/   — Ollama + LM Studio (OpenAI-compat wire, vision support)
   stt-providers/  — whisper transcription + pyannote diarization
   tts-providers/  — text-to-speech
   agents/         — agentic orchestrator with tool registry
   rag/            — vector store, BM25, graph search, ingestion
-  processing/     — transcription pipeline orchestration
+  processing/     — transcription pipeline, SOAP generation, OCR, ICD-9 selector
   export/         — PDF, DOCX, FHIR export
   translation/    — text translation
-  sharing/        — office-server sharing, mDNS, auth proxy, whisper supervisor
+  sharing/        — office-server sharing, mDNS, Tailscale, auth proxy, whisper supervisor
 src-tauri/        — Tauri app shell, commands, state management
 src/              — Svelte 5 frontend
 ```
@@ -79,7 +98,7 @@ src/              — Svelte 5 frontend
 
 - [Rust](https://rustup.rs/) 1.85+ (required by `edition = "2024"`)
 - [Node.js](https://nodejs.org/) 20+
-- [CMake](https://cmake.org/) and Clang (for whisper.cpp and ONNX Runtime)
+- [CMake](https://cmake.org/) and Clang (for whisper.cpp, ONNX Runtime, and libheif)
 - macOS: Xcode Command Line Tools
 
 ### Build & Run
@@ -100,16 +119,19 @@ On first launch, go to **Settings > Audio / STT** and download:
    - Pyannote segmentation 3.0 (~6 MB)
    - WeSpeaker CAM++ embedding (~28 MB)
 
+For **OCR** (optional), go to **Settings > Models** and set an OCR / Vision Model (e.g. `glm-ocr`). If not set, the text generation model is used for OCR.
+
 Models are downloaded from HuggingFace / GitHub and stored under the app's data directory (see [Where Your Data Lives](#where-your-data-lives)).
 
 ## Usage
 
 1. **Record** — Start a new recording or import an existing audio file.
-2. **Transcribe** — Local Whisper runs on-device by default; Custom Vocabulary corrections are applied automatically after STT.
-3. **Generate** — Produce a SOAP note, referral, clinical letter, or synopsis from the transcript, optionally guided by a Context Template.
-4. **Review** — Edit inline, or use the RSVP speed reader to review at high WPM.
-5. **Export** — Save as PDF, DOCX, or FHIR R4.
-6. **Chat** — Ask follow-up questions grounded in the recording and any ingested RAG documents.
+2. **Add Context** — Enter medications, allergies, conditions, and notes. Drop supporting documents (PDFs, images, Word/Excel files) for OCR extraction.
+3. **Transcribe** — Local Whisper runs on-device by default; Custom Vocabulary corrections are applied automatically after STT.
+4. **Generate** — Produce a SOAP note, referral, clinical letter, or synopsis from the transcript, optionally guided by a Context Template. Supporting documents and patient context are automatically included.
+5. **Review** — Preview inline in the Generate tab, edit in the Editor tab, or use the RSVP speed reader.
+6. **Export** — Save as PDF, DOCX, or FHIR R4.
+7. **Chat** — Ask follow-up questions grounded in the recording and any ingested RAG documents.
 
 ## Running Across Machines (LAN / Tailscale)
 
@@ -149,6 +171,13 @@ The model pickers under **Settings → Models** then list whatever models
 the office server has installed. No models are downloaded on the
 laptop.
 
+### Content Sync
+
+Enable **Sync patient content via Tailscale** in **Settings → Sharing** to
+bidirectionally sync transcripts, SOAP notes, letters, referrals, peer
+discussions, and audio between machines. Background sync runs every 5
+minutes. Use the **Sync Now** button for manual sync.
+
 ### Security
 
 Per-client tokens are issued during pairing and stored in the laptop's
@@ -162,7 +191,7 @@ risk, prefer Tailscale (which transparently encrypts with WireGuard).
 
 - Audio capture and waveform display
 - Speaker diarization (pyannote + WeSpeaker)
-- SQLite database, vocabulary rules, RAG vector store
+- SQLite database (SQLCipher encrypted), vocabulary rules, RAG vector store
 - The SOAP / referral / letter / synopsis editors
 
 Only Whisper inference and Ollama chat / embedding calls cross the wire.
@@ -177,7 +206,7 @@ Recordings, transcripts, settings, downloaded models, and the encrypted keystore
 | Linux | `~/.local/share/rust-medical-assistant/` |
 | Windows | `%APPDATA%\rust-medical-assistant\` |
 
-Inside you'll find `medical.db` (SQLite), `config/keys.json` (encrypted API keys), `models/whisper/*.bin`, `models/pyannote/*.onnx`, and the recordings themselves in whatever path you configured under **Settings → General**. Delete the directory to fully remove all user data.
+Inside you'll find `medical.db` (SQLCipher-encrypted SQLite), `config/keys.json` (encrypted API keys), `models/whisper/*.bin`, `models/pyannote/*.onnx`, and the recordings themselves (AES-256-GCM encrypted `.enc` files) in whatever path you configured under **Settings → General**. Delete the directory to fully remove all user data.
 
 ### Optional: stronger master key
 
