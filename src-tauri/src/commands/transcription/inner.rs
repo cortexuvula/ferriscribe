@@ -112,8 +112,17 @@ pub async fn transcribe_recording_inner(
                     );
                     // Persist the corrected path so future retries work directly.
                     recording.audio_path = candidate.clone();
-                    let conn = state.db.conn()?;
-                    RecordingsRepo::update(&conn, &recording)?;
+                    // Wrap the SQLite update in spawn_blocking so we never
+                    // block the async runtime worker.
+                    let rec_clone = recording.clone();
+                    let db = Arc::clone(&state.db);
+                    tokio::task::spawn_blocking(move || -> AppResult<()> {
+                        let conn = db.conn()?;
+                        RecordingsRepo::update(&conn, &rec_clone)?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(crate::commands::join_err)??;
                     candidate
                 } else {
                     let err_msg = format!("WAV file not found: {}", recording.audio_path.display());

@@ -238,14 +238,16 @@ pub async fn pair_with_server(
     // Update in-memory provider endpoints immediately so the "models visible"
     // success message in ClientPair.svelte is truthful without an app restart.
     let allow_public = {
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Other(e.to_string()))?;
-        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Other(e.to_string()))?;
-        cfg.migrate();
-        cfg.allow_public_endpoint
+        let db = std::sync::Arc::clone(&state.db);
+        tokio::task::spawn_blocking(move || -> AppResult<bool> {
+            let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+            cfg.migrate();
+            Ok(cfg.allow_public_endpoint)
+        })
+        .await
+        .map_err(crate::commands::join_err)??
     };
     use medical_core::types::RemoteEndpoint;
     let bearer = Some(token.clone());
@@ -290,19 +292,25 @@ pub async fn pair_with_server(
     // provider is still the active one.
     {
         use medical_core::types::settings::SttMode;
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Other(e.to_string()))?;
-        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Other(e.to_string()))?;
-        cfg.migrate();
-        if cfg.stt_mode != SttMode::Remote {
-            cfg.stt_mode = SttMode::Remote;
-            medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
-                .map_err(|e| AppError::Other(e.to_string()))?;
-            tracing::info!("pair: switched stt_mode to Remote");
-        }
+        let db = std::sync::Arc::clone(&state.db);
+        let cfg = tokio::task::spawn_blocking(
+            move || -> AppResult<medical_core::types::settings::AppConfig> {
+                let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                    .map_err(|e| AppError::Other(e.to_string()))?;
+                cfg.migrate();
+                if cfg.stt_mode != SttMode::Remote {
+                    cfg.stt_mode = SttMode::Remote;
+                    medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
+                        .map_err(|e| AppError::Other(e.to_string()))?;
+                    tracing::info!("pair: switched stt_mode to Remote");
+                }
+                Ok(cfg)
+            },
+        )
+        .await
+        .map_err(crate::commands::join_err)??;
+
         let stt_handles =
             crate::state::init_stt_providers_with_config(&state.data_dir, &cfg, whisper_ep.clone());
         {
@@ -342,16 +350,23 @@ pub async fn pair_with_server(
         }
 
         // 3. Update AppConfig with the paired endpoint values.
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Other(e.to_string()))?;
-        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Other(e.to_string()))?;
-        cfg.migrate();
-        apply_paired_settings(&mut cfg, &host, &ports);
-        medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
-            .map_err(|e| AppError::Other(e.to_string()))?;
+        //    Wrapped in spawn_blocking so the SQLite read-modify-write never
+        //    blocks the async runtime worker.
+        let db = std::sync::Arc::clone(&state.db);
+        let host_for_db = host.clone();
+        let ports_for_db = ports.clone();
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+            cfg.migrate();
+            apply_paired_settings(&mut cfg, &host_for_db, &ports_for_db);
+            medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
 
         tracing::info!(
             host = %host,
@@ -402,16 +417,19 @@ pub async fn unpair(state: State<'_, AppState>) -> AppResult<()> {
             let _ = state.keys.remove_key(slot);
         }
 
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Other(e.to_string()))?;
-        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Other(e.to_string()))?;
-        cfg.migrate();
-        reset_paired_settings(&mut cfg);
-        medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
-            .map_err(|e| AppError::Other(e.to_string()))?;
+        let db = std::sync::Arc::clone(&state.db);
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+            cfg.migrate();
+            reset_paired_settings(&mut cfg);
+            medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
 
         tracing::info!("unpair: cleared per-service api_keys and reset AppConfig");
     }

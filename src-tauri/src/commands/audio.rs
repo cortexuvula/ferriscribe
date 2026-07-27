@@ -81,14 +81,23 @@ pub async fn start_recording(
     let wav_path = recordings_dir.join(format!("{}.wav", friendly_name));
 
     // Read the configured input device and sample rate from settings.
+    // Wrapped in spawn_blocking so SQLite pool checkout + busy waits never
+    // stall the Tokio async runtime worker.
     let (input_device_name, sample_rate) = try_or_reset!(state, {
-        let conn = state.db.conn()?;
-        let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
-        config.migrate();
-        Ok::<_, AppError>((
-            config.input_device.filter(|s| !s.is_empty()),
-            config.sample_rate,
-        ))
+        let db = Arc::clone(&state.db);
+        let result: AppResult<(Option<String>, u32)> =
+            tokio::task::spawn_blocking(move || -> AppResult<(Option<String>, u32)> {
+                let conn = db.conn()?;
+                let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
+                config.migrate();
+                Ok((
+                    config.input_device.filter(|s| !s.is_empty()),
+                    config.sample_rate,
+                ))
+            })
+            .await
+            .map_err(crate::commands::join_err)?;
+        result
     });
 
     // Capture values for logging before they move into closures.
@@ -283,22 +292,41 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
     recording.file_size_bytes = Some(file_size);
     recording.status = ProcessingStatus::Pending;
 
-    // Insert into DB.
-    let conn = state.db.conn()?;
-    RecordingsRepo::insert(&conn, &recording)?;
-
-    // Mark encryption as pending BEFORE spawning the task, so the row is in
-    // the correct state by the time the background task (and any startup
-    // sweep) sees it. If we spawned first, the task could finish and call
-    // set_encryption_done on a not-yet-inserted row (a no-op), then this
-    // UPDATE would wrongly re-flag an already-encrypted recording as
-    // pending — the sweep would then re-encrypt ciphertext and corrupt it.
+    // Insert into DB and mark encryption_pending in a single spawn_blocking
+    // task so both SQLite writes happen on the same blocking worker thread
+    // (never on the Tokio async runtime).
+    //
+    // Marking encryption_pending BEFORE spawning the background encryption
+    // task is load-bearing: if we spawned first, the task could finish and
+    // call set_encryption_done on a not-yet-inserted row (a no-op), then
+    // this UPDATE would wrongly re-flag an already-encrypted recording as
+    // pending — the startup sweep would then re-encrypt ciphertext and
+    // corrupt it. Doing insert + flag atomically here closes that race.
     if file_size > 0 {
-        conn.execute(
-            "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
-            [&recording_uuid.to_string()],
-        )
-        .map_err(medical_db::DbError::from)?;
+        let db = Arc::clone(&state.db);
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db.conn()?;
+            RecordingsRepo::insert(&conn, &recording)?;
+            conn.execute(
+                "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+                [&recording_uuid.to_string()],
+            )
+            .map_err(medical_db::DbError::from)?;
+            Ok(())
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
+    } else {
+        // No file (empty recording): still insert the row, but skip the
+        // encryption_pending flag since there's nothing to encrypt.
+        let db = Arc::clone(&state.db);
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db.conn()?;
+            RecordingsRepo::insert(&conn, &recording)?;
+            Ok(())
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
     }
 
     // Spawn background encryption — don't block stop_recording.

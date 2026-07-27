@@ -63,14 +63,28 @@ pub async fn save_recording_field(
     value: String,
 ) -> AppResult<()> {
     let db = state.db.clone();
-    let cfg = {
-        let conn = db.conn()?;
-        medical_db::settings::SettingsRepo::load_config(&conn).unwrap_or_default()
+    // Load capture_for_training off the async worker — preserve the
+    // `unwrap_or_default()` semantics so a settings load failure still lets
+    // the edit go through without training capture (the same behavior as
+    // before, but no longer on the runtime thread). The JoinError itself is
+    // surfaced as a real error (it indicates a panic).
+    let capture = {
+        let db_cfg = Arc::clone(&db);
+        tokio::task::spawn_blocking(move || -> bool {
+            let conn = match db_cfg.conn() {
+                Ok(c) => c,
+                Err(_) => return false,
+            };
+            medical_db::settings::SettingsRepo::load_config(&conn)
+                .unwrap_or_default()
+                .capture_for_training
+        })
+        .await
+        .map_err(crate::commands::join_err)?
     };
     let recording_id_inner = recording_id.clone();
     let field_inner = field.clone();
     let value_inner = value.clone();
-    let capture = cfg.capture_for_training;
     tokio::task::spawn_blocking(move || {
         let conn = db.conn()?;
         save_recording_field_inner(

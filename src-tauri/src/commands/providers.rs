@@ -12,16 +12,22 @@ use crate::state::{self, AppState};
 /// Called by every test/probe command before firing an outbound request, so a
 /// crafted frontend payload can't make the app contact an arbitrary public host
 /// (AGENTS.md: no hosted AI APIs, no telemetry).
-fn validate_probe_host(state: &AppState, host: &str) -> AppResult<()> {
-    let allow_public = {
-        let conn = state.db.conn()?;
-        medical_db::settings::SettingsRepo::load_config(&conn)
+async fn validate_probe_host(state: &AppState, host: &str) -> AppResult<()> {
+    // Load allow_public_endpoint off the async worker — SQLite pool checkout
+    // and any busy-wait must not stall the Tokio runtime.
+    let db = std::sync::Arc::clone(&state.db);
+    let allow_public = tokio::task::spawn_blocking(move || -> AppResult<bool> {
+        let conn = db.conn()?;
+        Ok(medical_db::settings::SettingsRepo::load_config(&conn)
             .map(|mut c| {
                 c.migrate();
                 c.allow_public_endpoint
             })
-            .unwrap_or(false)
-    };
+            .unwrap_or(false))
+    })
+    .await
+    .map_err(crate::commands::join_err)??;
+
     let effective = if host.is_empty() { "localhost" } else { host };
     medical_core::endpoint_policy::validate_local_endpoint(effective, allow_public)
         .map_err(|e| AppError::invalid_endpoint_for(e, "probe_host"))?;
@@ -108,7 +114,7 @@ pub async fn probe_endpoint_reachable(
     probe_path: String,
     api_key: Option<String>,
 ) -> AppResult<()> {
-    validate_probe_host(&state, &host)?;
+    validate_probe_host(&state, &host).await?;
     probe_endpoint_reachable_inner(service, provider_name, host, port, probe_path, api_key).await
 }
 
@@ -117,12 +123,20 @@ pub async fn probe_endpoint_reachable(
 /// Returns the list of available AI provider names after reinitialization.
 #[tauri::command]
 pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
-    // Load saved settings for provider config (host, port, active provider, whisper model)
+    // Load saved settings for provider config (host, port, active provider, whisper model).
+    // Wrapped in spawn_blocking so SQLite pool checkout never blocks the async worker.
     let config = {
-        let conn = state.db.conn()?;
-        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)?;
-        cfg.migrate();
-        cfg
+        let db = std::sync::Arc::clone(&state.db);
+        tokio::task::spawn_blocking(
+            move || -> AppResult<medical_core::types::settings::AppConfig> {
+                let conn = db.conn()?;
+                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)?;
+                cfg.migrate();
+                Ok(cfg)
+            },
+        )
+        .await
+        .map_err(crate::commands::join_err)??
     };
 
     // Re-load paired endpoint so reinit also re-wires endpoints.
@@ -214,7 +228,7 @@ pub async fn test_lmstudio_connection(
     port: u16,
     api_key: Option<String>,
 ) -> AppResult<String> {
-    validate_probe_host(&state, &host)?;
+    validate_probe_host(&state, &host).await?;
     let effective_host = if host.is_empty() {
         "localhost".to_string()
     } else {
@@ -299,7 +313,7 @@ pub async fn test_stt_remote_connection(
     port: u16,
     api_key: Option<String>,
 ) -> AppResult<String> {
-    validate_probe_host(&state, &host)?;
+    validate_probe_host(&state, &host).await?;
     let effective_host = if host.is_empty() {
         "localhost".to_string()
     } else {
@@ -385,7 +399,7 @@ pub async fn test_ollama_connection(
     port: u16,
     api_key: Option<String>,
 ) -> AppResult<String> {
-    validate_probe_host(&state, &host)?;
+    validate_probe_host(&state, &host).await?;
     let effective_host = if host.is_empty() {
         "localhost".to_string()
     } else {
