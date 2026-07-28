@@ -48,7 +48,7 @@
   </div>
   <div class="item-action">
     {#if generating}
-      <button class="btn-generate" disabled>
+      <button class="btn-generate" type="button" disabled>
         <span class="spinner"></span> Generating...
       </button>
       {#if progressText}
@@ -59,6 +59,7 @@
         <span class="done-badge">Done</span>
         <button
           class="btn-copy"
+          type="button"
           class:copied={copyStatus === 'copied'}
           onclick={onCopy}
           disabled={copyStatus === 'copying' || copyStatus === 'copied'}
@@ -68,6 +69,7 @@
         {#if onSpeedRead}
           <button
             class="btn-copy"
+            type="button"
             onclick={onSpeedRead}
             title="Speed Read (Cmd/Ctrl+Shift+R)"
           >
@@ -76,6 +78,7 @@
         {/if}
         <button
           class="btn-regenerate"
+          type="button"
           onclick={onGenerate}
           disabled={anyGenerating}
         >
@@ -85,6 +88,7 @@
     {:else}
       <button
         class="btn-generate"
+        type="button"
         onclick={onGenerate}
         disabled={anyGenerating}
       >
