@@ -33,7 +33,7 @@
     onchange={(e) => onModelChange((e.target as HTMLSelectElement).value)}
     disabled={modelsRefreshing}
   >
-    {#each whisperModels as model}
+    {#each whisperModels as model (model.id)}
       <option value={model.id}>
         {model.id} ({formatBytes(model.size_bytes)}) {model.downloaded ? '' : '- not downloaded'}
       </option>
@@ -45,7 +45,7 @@
 <div class="form-group">
   <span class="form-label">Model Management</span>
   <div class="model-list">
-    {#each whisperModels as model}
+    {#each whisperModels as model (model.id)}
       <div class="model-row">
         <div class="model-info">
           <span class="model-name">{model.id}</span>

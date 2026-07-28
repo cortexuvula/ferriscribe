@@ -86,7 +86,7 @@
 
     <fieldset>
       <legend>Base model filter</legend>
-      {#each availableModels as model}
+      {#each availableModels as model (model)}
         <label>
           <input
             type="checkbox"

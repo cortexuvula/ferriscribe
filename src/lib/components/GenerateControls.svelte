@@ -66,8 +66,11 @@
   let peerFieldsExpanded = $state(true);
 
   $effect(() => {
-    // Reset field collapse state when the recording changes.
-    recording?.id;
+    // Reset field collapse state when the recording changes. Reading
+    // `recording?.id` registers it as a dependency of this effect so
+    // the collapse state resets on each recording switch.
+    const _recordingId = recording?.id;
+    void _recordingId;
     letterFieldsExpanded = true;
     peerFieldsExpanded = true;
   });

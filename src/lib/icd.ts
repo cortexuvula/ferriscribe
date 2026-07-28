@@ -23,7 +23,7 @@ export interface ValidatedIcdCode {
 export function stripIcdPrefix(raw: string): string {
   return raw
     .replace(/^\(?\[?\s*ICD-\d+\s*(?:Code)?\s*:?\s*/iu, '')
-    .replace(/^[\(\[\s]+|[\)\]\s]+$/gu, '')
+    .replace(/^[()[\s]+|[)\]\s]+$/gu, '')
     .trim();
 }
 

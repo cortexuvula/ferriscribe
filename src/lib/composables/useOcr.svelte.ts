@@ -29,7 +29,7 @@ export function useOcr() {
   /// Concatenation of all done-file text blocks. The user edits this in the
   /// preview textarea, but we rebuild from chips on removal. Using a derived
   /// value ensures consistency.
-  let ocrText = $derived(
+  const ocrText = $derived(
     ocrFiles
       .filter((f) => f.status === 'done' && f.text)
       .map((f) => `--- ${f.filename} ---\n${f.text}`)
@@ -38,7 +38,7 @@ export function useOcr() {
 
   /// Mutable override of the derived text — the user can edit the preview,
   /// which overrides the derived value until a file is added/removed.
-  let ocrTextDisplay = $derived(ocrTextOverride ?? ocrText);
+  const ocrTextDisplay = $derived(ocrTextOverride ?? ocrText);
 
   /**
    * Kick off OCR for the given file paths. Deduplicates paths, adds loading
@@ -48,6 +48,7 @@ export function useOcr() {
    * a different patient's context.
    */
   async function handleOcrFilesSelected(paths: string[]) {
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- transient dedup Set, not reactive state
     const uniquePaths = [...new Set(paths)];
     if (uniquePaths.length === 0) return;
     ocrLoading = true;
@@ -70,6 +71,7 @@ export function useOcr() {
       };
     });
     ocrFiles = [...ocrFiles, ...pendingChips];
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- transient lookup Set, not reactive state
     const idSet = new Set(chipIds);
 
     try {

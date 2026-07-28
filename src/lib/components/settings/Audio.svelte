@@ -64,6 +64,7 @@
     } catch (e) {
       console.error(`Failed to download model ${modelId}:`, e);
     } finally {
+      // eslint-disable-next-line svelte/prefer-svelte-reactivity -- transient local Set, not reactive state
       const next = new Set(downloadingModels);
       next.delete(modelId);
       downloadingModels = next;

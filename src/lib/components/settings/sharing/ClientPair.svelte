@@ -55,6 +55,7 @@
   // (`tailscale_addresses`) into a single entry, keeping each channel's
   // set separate so the slot routing in `pairDiscovered` is correct.
   const deduped = $derived.by(() => {
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- transient dedup map, not reactive state
     const seen = new Map<string, Discovered>();
     for (const d of discovered) {
       const existing = seen.get(d.instance_name);

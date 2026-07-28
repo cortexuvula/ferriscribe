@@ -148,7 +148,7 @@
   <h3>This machine is the office server</h3>
 
   <div class="status-panel" aria-label="Sharing service health">
-    {#each checks as c}
+    {#each checks as c (c.key)}
       {@const ok = !!status?.[c.key]}
       <div class="status-row" class:ok class:fail={!ok} title={!ok && c.offHint ? c.offHint : ''}>
         <span class="status-icon" aria-hidden="true">{ok ? '✓' : '✗'}</span>
