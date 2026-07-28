@@ -185,8 +185,12 @@ class RecordingsStore {
   /// affected recording is currently selected, re-fetch it so the open editor
   /// shows the merged content. The list reload is debounced (500ms) so
   /// batch sync updates only trigger one `load()` call.
+  ///
+  /// If a generation is in flight (syncing flag), skip re-selecting the
+  /// recording — the in-flight generation will refresh the data on completion.
+  /// This prevents a sync event from clobbering a freshly regenerated note.
   handleRemoteUpdate(recordingId: string): void {
-    if (this.selectedRecording?.id === recordingId) {
+    if (this.selectedRecording?.id === recordingId && !this.syncing) {
       // If the recording was remotely deleted, selectRecording will fail
       // (the row is now soft-deleted). Clear it so the editor doesn't
       // show a stale, now-deleted recording.

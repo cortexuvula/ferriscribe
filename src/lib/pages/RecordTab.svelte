@@ -22,6 +22,8 @@
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
   import { generateSoap } from '../api/generation';
+  import { generation } from '../stores/generation.svelte';
+  import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
   import { useOcr } from '../composables/useOcr.svelte';
 
   type Props = {
@@ -292,8 +294,9 @@
   let regenerating = $state(false);
   async function handleRegenerateSoap() {
     const rid = pipelineRecordingId;
-    if (!rid || regenerating) return;
+    if (!rid || regenerating || generation.state.generating) return;
     regenerating = true;
+    generation.startGenerating('soap');
     try {
       const ctx = buildPipelineContext();
       const pc = buildPatientContext(medicationsText, allergiesText, conditionsText);
@@ -302,8 +305,14 @@
       const rec = await getRecording(rid);
       soapNoteText = rec?.soap_note ?? null;
       await recordings.load();
+      generation.finish();
+      toasts.success('SOAP note generated');
     } catch (e) {
-      toasts.error(`Failed to regenerate SOAP note: ${formatError(e)}`);
+      if (e instanceof OfflineCancelled) {
+        generation.finish();
+        return;
+      }
+      generation.setError(formatError(e) || 'Failed to regenerate SOAP note');
     } finally {
       regenerating = false;
     }

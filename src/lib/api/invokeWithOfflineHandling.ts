@@ -39,12 +39,23 @@ export function isEndpointOffline(err: unknown): err is EndpointOfflinePayload {
   );
 }
 
+/** Maximum consecutive offline retries before giving up and throwing the
+ *  error. Prevents an endless retry loop when the endpoint is persistently
+ *  unreachable (e.g. server down, Tailscale disconnected). */
+const MAX_OFFLINE_RETRIES = 3;
+
 /** Wraps Tauri `invoke`. On `EndpointOffline` rejection, opens the
  *  shared dialog and awaits the user's decision:
- *    - Retry      → loops back to re-invoke `cmd` with `args`.
+ *    - Retry      → loops back to re-invoke `cmd` with `args` (up to
+ *                   MAX_OFFLINE_RETRIES consecutive failures).
  *    - Cancel     → throws OfflineCancelled('cancel').
  *    - OpenSettings → throws OfflineCancelled('opened_settings').
  *  Any other rejection passes through verbatim.
+ *
+ *  After MAX_OFFLINE_RETRIES consecutive offline failures, the error is
+ *  thrown verbatim instead of reopening the dialog — the endpoint is
+ *  clearly persistently unreachable and the user needs to fix it in
+ *  Settings rather than clicking Retry endlessly.
  *
  *  Successful retry resumes the original `await` with the new result —
  *  callers don't need to re-trigger their action.
@@ -53,11 +64,17 @@ export async function invokeWithOfflineHandling<T>(
   cmd: string,
   args: Record<string, unknown> = {},
 ): Promise<T> {
+  let consecutiveOfflineFailures = 0;
   for (;;) {
     try {
       return await invoke<T>(cmd, args);
     } catch (err) {
       if (!isEndpointOffline(err)) {
+        throw err;
+      }
+      consecutiveOfflineFailures++;
+      if (consecutiveOfflineFailures > MAX_OFFLINE_RETRIES) {
+        // Give up — the endpoint is persistently unreachable.
         throw err;
       }
       const decision = await endpointOfflineStore.openAndWait(err);
