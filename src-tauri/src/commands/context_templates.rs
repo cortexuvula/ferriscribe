@@ -146,21 +146,40 @@ pub fn export_json(templates: &[ContextTemplate]) -> AppResult<String> {
     Ok(json)
 }
 
-fn load_config(
+/// Load `AppConfig` from the DB inside `spawn_blocking` so the SQLite
+/// pool checkout and JSON parse never stall the Tokio async runtime worker.
+async fn load_config(
     db: &Arc<medical_db::Database>,
 ) -> AppResult<medical_core::types::settings::AppConfig> {
-    let conn = db.conn()?;
-    let mut config = SettingsRepo::load_config(&conn)?;
-    config.migrate();
-    Ok(config)
+    let db = Arc::clone(db);
+    tokio::task::spawn_blocking(
+        move || -> AppResult<medical_core::types::settings::AppConfig> {
+            let conn = db.conn()?;
+            let mut config = SettingsRepo::load_config(&conn)?;
+            config.migrate();
+            Ok(config)
+        },
+    )
+    .await
+    .map_err(crate::commands::join_err)?
 }
 
-fn save_config(
+/// Save `AppConfig` to the DB inside `spawn_blocking`.
+async fn save_config(
     db: &Arc<medical_db::Database>,
     config: &medical_core::types::settings::AppConfig,
 ) -> AppResult<()> {
-    let conn = db.conn()?;
-    SettingsRepo::save_config(&conn, config).map_err(AppError::from)
+    // SettingsRepo::save_config is synchronous; clone the config into an
+    // owned Arc so the move closure can take it across the thread boundary
+    // without borrowing.
+    let config = Arc::new(config.clone());
+    let db = Arc::clone(db);
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
+        let conn = db.conn()?;
+        SettingsRepo::save_config(&conn, &config).map_err(AppError::from)
+    })
+    .await
+    .map_err(crate::commands::join_err)?
 }
 
 #[tauri::command]
@@ -172,7 +191,7 @@ pub async fn list_context_templates(
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         return remote.list().await;
     }
-    let config = load_config(&state.db)?;
+    let config = load_config(&state.db).await?;
     let mut templates = config.custom_context_templates;
     sort_templates(&mut templates);
     Ok(templates)
@@ -206,9 +225,9 @@ pub async fn upsert_context_template(
         );
         return Ok(entry);
     }
-    let mut config = load_config(&state.db)?;
+    let mut config = load_config(&state.db).await?;
     let result = upsert_into(&mut config.custom_context_templates, name, body);
-    save_config(&state.db, &config)?;
+    save_config(&state.db, &config).await?;
     info!(
         name_len = result.name.chars().count(),
         "Upserted context template"
@@ -238,9 +257,9 @@ pub async fn rename_context_template(
         );
         return Ok(entry);
     }
-    let mut config = load_config(&state.db)?;
+    let mut config = load_config(&state.db).await?;
     let result = rename_in(&mut config.custom_context_templates, &old_name, new_name)?;
-    save_config(&state.db, &config)?;
+    save_config(&state.db, &config).await?;
     info!(
         name_len = result.name.chars().count(),
         "Renamed context template"
@@ -260,9 +279,9 @@ pub async fn delete_context_template(
         info!("Deleted context template (remote)");
         return Ok(());
     }
-    let mut config = load_config(&state.db)?;
+    let mut config = load_config(&state.db).await?;
     delete_in(&mut config.custom_context_templates, &name)?;
-    save_config(&state.db, &config)?;
+    save_config(&state.db, &config).await?;
     info!("Deleted context template");
     Ok(())
 }
@@ -292,9 +311,9 @@ pub async fn import_context_templates_json(
         info!(count, path = %file_path.display(), "Imported context templates (remote)");
         return Ok(count);
     }
-    let mut config = load_config(&state.db)?;
+    let mut config = load_config(&state.db).await?;
     let count = apply_import(&mut config.custom_context_templates, imported);
-    save_config(&state.db, &config)?;
+    save_config(&state.db, &config).await?;
     info!(count, path = %file_path.display(), "Imported context templates");
     Ok(count)
 }
@@ -311,7 +330,7 @@ pub async fn export_context_templates_json(
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         remote.list().await?
     } else {
-        let config = load_config(&state.db)?;
+        let config = load_config(&state.db).await?;
         config.custom_context_templates
     };
     let count = templates.len() as u32;

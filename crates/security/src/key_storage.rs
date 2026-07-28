@@ -250,7 +250,7 @@ impl KeyStorage {
     fn save_file(&self, key_file: &KeyFile) -> SecurityResult<()> {
         let json = serde_json::to_vec_pretty(key_file)
             .map_err(|e| SecurityError::Io(std::io::Error::other(e)))?;
-        std::fs::write(&self.storage_path, json)?;
+        atomic_write(&self.storage_path, &json)?;
         Ok(())
     }
 }
@@ -301,8 +301,34 @@ fn load_or_create_salt(config_dir: &Path) -> SecurityResult<Vec<u8>> {
     }
     let mut salt = vec![0u8; SALT_LENGTH];
     rand::rng().fill_bytes(&mut salt);
-    std::fs::write(&path, &salt)?;
+    atomic_write(&path, &salt)?;
     Ok(salt)
+}
+
+/// Write `content` to `path` atomically by first writing a temp file in
+/// the same directory and then renaming it over the target.
+///
+/// Atomicity guarantees:
+/// - On POSIX, `rename(2)` is atomic: a crash mid-rename never leaves a
+///   partially-written target file. Readers either see the old file or the
+///   new file in its entirety.
+/// - On NTFS (same volume), `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`
+///   is likewise atomic.
+///
+/// The temp file lives next to the target (`.tmp` extension) so the
+/// rename is intra-directory and therefore same-volume — required for
+/// atomicity on both platforms. On any error after the temp file is
+/// created, we attempt to remove it so a crash-later retry doesn't pick
+/// up stale bytes.
+fn atomic_write(path: &Path, content: &[u8]) -> SecurityResult<()> {
+    let temp = path.with_extension("tmp");
+    std::fs::write(&temp, content)?;
+    if let Err(e) = std::fs::rename(&temp, path) {
+        // Cleanup the temp file on rename failure so it doesn't linger.
+        let _ = std::fs::remove_file(&temp);
+        return Err(SecurityError::Io(e));
+    }
+    Ok(())
 }
 
 // ─── Utility ──────────────────────────────────────────────────────────────────

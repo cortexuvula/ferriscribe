@@ -78,8 +78,9 @@ pub struct AgentContext {
 /// # PHI note
 ///
 /// These fields contain protected health information. Never log them
-/// via `tracing::*` macros or `println!`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// via `tracing::*` macros or `println!`. The manual `Debug` impl below
+/// redacts every PHI field so accidental `{:?}` formatting cannot leak it.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PatientContext {
     /// Patient's name (optional — not always surfaced in the UI).
     #[serde(default)]
@@ -96,6 +97,30 @@ pub struct PatientContext {
     /// Known allergies.
     #[serde(default)]
     pub allergies: Vec<String>,
+}
+
+/// Manual Debug impl that redacts every PHI field. `patient_name` is
+/// collapsed to a presence flag; the four list fields report only their
+/// length so counts remain visible in diagnostics without leaking values.
+impl std::fmt::Debug for PatientContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PatientContext")
+            .field(
+                "patient_name",
+                &self.patient_name.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "prior_soap_notes",
+                &format!("<{} entries>", self.prior_soap_notes.len()),
+            )
+            .field(
+                "medications",
+                &format!("<{} items>", self.medications.len()),
+            )
+            .field("allergies", &format!("<{} items>", self.allergies.len()))
+            .field("conditions", &format!("<{} items>", self.conditions.len()))
+            .finish()
+    }
 }
 
 /// The final response from an agent run.

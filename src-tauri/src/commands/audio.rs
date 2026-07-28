@@ -302,17 +302,38 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
     // this UPDATE would wrongly re-flag an already-encrypted recording as
     // pending — the startup sweep would then re-encrypt ciphertext and
     // corrupt it. Doing insert + flag atomically here closes that race.
+    //
+    // The insert + UPDATE run inside a single transaction so that if the
+    // UPDATE fails (e.g. SQLite busy/disk error) the row insert is rolled
+    // back — otherwise we'd have committed a row whose encryption_pending
+    // flag is stuck at 0 and the startup sweep would miss it, leaving
+    // plaintext on disk.
     if file_size > 0 {
         let db = Arc::clone(&state.db);
         tokio::task::spawn_blocking(move || -> AppResult<()> {
             let conn = db.conn()?;
-            RecordingsRepo::insert(&conn, &recording)?;
-            conn.execute(
-                "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
-                [&recording_uuid.to_string()],
-            )
-            .map_err(medical_db::DbError::from)?;
-            Ok(())
+            conn.execute_batch("BEGIN")
+                .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+            let result: AppResult<()> = (|| {
+                RecordingsRepo::insert(&conn, &recording)?;
+                conn.execute(
+                    "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+                    [&recording_uuid.to_string()],
+                )
+                .map_err(medical_db::DbError::from)?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    conn.execute_batch("COMMIT")
+                        .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            }
         })
         .await
         .map_err(crate::commands::join_err)??;

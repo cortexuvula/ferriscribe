@@ -59,21 +59,31 @@ struct ErrorPayload {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Load the full `AppConfig` from the DB synchronously.
+/// Load the full `AppConfig` from the DB inside `spawn_blocking`.
 ///
 /// Returns a hard error if the settings can't be read — a silent fallback to a
 /// hardcoded model (previously `"gpt-4o"`) would route requests to the wrong
 /// provider for any user configured for Anthropic/Ollama/etc.
-fn load_app_config(
+///
+/// The DB checkout + JSON parse run on a blocking worker so SQLite pool
+/// busy waits never stall the Tokio async runtime.
+async fn load_app_config(
     state: &tauri::State<'_, AppState>,
 ) -> AppResult<medical_core::types::settings::AppConfig> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-    let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-        .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-    cfg.migrate();
+    let db = std::sync::Arc::clone(&state.db);
+    let cfg = tokio::task::spawn_blocking(
+        move || -> AppResult<medical_core::types::settings::AppConfig> {
+            let conn = db
+                .conn()
+                .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
+            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
+            cfg.migrate();
+            Ok(cfg)
+        },
+    )
+    .await
+    .map_err(crate::commands::join_err)??;
     Ok(cfg)
 }
 
@@ -139,15 +149,23 @@ async fn chat_send_inner(
     system_prompt: Option<String>,
 ) -> AppResult<String> {
     // Load full config for pre-flight (also provides model/temperature).
+    // Runs inside spawn_blocking so the SQLite pool checkout + JSON parse
+    // never stall the Tokio async runtime worker.
     let cfg = {
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-        let mut c = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-        c.migrate();
-        c
+        let db = std::sync::Arc::clone(&state.db);
+        tokio::task::spawn_blocking(
+            move || -> AppResult<medical_core::types::settings::AppConfig> {
+                let conn = db
+                    .conn()
+                    .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
+                let mut c = medical_db::settings::SettingsRepo::load_config(&conn)
+                    .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
+                c.migrate();
+                Ok(c)
+            },
+        )
+        .await
+        .map_err(crate::commands::join_err)??
     };
     let settings_model = cfg.ai_model.clone();
     let settings_temp = cfg.temperature;
@@ -224,7 +242,7 @@ pub async fn chat_stream(
     check_history_size(&messages)?;
 
     // Load full config for pre-flight (also provides model/temperature).
-    let cfg = load_app_config(&state)?;
+    let cfg = load_app_config(&state).await?;
     let settings_model = cfg.ai_model.clone();
     let settings_temp = cfg.temperature;
 
@@ -397,15 +415,23 @@ async fn chat_with_agent_inner(
 
     // Load full config so we can pass it to pre-flight (model/temperature are
     // also read from here, replacing the separate load_chat_settings call).
+    // Runs inside spawn_blocking so the SQLite pool checkout + JSON parse
+    // never stall the Tokio async runtime worker.
     let cfg = {
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-        let mut c = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-        c.migrate();
-        c
+        let db = std::sync::Arc::clone(&state.db);
+        tokio::task::spawn_blocking(
+            move || -> AppResult<medical_core::types::settings::AppConfig> {
+                let conn = db
+                    .conn()
+                    .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
+                let mut c = medical_db::settings::SettingsRepo::load_config(&conn)
+                    .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
+                c.migrate();
+                Ok(c)
+            },
+        )
+        .await
+        .map_err(crate::commands::join_err)??
     };
     let model = cfg.ai_model.clone();
     let temperature = cfg.temperature;

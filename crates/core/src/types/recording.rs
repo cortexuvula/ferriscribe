@@ -236,7 +236,12 @@ impl ProcessingStatus {
 /// Avoids loading full transcript/SOAP content. Use
 /// `RecordingSummary::from(&recording)` to derive from a full
 /// [`Recording`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # PHI note
+///
+/// Manual `Debug` impl redacts `patient_name`; the remaining fields are
+/// structural metadata safe to log.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RecordingSummary {
     /// Recording UUID.
     pub id: Uuid,
@@ -265,6 +270,28 @@ pub struct RecordingSummary {
     /// True if this recording was synced from a remote machine (metadata
     /// contains a `synced_from` key).
     pub is_remote: bool,
+}
+
+/// Manual Debug impl that redacts the `patient_name` field. All other
+/// fields are structural metadata (no PHI) and are logged verbatim.
+impl std::fmt::Debug for RecordingSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordingSummary")
+            .field("id", &self.id)
+            .field("filename", &self.filename)
+            .field("patient_name", &"<redacted>")
+            .field("status", &self.status)
+            .field("duration_seconds", &self.duration_seconds)
+            .field("created_at", &self.created_at)
+            .field("tags", &self.tags)
+            .field("has_transcript", &self.has_transcript)
+            .field("has_soap_note", &self.has_soap_note)
+            .field("has_referral", &self.has_referral)
+            .field("has_letter", &self.has_letter)
+            .field("has_peer_discussion", &self.has_peer_discussion)
+            .field("is_remote", &self.is_remote)
+            .finish()
+    }
 }
 
 impl From<&Recording> for RecordingSummary {
