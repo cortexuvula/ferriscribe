@@ -292,6 +292,13 @@ pub(super) async fn content_sync_push_handler(
     let db = Arc::clone(&state.db);
     let incoming_count = req.recordings.len();
 
+    // Acquire the merge lock to serialize concurrent pushes. Without this,
+    // two clients pushing simultaneously could interleave their
+    // read-modify-write cycles on field revisions, losing data. The lock is
+    // held across the spawn_blocking merge call and released before SSE
+    // events are sent so a slow broadcast never blocks other merges.
+    let merge_guard = state.merge_lock.lock().await;
+
     let result = tokio::task::spawn_blocking(
         move || -> Result<medical_db::content_sync::MergeResult, medical_core::error::AppError> {
             let conn = db.conn()?;
@@ -305,6 +312,10 @@ pub(super) async fn content_sync_push_handler(
         warn!("content_sync push failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Release the merge lock before fanning out notifications so a slow
+    // broadcast/SSE never blocks the next concurrent push merge.
+    drop(merge_guard);
 
     // Notify SSE subscribers that content changed. Best-effort: no
     // receivers is not an error.

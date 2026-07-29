@@ -80,6 +80,11 @@ pub(super) struct ApiState {
     /// `recording-updated` Tauri event per changed ID so the server's own
     /// Recordings view reloads — mirroring what the client does on pull.
     pub(super) app_handle: AppHandle,
+    /// Serializes content-sync merges to prevent concurrent read-modify-write
+    /// races when multiple clients push simultaneously. Held across the
+    /// `spawn_blocking` merge call in the push handler. Wrapped in an `Arc`
+    /// so the `Clone` derive can clone the same underlying lock.
+    pub(super) merge_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Spawn the vocab/templates/dictionary HTTP API server on `0.0.0.0:{port}`.
@@ -103,6 +108,7 @@ pub async fn spawn(
         content_changed_tx,
         data_dir,
         app_handle,
+        merge_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     let app = Router::new()
         .route(

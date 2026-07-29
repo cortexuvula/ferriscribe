@@ -243,6 +243,26 @@ async fn run_sync(
 ) -> AppResult<SyncSummary> {
     let mut summary = SyncSummary::default();
 
+    // ── Backfill NULL updated_at ───────────────────────────────────────
+    // The migration that adds updated_at (m013) backfills existing rows,
+    // but edge cases (interrupted migration, direct DB edits) can leave
+    // NULLs. NULL updated_at rows are excluded by `changed_since`'s strict
+    // `>` comparison, so they'd be invisible to incremental sync. Backfill
+    // them here so they're visible to both pull and push.
+    {
+        let backfill_db = Arc::clone(&db);
+        let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = backfill_db.conn()?;
+            conn.execute(
+                "UPDATE recordings SET updated_at = created_at WHERE updated_at IS NULL",
+                [],
+            )
+            .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+            Ok(())
+        })
+        .await;
+    }
+
     // ── Pull loop ───────────────────────────────────────────────────────
     loop {
         // Read cursor and pull a batch on the blocking pool, then merge.
@@ -280,33 +300,21 @@ async fn run_sync(
         .await
         .map_err(crate::commands::join_err)?;
 
-        // If the merge failed, advance the cursor past this batch and
-        // continue to the push loop. Don't abort the entire sync —
-        // local pushes must still go through even if one pull batch
-        // had a bad recording.
+        // If the merge failed, do NOT advance the cursor — break out of the
+        // pull loop so the next sync cycle retries the same batch from the
+        // same cursor position. Advancing past a failed merge would
+        // permanently skip the failed batch (data loss).
         let merge_result = match merge_result {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     batch_count,
-                    "sync: pull merge failed, advancing cursor past batch"
+                    "sync: pull merge failed — NOT advancing cursor, will retry next cycle"
                 );
-                // Advance cursor to skip this batch
-                if let Some(ref nc) = next_cursor {
-                    let cursor_db = Arc::clone(&db);
-                    let nc = advance_cursor(nc);
-                    let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
-                        let conn = cursor_db.conn()?;
-                        ContentSyncRepo::set_cursor(&conn, Some(&nc)).map_err(AppError::from)
-                    })
-                    .await
-                    .map_err(crate::commands::join_err);
-                }
-                if !has_more || batch_count == 0 {
-                    break;
-                }
-                continue;
+                // Exit pull loop; cursor stays at pre-batch position so the
+                // failed batch is retried on the next sync cycle.
+                break;
             }
         };
 
@@ -369,7 +377,7 @@ async fn run_sync(
                 move || -> AppResult<Vec<String>> {
                     let conn = db.conn()?;
                     let mut stmt = conn.prepare(
-                        "SELECT id FROM recordings WHERE audio_path = '' AND deleted_at IS NULL LIMIT 10",
+                        "SELECT id FROM recordings WHERE audio_path = '' AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 10",
                     ).map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
                     let ids = stmt.query_map([], |row| row.get::<_, String>(0))
                         .map_err(|e| AppError::from(medical_db::DbError::from(e)))?
@@ -523,25 +531,15 @@ async fn run_sync(
             let push_resp = match remote.push(batch).await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    // Don't abort the entire sync on push failure. Advance
-                    // the push cursor past this batch so it's not retried
-                    // every cycle, and continue to the next iteration.
-                    tracing::warn!(error = %e, push_count, "sync: push batch failed, advancing cursor");
-                    if let Some(ts) = max_ts {
-                        let pc_db = Arc::clone(&db);
-                        let ts_owned = advance_cursor(&ts);
-                        let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
-                            let conn = pc_db.conn()?;
-                            ContentSyncRepo::set_push_cursor(&conn, &ts_owned)
-                                .map_err(AppError::from)
-                        })
-                        .await
-                        .map_err(crate::commands::join_err);
-                    }
-                    if !has_more {
-                        break;
-                    }
-                    continue;
+                    tracing::warn!(
+                        error = %e,
+                        batch_count = push_count,
+                        "sync: push batch failed — NOT advancing cursor, will retry next cycle"
+                    );
+                    // Exit push loop; cursor stays at pre-batch position so the
+                    // failed batch is retried on the next sync cycle instead of
+                    // being permanently skipped.
+                    break;
                 }
             };
             summary.pushed += push_count;

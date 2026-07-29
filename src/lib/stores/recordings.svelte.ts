@@ -27,6 +27,10 @@ class RecordingsStore {
   /// True while a content sync round-trip is in flight. UI uses this to show
   /// a syncing indicator and to avoid stacking concurrent syncs.
   syncing = $state(false);
+  /// True when a sync was requested while another sync was already running.
+  /// The queued request is replayed after the in-flight sync completes so
+  /// `content-changed` SSE notifications are never silently dropped.
+  syncPending = $state(false);
   /// Timestamp of the most recently completed sync cycle. Null until the first
   /// successful sync / `content-sync-complete` event.
   lastSyncedAt = $state<Date | null>(null);
@@ -158,10 +162,19 @@ class RecordingsStore {
   /// Sync with server (manual trigger or `content-changed` event). Sets the
   /// `syncing` flag for the duration, reloads the list afterwards so the UI
   /// reflects any merged changes, and stamps `lastSyncedAt`.
+  ///
+  /// If called while a sync is already in flight (e.g. an SSE `content-changed`
+  /// event arrives mid-sync), the request is queued via `syncPending` and
+  /// replayed after the current sync completes. This prevents dropped
+  /// notifications when events fire during an in-flight sync.
   async syncNow(): Promise<void> {
     // Guard against concurrent syncs: stacked `content-changed` events would
-    // otherwise fire multiple overlapping round-trips (Bug M4).
-    if (this.syncing) return;
+    // otherwise fire multiple overlapping round-trips (Bug M4). Queue the
+    // request instead of dropping it so the missed event is replayed.
+    if (this.syncing) {
+      this.syncPending = true;
+      return;
+    }
     this.syncing = true;
     try {
       await invoke('sync_content_now');
@@ -173,6 +186,17 @@ class RecordingsStore {
       console.error('Content sync failed:', err);
     } finally {
       this.syncing = false;
+      // If another sync was requested while we were busy, run it now. Fire
+      // and forget with a short delay to avoid deep recursion and to let the
+      // current finally block complete before re-entering.
+      if (this.syncPending) {
+        this.syncPending = false;
+        setTimeout(() => {
+          this.syncNow().catch((err) =>
+            console.error('Replay content sync failed:', err),
+          );
+        }, 100);
+      }
     }
   }
 
