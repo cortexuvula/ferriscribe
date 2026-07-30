@@ -43,6 +43,25 @@ class SpellcheckerImpl implements Spellchecker {
   private medicalEnabled = true;
   private loadingPromise: Promise<void> | null = null;
 
+  /** Common medical abbreviations that Hunspell doesn't know but should
+   *  never be flagged. Checked case-insensitively. */
+  private static MEDICAL_ABBREVIATIONS = new Set([
+    'bid', 'tid', 'qid', 'prn', 'po', 'iv', 'im', 'sc', 'sq', 'sl',
+    'ac', 'pc', 'hs', 'qd', 'qod', 'qhs', 'qam', 'qpm',
+    'mg', 'ml', 'cc', 'mcl', 'meq', 'mmol', 'iu', 'mcg', 'ng',
+    'nacl', 'kcl', 'hctz', 'bpm', 'mmhg', 'wbc', 'rbc', 'hgb',
+    'pt', 'inr', 'bmp', 'cmp', 'cbc', 'ua', 'cxr', 'ekg', 'ecg',
+    'ct', 'mri', 'us', 'bid', 'npo', 'od', 'os', 'ou', 'au', 'ad', 'as',
+    'apap', 'ns', 'lr', 'd5w', 'd5ns', 'd51⁄2ns',
+    's/p', 'c/w', 'r/o', 'd/c', 'f/u', 'sxs', 'tx', 'dx', 'hx', 'px',
+    'sob', 'cp', 'loc', 'doe', 'pnd', 'orthopnea',
+    'copd', 'chf', 'cad', 'pad', 'uti', 'gerd', 'pud', 'ibd', 'ibs',
+    'bph', 'dvt', 'pe', 'tia', 'cva', 'saH', 'sak',
+    'tsh', 't3', 't4', 'hba1c', 'esr', 'crp', 'alt', 'ast', 'alp',
+    'bun', 'cr', 'egfr', 'gba',
+    'ssri', 'snri', 'ace', 'arb', 'ppi', 'nsaid', 'dmard',
+  ]);
+
   get ready(): boolean {
     return this.nspell !== null;
   }
@@ -76,7 +95,27 @@ class SpellcheckerImpl implements Spellchecker {
     if (this.userWords.has(lower)) return true;
     if (this.sessionIgnored.has(lower)) return true;
     if (this.medicalEnabled && this.medicalWords.has(lower)) return true;
-    return this.nspell.correct(word);
+
+    // Handle camelCase: split on case boundaries and check each part.
+    // e.g., "patientName" → ["patient", "Name"], each checked individually.
+    if (/[a-z][A-Z]/.test(word)) {
+      const parts = word.split(/(?=[A-Z])/).filter((p) => p.length > 0);
+      if (parts.length > 1) {
+        return parts.every((part) => this.checkInternal(part));
+      }
+    }
+
+    return this.checkInternal(word);
+  }
+
+  /** Core word check without camelCase splitting (used recursively). */
+  private checkInternal(word: string): boolean {
+    const lower = word.toLowerCase();
+    if (this.userWords.has(lower)) return true;
+    if (this.sessionIgnored.has(lower)) return true;
+    if (this.medicalEnabled && this.medicalWords.has(lower)) return true;
+    if (SpellcheckerImpl.MEDICAL_ABBREVIATIONS.has(lower)) return true;
+    return this.nspell!.correct(word);
   }
 
   suggest(word: string, max = 5): string[] {

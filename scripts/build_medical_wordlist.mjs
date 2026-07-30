@@ -36,7 +36,9 @@ const OUTPUT_PATH = join(
   'medical_terms.txt',
 );
 
-const TOKEN_RE = /[a-zA-Z][a-zA-Z'-]{2,}/g;
+// Include digits in tokens so medical terms like COVID-19, H1N1, 5-HT,
+// type-2 are preserved as complete tokens in the wordlist.
+const TOKEN_RE = /[a-zA-Z0-9][a-zA-Z0-9'-]{1,}/g;
 
 async function main() {
   console.log(`Fetching ${SOURCE_URL}`);

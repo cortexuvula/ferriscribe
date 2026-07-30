@@ -30,6 +30,7 @@
   import RsvpSectionPicker from './lib/components/RsvpSectionPicker.svelte';
   import { rsvp } from './lib/stores/rsvp.svelte';
   import { getSpellchecker } from './lib/components/rich_editor/spellcheck/spellchecker';
+  import { requestSpellcheckRescan } from './lib/components/rich_editor/spellcheck/spellcheck_extension';
 
   // Pages
   import RecordTab from './lib/pages/RecordTab.svelte';
@@ -104,10 +105,10 @@
   });
 
   // Keep the spellchecker's bundled-medical-wordlist flag in sync with
-  // settings. The flag flip is instant; existing editor views won't re-scan
-  // until they next process a transaction (typing, focus, recording switch).
+  // settings, and trigger a rescan so existing editors update immediately.
   $effect(() => {
     getSpellchecker().setMedicalEnabled(settings.state.medical_dict_enabled);
+    requestSpellcheckRescan();
   });
 
   let progressUnlisten: UnlistenFn | null = null;
