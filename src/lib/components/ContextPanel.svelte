@@ -231,7 +231,7 @@
     padding: 0 14px 14px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
   }
 
   .context-hint {
@@ -303,12 +303,12 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    margin-top: 4px;
-    margin-bottom: -4px;
+    margin-top: 6px;
+    margin-bottom: 2px;
   }
 
   .context-textarea.structured {
-    min-height: 56px;
+    min-height: 72px;
   }
 
   .context-textarea::placeholder {

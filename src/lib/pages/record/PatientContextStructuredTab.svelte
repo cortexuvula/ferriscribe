@@ -60,6 +60,7 @@
   .structured-fields {
     display: flex;
     flex-direction: column;
+    gap: 12px;
     padding: 8px 12px 12px;
   }
 
@@ -69,8 +70,8 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    margin-top: 8px;
-    margin-bottom: 4px;
+    margin-top: 6px;
+    margin-bottom: 2px;
     display: block;
   }
 
@@ -90,7 +91,7 @@
   }
 
   .context-textarea.structured {
-    min-height: 56px;
+    min-height: 72px;
   }
 
   .context-textarea:focus {

@@ -231,7 +231,7 @@
     margin-top: 8px;
     overflow-y: auto;
     flex: 0 1 auto;
-    max-height: 40%;
+    max-height: 30%;
   }
 
   .panel {

@@ -365,7 +365,7 @@
      on hover so the user sees the chip is interactive beyond click. */
   .chip-grip {
     flex: 0 0 auto;
-    padding: 3px 2px 3px 6px;
+    padding: 4px 2px 4px 6px;
     font-size: 10px;
     line-height: 1.4;
     color: var(--success, #22c55e);
@@ -401,8 +401,8 @@
     /* Label fills the available width so long condition names wrap/truncate
        cleanly instead of pushing the × off the edge of the sidebar. */
     min-width: 0;
-    padding: 3px 8px;
-    font-size: 11px;
+    padding: 4px 8px;
+    font-size: 12px;
     font-weight: 500;
     line-height: 1.4;
     color: var(--success, #22c55e);
@@ -416,7 +416,7 @@
     starts faintly visible so the chip reads as removable even without hover. */
   .chip-remove {
     flex: 0 0 auto;
-    padding: 3px 7px 3px 4px;
+    padding: 4px 7px 4px 4px;
     font-size: 13px;
     line-height: 1;
     color: var(--success, #22c55e);
@@ -453,8 +453,8 @@
   }
 
   .chip-input {
-    padding: 3px 9px;
-    font-size: 11px;
+    padding: 4px 9px;
+    font-size: 12px;
     color: var(--text-primary);
     background-color: var(--bg-primary, #1a1a1a);
     border: 1px solid var(--success, #22c55e);
