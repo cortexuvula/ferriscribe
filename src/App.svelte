@@ -117,6 +117,7 @@
   let contentChangedUnlisten: UnlistenFn | null = null;
   let recordingUpdatedUnlisten: UnlistenFn | null = null;
   let syncCompleteUnlisten: UnlistenFn | null = null;
+  let userDictChangedUnlisten: UnlistenFn | null = null;
   // Theme sync is handled reactively via $effect below.
   let onGlobalKeydown: ((e: KeyboardEvent) => void) | null = null;
 
@@ -156,6 +157,7 @@
     contentChangedUnlisten?.();
     recordingUpdatedUnlisten?.();
     syncCompleteUnlisten?.();
+    userDictChangedUnlisten?.();
     pipeline.destroy();
 
     // Listen for generation progress events globally so state persists across tab switches
@@ -271,6 +273,23 @@
     } catch (err) {
       console.error('Failed to start content sync subscription:', err);
     }
+
+    // User dictionary sync — listen for remote changes and reload the
+    // spellchecker's in-memory wordlist so words added on another paired
+    // machine are picked up without an app restart. The backend command is a
+    // no-op when sync is disabled or unpaired.
+    const { subscribeUserDictionary } = await import('./lib/api/userDictionary');
+    userDictChangedUnlisten = await listen('user-dictionary-changed', () => {
+      getSpellchecker()
+        .reloadUserWords()
+        .then(() => requestSpellcheckRescan())
+        .catch((e) => console.error('Failed to reload user dictionary after sync:', e));
+    });
+    try {
+      await subscribeUserDictionary();
+    } catch (err) {
+      console.error('Failed to start user dictionary sync subscription:', err);
+    }
   });
 
   onDestroy(() => {
@@ -282,6 +301,7 @@
     contentChangedUnlisten?.();
     recordingUpdatedUnlisten?.();
     syncCompleteUnlisten?.();
+    userDictChangedUnlisten?.();
     updater.stopAutoCheck();
     audio.destroy();
   });

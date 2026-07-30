@@ -21,6 +21,8 @@
 //!     GET    /                       — list all words
 //!     POST   /                       — add word { word }
 //!     DELETE /{word}                 — remove word
+//!     POST   /sync                   — two-way merge (client → server)
+//!     GET    /events                 — SSE change notifications
 //!   /v1/condition-chips
 //!     GET    /                       — list active chips
 //!     POST   /sync                   — two-way merge (client → server)
@@ -67,6 +69,9 @@ pub(super) struct ApiState {
     /// Broadcasts `()` whenever condition chips change on the server so SSE
     /// subscribers can push realtime notifications to their clients.
     pub(super) chips_changed_tx: tokio::sync::broadcast::Sender<()>,
+    /// Broadcasts `()` whenever the user dictionary changes on the server so
+    /// SSE subscribers can push realtime notifications to their clients.
+    pub(super) dict_changed_tx: tokio::sync::broadcast::Sender<()>,
     /// Broadcasts a recording ID (or `"*"` for all) whenever content-sync
     /// push merges new data, so SSE subscribers can refresh in near-realtime.
     pub(super) content_changed_tx: tokio::sync::broadcast::Sender<String>,
@@ -100,11 +105,13 @@ pub async fn spawn(
     app_handle: AppHandle,
 ) -> Result<JoinHandle<()>, medical_core::error::AppError> {
     let (chips_changed_tx, _) = tokio::sync::broadcast::channel::<()>(16);
+    let (dict_changed_tx, _) = tokio::sync::broadcast::channel::<()>(16);
     let (content_changed_tx, _) = tokio::sync::broadcast::channel::<String>(32);
     let state = ApiState {
         db,
         tokens,
         chips_changed_tx,
+        dict_changed_tx,
         content_changed_tx,
         data_dir,
         app_handle,
@@ -145,6 +152,14 @@ pub async fn spawn(
         .route(
             "/v1/user-dictionary/{word}",
             axum::routing::delete(user_dictionary::dict_remove_handler),
+        )
+        .route(
+            "/v1/user-dictionary/sync",
+            post(user_dictionary::dict_sync_handler),
+        )
+        .route(
+            "/v1/user-dictionary/events",
+            get(user_dictionary::dict_events_handler),
         )
         .route(
             "/v1/condition-chips",

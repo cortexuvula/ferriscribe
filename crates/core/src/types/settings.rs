@@ -501,6 +501,13 @@ pub struct AppConfig {
     #[serde(default)]
     pub sync_condition_chips: bool,
 
+    // User dictionary sync
+    /// When true, the per-user spellcheck dictionary syncs two-way between
+    /// this machine and the paired server via the vocab API. Defaults to
+    /// false — each machine keeps its own dictionary unless the user opts in.
+    #[serde(default)]
+    pub sync_user_dictionary: bool,
+
     // Content sync
     /// When true, patient content (transcripts, SOAP notes, letters, peer
     /// discussions, audio) syncs two-way between this machine and the paired
@@ -754,6 +761,14 @@ mod tests {
         let cfg: AppConfig =
             serde_json::from_str(old_json).expect("should parse with serde defaults");
         assert!(!cfg.sync_condition_chips, "default must be false");
+    }
+
+    #[test]
+    fn sync_user_dictionary_defaults_to_false_in_older_configs() {
+        let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
+        let cfg: AppConfig =
+            serde_json::from_str(old_json).expect("should parse with serde defaults");
+        assert!(!cfg.sync_user_dictionary, "default must be false");
     }
 
     #[test]

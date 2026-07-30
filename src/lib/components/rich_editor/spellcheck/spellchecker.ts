@@ -33,6 +33,10 @@ export interface Spellchecker {
   ignoreInSession(word: string): void;
   /** Enable/disable the bundled medical wordlist in check() lookups. */
   setMedicalEnabled(enabled: boolean): void;
+  /** Reload the user wordlist from the backend (used after a remote sync
+   *  pushes new words to this machine). Safe to call before load() completes
+   *  (it will await the load first). */
+  reloadUserWords(): Promise<void>;
 }
 
 class SpellcheckerImpl implements Spellchecker {
@@ -80,13 +84,31 @@ class SpellcheckerImpl implements Spellchecker {
         listUserDict().catch(() => [] as string[]),
       ]);
       this.nspell = nspell(affRes, dicRes);
-      for (const w of userListRaw) this.userWords.add(w.toLowerCase());
+      this.applyUserWords(userListRaw);
       for (const line of medicalRaw.split('\n')) {
         const w = line.trim();
         if (w) this.medicalWords.add(w);
       }
     })();
     return this.loadingPromise;
+  }
+
+  /** Replace the in-memory user wordlist with a fresh set from the backend. */
+  private applyUserWords(words: string[]): void {
+    this.userWords = new Set(words.map((w) => w.toLowerCase()));
+  }
+
+  /** Reload the user wordlist from the backend (used after a remote sync
+   *  pushes new words to this machine). Awaits the initial dictionary load
+   *  first so we don't race with it. */
+  async reloadUserWords(): Promise<void> {
+    await this.load();
+    try {
+      const words = await listUserDict();
+      this.applyUserWords(words);
+    } catch (e) {
+      console.error('Failed to reload user dictionary:', e);
+    }
   }
 
   check(word: string): boolean {

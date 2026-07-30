@@ -11,6 +11,7 @@
 //! | [`agent`] | Agent context, tools, patient context |
 //! | [`ai`] | Completion request/response, messages, streaming |
 //! | [`condition_chip`] | [`condition_chip::ConditionChip`] with deterministic UUID v5 id |
+//! | [`user_dict_entry`] | [`user_dict_entry::UserDictEntry`] with deterministic UUID v5 id |
 //! | [`stt`] | Audio data, transcription config/results |
 //! | [`tts`] | TTS config, voice info |
 //! | [`rag`] | RAG results, search config, knowledge graph types |
@@ -30,6 +31,7 @@ pub mod recording;
 pub mod settings;
 pub mod stt;
 pub mod tts;
+pub mod user_dict_entry;
 pub mod vocabulary;
 
 pub use agent::*;
@@ -43,4 +45,10 @@ pub use recording::*;
 pub use settings::*;
 pub use stt::*;
 pub use tts::*;
+// Re-export only the struct from `user_dict_entry` (not the `deterministic_id`
+// / `normalize_for_id` helpers) to avoid an ambiguous-glob clash with
+// `condition_chip::*`, which exports identically-named helpers. Callers that
+// need the dict-helpers reach them via the fully-qualified path
+// `medical_core::types::user_dict_entry::deterministic_id`.
+pub use user_dict_entry::UserDictEntry;
 pub use vocabulary::*;
