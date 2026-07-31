@@ -69,6 +69,19 @@
     onConditionsChange(next + sep + condition + '\n');
   }
 
+  // Remove the exact-matching line (case-insensitive, trimmed) from the
+  // textarea — the mirror of addCondition, invoked when an active chip is
+  // clicked to toggle it off. Only the single matching line is removed;
+  // hand-edited variants are preserved.
+  function removeCondition(condition: string) {
+    const target = condition.trim().toLowerCase();
+    if (target.length === 0) return;
+    const kept = conditionsText
+      .split('\n')
+      .filter((l) => l.trim().toLowerCase() !== target);
+    onConditionsChange(kept.join('\n'));
+  }
+
   // Refresh saved templates when the panel is first expanded, so newly-created
   // templates (from Settings or the Record tab) appear without a manual reload.
   let lastLoadedExpanded = false;
@@ -116,7 +129,11 @@
       ></textarea>
 
       <label class="field-label" for="ctx-conditions">Known conditions (one per line)</label>
-      <ConditionChips onAdd={addCondition} />
+      <ConditionChips
+        onAdd={addCondition}
+        onRemove={removeCondition}
+        selectedConditions={conditionsText}
+      />
       <textarea
         id="ctx-conditions"
         class="context-textarea structured"
