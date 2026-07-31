@@ -24,6 +24,19 @@
     const sep = next.length > 0 && !next.endsWith('\n') ? '\n' : '';
     conditionsText = next + sep + condition + '\n';
   }
+
+  // Remove the exact-matching line (case-insensitive, trimmed) from the
+  // textarea. The mirror of addCondition — invoked when an active chip is
+  // clicked to toggle it off. Only the single matching line is removed;
+  // hand-edited variants (e.g. "Type 2 diabetes (HbA1c 8.2)") are preserved.
+  function removeCondition(condition: string) {
+    const target = condition.trim().toLowerCase();
+    if (target.length === 0) return;
+    const kept = conditionsText
+      .split('\n')
+      .filter((l) => l.trim().toLowerCase() !== target);
+    conditionsText = kept.join('\n');
+  }
 </script>
 
 <div class="structured-fields">
@@ -46,7 +59,11 @@
   ></textarea>
 
   <label class="field-label" for="rt-conditions">Known conditions (one per line)</label>
-  <ConditionChips onAdd={addCondition} />
+  <ConditionChips
+    onAdd={addCondition}
+    onRemove={removeCondition}
+    selectedConditions={conditionsText}
+  />
   <textarea
     id="rt-conditions"
     class="context-textarea structured"

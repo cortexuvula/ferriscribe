@@ -12,7 +12,41 @@
   import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toasts.svelte';
 
-  let { onAdd }: { onAdd: (condition: string) => void } = $props();
+  let {
+    onAdd,
+    selectedConditions = '',
+    onRemove = () => {},
+  }: {
+    onAdd: (condition: string) => void;
+    /** Contents of the "Known conditions" textarea. A chip is rendered as
+     *  active (✓ + filled style) when its text exactly matches a line here
+     *  (case-insensitive, trimmed), and clicking it then removes that line
+     *  via `onRemove` instead of adding it. Empty by default → no chip is
+     *  active, preserving the original add-only behavior for callers that
+     *  don't opt in. */
+    selectedConditions?: string;
+    onRemove?: (condition: string) => void;
+  } = $props();
+
+  // Active-set derivation: one pass over the textarea lines, lowercased +
+  // trimmed, into a Set for O(1) chip lookups. Recomputed reactively as the
+  // textarea changes (Svelte 5 runes re-run on `selectedConditions` reads).
+  const activeSet = $derived(
+    new Set(
+      selectedConditions
+        .split('\n')
+        .map((l) => l.trim().toLowerCase())
+        .filter((l) => l.length > 0),
+    ),
+  );
+
+  // Collapsible tray: show only the first COLLAPSED_COUNT chips until the
+  // user expands. Presets the user cares about float to the top via the
+  // existing drag-reorder, so the collapsed view surfaces the most relevant
+  // chips. Chips hidden behind the fold are still represented by their line
+  // in the textarea below, so no selected state is silently lost.
+  const COLLAPSED_COUNT = 6;
+  let expanded = $state(false);
 
   // The default list shown while the backend list is loading or when it's
   // empty (fresh install / backend default). Once the backend returns a
@@ -57,6 +91,18 @@
 
   // Display defaults until the backend list loads (or if it's empty).
   let displayChips = $derived(loaded && chips.length > 0 ? chips : DEFAULT_CHIPS);
+
+  // Chips actually rendered given the collapsed/expanded state. When
+  // collapsed, only the first COLLAPSED_COUNT show; the rest reveal on
+  // expand. Drag-reorder keeps true indices via data-index on the wrapper.
+  let visibleChips = $derived(
+    expanded || displayChips.length <= COLLAPSED_COUNT
+      ? displayChips
+      : displayChips.slice(0, COLLAPSED_COUNT),
+  );
+  let hiddenCount = $derived(
+    displayChips.length > COLLAPSED_COUNT ? displayChips.length - COLLAPSED_COUNT : 0,
+  );
 
   // Poll handle for periodic chip refresh (cleared on destroy).
   let pollHandle: ReturnType<typeof setInterval> | null = null;
@@ -275,9 +321,11 @@
 </script>
 
 <div class="condition-chips" role="group" aria-label="Common conditions quick-add">
-  {#each displayChips as chip, i (chip.text)}
+  {#each visibleChips as chip, i (chip.text)}
+    {@const active = activeSet.has(chip.text.toLowerCase())}
     <div
       class="condition-chip-wrapper"
+      class:selected={active}
       role="listitem"
       data-index={i}
       class:drag-over={dragOverIndex === i && dragIndex !== null}
@@ -292,22 +340,49 @@
       <button
         class="condition-chip"
         type="button"
-        onclick={(e) => { if (wasDragging) { e.preventDefault(); return; } onAdd(chip.text); }}
-        title={`Add "${chip.text}" to the list`}
+        onclick={(e) => {
+          if (wasDragging) { e.preventDefault(); return; }
+          if (active) onRemove(chip.text);
+          else onAdd(chip.text);
+        }}
+        title={active ? `Remove "${chip.text}" from the list` : `Add "${chip.text}" to the list`}
+        aria-pressed={active}
       >
+        {#if active}<span class="chip-check" aria-hidden="true">✓</span>{/if}
         {chip.text}
       </button>
       <button
         class="chip-remove"
         type="button"
         onclick={() => removeCondition(chip.text)}
-        title={`Remove "${chip.text}" from chips`}
-        aria-label="Remove {chip.text}"
+        title={`Remove "${chip.text}" preset`}
+        aria-label="Remove {chip.text} preset"
       >
         ×
       </button>
     </div>
   {/each}
+  {#if displayChips.length > COLLAPSED_COUNT}
+    {#if expanded}
+      <button
+        class="chip-toggle"
+        type="button"
+        onclick={() => (expanded = false)}
+        title="Show fewer condition chips"
+      >
+        Show less
+      </button>
+    {:else}
+      <button
+        class="chip-toggle"
+        type="button"
+        onclick={() => (expanded = true)}
+        title="Show all condition chips"
+      >
+        +{hiddenCount} more
+      </button>
+    {/if}
+  {/if}
   {#if adding}
     <input
       class="chip-input"
@@ -337,7 +412,7 @@
   .condition-chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 6px;
     margin-bottom: 6px;
     /* Guarantee the chip row can wrap fully without being clipped by a
        flex parent that has a fixed/min width. */
@@ -382,6 +457,32 @@
   .condition-chip-wrapper:hover {
     background-color: color-mix(in srgb, var(--success, #22c55e) 18%, transparent);
     border-color: color-mix(in srgb, var(--success, #22c55e) 45%, transparent);
+  }
+
+  /* Selected (active) state: the condition is already in the list, so the
+     chip fills solid green with a ✓ to make "it worked" obvious at the
+     point of click — no need to scroll down to the textarea to confirm. */
+  .condition-chip-wrapper.selected {
+    background-color: color-mix(in srgb, var(--success, #22c55e) 85%, transparent);
+    border-color: var(--success, #22c55e);
+  }
+
+  .condition-chip-wrapper.selected .condition-chip,
+  .condition-chip-wrapper.selected .chip-grip,
+  .condition-chip-wrapper.selected .chip-remove,
+  .condition-chip-wrapper.selected .chip-check {
+    color: #06210f;
+  }
+
+  .condition-chip-wrapper.selected:hover {
+    background-color: var(--success, #22c55e);
+  }
+
+  /* The ✓ that prefixes an active chip's label. Sits tightly before the
+     text with a tiny right gap so it reads as a checkmark, not a bullet. */
+  .chip-check {
+    margin-right: 3px;
+    font-weight: 700;
   }
 
   .condition-chip-wrapper.drag-over {
@@ -450,6 +551,26 @@
   .chip-add:hover {
     color: var(--success, #22c55e);
     border-color: var(--success, #22c55e);
+  }
+
+  /* "+N more" / "Show less" toggle for the collapsible tray. Visually
+     consistent with the chips (same radius/height) but muted so it reads as
+     an affordance, not a condition. */
+  .chip-toggle {
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: none;
+    border: 1px dashed var(--border, #444);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .chip-toggle:hover {
+    color: var(--accent, #3b82f6);
+    border-color: var(--accent, #3b82f6);
   }
 
   .chip-input {
