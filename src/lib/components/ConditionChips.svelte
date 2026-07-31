@@ -45,7 +45,7 @@
   // existing drag-reorder, so the collapsed view surfaces the most relevant
   // chips. Chips hidden behind the fold are still represented by their line
   // in the textarea below, so no selected state is silently lost.
-  const COLLAPSED_COUNT = 6;
+  const COLLAPSED_COUNT = 8;
   let expanded = $state(false);
 
   // The default list shown while the backend list is loading or when it's
@@ -471,7 +471,9 @@
   .condition-chip-wrapper.selected .chip-grip,
   .condition-chip-wrapper.selected .chip-remove,
   .condition-chip-wrapper.selected .chip-check {
-    color: #06210f;
+    /* --text-inverse is #fff on light, #1a1b1e on dark — correct legible
+       text color against the filled --success background in both themes. */
+    color: var(--text-inverse, #ffffff);
   }
 
   .condition-chip-wrapper.selected:hover {
