@@ -139,14 +139,14 @@ describe('ConditionChips — render & load', () => {
     const group = screen.getByRole('group', { name: 'Common conditions quick-add' });
     expect(group).toBeTruthy();
 
-    // The tray collapses to the first COLLAPSED_COUNT chips with a "+N more"
-    // toggle for the rest. The first batch of default conditions should each
-    // be present as a clickable chip.
-    for (const condition of DEFAULT_CONDITIONS.slice(0, 6)) {
+    // The tray collapses to the first COLLAPSED_COUNT (8) chips with a
+    // "+N more" toggle for the rest. The first batch of default conditions
+    // should each be present as a clickable chip.
+    for (const condition of DEFAULT_CONDITIONS.slice(0, 8)) {
       expect(screen.getByRole('button', { name: condition })).toBeTruthy();
     }
-    // The remaining defaults are behind the toggle, surfaced as "+9 more".
-    expect(screen.getByRole('button', { name: '+9 more' })).toBeTruthy();
+    // The remaining defaults are behind the toggle, surfaced as "+7 more".
+    expect(screen.getByRole('button', { name: '+7 more' })).toBeTruthy();
   });
 
   it('loads chips from backend on mount and renders custom chips', async () => {
@@ -482,51 +482,51 @@ describe('ConditionChips — selection state (toggle)', () => {
 });
 
 describe('ConditionChips — collapsible tray', () => {
-  it('collapses to the first 6 chips with a "+N more" toggle, then expands on click', async () => {
-    // 8 chips → 6 visible, "+2 more".
-    const eight = Array.from({ length: 8 }, (_, i) => chip(`Cond${i + 1}`, i));
-    mockListConditionChips.mockResolvedValue(eight);
+  it('collapses to the first 8 chips with a "+N more" toggle, then expands on click', async () => {
+    // 10 chips → 8 visible, "+2 more".
+    const ten = Array.from({ length: 10 }, (_, i) => chip(`Cond${i + 1}`, i));
+    mockListConditionChips.mockResolvedValue(ten);
 
     render(ConditionChips, { onAdd: () => {} });
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Cond1' })).toBeTruthy();
     });
 
-    // First six are visible; the rest are behind the toggle.
-    for (let i = 1; i <= 6; i++) {
+    // First eight are visible; the rest are behind the toggle.
+    for (let i = 1; i <= 8; i++) {
       expect(screen.getByRole('button', { name: `Cond${i}` })).toBeTruthy();
     }
-    expect(screen.queryByRole('button', { name: 'Cond7' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Cond8' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cond9' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cond10' })).toBeNull();
     expect(screen.getByRole('button', { name: '+2 more' })).toBeTruthy();
 
-    // Expand → all eight visible, toggle now reads "Show less".
+    // Expand → all ten visible, toggle now reads "Show less".
     await fireEvent.click(screen.getByRole('button', { name: '+2 more' }));
     await tick();
-    expect(screen.getByRole('button', { name: 'Cond7' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Cond8' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Cond9' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Cond10' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Show less' })).toBeTruthy();
 
-    // Collapse again → back to six.
+    // Collapse again → back to eight.
     await fireEvent.click(screen.getByRole('button', { name: 'Show less' }));
     await tick();
-    expect(screen.queryByRole('button', { name: 'Cond7' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cond9' })).toBeNull();
     expect(screen.getByRole('button', { name: '+2 more' })).toBeTruthy();
   });
 
   it('renders all chips inline (no toggle) when count ≤ COLLAPSED_COUNT', async () => {
-    const four = Array.from({ length: 4 }, (_, i) => chip(`Cond${i + 1}`, i));
-    mockListConditionChips.mockResolvedValue(four);
+    const eight = Array.from({ length: 8 }, (_, i) => chip(`Cond${i + 1}`, i));
+    mockListConditionChips.mockResolvedValue(eight);
 
     render(ConditionChips, { onAdd: () => {} });
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Cond4' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Cond8' })).toBeTruthy();
     });
 
-    for (let i = 1; i <= 4; i++) {
+    for (let i = 1; i <= 8; i++) {
       expect(screen.getByRole('button', { name: `Cond${i}` })).toBeTruthy();
     }
-    // No collapse toggle should be present.
+    // No collapse toggle should be present (count == threshold).
     expect(screen.queryByRole('button', { name: /more/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /show less/i })).toBeNull();
   });
