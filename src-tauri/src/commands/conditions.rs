@@ -290,62 +290,40 @@ pub async fn sync_condition_chips_cmd(
     .map_err(crate::commands::join_err)?
 }
 
-/// Reorder condition chips.
+/// Increment the use count of a condition chip (frequency tracking).
 ///
-/// Writes the new `sort_order` locally first (instant UI), then fires a
-/// best-effort background sync push of the FULL list (including tombstones
-/// and the new sort_order values) so the server converges. The push is
-/// best-effort; a failure is retried on the next pull (list).
-///
-/// `ordered_ids` defines the new sequence; chips not in the list keep their
-/// existing sort_order.
+/// Called when a user adds the condition to a note via the chip. Writes
+/// locally first (instant UI + reorder), then fires a best-effort background
+/// sync push so the count propagates. Cross-machine reconciliation to `MAX`
+/// happens in `merge_incoming`, so a count bump here can never clobber a
+/// larger count on another machine. The push is best-effort; a failure is
+/// retried on the next pull (list).
 #[tauri::command]
-#[instrument(skip(state), name = "conditions::reorder")]
-pub async fn reorder_condition_chips(
+#[instrument(skip(state), name = "conditions::increment_use")]
+pub async fn increment_condition_chip_use(
     state: tauri::State<'_, AppState>,
-    ordered_ids: Vec<String>,
+    text: String,
 ) -> AppResult<Vec<ConditionChip>> {
     let now = now_iso();
 
-    // 1. Update local DB immediately (instant UI feedback).
+    // 1. Increment locally (returns the active list, now reordered by use_count).
+    //    `increment_use` upserts-on-miss, so this also self-heals fresh installs
+    //    whose default chips were never seeded.
     let db = Arc::clone(&state.db);
     let local_list = tokio::task::spawn_blocking(move || {
         let conn = db.conn()?;
-        medical_db::condition_chips::ConditionChipsRepo::reorder(&conn, &ordered_ids, &now)
+        medical_db::condition_chips::ConditionChipsRepo::increment_use(&conn, &text, &now)
             .map_err(AppError::from)
     })
     .await
     .map_err(crate::commands::join_err)??;
 
-    // 2. Best-effort background sync — push ALL chips (including tombstones)
-    //    so the server sees the new sort_order values. The owned
-    //    `PairedConnection` is moved into the task and `ConditionsRemote`
-    //    borrows it there.
+    // 2. Best-effort background sync push (non-blocking). The increment only
+    //    touches an active chip, so pushing the active list is sufficient.
     if let Some((conn, bearer)) = paired_conditions_target(&state) {
         let http_client = state.http_client.clone();
-        let db2 = Arc::clone(&state.db);
+        let chips_to_push = local_list.clone();
         tokio::spawn(async move {
-            // Load the full local list (incl. tombstones) on the blocking pool.
-            let all_chips = match tokio::task::spawn_blocking(move || {
-                let conn = db2.conn()?;
-                medical_db::condition_chips::ConditionChipsRepo::list_all(&conn)
-                    .map_err(AppError::from)
-            })
-            .await
-            {
-                Ok(Ok(chips)) => chips,
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "failed to load chips for sync push (reorder)");
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "task join error loading chips for sync push (reorder)"
-                    );
-                    return;
-                }
-            };
             let remote = match crate::conditions_remote::ConditionsRemote::from(
                 &conn,
                 Some(bearer),
@@ -353,15 +331,15 @@ pub async fn reorder_condition_chips(
             ) {
                 Some(r) => r,
                 None => {
-                    tracing::warn!("condition chip sync push (reorder) target unavailable");
+                    tracing::warn!("condition chip sync push (increment_use) target unavailable");
                     return;
                 }
             };
-            match remote.sync(all_chips).await {
-                Ok(_) => tracing::debug!("condition chip sync push (reorder) succeeded"),
+            match remote.sync(chips_to_push).await {
+                Ok(_) => tracing::debug!("condition chip sync push (increment_use) succeeded"),
                 Err(e) => tracing::warn!(
                     error = %e,
-                    "condition chip sync push (reorder) failed (will retry on next pull)"
+                    "condition chip sync push (increment_use) failed (will retry on next pull)"
                 ),
             }
         });

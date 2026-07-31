@@ -6,7 +6,7 @@
     addConditionChip,
     listConditionChips,
     removeConditionChip,
-    reorderConditionChips,
+    incrementConditionChipUse,
   } from '../api/conditions';
   import type { ConditionChip } from '../api/conditions';
   import { settings } from '../stores/settings.svelte';
@@ -41,10 +41,10 @@
   );
 
   // Collapsible tray: show only the first COLLAPSED_COUNT chips until the
-  // user expands. Presets the user cares about float to the top via the
-  // existing drag-reorder, so the collapsed view surfaces the most relevant
-  // chips. Chips hidden behind the fold are still represented by their line
-  // in the textarea below, so no selected state is silently lost.
+  // user expands. Chips are ordered by use_count descending (most-used first)
+  // by the backend, so the collapsed view surfaces the most relevant chips.
+  // Chips hidden behind the fold are still represented by their line in the
+  // textarea below, so no selected state is silently lost.
   const COLLAPSED_COUNT = 8;
   let expanded = $state(false);
 
@@ -76,6 +76,7 @@
     updated_at: '',
     deleted_at: null,
     sort_order: i,
+    use_count: 0,
   }));
 
   let chips = $state<ConditionChip[]>([]);
@@ -83,18 +84,11 @@
   let adding = $state(false);
   let newCondition = $state('');
 
-  // Hint text "Drag to reorder" is shown until the user's first successful
-  // drag, then permanently dismissed via localStorage.
-  let showDragHint = $state(
-    typeof localStorage !== 'undefined' && !localStorage.getItem('hasDraggedChips')
-  );
-
   // Display defaults until the backend list loads (or if it's empty).
   let displayChips = $derived(loaded && chips.length > 0 ? chips : DEFAULT_CHIPS);
 
   // Chips actually rendered given the collapsed/expanded state. When
-  // collapsed, only the first COLLAPSED_COUNT show; the rest reveal on
-  // expand. Drag-reorder keeps true indices via data-index on the wrapper.
+  // collapsed, only the first COLLAPSED_COUNT show; the rest reveal on expand.
   let visibleChips = $derived(
     expanded || displayChips.length <= COLLAPSED_COUNT
       ? displayChips
@@ -111,9 +105,10 @@
   // invoked in onDestroy). Null until the listener attaches or if it failed.
   let unlistenSSE: (() => void) | null = null;
 
-  // Tracks whether the user made a local mutation (add/remove/reorder) within
-  // the last 5s. If the 30s poll detects a remote change while dirtySince is
-  // set, we surface a toast instead of silently clobbering their edit.
+  // Tracks whether the user made a local mutation (add/remove/increment)
+  // within the last 5s. If the 30s poll detects a remote change while
+  // dirtySince is set, we surface a toast instead of silently clobbering
+  // their edit.
   let dirtySince = $state<number | null>(null);
   let dirtyTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -161,9 +156,11 @@
     try {
       const result = await listConditionChips();
       // Only update if the list actually changed (avoid unnecessary re-renders).
+      // We compare id + use_count (use_count drives ordering, so a count
+      // change means the display order may have shifted).
       if (
         result.length !== chips.length ||
-        result.some((c, i) => c.id !== chips[i]?.id || c.sort_order !== chips[i]?.sort_order)
+        result.some((c, i) => c.id !== chips[i]?.id || c.use_count !== chips[i]?.use_count)
       ) {
         // If the user made a local change within the last 5s, the poll is
         // about to clobber it — surface a toast instead of silently
@@ -211,102 +208,25 @@
     }
   }
 
-  // Drag-and-drop using pointer events (not HTML5 DnD API, which is
-  // unreliable in Tauri's webview — dragover/drop events don't fire
-  // reliably). Pointer events work identically in all webviews.
+  // Record that a chip was used (added to a note): bump its use_count on the
+  // backend. The returned list is already reordered by frequency, so assigning
+  // it to `chips` updates the tray order live. Fire-and-forget on the click
+  // path so the add UX stays snappy; markDirty so the poll/SSE won't clobber
+  // the fresh order. Sync reconciles counts across machines via MAX merge.
   //
-  // Flow: pointerdown marks a potential drag start. pointermove beyond a
-  // small threshold activates the drag (capture pointer, start hit-testing).
-  // pointerup performs the reorder if a drag was active, otherwise lets the
-  // click pass through to the button.
-  let pointerDownIndex = $state<number | null>(null);
-  let dragIndex = $state<number | null>(null);
-  let dragOverIndex = $state<number | null>(null);
-  let isDragging = $state(false);
-  let startX = 0;
-  let startY = 0;
-
-  let wasDragging = false; // set after a drag to suppress the subsequent click
-
-  const DRAG_THRESHOLD = 5; // px — movement beyond this activates drag
-
-  function handlePointerDown(e: PointerEvent, index: number) {
-    if (e.button !== 0 || !loaded || chips.length === 0) return;
-    pointerDownIndex = index;
-    startX = e.clientX;
-    startY = e.clientY;
-  }
-
-  function handlePointerMove(e: PointerEvent) {
-    if (pointerDownIndex === null || isDragging) {
-      if (isDragging) {
-        // Hit-test: find which chip wrapper is under the pointer.
-        const el = document
-          .elementFromPoint(e.clientX, e.clientY)
-          ?.closest('.condition-chip-wrapper') as HTMLElement | null;
-        if (el) {
-          const idx = Number(el.dataset.index);
-          if (!Number.isNaN(idx)) {
-            dragOverIndex = idx;
-          }
-        }
-      }
-      return;
+  // INVARIANT: `use_count` is a ranking signal, NOT an exact audit. A rapid
+  // double-click can lose one increment to read-modify-write interleaving
+  // (two round-trips race on the same row). This is acceptable for ordering
+  // purposes — never couple the correctness of `onAdd` to this count; `onAdd`
+  // runs first, synchronously, so the condition always lands in the textarea
+  // even if this call fails or undercounts.
+  async function recordUse(conditionText: string) {
+    try {
+      markDirty();
+      chips = await incrementConditionChipUse(conditionText);
+    } catch (e) {
+      console.error('Failed to increment condition chip use:', e);
     }
-    // Check if movement exceeds threshold to activate drag.
-    const dx = Math.abs(e.clientX - startX);
-    const dy = Math.abs(e.clientY - startY);
-    if (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD) {
-      isDragging = true;
-      dragIndex = pointerDownIndex;
-      // Capture pointer so we get pointermove/up even outside this element.
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    }
-  }
-
-  async function handlePointerUp(e: PointerEvent) {
-    const didDrag = isDragging;
-    const dropIndex = dragOverIndex;
-    const srcIndex = dragIndex;
-
-    if (didDrag) {
-      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-    }
-
-    // Reset pointer state.
-    pointerDownIndex = null;
-    isDragging = false;
-    dragIndex = null;
-    dragOverIndex = null;
-
-    if (didDrag) {
-      // Set wasDragging so the subsequent click event on the button is
-      // suppressed, then reset it on the next tick so future clicks work.
-      wasDragging = true;
-      setTimeout(() => { wasDragging = false; }, 0);
-
-      if (dropIndex !== null && dropIndex !== srcIndex) {
-        const reordered = [...chips];
-        const [moved] = reordered.splice(srcIndex!, 1);
-        reordered.splice(dropIndex, 0, moved);
-        chips = reordered; // optimistic UI update
-
-        const orderedIds = reordered.map((c) => c.id);
-        markDirty();
-        try {
-          chips = await reorderConditionChips(orderedIds);
-        } catch (err) {
-          console.error('Failed to reorder condition chips:', err);
-        }
-
-        // First successful drag — dismiss the hint permanently.
-        if (showDragHint) {
-          showDragHint = false;
-          try { localStorage.setItem('hasDraggedChips', '1'); } catch { /* localStorage may be unavailable */ }
-        }
-      }
-    }
-    // If not dragging, the click passes through to the button normally.
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -321,29 +241,15 @@
 </script>
 
 <div class="condition-chips" role="group" aria-label="Common conditions quick-add">
-  {#each visibleChips as chip, i (chip.text)}
+  {#each visibleChips as chip (chip.text)}
     {@const active = activeSet.has(chip.text.toLowerCase())}
-    <div
-      class="condition-chip-wrapper"
-      class:selected={active}
-      role="listitem"
-      data-index={i}
-      class:drag-over={dragOverIndex === i && dragIndex !== null}
-      class:dragging={dragIndex === i}
-      class:drag-active={isDragging}
-      onpointerdown={(e) => handlePointerDown(e, i)}
-      onpointermove={handlePointerMove}
-      onpointerup={handlePointerUp}
-      style:opacity={dragIndex === i ? '0.4' : '1'}
-    >
-      <span class="chip-grip" aria-hidden="true">⠿</span>
+    <div class="condition-chip-wrapper" class:selected={active} role="listitem">
       <button
         class="condition-chip"
         type="button"
-        onclick={(e) => {
-          if (wasDragging) { e.preventDefault(); return; }
+        onclick={() => {
           if (active) onRemove(chip.text);
-          else onAdd(chip.text);
+          else { onAdd(chip.text); recordUse(chip.text); }
         }}
         title={active ? `Remove "${chip.text}" from the list` : `Add "${chip.text}" to the list`}
         aria-pressed={active}
@@ -403,9 +309,6 @@
       +
     </button>
   {/if}
-  {#if showDragHint && loaded}
-    <p class="drag-hint">⠿ Drag to reorder · Click text to add</p>
-  {/if}
 </div>
 
 <style>
@@ -436,24 +339,6 @@
     -webkit-user-select: none;
   }
 
-  /* Grip handle — visual affordance for drag. Muted by default, brightens
-     on hover so the user sees the chip is interactive beyond click. */
-  .chip-grip {
-    flex: 0 0 auto;
-    padding: 4px 2px 4px 6px;
-    font-size: 10px;
-    line-height: 1.4;
-    color: var(--success, #22c55e);
-    opacity: 0.35;
-    cursor: grab;
-    user-select: none;
-    transition: opacity 0.15s ease;
-  }
-
-  .condition-chip-wrapper:hover .chip-grip {
-    opacity: 0.7;
-  }
-
   .condition-chip-wrapper:hover {
     background-color: color-mix(in srgb, var(--success, #22c55e) 18%, transparent);
     border-color: color-mix(in srgb, var(--success, #22c55e) 45%, transparent);
@@ -468,7 +353,6 @@
   }
 
   .condition-chip-wrapper.selected .condition-chip,
-  .condition-chip-wrapper.selected .chip-grip,
   .condition-chip-wrapper.selected .chip-remove,
   .condition-chip-wrapper.selected .chip-check {
     /* --text-inverse is #fff on light, #1a1b1e on dark — correct legible
@@ -485,19 +369,6 @@
   .chip-check {
     margin-right: 3px;
     font-weight: 700;
-  }
-
-  .condition-chip-wrapper.drag-over {
-    border-left: 2px solid var(--accent, #3b82f6);
-  }
-
-  /* Only show grab cursor when loaded (draggable is active) */
-  .condition-chip-wrapper.drag-active {
-    cursor: grabbing;
-  }
-
-  .condition-chip-wrapper:not(.dragging):hover {
-    cursor: grab;
   }
 
   .condition-chip {
@@ -588,16 +459,5 @@
 
   .chip-input:focus {
     outline: none;
-  }
-
-  /* Hint text shown until the user's first successful drag. Tiny and muted
-     so it's unobtrusive but discoverable. Auto-dismisses via localStorage. */
-  .drag-hint {
-    width: 100%;
-    margin: 2px 0 0 0;
-    font-size: 9px;
-    color: var(--text-muted, #666);
-    opacity: 0.7;
-    user-select: none;
   }
 </style>

@@ -19,6 +19,12 @@ const CONDITION_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
 ///   adding "Hypertension" produce the same id.
 /// - `updated_at`: ISO 8601 UTC string — the last-write-wins clock.
 /// - `deleted_at`: tombstone timestamp. `None` means active.
+/// - `use_count`: how often this chip has been added to a note. Drives
+///   frequency-based ordering (most-used first). Synced via `MAX(local,
+///   remote)` merge, so it reconciles correctly across machines without
+///   entering the `updated_at` LWW race. `#[serde(default)]` keeps the wire
+///   format backward-compatible with older clients/servers that predate the
+///   field (they see 0 / we see 0 from them).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConditionChip {
     pub id: String,
@@ -27,6 +33,8 @@ pub struct ConditionChip {
     pub deleted_at: Option<String>,
     #[serde(default)]
     pub sort_order: i32,
+    #[serde(default)]
+    pub use_count: i32,
 }
 
 /// Normalize condition text for deterministic ID generation.

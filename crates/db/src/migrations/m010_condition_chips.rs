@@ -58,6 +58,7 @@ fn seed_from_custom_conditions(conn: &Connection) -> DbResult<()> {
             updated_at: now.clone(),
             deleted_at: None,
             sort_order: 0,
+            use_count: 0,
         };
         let _ = conn.execute(
             "INSERT OR IGNORE INTO condition_chips (id, text, updated_at, deleted_at)
