@@ -121,38 +121,40 @@ fn tombstone_propagates_across_roundtrip() {
 }
 
 #[test]
-fn reorder_propagates_across_roundtrip() {
-    // Both start with Alpha, Beta. Sync the initial state so B has both.
-    // A then reorders to [Beta, Alpha]. After a round-trip both sides must
-    // display [Beta, Alpha].
+fn use_count_reconciles_via_max_across_roundtrip() {
+    // Both machines start with "Hypertension" (use_count 0). A uses it 100
+    // times, B uses it 3 times. After a round-trip both must hold the MAX
+    // (100) — the counter never clobbers down under LWW. This is the core
+    // sync-correctness guarantee for the frequency feature.
     let db_a = Database::open_in_memory().unwrap();
     let db_b = Database::open_in_memory().unwrap();
     let conn_a = db_a.conn().unwrap();
     let conn_b = db_b.conn().unwrap();
 
-    ConditionChipsRepo::add(&conn_a, "Alpha", &now(0)).unwrap();
-    ConditionChipsRepo::add(&conn_a, "Beta", &now(0)).unwrap();
-    ConditionChipsRepo::add(&conn_b, "Alpha", &now(0)).unwrap();
-    ConditionChipsRepo::add(&conn_b, "Beta", &now(0)).unwrap();
-
-    // Sync initial state so both converge on the same ordering.
+    ConditionChipsRepo::add(&conn_a, "Hypertension", &now(0)).unwrap();
+    ConditionChipsRepo::add(&conn_b, "Hypertension", &now(0)).unwrap();
+    // Converge on the shared chip first.
     let _ = sync_roundtrip(&conn_a, &conn_b);
 
-    // A reorders to [Beta, Alpha] at t=10.
-    let beta_id = deterministic_id("Beta");
-    let alpha_id = deterministic_id("Alpha");
-    ConditionChipsRepo::reorder(&conn_a, &[beta_id, alpha_id], &now(10)).unwrap();
+    let htn_id = deterministic_id("Hypertension");
+    // A increments 100× (timestamps t=10..=109), B increments 3× (t=200..=202).
+    for i in 10..110 {
+        ConditionChipsRepo::increment_use(&conn_a, &htn_id, &now(i)).unwrap();
+    }
+    for i in 200..203 {
+        ConditionChipsRepo::increment_use(&conn_b, &htn_id, &now(i)).unwrap();
+    }
 
     let (a_after, b_after) = sync_roundtrip(&conn_a, &conn_b);
 
+    assert_eq!(a_after.len(), 1);
+    assert_eq!(b_after.len(), 1);
     assert_eq!(
-        texts(&a_after),
-        vec!["Beta".to_string(), "Alpha".to_string()],
-        "A should display [Beta, Alpha]"
+        a_after[0].use_count, 100,
+        "A should converge to the MAX count (100), not B's smaller count"
     );
     assert_eq!(
-        texts(&b_after),
-        vec!["Beta".to_string(), "Alpha".to_string()],
-        "B should display [Beta, Alpha] after reorder propagates"
+        b_after[0].use_count, 100,
+        "B should converge to the MAX count (100) even though its own LWW timestamp was newer"
     );
 }

@@ -390,7 +390,7 @@ pub fn run() {
             commands::conditions::add_condition_chip,
             commands::conditions::remove_condition_chip,
             commands::conditions::sync_condition_chips_cmd,
-            commands::conditions::reorder_condition_chips,
+            commands::conditions::increment_condition_chip_use,
             commands::conditions::subscribe_condition_chips,
             commands::content_sync::sync_content_now,
             commands::content_sync::subscribe_content_sync,

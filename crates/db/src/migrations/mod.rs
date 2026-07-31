@@ -20,6 +20,7 @@ pub mod m013_recording_updated_at;
 pub mod m014_field_revisions;
 pub mod m015_sync_state;
 pub mod m016_user_dictionary_sync;
+pub mod m017_condition_chip_use_count;
 
 use rusqlite::Connection;
 
@@ -123,6 +124,11 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 16,
             name: "user_dictionary_sync",
             up: m016_user_dictionary_sync::up,
+        },
+        Migration {
+            version: 17,
+            name: "condition_chip_use_count",
+            up: m017_condition_chip_use_count::up,
         },
     ]
 }

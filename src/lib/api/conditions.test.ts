@@ -7,7 +7,7 @@ import {
   listConditionChips,
   addConditionChip,
   removeConditionChip,
-  reorderConditionChips,
+  incrementConditionChipUse,
   syncConditionChips,
 } from './conditions';
 
@@ -34,10 +34,9 @@ describe('conditions api', () => {
     expect(invokeMock).toHaveBeenCalledWith('remove_condition_chip', { text: 'Diabetes' });
   });
 
-  it('reorderConditionChips passes orderedIds', async () => {
-    const ids = ['chip-1', 'chip-2', 'chip-3'];
-    await reorderConditionChips(ids);
-    expect(invokeMock).toHaveBeenCalledWith('reorder_condition_chips', { orderedIds: ids });
+  it('incrementConditionChipUse passes text', async () => {
+    await incrementConditionChipUse('Asthma');
+    expect(invokeMock).toHaveBeenCalledWith('increment_condition_chip_use', { text: 'Asthma' });
   });
 
   it('syncConditionChips invokes with no args', async () => {
