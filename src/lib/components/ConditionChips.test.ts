@@ -381,6 +381,38 @@ describe('ConditionChips — frequency ordering & use-count tracking', () => {
     await tick();
     expect(mockIncrementConditionChipUse).not.toHaveBeenCalled();
   });
+
+  it('fresh-install fallback: empty backend shows DEFAULT_CHIPS and clicks still work', async () => {
+    // Simulates a brand-new install where condition_chips is empty (the m010
+    // seed only runs on upgrade). The component falls back to DEFAULT_CHIPS
+    // (id ''). Clicking one must still call onAdd synchronously, and the
+    // count bump fires (the backend upserts-on-miss). A recordUse rejection
+    // must NOT block the add — onAdd runs first.
+    mockListConditionChips.mockResolvedValue([]);
+    // Even if the increment fails (e.g. backend hiccup), the add must succeed.
+    mockIncrementConditionChipUse.mockRejectedValue(new Error('IPC failed'));
+    const onAdd = vi.fn();
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    render(ConditionChips, { props: { onAdd } });
+    // Fallback defaults render despite the empty backend list.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Hypertension' })).toBeTruthy();
+    });
+
+    // Click a default chip → onAdd fires (the invariant from Bug 2's comment).
+    await fireEvent.click(screen.getByRole('button', { name: 'Hypertension' }));
+    expect(onAdd).toHaveBeenCalledWith('Hypertension');
+    // recordUse was attempted (best-effort) and its error was logged, not thrown.
+    await waitFor(() => {
+      expect(mockIncrementConditionChipUse).toHaveBeenCalledWith('Hypertension');
+    });
+    expect(consoleSpy).toHaveBeenCalledWith(
+      'Failed to increment condition chip use:',
+      expect.any(Error),
+    );
+    consoleSpy.mockRestore();
+  });
 });
 
 describe('ConditionChips — realtime SSE sync', () => {

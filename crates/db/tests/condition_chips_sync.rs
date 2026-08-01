@@ -1,7 +1,7 @@
 //! Integration test: condition chip sync round-trip between two independent
 //! databases (simulating two machines).
 
-use medical_core::types::condition_chip::{ConditionChip, deterministic_id};
+use medical_core::types::condition_chip::ConditionChip;
 use medical_db::Database;
 use medical_db::condition_chips::ConditionChipsRepo;
 
@@ -136,13 +136,15 @@ fn use_count_reconciles_via_max_across_roundtrip() {
     // Converge on the shared chip first.
     let _ = sync_roundtrip(&conn_a, &conn_b);
 
-    let htn_id = deterministic_id("Hypertension");
     // A increments 100× (timestamps t=10..=109), B increments 3× (t=200..=202).
+    // increment_use takes the chip TEXT (it derives the id internally and
+    // upserts-on-miss); passing a precomputed id here would create a stray
+    // chip named with the id string.
     for i in 10..110 {
-        ConditionChipsRepo::increment_use(&conn_a, &htn_id, &now(i)).unwrap();
+        ConditionChipsRepo::increment_use(&conn_a, "Hypertension", &now(i)).unwrap();
     }
     for i in 200..203 {
-        ConditionChipsRepo::increment_use(&conn_b, &htn_id, &now(i)).unwrap();
+        ConditionChipsRepo::increment_use(&conn_b, "Hypertension", &now(i)).unwrap();
     }
 
     let (a_after, b_after) = sync_roundtrip(&conn_a, &conn_b);

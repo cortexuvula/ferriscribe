@@ -676,6 +676,29 @@ mod tests {
     }
 
     #[test]
+    fn merge_tie_tombstone_wins_and_preserves_max_count() {
+        // Equal timestamps → tombstone wins (ghost-reappearance guard). But the
+        // use_count must still reconcile to MAX across both sides, so a later
+        // re-add (resurrection) doesn't lose the accumulated count. Local
+        // active count 100, remote tombstone count 3, same t=500 → tombstone
+        // wins, count = MAX(100, 3) = 100.
+        let conn = fresh();
+        ConditionChipsRepo::upsert(&conn, &chip_with_use("Hypertension", 500, 100)).unwrap();
+
+        let remote = vec![chip("Hypertension", 500, true)];
+        let merged = ConditionChipsRepo::merge_incoming(&conn, &remote).unwrap();
+
+        assert!(merged.is_empty(), "tie → tombstone wins, active list empty");
+        let all = ConditionChipsRepo::list_all(&conn).unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].deleted_at.is_some(), "row must be a tombstone");
+        assert_eq!(
+            all[0].use_count, 100,
+            "tombstone must carry the MAX count for a future resurrection"
+        );
+    }
+
+    #[test]
     fn add_appends_to_end_of_sorted_list() {
         let db = Database::open_in_memory().unwrap();
         let conn = db.conn().unwrap();
