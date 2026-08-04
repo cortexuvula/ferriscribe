@@ -15,6 +15,10 @@ cargo test --workspace --lib
 # Sharing integration tests (needs FERRISCRIBE_MDNS_TEST=1 only on Linux)
 cargo test -p medical-sharing
 
+# DB integration tests (condition_chips_sync, content_sync, encryption,
+# recording_sync_merge — NOT covered by --lib above)
+cargo test -p medical-db
+
 # Frontend tests
 npx vitest run
 
