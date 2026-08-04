@@ -605,13 +605,19 @@ mod tests {
         // erroring. This is what makes frequency tracking work out-of-box for
         // new users whose default chips were never seeded.
         let conn = fresh();
-        assert!(ConditionChipsRepo::list_active(&conn).unwrap().is_empty(), "fixture: empty");
+        assert!(
+            ConditionChipsRepo::list_active(&conn).unwrap().is_empty(),
+            "fixture: empty"
+        );
 
         let after =
             ConditionChipsRepo::increment_use(&conn, "Hypertension", &now(100)).expect("increment");
         assert_eq!(after.len(), 1, "chip should be created");
         assert_eq!(after[0].text, "Hypertension");
-        assert_eq!(after[0].use_count, 1, "newly created chip starts at count 1");
+        assert_eq!(
+            after[0].use_count, 1,
+            "newly created chip starts at count 1"
+        );
         assert!(after[0].deleted_at.is_none(), "created chip must be active");
     }
 
@@ -627,8 +633,14 @@ mod tests {
         let after =
             ConditionChipsRepo::increment_use(&conn, "Hypertension", &now(10)).expect("increment");
         assert_eq!(after.len(), 1, "chip should be resurrected");
-        assert!(after[0].deleted_at.is_none(), "resurrected chip must be active");
-        assert_eq!(after[0].use_count, 1, "tombstone (count 0) resurrects at count 1");
+        assert!(
+            after[0].deleted_at.is_none(),
+            "resurrected chip must be active"
+        );
+        assert_eq!(
+            after[0].use_count, 1,
+            "tombstone (count 0) resurrects at count 1"
+        );
     }
 
     #[test]
@@ -671,7 +683,10 @@ mod tests {
         let merged = ConditionChipsRepo::merge_incoming(&conn, &remote).unwrap();
 
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].use_count, 80, "local wins LWW but count still MAXes");
+        assert_eq!(
+            merged[0].use_count, 80,
+            "local wins LWW but count still MAXes"
+        );
         assert_eq!(merged[0].updated_at, now(300), "local updated_at preserved");
     }
 
