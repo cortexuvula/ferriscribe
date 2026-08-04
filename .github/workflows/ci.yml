@@ -100,6 +100,13 @@ jobs:
           FERRISCRIBE_MDNS_TEST: ${{ runner.os == 'Linux' && '1' || '0' }}
         run: cargo test -p medical-sharing
 
+      - name: DB integration tests
+        # medical-db's tests/ suite (condition_chips_sync, content_sync,
+        # encryption, recording_sync_merge) is not covered by --lib. Run it
+        # explicitly so a stale integration test can't slip onto master the
+        # way condition_chips_sync did after the increment_use signature change.
+        run: cargo test -p medical-db
+
   # Security advisory scan — catches RustSec advisories on the dependency
   # tree. For a HIPAA-adjacent app this is important: known CVEs in crypto,
   # network, or archive crates must not ship silently.
