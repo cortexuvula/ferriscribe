@@ -25,11 +25,16 @@ npx vitest run
 # Type-check (runs svelte-check, NOT SvelteKit)
 npm run check
 
+# Rust formatting + lints — both gates enforced by CI on push/PR.
+# Run before pushing; fmt drift on master only gets caught by the next PR.
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+
 # Dev
 npm run tauri dev
 ```
 
-There is no top-level lint command wired up. Run crate-specific checks with `cargo clippy --workspace` if needed.
+CI (`ci.yml`, lint job) enforces `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` on every push to master and every PR. Run both locally before pushing — there is no separate "lint" npm script; invoke the cargo commands directly as shown. Frontend linting uses `npm run lint` (eslint), also gated in CI.
 
 `npm run check` runs `svelte-check` — an earlier version invoked `svelte-kit sync`; that prefix was removed because **this is not a SvelteKit project**. The README's mention of "SvelteKit" is stale; treat Svelte 5 + Vite as the truth.
 
