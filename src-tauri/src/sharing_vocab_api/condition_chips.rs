@@ -84,6 +84,15 @@ pub(super) async fn condition_chips_sync_handler(
     // which is the normal idle case).
     let _ = state.chips_changed_tx.send(());
 
+    // Also notify THIS server's own webview so its chip tray refreshes when a
+    // remote client pushed a change (add/remove/increment). The SSE broadcast
+    // above only reaches *other* client machines; without this emit the server
+    // UI would stay stale until restart — the bug behind chip reorder/use_count
+    // not reflecting on the Mac when Windows pushed changes. The frontend's
+    // ConditionChips.svelte already listens for `condition-chips-changed`.
+    // Mirrors content_sync's `recording-updated` self-emit pattern.
+    let _ = state.app_handle.emit("condition-chips-changed", ());
+
     info!(
         incoming_count,
         result_count = merged.len(),
@@ -117,3 +126,19 @@ pub(super) async fn condition_chips_events_handler(
     };
     Ok(Sse::new(stream))
 }
+
+// Re-export tauri::Emitter so the `state.app_handle.emit(...)` call in the
+// sync handler compiles without a top-level `use` cluttering the module's
+// public imports. Mirrors content_sync.rs. Kept private to this module.
+use tauri::Emitter as _;
+
+// Note on test coverage: the self-emit in condition_chips_sync_handler is not
+// unit-tested. ApiState.app_handle is `tauri::AppHandle` (the default `Wry`
+// runtime alias), and tauri::test::mock_app() yields `AppHandle<MockRuntime>` —
+// incompatible types, so the handler can't be driven without a real running
+// app. This mirrors the codebase's established precedent (content_sync's
+// identical `recording-updated` self-emit is also untested; see
+// transcription/inner.rs:766 for the documented "can't build AppHandle in
+// unit tests" pattern). The regression is guarded manually: with Mac (server)
+// + Windows (client), a chip add/increment on Windows should refresh the
+// Mac's chip tray without restart.
