@@ -18,7 +18,7 @@ use axum::Json;
 use axum::extract::Path;
 use axum::extract::State as AxumState;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use serde::Deserialize;
 use tokio::sync::broadcast;
@@ -189,7 +189,9 @@ pub(super) async fn dict_events_handler(
             }
         }
     };
-    Ok(Sse::new(stream))
+    // Keep-alive comments (`:\n\n` every 15s by default) prevent NAT / relay
+    // idle timeouts from silently dropping the long-lived SSE stream.
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// ISO 8601 UTC timestamp with millisecond precision, matching the format

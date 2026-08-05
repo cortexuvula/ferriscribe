@@ -12,7 +12,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State as AxumState;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
@@ -124,7 +124,10 @@ pub(super) async fn condition_chips_events_handler(
             }
         }
     };
-    Ok(Sse::new(stream))
+    // Keep-alive comments (`:\n\n` every 15s by default) prevent NAT / relay
+    // idle timeouts from silently dropping the long-lived SSE stream — the
+    // real risk the client's old 300s timeout was fumbling toward.
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 // Re-export tauri::Emitter so the `state.app_handle.emit(...)` call in the

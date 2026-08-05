@@ -15,6 +15,17 @@ use medical_core::types::endpoint::http_url;
 
 use crate::commands::sharing::PairedConnection;
 
+/// Build a dedicated `reqwest::Client` for a long-lived SSE stream (no total
+/// timeout; liveness via server keep-alive + caller reconnect loop). See
+/// [`ConditionsRemote::subscribe_events`] for the rationale.
+fn sse_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// HTTP client for the office server's `/v1/condition-chips` API.
 ///
 /// Created via [`ConditionsRemote::from`] when a paired connection is present.
@@ -106,10 +117,15 @@ impl<'a> ConditionsRemote<'a> {
     /// Returns a stream that yields `()` for each `data: changed` event pushed
     /// by the server's `/v1/condition-chips/events` endpoint. The stream stays
     /// open until the connection drops or the server closes it; callers should
-    /// wrap it in a reconnect loop with backoff. The request uses a long
-    /// timeout (300s) because SSE is a long-lived connection — reqwest will
-    /// keep the response body streaming, and each server push resets the idle
-    /// window.
+    /// wrap it in a reconnect loop with backoff.
+    ///
+    /// **No total timeout is set on the SSE request.** reqwest's `.timeout()`
+    /// is a hard total deadline from request start (it does NOT reset on
+    /// stream chunks). Capping at 300s — as before — forced a reconnect every
+    /// 5 min. Liveness is maintained by the server's keep-alive comments +
+    /// the caller's reconnect loop. A dedicated client is built here because
+    /// the shared client carries a 30s total timeout that would cap the
+    /// stream.
     ///
     /// The `data: connected` initial event is filtered out (only `changed`
     /// events surface to the caller).
@@ -120,10 +136,8 @@ impl<'a> ConditionsRemote<'a> {
                 AppError::Other("no vocab base URL for conditions remote".into())
             })?
         );
-        let resp = self
-            .client
+        let resp = sse_client()
             .get(&url)
-            .timeout(Duration::from_secs(300))
             .bearer_auth(&self.bearer)
             .send()
             .await

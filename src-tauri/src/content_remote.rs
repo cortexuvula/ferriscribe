@@ -62,6 +62,22 @@ pub struct PushResponse {
     pub server_time: String,
 }
 
+/// Build a dedicated `reqwest::Client` for a long-lived SSE stream.
+///
+/// Unlike the shared `state.http_client` (which carries a 30s total timeout
+/// appropriate for request/response calls), this client has **no total
+/// timeout** — only a connect timeout and TCP keepalive. SSE streams must not
+/// be capped by a hard deadline; liveness is maintained by the server's
+/// keep-alive comments and the caller's reconnect loop. See
+/// [`ContentRemote::subscribe_events_async`] for the rationale.
+fn sse_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .tcp_keepalive(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 /// HTTP client for the office server's `/v1/content/*` API.
 ///
 /// Created via [`ContentRemote::from`] only when the paired connection
@@ -291,9 +307,20 @@ impl<'a> ContentRemote<'a> {
     /// `GET /v1/content/events` — open the SSE change-notification stream.
     ///
     /// Returns the raw `reqwest::Response`; the caller reads the body as a
-    /// byte stream and parses `data: changed` lines. Uses a long timeout
-    /// (300s) because SSE is long-lived — each server push resets the idle
-    /// window, and the caller wraps this in a reconnect loop with backoff.
+    /// byte stream and parses `data: changed` lines.
+    ///
+    /// **No total timeout is set on the SSE request.** SSE is a long-lived
+    /// stream; reqwest's `.timeout()` is a *hard total deadline from request
+    /// start* (it does NOT reset on stream chunks, despite a common
+    /// misconception). Capping it at 300s — as this code did before — forced
+    /// a reconnect storm every 5 minutes (311 warnings/day in user logs).
+    /// Liveness is instead maintained by the server's SSE `keep_alive`
+    /// comments (every 15s, preventing NAT/relay idle closes) and the caller's
+    /// reconnect loop with backoff (which handles genuine disconnects).
+    ///
+    /// A dedicated client is built here (rather than reusing `self.client`)
+    /// because the shared client carries a 30s total timeout that would cap
+    /// the stream even without an explicit per-request timeout.
     ///
     /// Unlike [`ConditionsRemote::subscribe_events`](crate::conditions_remote::ConditionsRemote::subscribe_events),
     /// this returns the raw response rather than a parsed stream so the
@@ -304,10 +331,8 @@ impl<'a> ContentRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("content remote has no tailscale base URL".into()))?;
         let url = format!("{base}/v1/content/events");
-        let resp = self
-            .client
+        let resp = sse_client()
             .get(&url)
-            .timeout(Duration::from_secs(300))
             .bearer_auth(&self.bearer)
             .send()
             .await
