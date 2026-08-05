@@ -21,6 +21,7 @@
   import { rsvp } from '../stores/rsvp.svelte';
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
+  import { contextFromMetadata } from '../utils/recordingContext';
   import { generateSoap } from '../api/generation';
   import { generation } from '../stores/generation.svelte';
   import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
@@ -53,6 +54,25 @@
       ocr.clearOcr();
     }
     lastOcrRecordingId = id;
+  });
+
+  // Repopulate context fields from recording history when the user selects a
+  // different recording in the list — parity with GenerateTab. Without this,
+  // the Record tab's context fields were ephemeral (never loaded from saved
+  // metadata), so switching patients left the previous patient's meds visible
+  // and the upload-wipe bug had no self-healing path. The id-guard prevents
+  // the store refresh that follows generation from clobbering user edits.
+  let lastContextRecordingId: string | null = null;
+  $effect(() => {
+    const rec = recordings.selectedRecording;
+    const currentId = rec?.id ?? null;
+    if (currentId === lastContextRecordingId) return;
+    lastContextRecordingId = currentId;
+    const fields = contextFromMetadata(rec?.metadata);
+    contextText = fields.contextText;
+    medicationsText = fields.medicationsText;
+    allergiesText = fields.allergiesText;
+    conditionsText = fields.conditionsText;
   });
 
   // Sidebar UI state — synced with the persisted recordSidebar store.
@@ -326,8 +346,12 @@
   async function handleUploadAudio() {
     importError = null;
     try {
-      // Clear context from any previous patient before importing.
-      clearAllContextFields();
+      // Do NOT clear context here — the user typed these meds/conditions FOR
+      // this uploaded encounter. Clearing was a bug (handleUploadAudio ran
+      // before the file picker, wiping fields that maybeLaunchPipeline then
+      // read as empty → SOAP got no patient_context). A fresh recording has
+      // empty metadata, so the selectedRecording effect below leaves the
+      // current fields in place for the current encounter.
       const selected = await open({
         multiple: false,
         filters: [
