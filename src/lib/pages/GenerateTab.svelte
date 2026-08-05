@@ -5,11 +5,11 @@
   import { generation } from '../stores/generation.svelte';
   import { copyWithStatus } from '../utils/clipboard';
   import { buildPatientContext } from '../utils/patient_context';
+  import { contextFromMetadata } from '../utils/recordingContext';
   import GenerateControls from '../components/GenerateControls.svelte';
   import ContextPanel from '../components/ContextPanel.svelte';
   import { rsvp } from '../stores/rsvp.svelte';
   import type { DocKind } from '../stores/rsvp.svelte';
-  import type { PatientContext } from '../types';
   import { formatError } from '../types/errors';
   import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
   import { letterAudiences } from '../stores/letterAudiences.svelte';
@@ -58,25 +58,18 @@
 
   // Load saved context + structured fields from recording metadata only when
   // the recording ID changes. Prevents overwriting user-typed values on the
-  // store-refresh that follows generation.
+  // store-refresh that follows generation. Shares the same metadata→fields
+  // mapping as RecordTab via contextFromMetadata.
   $effect(() => {
     const rec = recordings.selectedRecording;
     const currentId = rec?.id ?? null;
     if (currentId === lastContextRecordingId) return;
     lastContextRecordingId = currentId;
-    const meta = rec?.metadata;
-    if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
-      contextText = typeof meta.context === 'string' ? meta.context : '';
-      const pc = meta.patient_context as PatientContext | undefined;
-      medicationsText = pc?.medications?.join('\n') ?? '';
-      allergiesText = pc?.allergies?.join('\n') ?? '';
-      conditionsText = pc?.conditions?.join('\n') ?? '';
-    } else {
-      contextText = '';
-      medicationsText = '';
-      allergiesText = '';
-      conditionsText = '';
-    }
+    const fields = contextFromMetadata(rec?.metadata);
+    contextText = fields.contextText;
+    medicationsText = fields.medicationsText;
+    allergiesText = fields.allergiesText;
+    conditionsText = fields.conditionsText;
     // Clear OCR state on recording switch — OCR text from a previous patient
     // must never leak into the next patient's generation context.
     ocr.clearOcr();
