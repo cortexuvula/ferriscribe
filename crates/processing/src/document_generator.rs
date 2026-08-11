@@ -130,6 +130,29 @@ pub fn default_synopsis_prompt() -> &'static str {
      Write in clear, professional language suitable for a quick clinical overview."
 }
 
+/// Returns the built-in default system prompt for the standalone Letter Writer
+/// (OCR a document → draft a letter from it).
+///
+/// The template has no placeholders. It instructs the model to rely strictly on
+/// facts present in the source document (anti-fabrication), honour the requested
+/// tone and letter type, follow the writer's instructions, and output plain text.
+pub fn default_letter_from_document_prompt() -> &'static str {
+    "You are a professional medical letter writer. Draft a polished letter based \
+     on the provided source document and the writer's instructions. \
+     Use only facts that appear in the source document — do not invent clinical \
+     details, diagnoses, medications, dates, or patient identifiers that are not \
+     present in the source. \
+     Match the requested tone and letter type, and follow the writer's specific \
+     instructions closely. \
+     Format the letter with a date line, greeting, body paragraphs, and a \
+     professional closing. \
+     Do not use markdown formatting. Write in plain text only. \
+     You may use uppercase headings (e.g., RE:) for structure. \
+     If the source document is missing information needed for a complete letter, \
+     insert a clearly marked placeholder such as [NOT IN SOURCE: ...] rather than \
+     guessing."
+}
+
 // ---------------------------------------------------------------------------
 // Referral letter
 // ---------------------------------------------------------------------------
@@ -377,6 +400,103 @@ pub fn build_synopsis_prompt(
     );
 
     (system, inject_context(&user, context))
+}
+
+// ---------------------------------------------------------------------------
+// Letter from document (standalone Letter Writer)
+// ---------------------------------------------------------------------------
+
+/// Build `(system_prompt, user_prompt)` for the standalone Letter Writer, which
+/// drafts a letter from an OCR'd (or pasted) source document plus a few optional
+/// fields and freeform writer's instructions.
+///
+/// If `custom_template` is provided and non-empty, it replaces
+/// [`default_letter_from_document_prompt`]. The default template has no
+/// placeholders; a custom template is resolved with an empty map so that any
+/// unknown `{tokens}` remain visible (matching [`build_synopsis_prompt`]'s
+/// contract).
+///
+/// `document_text` is treated as trusted input (analogous to the SOAP note in
+/// the other builders) and passed verbatim. `user_instructions`, by contrast,
+/// is freeform user text and is sanitised via the SOAP generator's prompt-
+/// injection filter before being inserted, then rendered under a clearly
+/// delimited "## Writer's instructions" section.
+pub fn build_letter_from_document_prompt(
+    document_text: &str,
+    recipient: Option<&str>,
+    letter_type: Option<&str>,
+    tone: Option<&str>,
+    re_line: Option<&str>,
+    user_instructions: Option<&str>,
+    custom_template: Option<&str>,
+) -> (String, String) {
+    let template = custom_template
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_letter_from_document_prompt());
+
+    // Default template has no placeholders; resolve with an empty map so custom
+    // templates keep their unresolved tokens visible (same contract as synopsis).
+    let system = resolve_prompt(template, &HashMap::new());
+
+    let time_date = format_now_for_prompt();
+
+    let recipient_line = recipient
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("Recipient: {s}"))
+        .unwrap_or_else(|| {
+            "Recipient: (not specified — infer from the document, or use a generic greeting)"
+                .to_string()
+        });
+
+    let letter_type_line = letter_type
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("Letter type: {s}"))
+        .unwrap_or_else(|| {
+            "Letter type: (not specified — choose the most appropriate for the document)"
+                .to_string()
+        });
+
+    let tone_line = tone
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("Tone: {s}"))
+        .unwrap_or_else(|| "Tone: professional".to_string());
+
+    let re_section = re_line
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("RE: {s}\n"))
+        .unwrap_or_default();
+
+    // Freeform instructions are user-supplied, so sanitise prompt-injection
+    // patterns (same filter `inject_context` applies to user context).
+    let instructions_section = user_instructions
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            let sanitized = crate::soap_generator::user_prompt::sanitize_prompt(s);
+            if sanitized.is_empty() {
+                String::new()
+            } else {
+                format!("## Writer's instructions\n\n{sanitized}\n\n---\n\n")
+            }
+        })
+        .unwrap_or_default();
+
+    let user = format!(
+        "Please draft a letter based on the source document below.\n\n\
+         {time_date}\n\n\
+         {recipient_line}\n\
+         {letter_type_line}\n\
+         {tone_line}\n\
+         {re_section}\
+         \n## Source document\n\n{document_text}",
+        time_date = time_date,
+        recipient_line = recipient_line,
+        letter_type_line = letter_type_line,
+        tone_line = tone_line,
+        re_section = re_section,
+        document_text = document_text,
+    );
+
+    (system, format!("{instructions_section}{user}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -672,5 +792,82 @@ mod tests {
     fn inject_context_formats_exactly() {
         let out = inject_context("USER", Some("CTX"));
         assert_eq!(out, "## Supporting Documents\n\nCTX\n\n---\n\nUSER");
+    }
+
+    #[test]
+    fn letter_from_document_default_includes_source_and_fields() {
+        let doc = "Patient referred for abnormal ECG. Family history of IHD.";
+        let (system, user) = build_letter_from_document_prompt(
+            doc,
+            Some("Dr. Smith"),
+            Some("Referral"),
+            Some("Formal"),
+            Some("Abnormal ECG"),
+            None,
+            None,
+        );
+
+        // Default system prompt has no placeholders to resolve.
+        assert!(system.contains("professional medical letter writer"));
+        assert!(!system.contains('{'));
+
+        // Every supplied field appears in the user prompt.
+        assert!(user.contains("Dr. Smith"));
+        assert!(user.contains("Referral"));
+        assert!(user.contains("Formal"));
+        assert!(user.contains("RE: Abnormal ECG"));
+        // The source document is passed verbatim.
+        assert!(user.contains("abnormal ECG"));
+        // No instructions section when none provided.
+        assert!(!user.contains("Writer's instructions"));
+    }
+
+    #[test]
+    fn letter_from_document_omits_blank_optional_fields() {
+        let doc = "Lab results within normal limits.";
+        let (system, user) =
+            build_letter_from_document_prompt(doc, Some("   "), None, Some(""), None, None, None);
+
+        let _ = system;
+        // Blank recipient falls back to the "(not specified ...)" hint.
+        assert!(user.contains("(not specified"));
+        // No dangling "RE:" line when re_line is absent.
+        assert!(!user.contains("RE:"));
+        // Tone always has a value.
+        assert!(user.contains("Tone:"));
+    }
+
+    #[test]
+    fn letter_from_document_includes_sanitised_instructions() {
+        let doc = "Consult note regarding knee pain.";
+        let (_system, user) = build_letter_from_document_prompt(
+            doc,
+            None,
+            None,
+            None,
+            None,
+            Some("Keep it brief and request urgent follow-up."),
+            None,
+        );
+
+        assert!(user.contains("## Writer's instructions"));
+        assert!(user.contains("Keep it brief and request urgent follow-up."));
+        // Source document still present.
+        assert!(user.contains("knee pain"));
+    }
+
+    #[test]
+    fn letter_from_document_custom_template_overrides() {
+        let doc = "Source.";
+        let (system, _user) = build_letter_from_document_prompt(
+            doc,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("CUSTOM LETTER WRITER PROMPT"),
+        );
+        assert!(system.starts_with("CUSTOM LETTER WRITER PROMPT"));
     }
 }

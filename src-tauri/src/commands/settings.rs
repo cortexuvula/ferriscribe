@@ -194,11 +194,13 @@ pub async fn set_api_key(
 
 /// Return the built-in default system prompt for the given document type.
 ///
-/// `doc_type` must be one of: "soap", "referral", "letter", "synopsis", "peer_discussion".
+/// `doc_type` must be one of: "soap", "referral", "letter", "letter_writer",
+/// "synopsis", "peer_discussion".
 #[tauri::command]
 pub fn get_default_prompt(doc_type: String) -> AppResult<String> {
     use medical_processing::document_generator::{
-        default_letter_prompt, default_referral_prompt, default_synopsis_prompt,
+        default_letter_from_document_prompt, default_letter_prompt, default_referral_prompt,
+        default_synopsis_prompt,
     };
     use medical_processing::peer_discussion::default_peer_discussion_prompt;
     use medical_processing::soap_generator::default_soap_prompt;
@@ -207,6 +209,7 @@ pub fn get_default_prompt(doc_type: String) -> AppResult<String> {
         "soap" => Ok(default_soap_prompt().to_string()),
         "referral" => Ok(default_referral_prompt().to_string()),
         "letter" => Ok(default_letter_prompt().to_string()),
+        "letter_writer" => Ok(default_letter_from_document_prompt().to_string()),
         "synopsis" => Ok(default_synopsis_prompt().to_string()),
         "peer_discussion" => Ok(default_peer_discussion_prompt().to_string()),
         _ => Err(AppError::Config(format!("Unknown doc_type: {}", doc_type))),

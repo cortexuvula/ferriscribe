@@ -36,6 +36,7 @@
   import RecordTab from './lib/pages/RecordTab.svelte';
   import RecordingsTab from './lib/pages/RecordingsTab.svelte';
   import GenerateTab from './lib/pages/GenerateTab.svelte';
+  import LetterWriterTab from './lib/pages/LetterWriterTab.svelte';
   import ChatTab from './lib/pages/ChatTab.svelte';
   import EditorTab from './lib/pages/EditorTab.svelte';
 
@@ -355,6 +356,8 @@
       <RecordingsTab />
     {:else if activeTab === 'generate'}
       <GenerateTab onNavigateRecordings={() => (activeTab = 'recordings')} />
+    {:else if activeTab === 'letter_writer'}
+      <LetterWriterTab />
     {:else if activeTab === 'chat'}
       <ChatTab />
     {:else if activeTab === 'transcript'}

@@ -329,6 +329,7 @@ pub fn run() {
             commands::generation::soap::generate_soap,
             commands::generation::referral::generate_referral,
             commands::generation::letter::generate_letter,
+            commands::generation::letter_writer::generate_letter_from_document,
             commands::letter_audiences::list_letter_audiences,
             commands::letter_audiences::upsert_letter_audience,
             commands::letter_audiences::delete_letter_audience,

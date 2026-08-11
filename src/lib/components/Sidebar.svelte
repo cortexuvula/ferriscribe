@@ -9,10 +9,11 @@
   let { activeTab = $bindable('record') }: Props = $props();
 
   const workflowNav = [
-    { id: 'record',     label: 'Record',     icon: '🎙' },
-    { id: 'recordings', label: 'Recordings', icon: '📋' },
-    { id: 'generate',   label: 'Generate',   icon: '⚡' },
-    { id: 'chat',       label: 'Chat',       icon: '💬' },
+    { id: 'record',        label: 'Record',        icon: '🎙' },
+    { id: 'recordings',    label: 'Recordings',    icon: '📋' },
+    { id: 'generate',      label: 'Generate',      icon: '⚡' },
+    { id: 'letter_writer', label: 'Letter Writer', icon: '📝' },
+    { id: 'chat',          label: 'Chat',          icon: '💬' },
   ];
 
   const documentNav = [

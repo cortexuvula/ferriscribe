@@ -45,6 +45,31 @@ export async function generateLetter(
   });
 }
 
+/**
+ * Standalone Letter Writer: draft a letter from already-extracted document text
+ * (typically OCR'd by `ocrDocuments`) plus optional structured fields and
+ * freeform writer's instructions. Not tied to a recording; result is ephemeral.
+ */
+export async function generateLetterFromDocument(
+  documentText: string,
+  opts: {
+    recipient?: string;
+    letterType?: string;
+    tone?: string;
+    reLine?: string;
+    userInstructions?: string;
+  } = {},
+): Promise<string> {
+  return invokeWithOfflineHandling('generate_letter_from_document', {
+    documentText,
+    recipient: opts.recipient ?? null,
+    letterType: opts.letterType ?? null,
+    tone: opts.tone ?? null,
+    reLine: opts.reLine ?? null,
+    userInstructions: opts.userInstructions ?? null,
+  });
+}
+
 export async function generateSynopsis(
   recordingId: string
 ): Promise<string> {
