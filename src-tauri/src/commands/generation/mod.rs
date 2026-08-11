@@ -10,6 +10,7 @@ use medical_core::error::AppError;
 
 mod helpers;
 pub mod letter;
+pub mod letter_writer;
 pub mod peer_discussion;
 pub mod referral;
 pub mod soap;
@@ -52,6 +53,11 @@ pub(super) const MAX_TRANSCRIPT_CHARS: usize = 500_000;
 /// (referral / letter / synopsis). SOAP notes are AI-generated, so this is
 /// a sanity upper bound rather than an expected boundary.
 pub(super) const MAX_SOAP_NOTE_CHARS: usize = 500_000;
+
+/// Maximum size of a source document (e.g. OCR'd text) accepted by the
+/// standalone Letter Writer. Multi-page scans can run long, so this matches
+/// the SOAP/transcript headroom; it exists to reject pathological input.
+pub(super) const MAX_DOCUMENT_CHARS: usize = 500_000;
 
 // ---------------------------------------------------------------------------
 // Progress event payload

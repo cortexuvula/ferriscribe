@@ -74,6 +74,21 @@ pub(super) async fn load_recording_and_settings(
     .map_err(crate::commands::join_err)?
 }
 
+/// Load the full `AppConfig` from the DB on a blocking thread, without a
+/// recording. Used by commands that don't operate on a recording (e.g. the
+/// standalone Letter Writer, which generates from OCR'd text).
+pub(super) async fn load_config(db: &Arc<medical_db::Database>) -> AppResult<AppConfig> {
+    let db = Arc::clone(db);
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
+        config.migrate();
+        Ok::<_, AppError>(config)
+    })
+    .await
+    .map_err(crate::commands::join_err)?
+}
+
 /// Resolve the AI provider from the registry using the settings provider name.
 ///
 /// `pub` so it can be re-exported from `generation::mod` for `commands::ocr`;

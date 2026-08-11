@@ -412,6 +412,10 @@ pub struct AppConfig {
     pub custom_referral_prompt: Option<String>,
     #[serde(default)]
     pub custom_letter_prompt: Option<String>,
+    /// Optional custom system prompt for the standalone Letter Writer
+    /// (OCR → letter). When None/empty, the built-in default is used.
+    #[serde(default)]
+    pub custom_letter_writer_prompt: Option<String>,
     #[serde(default)]
     pub custom_synopsis_prompt: Option<String>,
     #[serde(default)]
