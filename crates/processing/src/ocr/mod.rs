@@ -1,12 +1,15 @@
 //! Document OCR pipeline: extract text from files (text, images, PDFs).
 //!
-//! Text files are read directly. Images are sent to a vision model. PDFs
-//! are text-extracted (scanned-PDF rasterization is deferred to v2).
+//! Text files are read directly. Images are sent to a vision model. PDFs with
+//! an embedded text layer are extracted via `pdf-extract`; scanned (image-only)
+//! PDFs are rasterized to page images via poppler's `pdftoppm`/`pdftocairo`
+//! (when available) and OCR'd page-by-page through the vision model.
 //!
 //! **HIPAA note:** Extracted content is never logged — only filenames and
-//! page/character counts appear in tracing.
+//! page/character counts appear in tracing. Rendered page images live in a
+//! temp dir that is deleted as soon as OCR completes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use medical_core::traits::ai_provider::AiProvider;
@@ -140,6 +143,29 @@ fn build_image_ocr_request(image_data_url: &str, model: &str) -> CompletionReque
     }
 }
 
+/// OCR a single in-memory image via the vision model.
+///
+/// Shared by the `Image` strategy (implicitly — same flow) and the scanned-PDF
+/// page loop. `format` is the MIME subtype for the data URL ("png", "jpeg",
+/// …). Returns the trimmed extracted text, or an `OcrError` on provider failure
+/// or per-file timeout.
+async fn ocr_image_bytes(
+    image_bytes: &[u8],
+    format: &str,
+    ocr_model: &str,
+    provider: &Arc<dyn AiProvider>,
+) -> Result<String, OcrError> {
+    let data_url = encode_image_as_data_url(image_bytes, format);
+    let request = build_image_ocr_request(&data_url, ocr_model);
+    match tokio::time::timeout(OCR_PER_FILE_TIMEOUT, provider.complete(request)).await {
+        Ok(Ok(response)) => Ok(response.content.trim().to_string()),
+        Ok(Err(e)) => Err(OcrError::ModelError(e.to_string())),
+        Err(_) => Err(OcrError::ModelError(
+            "OCR timed out after 120 seconds".to_string(),
+        )),
+    }
+}
+
 /// Extract embedded text from a PDF using `pdf-extract`.
 ///
 /// Returns the concatenated text content. For scanned PDFs (image-only),
@@ -165,6 +191,21 @@ const MAX_OCR_FILE_BYTES: u64 = 100 * 1024 * 1024;
 /// Per-file timeout for vision model OCR calls. Prevents a single slow or
 /// hung image from stalling the whole batch indefinitely.
 const OCR_PER_FILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Render DPI for scanned-PDF rasterization. 150 is a standard OCR DPI — high
+/// enough for the vision model to read text, low enough to bound image size
+/// (and thus token cost per page).
+const PDF_OCR_DPI: u32 = 150;
+
+/// Maximum number of pages to rasterize + OCR per scanned PDF. Bounds work and
+/// temp-disk usage for very large documents.
+const MAX_PDF_OCR_PAGES: usize = 50;
+
+/// Message shown when a scanned PDF is detected but no rasterizer is installed.
+/// Kept as a constant so the install hint is testable and easy to update.
+const NO_RASTERIZER_MSG: &str = "[Scanned PDF detected (no text layer). Install poppler to OCR scanned \
+     PDFs — macOS: `brew install poppler`, Linux: `sudo apt install poppler-utils`, \
+     Windows: download poppler and add it to PATH.]";
 
 /// Extract text from a .docx file by reading word/document.xml from the ZIP
 /// archive and concatenating all `<w:t>` element contents.
@@ -273,6 +314,112 @@ fn extract_xlsx_text(path: &Path) -> Result<String, OcrError> {
     }
 
     Ok(lines.join("\n").trim().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Scanned-PDF rasterization (poppler fallback)
+// ---------------------------------------------------------------------------
+
+/// Candidate rasterizer binaries, in preference order. `pdftoppm` is the
+/// canonical poppler renderer; `pdftocairo` is a capable fallback with the
+/// same CLI shape for our flags.
+const RASTERIZER_CANDIDATES: &[&str] = &["pdftoppm", "pdftocairo"];
+
+/// Return the first rasterizer binary found on PATH, or `None`.
+fn find_rasterizer() -> Option<&'static str> {
+    for tool in RASTERIZER_CANDIDATES {
+        // `-v` distinguishes "binary exists" (Ok, regardless of exit code) from
+        // "not found" (io::Error NotFound). Version output is discarded.
+        match std::process::Command::new(tool).arg("-v").output() {
+            Ok(_) => return Some(tool),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+/// Sort rendered page paths by their trailing page number so `page-2.png`
+/// precedes `page-10.png` (lexicographic order would get this wrong when the
+/// count crosses a digit boundary). Files whose numeric suffix can't be parsed
+/// sort to the end, stably preserving their relative order.
+fn sort_page_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut keyed: Vec<(Option<usize>, usize, PathBuf)> = paths
+        .into_iter()
+        .enumerate()
+        .map(|(idx, p)| {
+            let key = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|stem| stem.rsplit('-').next())
+                .and_then(|num| num.parse::<usize>().ok());
+            (key, idx, p)
+        })
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    keyed.into_iter().map(|(_, _, p)| p).collect()
+}
+
+/// Rasterize a PDF's pages to PNG images via poppler.
+///
+/// Picks the first available rasterizer, renders up to [`MAX_PDF_OCR_PAGES`]
+/// pages at [`PDF_OCR_DPI`], and returns the page PNG paths in page order
+/// alongside the owning temp dir (the PNGs are deleted when the dir drops).
+/// Returns `Err(NO_RASTERIZER_MSG)` when no rasterizer is on PATH, or
+/// `Err(<reason>)` on spawn/render failure. Runs the subprocess on a blocking
+/// thread so the async runtime is never blocked.
+async fn rasterize_pdf_pages(pdf_path: &Path) -> Result<(tempfile::TempDir, Vec<PathBuf>), String> {
+    let tool = match find_rasterizer() {
+        Some(t) => t,
+        None => return Err(NO_RASTERIZER_MSG.to_string()),
+    };
+    let pdf_path = pdf_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let dir = tempfile::TempDir::new().map_err(|e| format!("create temp dir: {e}"))?;
+        let prefix = dir.path().join("page");
+        // `-l N` caps the last page rendered, bounding work + temp-disk usage.
+        let status = std::process::Command::new(tool)
+            .arg("-png")
+            .arg("-r")
+            .arg(PDF_OCR_DPI.to_string())
+            .arg("-l")
+            .arg(MAX_PDF_OCR_PAGES.to_string())
+            .arg(&pdf_path)
+            .arg(&prefix)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| format!("run {tool}: {e}"))?;
+        if !status.status.success() {
+            let stderr = String::from_utf8_lossy(&status.stderr);
+            let first_line = stderr.lines().next().unwrap_or("").trim_end();
+            return Err(if first_line.is_empty() {
+                format!("{tool} failed")
+            } else {
+                format!("{tool} failed: {first_line}")
+            });
+        }
+        // Collect page-*.png and sort numerically by page number.
+        let mut pages: Vec<PathBuf> = std::fs::read_dir(dir.path())
+            .map_err(|e| format!("read temp dir: {e}"))?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().and_then(|e| e.to_str()) == Some("png")
+                    && p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|s| s.starts_with("page-"))
+            })
+            .collect();
+        if pages.is_empty() {
+            return Err("rasterizer produced no pages (PDF may be empty or corrupt)".to_string());
+        }
+        pages = sort_page_paths(pages);
+        Ok::<_, String>((dir, pages))
+    })
+    .await
+    .map_err(|e| format!("rasterizer task failed: {e}"))?
 }
 
 /// Extract text from a list of document file paths.
@@ -423,15 +570,63 @@ pub async fn extract_text(
                     Ok(Ok(Ok(text))) => {
                         let text = text.trim().to_string();
                         if text.is_empty() {
-                            tracing::info!(filename = %filename, "OCR: PDF text extraction returned empty (likely scanned PDF)");
-                            results.push(OcrPageResult {
-                                filename,
-                                text: String::from(
-                                    "[No machine-readable text found in this PDF. \
-                                Scanned PDFs require image-based OCR, coming in a future update.]",
-                                ),
-                                page_count: 0,
-                            });
+                            // Scanned PDF (no text layer): rasterize pages via
+                            // poppler and OCR each page through the vision model.
+                            tracing::info!(filename = %filename, "OCR: PDF text empty — trying page rasterization");
+                            match rasterize_pdf_pages(path).await {
+                                Ok((dir, page_paths)) => {
+                                    let page_count = page_paths.len();
+                                    let mut pages: Vec<String> = Vec::with_capacity(page_count);
+                                    for (i, page_path) in page_paths.iter().enumerate() {
+                                        let pp = page_path.clone();
+                                        let read_res =
+                                            tokio::task::spawn_blocking(move || std::fs::read(&pp))
+                                                .await;
+                                        let page_text = match read_res {
+                                            Ok(Ok(bytes)) => {
+                                                match ocr_image_bytes(
+                                                    &bytes, "png", ocr_model, &provider,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(t) if !t.is_empty() => t,
+                                                    Ok(_) => "[No text detected on this page.]"
+                                                        .to_string(),
+                                                    Err(e) => {
+                                                        tracing::warn!(filename = %filename, page = i + 1, error = %e, "OCR: page failed");
+                                                        format!("[Page OCR failed: {e}]")
+                                                    }
+                                                }
+                                            }
+                                            Ok(Err(e)) => {
+                                                format!("[Could not read rendered page: {e}]")
+                                            }
+                                            Err(e) => format!("[Render-read task failed: {e}]"),
+                                        };
+                                        pages.push(format!(
+                                            "--- Page {} ---\n{}",
+                                            i + 1,
+                                            page_text
+                                        ));
+                                    }
+                                    drop(dir); // delete rendered page PNGs (PHI) ASAP
+                                    let text = pages.join("\n\n");
+                                    tracing::info!(filename = %filename, pages = page_count, chars = text.len(), "OCR: scanned PDF OCR'd via rasterization");
+                                    results.push(OcrPageResult {
+                                        filename,
+                                        text,
+                                        page_count,
+                                    });
+                                }
+                                Err(msg) => {
+                                    tracing::warn!(filename = %filename, reason = %msg, "OCR: scanned-PDF rasterization unavailable");
+                                    results.push(OcrPageResult {
+                                        filename,
+                                        text: msg,
+                                        page_count: 0,
+                                    });
+                                }
+                            }
                         } else {
                             tracing::info!(filename = %filename, chars = text.len(), "OCR: PDF text extracted");
                             results.push(OcrPageResult {
@@ -888,5 +1083,121 @@ mod tests {
         assert_eq!(results[0].filename, "notes.txt");
         assert!(results[0].text.contains("hypertension"));
         assert_eq!(results[0].page_count, 1);
+    }
+
+    #[test]
+    fn sorts_pdf_page_filenames_numerically() {
+        // Synthetic paths named like pdftoppm output. A lexicographic sort
+        // would put page-10 before page-2; the numeric sort must not.
+        let paths: Vec<PathBuf> = ["page-1.png", "page-10.png", "page-2.png", "page-3.png"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let sorted = sort_page_paths(paths);
+        let names: Vec<String> = sorted
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["page-1.png", "page-2.png", "page-3.png", "page-10.png"]
+        );
+    }
+
+    #[test]
+    fn sorts_pdf_page_filenames_handles_zero_padding() {
+        // pdftoppm zero-pads based on total page count; both forms must sort
+        // numerically, not lexically.
+        let paths: Vec<PathBuf> = ["page-09.png", "page-10.png", "page-01.png"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let sorted = sort_page_paths(paths);
+        let names: Vec<String> = sorted
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["page-01.png", "page-09.png", "page-10.png"]);
+    }
+
+    #[test]
+    fn no_rasterizer_message_mentions_poppler_and_platform_hints() {
+        assert!(NO_RASTERIZER_MSG.contains("poppler"));
+        assert!(
+            NO_RASTERIZER_MSG.contains("macOS") || NO_RASTERIZER_MSG.contains("brew"),
+            "should hint at macOS install"
+        );
+        assert!(
+            NO_RASTERIZER_MSG.contains("Linux") || NO_RASTERIZER_MSG.contains("apt"),
+            "should hint at Linux install"
+        );
+    }
+
+    /// Validates the full rasterization pipeline (subprocess, temp dir, page
+    /// collection, numeric sort) end-to-end. `#[ignore]` because it needs
+    /// poppler (pdftoppm/pdftocairo) on PATH; run locally with
+    /// `cargo test -p medical-processing --lib -- --ignored rasterizes_pdf`.
+    #[ignore = "requires poppler (pdftoppm/pdftocairo) on PATH"]
+    #[tokio::test]
+    async fn rasterizes_pdf_when_poppler_present() {
+        // Build a minimal valid PDF (same fixture approach as
+        // `extract_pdf_text_from_real_pdf`). pdftoppm renders text PDFs too, so
+        // this exercises rasterization without needing a scanned/image PDF.
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Dictionary, Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let font_id = doc.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Td", vec![100.into(), 700.into()]),
+                Operation::new("Tj", vec![Object::string_literal("Scanned PDF OCR test")]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
+        });
+        let pages = Dictionary::from_iter([
+            ("Type", Object::Name(b"Pages".to_vec())),
+            ("Kids", Object::Array(vec![Object::Reference(page_id)])),
+            ("Count", Object::Integer(1)),
+            ("Resources", Object::Reference(resources_id)),
+            (
+                "MediaBox",
+                Object::Array(vec![
+                    Object::Integer(0),
+                    Object::Integer(0),
+                    Object::Integer(612),
+                    Object::Integer(792),
+                ]),
+            ),
+        ]);
+        doc.objects.insert(pages_id, Object::Dictionary(pages));
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog", "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        doc.compress();
+
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("scan.pdf");
+        doc.save(&pdf_path).unwrap();
+
+        let result = rasterize_pdf_pages(&pdf_path).await;
+        assert!(result.is_ok(), "rasterize failed: {:?}", result.err());
+        let (render_dir, pages) = result.unwrap();
+        assert!(!pages.is_empty(), "should render at least one page PNG");
+        assert_eq!(pages[0].extension().and_then(|e| e.to_str()), Some("png"));
+        drop(render_dir);
     }
 }
