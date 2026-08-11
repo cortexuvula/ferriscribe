@@ -4,9 +4,9 @@
   "version": "0.42.1",
   "identifier": "com.ferriscribe.app",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run fetch:pdfium && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run fetch:pdfium && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -23,6 +23,7 @@
   },
   "bundle": {
     "active": true,
+    "resources": ["resources/pdfium/*"],
     "targets": ["deb", "rpm", "msi", "nsis", "dmg", "app"],
     "icon": [
       "icons/32x32.png",
