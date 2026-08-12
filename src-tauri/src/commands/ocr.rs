@@ -59,6 +59,19 @@ pub async fn ocr_documents(
 
     let provider = generation::resolve_provider(&state, &provider_name).await?;
 
+    // If the batch contains any PDFs, make sure the pdfium renderer (used to
+    // OCR scanned/image-only PDFs) is downloaded + bound. This is lazy + cached:
+    // the ~7 MB library is fetched into the app data dir on first use and reused
+    // thereafter. Non-PDF batches skip this entirely.
+    if file_paths
+        .iter()
+        .any(|p| p.to_lowercase().ends_with(".pdf"))
+        && let Err(e) = ocr::ensure_pdfium_initialized(&state.data_dir).await
+    {
+        tracing::warn!(error = %e, "pdfium ensure failed; scanned-PDF OCR will report unavailable");
+        // Proceed — each scanned PDF will surface PDFIUM_UNAVAILABLE_MSG.
+    }
+
     let results = ocr::extract_text(&file_paths, &ocr_model, provider)
         .await
         .map_err(|e| AppError::Other(format!("OCR failed: {e}")))?;

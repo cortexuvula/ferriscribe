@@ -273,35 +273,10 @@ pub fn run() {
                 });
             }
 
-            // Initialize the bundled pdfium renderer for scanned-PDF OCR. The
-            // library ships as a Tauri resource; we resolve its directory and
-            // hand it to the OCR module, which binds dynamically (no link-time
-            // dependency). Non-fatal: on failure, scanned-PDF OCR degrades to a
-            // clear message and the rest of the app works normally.
-            let pdfium_dir = (|| -> Option<std::path::PathBuf> {
-                let rd = app.path().resource_dir().ok()?;
-                // The release bundle places the lib under resources/pdfium/;
-                // both candidate locations are checked to be robust to Tauri's
-                // resource-path mapping.
-                for cand in [rd.join("pdfium"), rd.join("resources").join("pdfium")] {
-                    if cand.is_dir() {
-                        return Some(cand);
-                    }
-                }
-                // Dev fallback: the freshly-fetched lib relative to CWD.
-                let dev = std::path::PathBuf::from("src-tauri/resources/pdfium");
-                if dev.is_dir() {
-                    return Some(dev);
-                }
-                None
-            })();
-            match pdfium_dir {
-                Some(dir) => match medical_processing::ocr::init_pdfium(&dir) {
-                    Ok(()) => tracing::info!(dir = ?dir, "pdfium initialized for scanned-PDF OCR"),
-                    Err(e) => tracing::warn!(error = %e, "pdfium init failed; scanned-PDF OCR will be unavailable"),
-                },
-                None => tracing::warn!("pdfium resource dir not found; scanned-PDF OCR will be unavailable"),
-            }
+            // Note: the pdfium renderer for scanned-PDF OCR is initialized
+            // lazily by the `ocr_documents` command (it downloads the library
+            // into the app data dir on first use), so there's nothing to do
+            // here at startup.
 
             Ok(())
         });

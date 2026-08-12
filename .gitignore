@@ -27,9 +27,6 @@ Thumbs.db
 # Tauri
 /src-tauri/target/
 
-# Bundled pdfium library (fetched at build time by scripts/fetch-pdfium.mjs)
-/src-tauri/resources/pdfium/
-
 # Node
 node_modules/
 dist/
