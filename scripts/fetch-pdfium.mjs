@@ -96,6 +96,38 @@ async function main() {
   rmSync(join(OUT_DIR, dirname(member)), { recursive: true, force: true });
   rmSync(tmpArchive, { force: true });
 
+  // On macOS, sign the dylib so it passes app notarization. Tauri's bundler
+  // signs the main executable and the .app but NOT resource dylibs under
+  // Contents/Resources/ — Apple's notarization rejects an unsigned/ad-hoc
+  // dylib with "Archive contains critical validation errors". We re-sign it
+  // here with the Developer ID + Hardened Runtime when the identity is present
+  // (CI exposes APPLE_SIGNING_IDENTITY during beforeBuildCommand). Local dev
+  // has no identity → the dylib stays unsigned, which is fine (no notarization
+  // outside CI). Done BEFORE stamping .version so a codesign failure forces a
+  // re-fetch on the next run rather than persisting an unstamped "success".
+  if (process.platform === 'darwin') {
+    // Strip extended attributes (prevents "resource fork / Finder information
+    // / similar detritus not allowed" codesign rejection).
+    try {
+      execSync(`xattr -cr "${outPath}"`, { stdio: 'ignore' });
+    } catch {
+      /* xattr may be unavailable; non-fatal */
+    }
+    if (process.env.APPLE_SIGNING_IDENTITY) {
+      console.log(`fetch-pdfium: codesigning ${out} (Hardened Runtime, Developer ID)`);
+      try {
+        execSync(
+          `codesign --force --options runtime --sign "${process.env.APPLE_SIGNING_IDENTITY}" "${outPath}"`,
+          { stdio: 'inherit' },
+        );
+      } catch (e) {
+        throw new Error(`fetch-pdfium: codesign failed: ${e instanceof Error ? e.message : e}`);
+      }
+    } else {
+      console.log(`fetch-pdfium: APPLE_SIGNING_IDENTITY not set — leaving ${out} unsigned (fine for dev)`);
+    }
+  }
+
   writeFileSync(VERSION_FILE, VERSION);
   console.log(`fetch-pdfium: wrote ${outPath} (${VERSION})`);
 }
