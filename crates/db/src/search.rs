@@ -19,11 +19,35 @@ impl SearchRepo {
     ///
     /// Returns the UUIDs of matching rows ordered by rank (best match first).
     /// An empty or whitespace-only query returns an empty vector.
+    ///
+    /// # Query escaping
+    ///
+    /// The user's input is passed to FTS5 as **query syntax**, not a literal
+    /// string — so raw input containing FTS metacharacters breaks the parse.
+    /// Worst case in practice: hyphens (filenames like
+    /// `Recording_2026-08-13_13-39-22.wav`, dates like `2026-08-13`, clinical
+    /// terms like `covid-19`) make FTS5 treat the following token as a column
+    /// filter and fail with `no such column`, which surfaced as a silent
+    /// empty result set. To make input literal, each whitespace-separated term
+    /// is wrapped as an FTS5 **phrase** (`"term"`); multiple phrases form an
+    /// implicit AND, preserving multi-word semantics. FTS5 phrases cannot
+    /// contain double quotes, so stray quotes are stripped.
     pub fn search(conn: &Connection, query: &str, limit: u32) -> DbResult<Vec<Uuid>> {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
+        let phrases: Vec<String> = query
+            .split_whitespace()
+            .filter_map(|term| {
+                let cleaned = term.replace('"', "");
+                if cleaned.is_empty() {
+                    None
+                } else {
+                    Some(format!("\"{cleaned}\""))
+                }
+            })
+            .collect();
+        if phrases.is_empty() {
             return Ok(Vec::new());
         }
+        let fts_query = phrases.join(" ");
 
         let mut stmt = conn.prepare(
             "SELECT id FROM recordings_fts
@@ -33,7 +57,7 @@ impl SearchRepo {
         )?;
 
         let ids: Vec<Uuid> = stmt
-            .query_map(rusqlite::params![trimmed, limit], |row| {
+            .query_map(rusqlite::params![fts_query, limit], |row| {
                 let id_str: String = row.get(0)?;
                 Ok(id_str)
             })?
@@ -169,5 +193,93 @@ mod tests {
         // Old term should no longer match
         let old_after = SearchRepo::search(&conn, "original", 10).unwrap();
         assert!(old_after.is_empty());
+    }
+
+    #[test]
+    fn finds_by_filename_with_hyphens() {
+        // Regression: raw queries were passed to FTS5 MATCH as query syntax,
+        // so hyphens in a filename made FTS5 fail with "no such column" and
+        // the search silently returned nothing. The user-visible symptom was
+        // being unable to find synced recordings by filename.
+        let conn = migrated();
+        let rec = new_rec_with(
+            "Recording_2026-08-13_13-39-22.wav",
+            None,
+            None, // no patient name — filename is the only identifying text
+        );
+        let id = rec.id;
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        // Full filename search must find it (previously: Err "no such column: 08").
+        let results = SearchRepo::search(&conn, "Recording_2026-08-13_13-39-22.wav", 10).unwrap();
+        assert_eq!(results, vec![id]);
+
+        // A distinctive fragment also matches the filename's tokens.
+        let frag = SearchRepo::search(&conn, "13-39-22", 10).unwrap();
+        assert_eq!(frag, vec![id]);
+    }
+
+    #[test]
+    fn hyphenated_clinical_term_does_not_error() {
+        // Terms like covid-19 or h-pylori previously broke the FTS5 parse.
+        let conn = migrated();
+        let rec = new_rec_with(
+            "visit.wav",
+            Some("patient tested positive for covid-19"),
+            None,
+        );
+        let id = rec.id;
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        let results = SearchRepo::search(&conn, "covid-19", 10).unwrap();
+        assert_eq!(results, vec![id]);
+    }
+
+    #[test]
+    fn date_query_does_not_error() {
+        let conn = migrated();
+        let rec = new_rec_with("note.wav", Some("follow-up on 2026-08-13 discussed"), None);
+        let id = rec.id;
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        let results = SearchRepo::search(&conn, "2026-08-13", 10).unwrap();
+        assert_eq!(results, vec![id]);
+    }
+
+    #[test]
+    fn multi_word_terms_are_implicit_and() {
+        let conn = migrated();
+        let matching = new_rec_with("a.wav", Some("hypertension noted, diabetes reviewed"), None);
+        let other = new_rec_with("b.wav", Some("hypertension only"), None);
+        RecordingsRepo::insert(&conn, &matching).unwrap();
+        RecordingsRepo::insert(&conn, &other).unwrap();
+
+        let results = SearchRepo::search(&conn, "hypertension diabetes", 10).unwrap();
+        assert_eq!(results, vec![matching.id]);
+    }
+
+    #[test]
+    fn query_of_only_quotes_returns_empty() {
+        // FTS5 phrases cannot contain double quotes; stray quotes are stripped
+        // and a query of nothing else must yield an empty (non-error) result.
+        let conn = migrated();
+        let rec = new_rec_with("q.wav", Some("some transcript"), None);
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        let results = SearchRepo::search(&conn, "\"\"\"", 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn fts_metacharacters_are_treated_literally() {
+        // Parentheses/colons/asterisks in user input must not alter FTS
+        // semantics or cause parse errors.
+        let conn = migrated();
+        let rec = new_rec_with("m.wav", Some("assessment (working): plan *deferred*"), None);
+        let id = rec.id;
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        let results = SearchRepo::search(&conn, "(working):", 10).unwrap();
+        assert_eq!(results, vec![id]);
     }
 }
