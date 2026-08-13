@@ -102,6 +102,9 @@ export interface AppConfig {
   autosave_enabled: boolean;
   autosave_interval_secs: number;
   auto_generate_soap: boolean;
+  /** Play a short local chime when a SOAP note finishes generating.
+   *  Mirrors `soap_notification_sound: bool` in crates/core/src/types/settings.rs. */
+  soap_notification_sound: boolean;
   search_top_k: number;
   mmr_lambda: number;
   vocabulary_enabled: boolean;

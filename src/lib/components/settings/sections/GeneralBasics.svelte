@@ -1,6 +1,7 @@
 <script lang="ts">
   import { settings } from '../../../stores/settings.svelte';
   import { theme } from '../../../stores/theme.svelte';
+  import { playSoapCompleteChime } from '../../../utils/notificationSound';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
   async function handleThemeChange(e: Event) {
@@ -17,6 +18,15 @@
   async function handleAutosaveChange(e: Event) {
     const checked = (e.target as HTMLInputElement).checked;
     await settings.updateField('autosave_enabled', checked);
+  }
+
+  async function handleSoapSoundChange(e: Event) {
+    const checked = (e.target as HTMLInputElement).checked;
+    await settings.updateField('soap_notification_sound', checked);
+    if (checked) {
+      // Preview the chime so the user knows exactly what they enabled.
+      playSoapCompleteChime();
+    }
   }
 
   async function handleAutosaveIntervalChange(e: Event) {
@@ -78,6 +88,18 @@
     <input type="checkbox" checked={settings.state.autosave_enabled} onchange={handleAutosaveChange} />
     <span>Enable Autosave</span>
   </label>
+</div>
+
+<div class="form-group">
+  <label class="form-label checkbox-label">
+    <input
+      type="checkbox"
+      checked={settings.state.soap_notification_sound}
+      onchange={handleSoapSoundChange}
+    />
+    <span>Play a sound when a SOAP note is generated</span>
+  </label>
+  <span class="form-hint">A short local chime when SOAP note generation completes — useful when you've stepped away during processing. The sound is synthesized locally; nothing is sent anywhere.</span>
 </div>
 
 <div class="form-group">

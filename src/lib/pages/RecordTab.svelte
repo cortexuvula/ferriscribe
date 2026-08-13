@@ -18,6 +18,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { contextTemplates } from '../stores/contextTemplates.svelte';
   import { toasts } from '../stores/toasts.svelte';
+  import { playSoapCompleteChime } from '../utils/notificationSound';
   import { rsvp } from '../stores/rsvp.svelte';
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
@@ -327,6 +328,9 @@
       await recordings.load();
       generation.finish();
       toasts.success('SOAP note generated');
+      if (settings.state.soap_notification_sound) {
+        playSoapCompleteChime();
+      }
     } catch (e) {
       if (e instanceof OfflineCancelled) {
         generation.finish();
