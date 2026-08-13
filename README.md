@@ -1,6 +1,6 @@
 # FerriScribe
 
-A privacy-first medical transcription desktop application built with Rust and Svelte. Record doctor-patient encounters, transcribe them locally with speaker diarization, generate SOAP notes and clinical documents, OCR supporting documents, sync across machines, and export to PDF, DOCX, or FHIR.
+A privacy-first medical transcription desktop application built with Rust and Svelte. Record doctor-patient encounters, transcribe them locally with speaker diarization, generate SOAP notes and clinical documents, draft letters from scanned paper documents, OCR supporting documents, sync across machines, and export to PDF, DOCX, or FHIR.
 
 ## Features
 
@@ -23,6 +23,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
   - **Legal/Court** — Formal opinion, timeline
 
   Create custom audiences in **Settings → Letter Audiences** with your own system prompts and user templates.
+- **Letter Writer** — A standalone Workflow tab for drafting letters from paper documents: drop in any document (scanned PDF, photo, export), OCR it, fill in recipient / type / tone / RE line plus freeform instructions, and generate a polished letter. Anti-fabrication rules keep the letter grounded in the source document — anything missing surfaces as a `[NOT IN SOURCE: …]` placeholder instead of invented content. Not tied to a recording; the drafted letter stays on screen for copying (state persists across tab switches).
 - **Context Templates** — Pre-built visit types (e.g. Follow-up, New Patient) with custom instructions layered on top of the base prompt; import/export as JSON.
 - **RSVP Speed Reader** — Rapid-serial-visual-presentation review mode for SOAP notes and transcripts — chunk-size, WPM, and per-section filters configurable in Settings.
 - **Inline Preview** — Generated documents display in a collapsible preview directly in the Generate tab, no need to switch tabs.
@@ -31,10 +32,11 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 - **Multi-Format OCR** — Drop documents into the context panel to extract text via a local vision model (e.g. glm-ocr). Supported formats:
   - **Text** — `.txt`, `.md`, `.csv` (read directly, no model needed)
   - **Images** — `.png`, `.jpg`, `.jpeg`, `.bmp`, `.webp`, `.tiff` (sent to vision model)
-  - **PDF** — `.pdf` (text extraction via pdf-extract; scanned PDFs return a message)
+  - **PDF** — `.pdf` (embedded text extracted via pdf-extract; scanned/image-only PDFs are rendered page-by-page with pdfium and OCR'd through the vision model — up to 50 pages at 150 DPI)
   - **Office** — `.docx` (text from Word XML), `.xlsx` (cell data from all sheets)
+- **Scanned-PDF Renderer** — Scanned-PDF OCR is powered by [pdfium](https://github.com/bblanchon/pdfium-binaries) (Chrome's PDF engine, BSD-licensed). The library is downloaded automatically into the app data directory the first time you OCR a scanned PDF — nothing to install, and it runs entirely locally (no network after the one-time fetch).
 - **OCR Model Setting** — Configure a dedicated vision model for OCR separately from the text generation model in **Settings → Models**.
-- **Integration** — OCR'd text is combined with notes and structured patient context (medications, allergies, conditions) and threaded into all generation types (SOAP, referral, letter, peer discussion). Available in both the Record and Generate tabs.
+- **Integration** — OCR'd text is combined with notes and structured patient context (medications, allergies, conditions) and threaded into all generation types (SOAP, referral, letter, peer discussion). Available in the Record, Generate, and Letter Writer tabs.
 
 ### Content Sync
 - **Bidirectional Sync** — Sync transcripts, SOAP notes, letters, referrals, peer discussions, and audio between machines over Tailscale. Per-field last-write-wins merge with separate push/pull cursors.
@@ -65,7 +67,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 | STT | whisper-rs (whisper.cpp), ort (ONNX Runtime), knf-rs, rubato |
 | Database | SQLite with SQLCipher (AES-256 encryption) |
 | AI | Ollama, LM Studio (OpenAI-compatible wire protocol) |
-| OCR | Vision models via Ollama/LM Studio, pdf-extract, calamine, quick-xml |
+| OCR | Vision models via Ollama/LM Studio, pdfium (scanned-PDF rendering), pdf-extract, calamine, quick-xml |
 | Export | PDF (printpdf), DOCX (docx-rs), FHIR R4 |
 | Security | AES-256-GCM + PBKDF2 (aes-gcm + pbkdf2 crates), SQLCipher |
 
@@ -132,6 +134,8 @@ Models are downloaded from HuggingFace / GitHub and stored under the app's data 
 5. **Review** — Preview inline in the Generate tab, edit in the Editor tab, or use the RSVP speed reader.
 6. **Export** — Save as PDF, DOCX, or FHIR R4.
 7. **Chat** — Ask follow-up questions grounded in the recording and any ingested RAG documents.
+
+**No recording needed?** Use the **Letter Writer** tab (Workflow section) to OCR a paper document and draft a letter directly from it.
 
 ## Running Across Machines (LAN / Tailscale)
 
@@ -206,7 +210,7 @@ Recordings, transcripts, settings, downloaded models, and the encrypted keystore
 | Linux | `~/.local/share/rust-medical-assistant/` |
 | Windows | `%APPDATA%\rust-medical-assistant\` |
 
-Inside you'll find `medical.db` (SQLCipher-encrypted SQLite), `config/keys.json` (encrypted API keys), `models/whisper/*.bin`, `models/pyannote/*.onnx`, and the recordings themselves (AES-256-GCM encrypted `.enc` files) in whatever path you configured under **Settings → General**. Delete the directory to fully remove all user data.
+Inside you'll find `medical.db` (SQLCipher-encrypted SQLite), `config/keys.json` (encrypted API keys), `models/whisper/*.bin`, `models/pyannote/*.onnx`, `pdfium/` (the scanned-PDF renderer, fetched on first use), and the recordings themselves (AES-256-GCM encrypted `.enc` files) in whatever path you configured under **Settings → General**. Delete the directory to fully remove all user data.
 
 ### Optional: stronger master key
 
