@@ -8,8 +8,13 @@
 
   type Props = {
     visible: boolean;
+    /** True when this machine is the office server. The server is the sync
+     *  hub — clients push/pull to it — so "Sync Now" is meaningless here and
+     *  would otherwise report "skipped" (it has no paired connection, by
+     *  design). We show an explanatory hint instead of the button. */
+    isServer?: boolean;
   };
-  let { visible }: Props = $props();
+  let { visible, isServer = false }: Props = $props();
 
   // Listen for sync-complete events so lastSyncedAt updates even when the
   // sync was triggered by startup or background timer (not the Sync Now
@@ -127,21 +132,28 @@
 
     {#if settings.state.sync_content}
       <div class="sync-controls">
-        <button
-          class="btn-sync-now"
-          onclick={handleSyncNow}
-          disabled={recordings.syncing}
-        >
-          {#if recordings.syncing}
-            <span class="sync-spinner"></span>
-            Syncing…
-          {:else}
-            Sync Now
-          {/if}
-        </button>
-        <span class="last-synced">
-          Last synced: {formatLastSynced(recordings.lastSyncedAt)}
-        </span>
+        {#if isServer}
+          <span class="last-synced">
+            This machine is the office server — client recordings sync here
+            automatically as clients connect. There is nothing to sync out.
+          </span>
+        {:else}
+          <button
+            class="btn-sync-now"
+            onclick={handleSyncNow}
+            disabled={recordings.syncing}
+          >
+            {#if recordings.syncing}
+              <span class="sync-spinner"></span>
+              Syncing…
+            {:else}
+              Sync Now
+            {/if}
+          </button>
+          <span class="last-synced">
+            Last synced: {formatLastSynced(recordings.lastSyncedAt)}
+          </span>
+        {/if}
       </div>
     {/if}
   </div>
