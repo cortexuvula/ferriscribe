@@ -360,6 +360,13 @@ fn pdfium_target() -> (&'static str, &'static str, &'static str) {
     }
 }
 
+/// Serializes the pdfium download/extract/bind path. Without it, two
+/// concurrent OCR batches both seeing an empty cache would race the
+/// `.part` file writes, the archive rename (which outright fails on
+/// Windows when the destination exists), and the lib extraction —
+/// producing a torn archive or a library bound mid-rewrite.
+static PDFIUM_ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Ensure the pdfium library is present in `{data_dir}/pdfium/`, downloading +
 /// extracting it (and ad-hoc signing on macOS) if missing or stale. Returns the
 /// directory containing the lib. Idempotent: a no-op if the pinned version is
@@ -367,19 +374,21 @@ fn pdfium_target() -> (&'static str, &'static str, &'static str) {
 /// (consistent with the app's existing model-download traffic); the lib is then
 /// cached and used locally forever.
 pub async fn ensure_pdfium_available(data_dir: &Path) -> Result<std::path::PathBuf, String> {
+    // Fast path before taking the lock ( uncontended once cached ).
+    if let Some(dir) = cached_pdfium_dir(data_dir) {
+        return Ok(dir);
+    }
+    let _guard = PDFIUM_ENSURE_LOCK.lock().await;
+    // Re-check after acquiring: another task may have completed the download
+    // while we waited.
+    if let Some(dir) = cached_pdfium_dir(data_dir) {
+        return Ok(dir);
+    }
+
     let pdfium_dir = data_dir.join("pdfium");
     let (asset, member, lib_name) = pdfium_target();
     let lib_path = pdfium_dir.join(lib_name);
     let version_path = pdfium_dir.join(".version");
-
-    // Already present + matching version → done.
-    let cached = lib_path.exists()
-        && std::fs::read_to_string(&version_path)
-            .ok()
-            .is_some_and(|s| s.trim() == PDFIUM_BIN_VERSION);
-    if cached {
-        return Ok(pdfium_dir);
-    }
 
     std::fs::create_dir_all(&pdfium_dir).map_err(|e| format!("create pdfium dir: {e}"))?;
 
@@ -402,13 +411,25 @@ pub async fn ensure_pdfium_available(data_dir: &Path) -> Result<std::path::PathB
     // NOT part of the app bundle (it's in the writable data dir), so it is
     // outside notarization scope; ad-hoc signing suffices for loading. The
     // app's disable-library-validation entitlement permits loading a dylib
-    // not signed with its Team ID.
+    // not signed with its Team ID. Note: no `--timestamp` — secure timestamps
+    // contact Apple's server and add nothing to an ad-hoc signature.
     #[cfg(target_os = "macos")]
     ad_hoc_sign(&lib_path)?;
 
     std::fs::write(&version_path, PDFIUM_BIN_VERSION).map_err(|e| format!("stamp version: {e}"))?;
     tracing::info!(path = %lib_path.display(), "pdfium ready");
     Ok(pdfium_dir)
+}
+
+/// The pdfium dir, if the lib is present with the pinned version stamped.
+fn cached_pdfium_dir(data_dir: &Path) -> Option<std::path::PathBuf> {
+    let pdfium_dir = data_dir.join("pdfium");
+    let (_asset, _member, lib_name) = pdfium_target();
+    let cached = pdfium_dir.join(lib_name).exists()
+        && std::fs::read_to_string(pdfium_dir.join(".version"))
+            .ok()
+            .is_some_and(|s| s.trim() == PDFIUM_BIN_VERSION);
+    cached.then_some(pdfium_dir)
 }
 
 /// Idempotently ensure pdfium is downloaded (if needed) and bound. Safe to call
@@ -419,7 +440,15 @@ pub async fn ensure_pdfium_initialized(data_dir: &Path) -> Result<(), String> {
         return Ok(());
     }
     let lib_dir = ensure_pdfium_available(data_dir).await?;
-    init_pdfium(&lib_dir)
+    if let Err(e) = init_pdfium(&lib_dir) {
+        // A cached lib that fails to bind would otherwise fail forever (the
+        // version stamp short-circuits re-download). Clear the stamp so the
+        // next call re-fetches a fresh copy.
+        let _ = std::fs::remove_file(lib_dir.join(".version"));
+        Err(e)
+    } else {
+        Ok(())
+    }
 }
 
 /// Download `url` into `dest` (a .part temp path), streaming to disk.
@@ -469,7 +498,9 @@ fn extract_member(tgz: &Path, member: &str, dest: &Path) -> std::io::Result<()> 
 }
 
 /// macOS: strip extended attributes and ad-hoc sign the dylib with Hardened
-/// Runtime + a secure timestamp, so it loads under the app's Hardened Runtime.
+/// Runtime, so it loads under the app's Hardened Runtime. No `--timestamp` —
+/// secure timestamps contact Apple's server and add nothing to an ad-hoc
+/// signature (the dylib lives outside the bundle, so it never notarizes).
 #[cfg(target_os = "macos")]
 fn ad_hoc_sign(lib: &Path) -> Result<(), String> {
     // Strip xattrs (prevents "resource fork / detritus" rejection).
@@ -478,14 +509,7 @@ fn ad_hoc_sign(lib: &Path) -> Result<(), String> {
         .arg(lib)
         .status();
     let status = std::process::Command::new("codesign")
-        .args([
-            "--force",
-            "--options",
-            "runtime",
-            "--timestamp",
-            "--sign",
-            "-",
-        ])
+        .args(["--force", "--options", "runtime", "--sign", "-"])
         .arg(lib)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

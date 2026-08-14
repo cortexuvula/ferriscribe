@@ -35,6 +35,11 @@ class RecordingsStore {
   /// Timestamp of the most recently completed sync cycle. Null until the first
   /// successful sync / `content-sync-complete` event.
   lastSyncedAt = $state<Date | null>(null);
+  /// Error message from the last failed sync, or null. `syncNow()` swallows
+  /// errors (callers like the SSE listener don't await safely), so this is
+  /// how UI callers distinguish a failed sync from a queued one (both return
+  /// null). Cleared at the start of each sync attempt.
+  lastSyncError = $state<string | null>(null);
 
   /// Load the first page, replacing the list. Called on mount and after
   /// mutations that change ordering (new recording, generation, etc.).
@@ -177,6 +182,7 @@ class RecordingsStore {
       return null;
     }
     this.syncing = true;
+    this.lastSyncError = null;
     let summary: SyncSummary | null = null;
     try {
       summary = await invoke<SyncSummary>('sync_content_now');
@@ -186,8 +192,11 @@ class RecordingsStore {
       }
     } catch (err) {
       // Network failures and backend errors are logged here rather than
-      // propagating as unhandled promise rejections (Bug M4).
+      // propagating as unhandled promise rejections (Bug M4). Recorded on
+      // lastSyncError so UI callers (Sync Now) can distinguish failure from
+      // a queued sync — both return null.
       console.error('Content sync failed:', err);
+      this.lastSyncError = err instanceof Error ? err.message : String(err);
     } finally {
       this.syncing = false;
       // If another sync was requested while we were busy, run it now. Fire

@@ -1,6 +1,8 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { processRecording, cancelPipeline } from '../api/pipeline';
 import { recordings, selectRecording } from './recordings.svelte';
+import { settings } from './settings.svelte';
+import { playSoapCompleteChime } from '../utils/notificationSound';
 import { log } from '../api/logging';
 import { formatError } from '../types/errors';
 import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
@@ -101,6 +103,12 @@ class PipelineStore {
             log.error('Pipeline failed', { recording_id, error: error ?? 'unknown' });
           } else {
             log.info('Pipeline completed', { recording_id });
+            // The pipeline's final stage is SOAP generation — this is the
+            // "stepped away while it processed" moment the chime exists for
+            // (the manual paths chime in RecordTab / GenerateTab).
+            if (settings.state.soap_notification_sound) {
+              playSoapCompleteChime();
+            }
           }
           recordings.load(); // Refresh recordings list
           // When the most-recently launched pipeline finishes, switch the UI

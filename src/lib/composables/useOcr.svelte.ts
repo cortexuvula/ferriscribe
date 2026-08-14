@@ -53,7 +53,13 @@ export function useOcr() {
     if (uniquePaths.length === 0) return;
     ocrLoading = true;
     ocrTextOverride = null; // reset manual edits when new files arrive
-    const myToken = ++ocrBatchToken; // Capture token for this batch.
+    // Capture the CURRENT token without incrementing. Only `clearOcr()`
+    // bumps it — an overlapping selection (a second drop while the first
+    // batch is in flight) shares the token, so both batches merge their
+    // chips. Incrementing here (the old behaviour) stranded the first
+    // batch's chips in `loading` forever when its results were discarded
+    // as stale, pinning `ocrLoading` true.
+    const myToken = ocrBatchToken;
     // Add loading chips immediately so the user sees feedback. Track the chip
     // IDs created by THIS invocation so concurrent drops don't interfere.
     const chipIds: string[] = [];

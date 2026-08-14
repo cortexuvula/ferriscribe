@@ -65,7 +65,14 @@
   async function handleSyncNow() {
     try {
       const summary = await recordings.syncNow();
-      if (!summary) return; // queued behind an in-flight sync
+      if (!summary) {
+        // null = queued behind an in-flight sync OR the sync threw (the
+        // store swallows errors; lastSyncError distinguishes the two).
+        if (recordings.lastSyncError) {
+          toasts.error(`Sync failed: ${recordings.lastSyncError}`);
+        }
+        return;
+      }
       if (summary.disabled) {
         toasts.error(
           'Content sync skipped — check that sync is enabled, the pairing has a Tailscale address, and a token is present. See the logs for the specific reason.',
