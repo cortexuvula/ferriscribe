@@ -64,8 +64,22 @@
 
   async function handleSyncNow() {
     try {
-      await recordings.syncNow();
-      toasts.success('Content sync complete');
+      const summary = await recordings.syncNow();
+      if (!summary) return; // queued behind an in-flight sync
+      if (summary.disabled) {
+        toasts.error(
+          'Content sync skipped — check that sync is enabled, the pairing has a Tailscale address, and a token is present. See the logs for the specific reason.',
+        );
+      } else if (summary.pulled > 0 || summary.pushed > 0) {
+        toasts.success(
+          `Content sync complete — pulled ${summary.pulled}, pushed ${summary.pushed}` +
+            (summary.merge_conflicts + summary.push_conflicts > 0
+              ? `, ${summary.merge_conflicts + summary.push_conflicts} conflict(s)`
+              : ''),
+        );
+      } else {
+        toasts.success('Content sync complete (no changes)');
+      }
     } catch (err) {
       toasts.error(`Sync failed: ${err}`);
     }

@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { SyncSummary } from '../api/contentSync';
 import type { Recording, RecordingSummary } from '../types';
 import {
   listRecordings,
@@ -167,19 +168,22 @@ class RecordingsStore {
   /// event arrives mid-sync), the request is queued via `syncPending` and
   /// replayed after the current sync completes. This prevents dropped
   /// notifications when events fire during an in-flight sync.
-  async syncNow(): Promise<void> {
+  async syncNow(): Promise<SyncSummary | null> {
     // Guard against concurrent syncs: stacked `content-changed` events would
     // otherwise fire multiple overlapping round-trips (Bug M4). Queue the
     // request instead of dropping it so the missed event is replayed.
     if (this.syncing) {
       this.syncPending = true;
-      return;
+      return null;
     }
     this.syncing = true;
+    let summary: SyncSummary | null = null;
     try {
-      await invoke('sync_content_now');
-      await this.load();
-      this.lastSyncedAt = new Date();
+      summary = await invoke<SyncSummary>('sync_content_now');
+      if (!summary?.disabled) {
+        await this.load();
+        this.lastSyncedAt = new Date();
+      }
     } catch (err) {
       // Network failures and backend errors are logged here rather than
       // propagating as unhandled promise rejections (Bug M4).
@@ -198,6 +202,7 @@ class RecordingsStore {
         }, 100);
       }
     }
+    return summary;
   }
 
   /// Debounce timer for batched `recording-updated` events. A sync pull
