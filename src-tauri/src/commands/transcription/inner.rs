@@ -350,10 +350,11 @@ pub async fn transcribe_recording_inner(
     //
     // When paired with an office server that exposes the vocab API, fetch
     // entries from there so corrections stay consistent across all paired
-    // clients. On failure (server unreachable, transient HTTP error), warn
-    // and fall through with no corrections rather than aborting the whole
-    // transcription — corrections are best-effort polish on top of the
-    // already-successful STT output.
+    // clients. On failure (server unreachable, transient HTTP error), fall
+    // back to the LOCAL rules (warned in the log) rather than aborting the
+    // whole transcription or shipping an uncorrected transcript —
+    // corrections are best-effort polish on top of the already-successful
+    // STT output.
     let vocab_enabled = {
         let db_settings = Arc::clone(&state.db);
         tokio::task::spawn_blocking(move || -> bool {
@@ -406,38 +407,51 @@ pub async fn transcribe_recording_inner(
         };
 
     let db_vocab = Arc::clone(&state.db);
-    let display_text = match tokio::task::spawn_blocking(move || {
+    let (display_text, transcript) = match tokio::task::spawn_blocking(move || {
         if !vocab_enabled {
-            return Ok::<String, AppError>(display_text);
+            return Ok::<_, AppError>((display_text, transcript));
         }
-        let entries = if let Some(remote) = remote_entries {
-            remote
-        } else {
-            // Local fallback: only when not paired or remote fetch failed
-            // and we want to use the local DB. When paired but remote
-            // failed, remote_entries is None and we skip rather than
-            // silently using stale local data.
-            if crate::state::load_paired_connection().is_some() {
-                return Ok(display_text);
+        let entries = match remote_entries {
+            Some(remote) => remote,
+            None => {
+                // Paired but the server rules are unavailable (fetch failed,
+                // or the server predates the vocab API). Fall back to the
+                // local rules rather than skipping — some corrections beat
+                // none — and log loudly so the staleness is visible.
+                if crate::state::load_paired_connection().is_some() {
+                    tracing::warn!(
+                        "vocabulary: server rules unavailable (fetch failed or server predates the vocab API) — falling back to local rules, which may be stale"
+                    );
+                }
+                let conn = db_vocab.conn()?;
+                VocabularyRepo::list_enabled(&conn)?
             }
-            let conn = db_vocab.conn()?;
-            VocabularyRepo::list_enabled(&conn)?
         };
         if entries.is_empty() {
-            return Ok(display_text);
+            return Ok((display_text, transcript));
         }
-        let result = vocabulary_corrector::apply_corrections(&display_text, &entries);
-        if result.total_replacements > 0 {
+        // Correct each segment's text, then rebuild the display text from
+        // the corrected segments so the speaker-labeled editor view (which
+        // reads transcript_segments from metadata) always matches the flat
+        // transcript — previously only the flat text was corrected.
+        let mut total_replacements: u32 = 0;
+        for seg in transcript.segments.iter_mut() {
+            let result = vocabulary_corrector::apply_corrections(&seg.text, &entries);
+            total_replacements += result.total_replacements;
+            seg.text = result.corrected_text;
+        }
+        if total_replacements > 0 {
             tracing::info!(
-                replacements = result.total_replacements,
+                replacements = total_replacements,
                 "Applied vocabulary corrections to transcript"
             );
         }
-        Ok(result.corrected_text)
+        let display_text = format_transcript_with_speakers(&transcript);
+        Ok((display_text, transcript))
     })
     .await
     {
-        Ok(Ok(text)) => text,
+        Ok(Ok(pair)) => pair,
         Ok(Err(e)) => {
             let err_msg = unwrap_app_error_message(e);
             return Err(AppError::Processing(
