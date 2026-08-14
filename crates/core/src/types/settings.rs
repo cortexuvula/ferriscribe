@@ -212,6 +212,10 @@ fn default_auto_generate_soap() -> bool {
     false
 }
 
+fn default_soap_notification_sound() -> bool {
+    true
+}
+
 fn default_max_retry_attempts() -> u32 {
     3
 }
@@ -368,6 +372,12 @@ pub struct AppConfig {
     pub auto_generate_letter: bool,
     #[serde(default = "default_auto_generate_soap")]
     pub auto_generate_soap: bool,
+    /// Play a short local chime when a SOAP note finishes generating.
+    /// Purely local (Web Audio synthesis in the app webview) — no TTS
+    /// provider, no audio asset, no network. Frontend-only concern; the
+    /// backend just persists the preference.
+    #[serde(default = "default_soap_notification_sound")]
+    pub soap_notification_sound: bool,
     #[serde(default = "default_auto_index_rag")]
     pub auto_index_rag: bool,
     #[serde(default = "default_vocabulary_enabled")]

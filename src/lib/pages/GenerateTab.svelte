@@ -15,6 +15,8 @@
   import { letterAudiences } from '../stores/letterAudiences.svelte';
   import { toasts } from '../stores/toasts.svelte';
   import { useOcr } from '../composables/useOcr.svelte';
+  import { settings } from '../stores/settings.svelte';
+  import { playSoapCompleteChime } from '../utils/notificationSound';
 
   interface Props {
     onNavigateRecordings?: () => void;
@@ -178,6 +180,9 @@
       generation.finish();
       const label = type === 'soap' ? 'SOAP note' : type === 'referral' ? 'Referral letter' : type === 'letter' ? 'Letter' : 'Peer discussion note';
       toasts.success(`${label} generated`);
+      if (type === 'soap' && settings.state.soap_notification_sound) {
+        playSoapCompleteChime();
+      }
     } catch (e) {
       if (e instanceof OfflineCancelled) {
         // Dialog already informed the user; restore idle state without an error banner.
