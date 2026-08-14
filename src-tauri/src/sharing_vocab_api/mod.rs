@@ -190,8 +190,12 @@ pub async fn spawn(
             "/v1/content/audio/{recording_id}",
             get(audio::content_audio_get_handler).put(audio::content_audio_put_handler),
         )
-        // Allow large bodies (up to 256 MiB) for audio upload/download.
-        .layer(DefaultBodyLimit::max(256 * 1024 * 1024))
+        // Allow large bodies (up to 1 GiB) for audio upload/download. The
+        // previous 256 MiB cap rejected multi-hour recordings with
+        // 413 Payload Too Large — their metadata synced but the audio never
+        // arrived. The handler buffers the body in memory to encrypt it, so
+        // the server needs roughly 2x the largest recording in free RAM.
+        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(state);
 
     let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")

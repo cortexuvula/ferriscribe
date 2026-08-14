@@ -18,6 +18,11 @@ use medical_security::file_crypto;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+// Re-export tauri::Emitter so the inline `state.app_handle.emit(...)` call
+// below compiles without importing the trait into the module namespace
+// (mirrors the pattern in `content_sync.rs`).
+use tauri::Emitter as _;
+
 use super::{ApiState, authorize};
 
 /// GET /v1/content/audio/{recording_id} — download decrypted audio bytes.
@@ -192,6 +197,17 @@ pub(super) async fn content_audio_put_handler(
         warn!(id_len, error = %e, "content_audio: put failed");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Notify other clients (SSE) and THIS server's own webview that the
+    // recording's audio landed. Recordings sync in two phases (metadata,
+    // then audio); without this emit the server UI's audio state stays
+    // stale after phase 2 until the next background refresh. Mirrors the
+    // metadata push handler's notify pattern.
+    let _ = state.content_changed_tx.send(recording_id.clone());
+    let _ = state.app_handle.emit(
+        "recording-updated",
+        serde_json::json!({ "id": recording_id }),
+    );
 
     info!(id_len, byte_count, "content_audio: put (201)");
     Ok(StatusCode::CREATED)

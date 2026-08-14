@@ -77,17 +77,42 @@ fn advance_cursor(ts: &str) -> String {
 pub(crate) fn content_sync_target(
     state: &AppState,
 ) -> Option<(PairedConnection, String, Arc<reqwest::Client>)> {
+    // Each gate logs WHY it failed at debug level, so a silently-zero sync is
+    // diagnosable from the logs instead of being indistinguishable from
+    // "synced, nothing changed". Debug (not info) because the per-edit push
+    // paths call this too and would spam when gates are down.
     // Gate 1: user opt-in.
-    let config = crate::commands::settings::load_config_sync(&state.db).ok()?;
+    let Ok(config) = crate::commands::settings::load_config_sync(&state.db) else {
+        tracing::debug!("content sync skipped: could not load settings");
+        return None;
+    };
     if !config.sync_content {
+        tracing::debug!("content sync skipped: sync_content is disabled in settings");
         return None;
     }
     // Gate 2: paired connection with Tailscale + vocab port.
-    let conn = state::load_paired_connection()?;
-    conn.ports.vocab?;
-    conn.tailscale.as_ref()?;
+    let Some(conn) = state::load_paired_connection() else {
+        tracing::debug!("content sync skipped: not paired with an office server");
+        return None;
+    };
+    if conn.ports.vocab.is_none() {
+        tracing::debug!(
+            "content sync skipped: paired connection has no vocab port (server predates content sync?)"
+        );
+        return None;
+    }
+    if conn.tailscale.is_none() {
+        tracing::debug!(
+            "content sync skipped: paired connection has no Tailscale address \
+             (re-pair, or ensure the server advertises Tailscale)"
+        );
+        return None;
+    }
     // Gate 3: bearer token.
-    let bearer = state::load_sharing_bearer()?;
+    let Some(bearer) = state::load_sharing_bearer() else {
+        tracing::debug!("content sync skipped: no sharing bearer token (unpaired?)");
+        return None;
+    };
     Some((conn, bearer, state.http_client.clone()))
 }
 
@@ -586,7 +611,7 @@ async fn run_sync(
                 match plaintext_result {
                     Ok(Ok(plaintext)) => {
                         if let Err(e) = remote.upload_audio(rec_id, plaintext).await {
-                            tracing::debug!(error = %e, "sync: audio upload failed (may already exist)");
+                            tracing::debug!(error = %e, "sync: audio upload failed");
                         }
                     }
                     Ok(Err(_)) | Err(_) => { /* no local audio — skip */ }
@@ -648,12 +673,24 @@ pub async fn sync_content_now(
     }
 
     let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
-        return Ok(SyncSummaryPayload::default());
+        tracing::warn!(
+            "content sync skipped: gates failed (see preceding debug logs for the reason)"
+        );
+        return Ok(SyncSummaryPayload {
+            disabled: true,
+            ..Default::default()
+        });
     };
     let remote = match crate::content_remote::ContentRemote::from(&conn, Some(bearer), http_client)
     {
         Some(r) => r,
-        None => return Ok(SyncSummaryPayload::default()),
+        None => {
+            tracing::warn!("content sync skipped: transport setup failed after gates passed");
+            return Ok(SyncSummaryPayload {
+                disabled: true,
+                ..Default::default()
+            });
+        }
     };
     // Serialize sync rounds to prevent cursor races (H3).
     let _guard = state.content_sync_lock.lock().await;
@@ -746,6 +783,11 @@ pub struct SyncSummaryPayload {
     pub pushed: usize,
     pub merge_conflicts: usize,
     pub push_conflicts: usize,
+    /// True when the sync was skipped entirely because a gate failed
+    /// (sync disabled, missing Tailscale address, unpaired, no token).
+    /// Distinguishes "couldn't sync" from "synced, nothing changed" — the
+    /// two were previously indistinguishable in the UI.
+    pub disabled: bool,
 }
 
 impl From<SyncSummary> for SyncSummaryPayload {
@@ -755,6 +797,8 @@ impl From<SyncSummary> for SyncSummaryPayload {
             pushed: s.pushed,
             merge_conflicts: s.merge_conflicts,
             push_conflicts: s.push_conflicts,
+            // A real sync round is by definition not gate-disabled.
+            disabled: false,
         }
     }
 }
