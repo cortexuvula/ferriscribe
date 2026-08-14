@@ -33,7 +33,7 @@
 
   <ConditionChipSync visible={sharingOn || !!pairedTo} />
 
-  <ContentSync visible={sharingOn || !!pairedTo} />
+  <ContentSync visible={sharingOn || !!pairedTo} isServer={mode === 'server'} />
 
   {#if mode === 'server' && !sharingOn}
     <ServerWizard ondone={() => sharingModes.refresh()} />
