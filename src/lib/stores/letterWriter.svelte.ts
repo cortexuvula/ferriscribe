@@ -43,15 +43,19 @@ class LetterWriterStore {
     if (!this.canGenerate) return;
     this.generating = true;
     this.error = null;
-    this.output = '';
+    // NOTE: the previous letter is deliberately kept visible during
+    // generation and only replaced on success — clearing it up-front
+    // destroyed the user's letter (including manual edits) when the
+    // request was cancelled (offline dialog) without producing anything.
     try {
-      this.output = await generateLetterFromDocument(this.ocr.ocrTextDisplay.trim(), {
+      const letter = await generateLetterFromDocument(this.ocr.ocrTextDisplay.trim(), {
         recipient: this.recipient.trim() || undefined,
         letterType: this.letterType || undefined,
         tone: this.tone || undefined,
         reLine: this.reLine.trim() || undefined,
         userInstructions: this.userInstructions.trim() || undefined,
       });
+      this.output = letter;
       toasts.success('Letter generated');
     } catch (e) {
       if (e instanceof OfflineCancelled) {

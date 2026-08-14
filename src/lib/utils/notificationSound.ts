@@ -17,7 +17,10 @@ export function playSoapCompleteChime(): void {
   try {
     ctx ??= new AudioContext();
     if (ctx.state === 'suspended') {
-      void ctx.resume();
+      // Autoplay policy can reject resume when not user-gesture initiated;
+      // swallow it — the visual toast still notifies, and the scheduled
+      // tones will fire whenever the context eventually advances.
+      ctx.resume().catch(() => {});
     }
     const t0 = ctx.currentTime;
 
