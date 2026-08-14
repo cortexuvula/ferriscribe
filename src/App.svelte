@@ -21,7 +21,7 @@
   import EndpointOfflineDialog from './lib/components/EndpointOfflineDialog.svelte';
   import { settingsNav } from './lib/stores/settingsNav.svelte';
   import type { ServiceKind } from './lib/api/invokeWithOfflineHandling';
-  import { recordings, selectRecording } from './lib/stores/recordings.svelte';
+  import { recordings, selectRecording, startBackgroundSync } from './lib/stores/recordings.svelte';
   import { pipeline } from './lib/stores/pipeline.svelte';
   import { audio } from './lib/stores/audio.svelte';
   import { toasts } from './lib/stores/toasts.svelte';
@@ -89,6 +89,20 @@
   async function retrySettingsLoad() {
     await settings.load();
   }
+
+  // Content-sync background timer: start it at APP STARTUP when content
+  // sync is enabled, not only when the user happens to open Settings →
+  // Sharing (the ContentSync settings component that previously (re)started
+  // it only mounts inside the settings dialog). The SSE subscription is
+  // already established unconditionally in onMount below; this timer is the
+  // polling safety net for events the SSE stream may have missed (e.g.
+  // laptop asleep at the moment of a change). Idempotent — replaces any
+  // existing timer.
+  $effect(() => {
+    if (settings.loaded && settings.state.sync_content) {
+      startBackgroundSync();
+    }
+  });
 
   // Intercept settings tab — open modal instead of navigating
   $effect(() => {
