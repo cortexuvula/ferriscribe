@@ -12,12 +12,8 @@ use crate::RagError;
 /// SQLite-backed knowledge-graph search for the RAG layer.
 ///
 /// Stores entities and relations in two lightweight SQLite tables
-/// (`graph_entities` and `graph_relations`). This avoids the CozoDB
-/// feature-gate complexity while still providing graph-based retrieval
-/// within the RAG pipeline.
-///
-/// The CozoDB `GraphRepo` in the `medical-db` crate remains available
-/// (behind the `graph` feature) for direct, more powerful Datalog queries.
+/// (`graph_entities` and `graph_relations`), providing graph-based
+/// retrieval within the RAG pipeline without a separate graph database.
 pub struct GraphSearch {
     db: Arc<Database>,
     initialized: std::sync::OnceLock<Result<(), String>>,

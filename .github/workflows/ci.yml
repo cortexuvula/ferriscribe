@@ -64,6 +64,12 @@ jobs:
         # aren't relevant to the workspace lint gate. `--all-targets` includes
         # tests/examples so we catch lint regressions in test code too.
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo clippy local-tts feature (-D warnings)
+        # The `local-tts` feature is off by default and pulled in by nothing,
+        # so the workspace-wide clippy pass never compiles it — it rotted
+        # unnoticed before this gate existed. tts on Linux needs
+        # speech-dispatcher headers only at runtime, not build time.
+        run: cargo clippy -p medical-tts-providers --all-targets --features local-tts -- -D warnings
 
   test:
     strategy:
