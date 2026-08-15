@@ -184,8 +184,23 @@ pub fn get_output_device(name: Option<&str>) -> AudioResult<cpal::Device> {
 mod tests {
     use super::*;
 
+    /// cpal device enumeration can block indefinitely on machines with busy
+    /// or virtual audio hardware (the same reason Windows CI is excluded).
+    /// Gated like the mDNS smoke tests (FERRISCRIBE_MDNS_TEST) so
+    /// `cargo test --workspace --lib` stays runnable on dev machines.
+    fn audio_gate() -> bool {
+        if std::env::var("FERRISCRIBE_AUDIO_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set FERRISCRIBE_AUDIO_TEST=1 to enumerate audio devices");
+            return false;
+        }
+        true
+    }
+
     #[test]
     fn list_input_returns_vec() {
+        if !audio_gate() {
+            return;
+        }
         // May be empty in a headless CI environment — just assert it doesn't panic.
         let result = list_input_devices();
         assert!(
@@ -197,6 +212,9 @@ mod tests {
 
     #[test]
     fn list_output_returns_vec() {
+        if !audio_gate() {
+            return;
+        }
         let result = list_output_devices();
         assert!(
             result.is_ok(),
@@ -207,6 +225,9 @@ mod tests {
 
     #[test]
     fn get_input_device_none_succeeds_or_no_device() {
+        if !audio_gate() {
+            return;
+        }
         match get_input_device(None) {
             Ok(_) => {}
             Err(AudioError::NoInputDevice) => {}

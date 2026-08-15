@@ -19,6 +19,12 @@ cargo test -p medical-sharing
 # recording_sync_merge — NOT covered by --lib above)
 cargo test -p medical-db
 
+# Audio device tests are gated behind FERRISCRIBE_AUDIO_TEST=1 (cpal
+# enumeration can block indefinitely on machines with busy/virtual audio
+# hardware — same reason Windows CI is excluded). Without the env var they
+# skip, so `cargo test --workspace --lib` stays runnable on dev machines.
+FERRISCRIBE_AUDIO_TEST=1 cargo test -p medical-audio --lib
+
 # Frontend tests
 npx vitest run
 
