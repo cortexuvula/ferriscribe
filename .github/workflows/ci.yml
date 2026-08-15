@@ -56,7 +56,7 @@ jobs:
       - name: Install Linux deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev pkg-config
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev pkg-config libspeechd-dev
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy (-D warnings)
@@ -67,8 +67,9 @@ jobs:
       - name: cargo clippy local-tts feature (-D warnings)
         # The `local-tts` feature is off by default and pulled in by nothing,
         # so the workspace-wide clippy pass never compiles it — it rotted
-        # unnoticed before this gate existed. tts on Linux needs
-        # speech-dispatcher headers only at runtime, not build time.
+        # unnoticed before this gate existed. On Linux the tts crate pulls in
+        # speech-dispatcher-sys, whose build script pkg-configs libspeechd —
+        # hence the libspeechd-dev apt above.
         run: cargo clippy -p medical-tts-providers --all-targets --features local-tts -- -D warnings
 
   test:
