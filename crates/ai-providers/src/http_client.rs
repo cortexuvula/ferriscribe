@@ -26,13 +26,13 @@ use medical_core::types::settings::AppConfig;
 
 /// Build a reqwest client with Bearer-token auth.
 ///
-/// Returns `Err(AppError::AiProvider(...))` if the API key contains characters
+/// Returns `Err(AppError::ai_provider(...))` if the API key contains characters
 /// that are invalid in HTTP header values (newlines, raw control bytes) or if
 /// reqwest's builder fails — the caller decides how to surface that.
 pub fn build_client(api_key: &str, timeout_secs: u64) -> AppResult<Client> {
     let mut auth_value =
         header::HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| {
-            AppError::AiProvider("API key contains characters invalid in HTTP headers".into())
+            AppError::ai_provider("API key contains characters invalid in HTTP headers")
         })?;
     auth_value.set_sensitive(true);
 
@@ -45,7 +45,7 @@ pub fn build_client(api_key: &str, timeout_secs: u64) -> AppResult<Client> {
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(timeout_secs))
         .build()
-        .map_err(|e| AppError::AiProvider(format!("Failed to build HTTP client: {e}")))
+        .map_err(|e| AppError::ai_provider(format!("Failed to build HTTP client: {e}")))
 }
 
 /// Build a reqwest client with a custom auth header.
@@ -55,10 +55,10 @@ pub fn build_client_custom_auth(
     timeout_secs: u64,
 ) -> AppResult<Client> {
     let header_name = header::HeaderName::from_bytes(header_name.as_bytes())
-        .map_err(|_| AppError::AiProvider(format!("Invalid auth header name: {header_name:?}")))?;
+        .map_err(|_| AppError::ai_provider(format!("Invalid auth header name: {header_name:?}")))?;
 
     let mut header_value = header::HeaderValue::from_str(api_key).map_err(|_| {
-        AppError::AiProvider("API key contains characters invalid in HTTP headers".into())
+        AppError::ai_provider("API key contains characters invalid in HTTP headers")
     })?;
     header_value.set_sensitive(true);
 
@@ -71,7 +71,7 @@ pub fn build_client_custom_auth(
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(timeout_secs))
         .build()
-        .map_err(|e| AppError::AiProvider(format!("Failed to build HTTP client: {e}")))
+        .map_err(|e| AppError::ai_provider(format!("Failed to build HTTP client: {e}")))
 }
 
 /// Configuration for exponential-backoff retry logic.

@@ -111,7 +111,7 @@ async fn generate_letter_from_document_inner(
     let response = provider.complete(request).await.map_err(|e| match e {
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
-        _ => AppError::AiProvider(format!(
+        _ => AppError::ai_provider(format!(
             "AI completion failed: {}",
             crate::commands::unwrap_app_error_message(e)
         )),
@@ -119,7 +119,7 @@ async fn generate_letter_from_document_inner(
 
     let letter = document_generator::strip_markdown(&response.content);
     if letter.trim().is_empty() {
-        return Err(AppError::AiProvider(
+        return Err(AppError::ai_provider(
             "AI returned an empty letter.".to_string(),
         ));
     }

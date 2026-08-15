@@ -133,12 +133,12 @@ impl Tool for RagSearchTool {
         let fetch_k = top_k * 2;
         let vector_results = vector_store
             .search(&query_embedding, fetch_k, 0.3)
-            .map_err(|e| medical_core::error::AppError::Rag(format!("Vector search: {e}")))?;
+            .map_err(|e| medical_core::error::AppError::rag(format!("Vector search: {e}")))?;
 
         // 3. Search BM25
         let bm25_results = bm25
             .search(query, fetch_k)
-            .map_err(|e| medical_core::error::AppError::Rag(format!("BM25 search: {e}")))?;
+            .map_err(|e| medical_core::error::AppError::rag(format!("BM25 search: {e}")))?;
 
         info!(
             vector_count = vector_results.len(),

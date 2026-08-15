@@ -43,7 +43,7 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            AppError::Processing(
+            AppError::processing(
                 "Recording has no SOAP note. Generate a SOAP note first.".to_string(),
             )
         })?;
@@ -80,7 +80,7 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
         // For other errors, keep the existing nicer wrapping.
-        _ => AppError::AiProvider(format!(
+        _ => AppError::ai_provider(format!(
             "AI completion failed: {}",
             crate::commands::unwrap_app_error_message(e)
         )),
@@ -88,7 +88,7 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
 
     let synopsis_text = response.content;
     if synopsis_text.is_empty() {
-        return Err(AppError::AiProvider(
+        return Err(AppError::ai_provider(
             "AI returned an empty synopsis.".to_string(),
         ));
     }

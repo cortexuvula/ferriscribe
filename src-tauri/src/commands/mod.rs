@@ -136,16 +136,16 @@ pub fn resolve_recordings_dir(db: &Database, data_dir: &Path) -> AppResult<PathB
 pub(super) fn unwrap_app_error_message(err: AppError) -> String {
     match err {
         AppError::Database { message: s, .. }
-        | AppError::Security(s)
-        | AppError::Audio(s)
-        | AppError::AiProvider(s)
-        | AppError::SttProvider(s)
-        | AppError::TtsProvider(s)
-        | AppError::Agent(s)
-        | AppError::Rag(s)
-        | AppError::Processing(s)
-        | AppError::Export(s)
-        | AppError::Translation(s)
+        | AppError::Security { message: s, .. }
+        | AppError::Audio { message: s, .. }
+        | AppError::AiProvider { message: s, .. }
+        | AppError::SttProvider { message: s, .. }
+        | AppError::TtsProvider { message: s, .. }
+        | AppError::Agent { message: s, .. }
+        | AppError::Rag { message: s, .. }
+        | AppError::Processing { message: s, .. }
+        | AppError::Export { message: s, .. }
+        | AppError::Translation { message: s, .. }
         | AppError::Config(s)
         | AppError::InvalidInput(s)
         | AppError::MutexPoisoned(s)
@@ -167,16 +167,16 @@ pub(super) fn unwrap_app_error_message(err: AppError) -> String {
 pub(super) fn unwrap_app_error_message_ref(err: &AppError) -> String {
     match err {
         AppError::Database { message: s, .. }
-        | AppError::Security(s)
-        | AppError::Audio(s)
-        | AppError::AiProvider(s)
-        | AppError::SttProvider(s)
-        | AppError::TtsProvider(s)
-        | AppError::Agent(s)
-        | AppError::Rag(s)
-        | AppError::Processing(s)
-        | AppError::Export(s)
-        | AppError::Translation(s)
+        | AppError::Security { message: s, .. }
+        | AppError::Audio { message: s, .. }
+        | AppError::AiProvider { message: s, .. }
+        | AppError::SttProvider { message: s, .. }
+        | AppError::TtsProvider { message: s, .. }
+        | AppError::Agent { message: s, .. }
+        | AppError::Rag { message: s, .. }
+        | AppError::Processing { message: s, .. }
+        | AppError::Export { message: s, .. }
+        | AppError::Translation { message: s, .. }
         | AppError::Config(s)
         | AppError::InvalidInput(s)
         | AppError::MutexPoisoned(s)
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn unwrap_app_error_message_strips_all_category_prefixes() {
         assert_eq!(
-            unwrap_app_error_message(AppError::AiProvider("bad key".to_string())),
+            unwrap_app_error_message(AppError::ai_provider("bad key".to_string())),
             "bad key"
         );
         assert_eq!(
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn unwrap_app_error_message_ref_strips_all_category_prefixes() {
         assert_eq!(
-            unwrap_app_error_message_ref(&AppError::AiProvider("bad key".to_string())),
+            unwrap_app_error_message_ref(&AppError::ai_provider("bad key".to_string())),
             "bad key"
         );
         assert_eq!(

@@ -116,7 +116,7 @@ async fn generate_peer_discussion_inner(
         .as_deref()
         .filter(|t| !t.is_empty())
         .ok_or_else(|| {
-            AppError::Processing(
+            AppError::processing(
                 "Recording has no transcript. Run transcription first.".to_string(),
             )
         })?;
@@ -165,7 +165,7 @@ async fn generate_peer_discussion_inner(
 
     let response = provider.complete(request).await.map_err(|e| match e {
         AppError::EndpointOffline { .. } => e,
-        _ => AppError::AiProvider(format!(
+        _ => AppError::ai_provider(format!(
             "AI completion failed: {}",
             crate::commands::unwrap_app_error_message(e)
         )),
@@ -173,7 +173,7 @@ async fn generate_peer_discussion_inner(
 
     let discussion_text = response.content;
     if discussion_text.is_empty() {
-        return Err(AppError::AiProvider(
+        return Err(AppError::ai_provider(
             "AI returned an empty peer discussion note.".to_string(),
         ));
     }

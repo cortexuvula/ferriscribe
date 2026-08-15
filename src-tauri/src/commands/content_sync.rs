@@ -452,7 +452,7 @@ async fn run_sync(
                             medical_security::file_crypto::encrypt_file_in_place(&tmp).map_err(
                                 |e| {
                                     let _ = std::fs::remove_file(&tmp);
-                                    AppError::Security(format!("audio re-encrypt failed: {e}"))
+                                    AppError::security(format!("audio re-encrypt failed: {e}"))
                                 },
                             )?;
                             std::fs::rename(&tmp, &target)?;
@@ -603,7 +603,7 @@ async fn run_sync(
                                 std::fs::read(path)
                                     .map_err(|e| AppError::Other(format!("audio read failed: {e}")))
                             }
-                            Err(e) => Err(AppError::Security(format!("audio decrypt failed: {e}"))),
+                            Err(e) => Err(AppError::security(format!("audio decrypt failed: {e}"))),
                         }
                     })
                     .await
@@ -968,7 +968,7 @@ pub async fn fetch_audio_from_server(
             // Clean up the temp plaintext on failure — never leave
             // unencrypted PHI on disk.
             let _ = std::fs::remove_file(&tmp_path);
-            AppError::Security(format!("audio re-encrypt failed: {e}"))
+            AppError::security(format!("audio re-encrypt failed: {e}"))
         })?;
         if let Err(e) = std::fs::rename(&tmp_path, &target_for_task) {
             let _ = std::fs::remove_file(&tmp_path);
@@ -1035,7 +1035,7 @@ pub async fn upload_audio_to_server(
                 // Legacy plaintext file — read as-is.
                 std::fs::read(path).map_err(|e| AppError::Other(format!("audio read failed: {e}")))
             }
-            Err(e) => Err(AppError::Security(format!("audio decrypt failed: {e}"))),
+            Err(e) => Err(AppError::security(format!("audio decrypt failed: {e}"))),
         }
     })
     .await

@@ -183,7 +183,7 @@ async fn chat_send_inner(
         let registry = state.ai_providers.lock().await;
         registry.get_active_arc()
     }
-    .ok_or_else(|| AppError::AiProvider("No active AI provider configured".to_string()))?;
+    .ok_or_else(|| AppError::ai_provider("No active AI provider configured".to_string()))?;
 
     let core_messages = convert_messages(messages);
 
@@ -201,7 +201,7 @@ async fn chat_send_inner(
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
         // For other errors, keep the existing nicer wrapping.
-        _ => AppError::AiProvider(format!(
+        _ => AppError::ai_provider(format!(
             "AI completion failed: {}",
             super::unwrap_app_error_message(e)
         )),
@@ -259,7 +259,7 @@ pub async fn chat_stream(
         let registry = state.ai_providers.lock().await;
         registry.get_active_arc()
     }
-    .ok_or_else(|| AppError::AiProvider("No active AI provider configured".to_string()))?;
+    .ok_or_else(|| AppError::ai_provider("No active AI provider configured".to_string()))?;
 
     let core_messages = convert_messages(messages);
 
@@ -280,7 +280,7 @@ pub async fn chat_stream(
             // Preserve EndpointOffline as-is so the frontend dialog can fire.
             AppError::EndpointOffline { .. } => e,
             // For other errors, keep the existing nicer wrapping.
-            _ => AppError::AiProvider(format!(
+            _ => AppError::ai_provider(format!(
                 "Failed to start streaming: {}",
                 super::unwrap_app_error_message(e)
             )),
@@ -391,13 +391,13 @@ async fn chat_with_agent_inner(
     conversation_history: Option<Vec<ChatMessageInput>>,
 ) -> AppResult<serde_json::Value> {
     let agent = get_agent_by_name(&agent_name)
-        .ok_or_else(|| AppError::Agent(format!("Unknown agent: '{agent_name}'")))?;
+        .ok_or_else(|| AppError::agent(format!("Unknown agent: '{agent_name}'")))?;
 
     let provider = {
         let registry = state.ai_providers.lock().await;
         registry.get_active_arc()
     }
-    .ok_or_else(|| AppError::AiProvider("No active AI provider configured".to_string()))?;
+    .ok_or_else(|| AppError::ai_provider("No active AI provider configured".to_string()))?;
 
     let history = conversation_history
         .map(convert_messages)
@@ -447,7 +447,7 @@ async fn chat_with_agent_inner(
     .map_err(|e| match e {
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
-        other => AppError::Agent(format!(
+        other => AppError::agent(format!(
             "Pre-flight check failed: {}",
             super::unwrap_app_error_message(other)
         )),
@@ -472,7 +472,7 @@ async fn chat_with_agent_inner(
         .map_err(|e| match e {
             // Preserve EndpointOffline as-is so the frontend dialog can fire.
             AppError::EndpointOffline { .. } => e,
-            other => AppError::Agent(format!(
+            other => AppError::agent(format!(
                 "Agent execution failed: {}",
                 super::unwrap_app_error_message(other)
             )),
@@ -542,7 +542,7 @@ pub async fn list_models(
         }
     };
     let provider = provider
-        .ok_or_else(|| AppError::AiProvider("Provider not found or not configured".to_string()))?;
+        .ok_or_else(|| AppError::ai_provider("Provider not found or not configured".to_string()))?;
     provider.available_models().await
 }
 

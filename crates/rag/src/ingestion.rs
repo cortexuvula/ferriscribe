@@ -68,7 +68,7 @@ impl IngestionPipeline {
             };
             self.vector_store
                 .store_chunk(&chunk)
-                .map_err(|e| AppError::Rag(format!("Vector store: {e}")))?;
+                .map_err(|e| AppError::rag(format!("Vector store: {e}")))?;
         }
 
         // Extract medical entities and store in the knowledge graph
@@ -98,7 +98,7 @@ impl IngestionPipeline {
     pub async fn delete_document(&self, doc_id: Uuid) -> AppResult<()> {
         self.vector_store
             .delete_document(&doc_id)
-            .map_err(|e| AppError::Rag(format!("Delete: {e}")))?;
+            .map_err(|e| AppError::rag(format!("Delete: {e}")))?;
         Ok(())
     }
 }

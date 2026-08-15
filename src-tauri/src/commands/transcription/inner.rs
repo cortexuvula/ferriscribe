@@ -126,19 +126,19 @@ pub async fn transcribe_recording_inner(
                     candidate
                 } else {
                     let err_msg = format!("WAV file not found: {}", recording.audio_path.display());
-                    return Err(AppError::Processing(
+                    return Err(AppError::processing(
                         mark_recording_failed(&app, &state.db, recording, err_msg).await,
                     ));
                 }
             } else {
                 let err_msg = format!("WAV file not found: {}", recording.audio_path.display());
-                return Err(AppError::Processing(
+                return Err(AppError::processing(
                     mark_recording_failed(&app, &state.db, recording, err_msg).await,
                 ));
             }
         } else {
             let err_msg = format!("WAV file not found: {}", recording.audio_path.display());
-            return Err(AppError::Processing(
+            return Err(AppError::processing(
                 mark_recording_failed(&app, &state.db, recording, err_msg).await,
             ));
         }
@@ -151,7 +151,7 @@ pub async fn transcribe_recording_inner(
             Ok(Ok(audio)) => audio,
             Ok(Err(e)) => {
                 let err_msg = unwrap_app_error_message(e);
-                return Err(AppError::Processing(
+                return Err(AppError::processing(
                     mark_recording_failed(&app, &state.db, recording, err_msg).await,
                 ));
             }
@@ -201,7 +201,7 @@ pub async fn transcribe_recording_inner(
     if audio.samples.is_empty() {
         let err_msg = format!("WAV file contains no audio samples: {}", wav_path.display());
         tracing::error!("{err_msg}");
-        return Err(AppError::Processing(
+        return Err(AppError::processing(
             mark_recording_failed(&app, &state.db, recording.clone(), err_msg).await,
         ));
     }
@@ -240,7 +240,7 @@ pub async fn transcribe_recording_inner(
             None => {
                 let err_msg = "No STT provider configured. Download a Whisper model in Settings → Audio / STT.".to_string();
                 tracing::error!("{err_msg}");
-                return Err(AppError::SttProvider(
+                return Err(AppError::stt_provider(
                     mark_recording_failed(&app, &state.db, recording, err_msg).await,
                 ));
             }
@@ -258,7 +258,7 @@ pub async fn transcribe_recording_inner(
             }
             let err_msg = format!("Transcription failed: {e}");
             tracing::error!(error = %e, "STT transcription failed");
-            return Err(AppError::Processing(
+            return Err(AppError::processing(
                 mark_recording_failed(&app, &state.db, recording, err_msg).await,
             ));
         }
@@ -317,7 +317,7 @@ pub async fn transcribe_recording_inner(
             segments = transcript.segments.len(),
             "Rejecting likely Whisper hallucination from silent source"
         );
-        return Err(AppError::Processing(
+        return Err(AppError::processing(
             mark_recording_failed(&app, &state.db, recording, err_msg).await,
         ));
     }
@@ -332,7 +332,7 @@ pub async fn transcribe_recording_inner(
             segments = transcript.segments.len(),
             "{err_msg}"
         );
-        return Err(AppError::Processing(
+        return Err(AppError::processing(
             mark_recording_failed(&app, &state.db, recording, err_msg).await,
         ));
     }
@@ -454,7 +454,7 @@ pub async fn transcribe_recording_inner(
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => {
             let err_msg = unwrap_app_error_message(e);
-            return Err(AppError::Processing(
+            return Err(AppError::processing(
                 mark_recording_failed(&app, &state.db, recording, err_msg).await,
             ));
         }

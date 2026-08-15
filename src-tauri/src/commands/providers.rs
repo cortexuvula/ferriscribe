@@ -246,29 +246,29 @@ pub async fn test_lmstudio_connection(
         use medical_core::error::OfflineReason;
         use medical_core::preflight::classify_reqwest_error;
         match classify_reqwest_error(&e) {
-            Some(OfflineReason::ConnectionRefused) => AppError::AiProvider(format!(
+            Some(OfflineReason::ConnectionRefused) => AppError::ai_provider(format!(
                 "Connection refused — is LM Studio running at {}:{}?",
                 effective_host, port
             )),
-            Some(OfflineReason::Timeout) => AppError::AiProvider(format!(
+            Some(OfflineReason::Timeout) => AppError::ai_provider(format!(
                 "Connection timed out — check that {}:{} is reachable",
                 effective_host, port
             )),
             Some(OfflineReason::DnsFailure) => {
-                AppError::AiProvider(format!("Cannot resolve hostname '{}'", effective_host))
+                AppError::ai_provider(format!("Cannot resolve hostname '{}'", effective_host))
             }
-            Some(OfflineReason::TlsFailure) => AppError::AiProvider(format!(
+            Some(OfflineReason::TlsFailure) => AppError::ai_provider(format!(
                 "TLS handshake failed at {}:{}",
                 effective_host, port
             )),
-            None => AppError::AiProvider(format!("Connection failed: {e}")),
+            None => AppError::ai_provider(format!("Connection failed: {e}")),
         }
     })?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED
         || response.status() == reqwest::StatusCode::FORBIDDEN
     {
-        return Err(AppError::AiProvider(
+        return Err(AppError::ai_provider(
             "Authentication failed \u{2014} verify the API key, or if this is a paired client, \
              re-pair the office server (Settings \u{2192} Sharing \u{2192} Unpair, then scan a fresh code)."
                 .to_string(),
@@ -277,7 +277,7 @@ pub async fn test_lmstudio_connection(
     if !response.status().is_success() {
         let status = response.status();
         let body = medical_core::http_error_body::read_error_body(response, 200).await;
-        return Err(AppError::AiProvider(format!(
+        return Err(AppError::ai_provider(format!(
             "Server returned HTTP {status}: {body}"
         )));
     }
@@ -286,7 +286,7 @@ pub async fn test_lmstudio_connection(
     let body: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| AppError::AiProvider(format!("Invalid response from server: {e}")))?;
+        .map_err(|e| AppError::ai_provider(format!("Invalid response from server: {e}")))?;
 
     let model_count = body
         .get("data")
@@ -332,29 +332,29 @@ pub async fn test_stt_remote_connection(
         use medical_core::error::OfflineReason;
         use medical_core::preflight::classify_reqwest_error;
         match classify_reqwest_error(&e) {
-            Some(OfflineReason::ConnectionRefused) => AppError::SttProvider(format!(
+            Some(OfflineReason::ConnectionRefused) => AppError::stt_provider(format!(
                 "Connection refused — is the Whisper server running at {}:{}?",
                 effective_host, port
             )),
-            Some(OfflineReason::Timeout) => AppError::SttProvider(format!(
+            Some(OfflineReason::Timeout) => AppError::stt_provider(format!(
                 "Connection timed out — check that {}:{} is reachable",
                 effective_host, port
             )),
             Some(OfflineReason::DnsFailure) => {
-                AppError::SttProvider(format!("Cannot resolve hostname '{}'", effective_host))
+                AppError::stt_provider(format!("Cannot resolve hostname '{}'", effective_host))
             }
-            Some(OfflineReason::TlsFailure) => AppError::SttProvider(format!(
+            Some(OfflineReason::TlsFailure) => AppError::stt_provider(format!(
                 "TLS handshake failed at {}:{}",
                 effective_host, port
             )),
-            None => AppError::SttProvider(format!("Connection failed: {e}")),
+            None => AppError::stt_provider(format!("Connection failed: {e}")),
         }
     })?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED
         || response.status() == reqwest::StatusCode::FORBIDDEN
     {
-        return Err(AppError::SttProvider(
+        return Err(AppError::stt_provider(
             "Authentication failed \u{2014} verify the API key, or if this is a paired client, \
              re-pair the office server (Settings \u{2192} Sharing \u{2192} Unpair, then scan a fresh code)."
                 .to_string(),
@@ -363,7 +363,7 @@ pub async fn test_stt_remote_connection(
     if !response.status().is_success() {
         let status = response.status();
         let body = medical_core::http_error_body::read_error_body(response, 200).await;
-        return Err(AppError::SttProvider(format!(
+        return Err(AppError::stt_provider(format!(
             "Server returned HTTP {status}: {body}"
         )));
     }
@@ -371,7 +371,7 @@ pub async fn test_stt_remote_connection(
     let body: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| AppError::SttProvider(format!("Invalid response from server: {e}")))?;
+        .map_err(|e| AppError::stt_provider(format!("Invalid response from server: {e}")))?;
 
     let model_count = body
         .get("data")
@@ -417,29 +417,29 @@ pub async fn test_ollama_connection(
         use medical_core::error::OfflineReason;
         use medical_core::preflight::classify_reqwest_error;
         match classify_reqwest_error(&e) {
-            Some(OfflineReason::ConnectionRefused) => AppError::AiProvider(format!(
+            Some(OfflineReason::ConnectionRefused) => AppError::ai_provider(format!(
                 "Connection refused — is Ollama running at {}:{}?",
                 effective_host, port
             )),
-            Some(OfflineReason::Timeout) => AppError::AiProvider(format!(
+            Some(OfflineReason::Timeout) => AppError::ai_provider(format!(
                 "Connection timed out — check that {}:{} is reachable",
                 effective_host, port
             )),
             Some(OfflineReason::DnsFailure) => {
-                AppError::AiProvider(format!("Cannot resolve hostname '{}'", effective_host))
+                AppError::ai_provider(format!("Cannot resolve hostname '{}'", effective_host))
             }
-            Some(OfflineReason::TlsFailure) => AppError::AiProvider(format!(
+            Some(OfflineReason::TlsFailure) => AppError::ai_provider(format!(
                 "TLS handshake failed at {}:{}",
                 effective_host, port
             )),
-            None => AppError::AiProvider(format!("Connection failed: {e}")),
+            None => AppError::ai_provider(format!("Connection failed: {e}")),
         }
     })?;
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED
         || response.status() == reqwest::StatusCode::FORBIDDEN
     {
-        return Err(AppError::AiProvider(
+        return Err(AppError::ai_provider(
             "Authentication failed \u{2014} verify the API key, or if this is a paired client, \
              re-pair the office server (Settings \u{2192} Sharing \u{2192} Unpair, then scan a fresh code)."
                 .to_string(),
@@ -448,7 +448,7 @@ pub async fn test_ollama_connection(
     if !response.status().is_success() {
         let status = response.status();
         let body = medical_core::http_error_body::read_error_body(response, 200).await;
-        return Err(AppError::AiProvider(format!(
+        return Err(AppError::ai_provider(format!(
             "Server returned HTTP {status}: {body}"
         )));
     }
@@ -456,7 +456,7 @@ pub async fn test_ollama_connection(
     let body: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| AppError::AiProvider(format!("Invalid response from server: {e}")))?;
+        .map_err(|e| AppError::ai_provider(format!("Invalid response from server: {e}")))?;
 
     let model_count = body
         .get("models")

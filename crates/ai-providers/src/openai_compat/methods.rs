@@ -39,13 +39,13 @@ impl OpenAiCompatibleClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = medical_core::http_error_body::read_error_body(response, 200).await;
-            return Err(AppError::AiProvider(format!("HTTP {status}: {text}")));
+            return Err(AppError::ai_provider(format!("HTTP {status}: {text}")));
         }
 
         let resp: ModelsListResponse = response
             .json()
             .await
-            .map_err(|e| AppError::AiProvider(e.to_string()))?;
+            .map_err(|e| AppError::ai_provider_with_source(e.to_string(), e))?;
 
         let mut ids: Vec<String> = resp.data.into_iter().map(|m| m.id).collect();
         ids.sort();
@@ -94,7 +94,7 @@ impl OpenAiCompatibleClient {
 
         if !status.is_success() {
             let preview: String = raw_body.chars().take(200).collect();
-            return Err(AppError::AiProvider(format!("HTTP {status}: {preview}")));
+            return Err(AppError::ai_provider(format!("HTTP {status}: {preview}")));
         }
 
         let resp: ChatResponse = serde_json::from_str(&raw_body).map_err(|e| {
@@ -102,7 +102,7 @@ impl OpenAiCompatibleClient {
                 body_len = raw_body.len(),
                 "Failed to parse AI response JSON"
             );
-            AppError::AiProvider(format!("JSON parse error: {e}"))
+            AppError::ai_provider(format!("JSON parse error: {e}"))
         })?;
 
         debug!(
@@ -126,7 +126,7 @@ impl OpenAiCompatibleClient {
             .unwrap_or(false);
 
         if !has_content && finish_reason == "length" {
-            return Err(AppError::AiProvider(format!(
+            return Err(AppError::ai_provider(format!(
                 "Model '{}' context window exceeded: the prompt is too long for the model, \
                  leaving no room for output. Try a model with a larger context window, \
                  reduce the prompt size, or increase the model's context length in LM Studio.",
@@ -173,7 +173,7 @@ impl OpenAiCompatibleClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = medical_core::http_error_body::read_error_body(response, 200).await;
-            return Err(AppError::AiProvider(format!("HTTP {status}: {text}")));
+            return Err(AppError::ai_provider(format!("HTTP {status}: {text}")));
         }
 
         let sse = parse_sse_response(response);
@@ -182,7 +182,7 @@ impl OpenAiCompatibleClient {
         let mapped = sse
             .map(|item| -> Vec<AppResult<StreamChunk>> {
                 match item {
-                    Err(e) => vec![Err(AppError::AiProvider(e))],
+                    Err(e) => vec![Err(AppError::ai_provider(e))],
                     Ok(data) => {
                         match serde_json::from_str::<ChatResponse>(&data) {
                             Err(e) => {
@@ -193,7 +193,7 @@ impl OpenAiCompatibleClient {
                                 // silently dropping the chunk (which risked incomplete
                                 // SOAP notes with no indication).
                                 warn!(error = %e, data_len = data.len(), "malformed SSE event; propagating as stream error");
-                                vec![Err(AppError::AiProvider(format!(
+                                vec![Err(AppError::ai_provider(format!(
                                     "malformed SSE event ({} bytes): {e}",
                                     data.len()
                                 )))]
@@ -298,13 +298,13 @@ impl OpenAiCompatibleClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = medical_core::http_error_body::read_error_body(response, 200).await;
-            return Err(AppError::AiProvider(format!("HTTP {status}: {text}")));
+            return Err(AppError::ai_provider(format!("HTTP {status}: {text}")));
         }
 
         let resp: ChatResponse = response
             .json()
             .await
-            .map_err(|e| AppError::AiProvider(e.to_string()))?;
+            .map_err(|e| AppError::ai_provider_with_source(e.to_string(), e))?;
 
         let usage = resp
             .usage

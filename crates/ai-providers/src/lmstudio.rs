@@ -92,7 +92,7 @@ impl LmStudioProvider {
             .timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| {
-                AppError::AiProvider(format!("Failed to build LM Studio HTTP client: {e}"))
+                AppError::ai_provider(format!("Failed to build LM Studio HTTP client: {e}"))
             })?;
         Ok(Self {
             static_base_url: base_url.clone(),
@@ -128,7 +128,7 @@ impl LmStudioProvider {
             .timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| {
-                AppError::AiProvider(format!("Failed to build LM Studio HTTP client: {e}"))
+                AppError::ai_provider(format!("Failed to build LM Studio HTTP client: {e}"))
             })?;
         Ok(Self {
             static_base_url: base_url.clone(),
