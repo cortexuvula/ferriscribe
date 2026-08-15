@@ -21,9 +21,14 @@ use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 const MANIFEST: &str = include_str!("../whisper-manifest.json");
+
+/// Upper bound on a decompressed whisper-server binary during extraction.
+/// Guards against zip/gzip bombs in a corrupted or tampered archive; the
+/// shipped whisper-server binaries are well under this size.
+const MAX_EXTRACTED_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -201,7 +206,17 @@ impl WhisperSupervisor {
                 "sha256 hash missing for binary {binary_name}; refusing to download without verification"
             ))
         })?;
-        let bytes = reqwest::get(url)
+        // A stalled CDN must not hang start() forever — the default reqwest
+        // client has no timeout at all. Connect quickly, allow 5 min total
+        // for the binary transfer on slow clinic links.
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(300))
+            .build()
+            .map_err(|e| WhisperError::Download(format!("failed to build HTTP client: {e}")))?;
+        let bytes = client
+            .get(url)
+            .send()
             .await
             .map_err(|e| WhisperError::Download(e.to_string()))?
             .bytes()
@@ -358,26 +373,45 @@ impl WhisperSupervisor {
             tokio::select! {
                 _ = c.wait() => {
                     info!("whisper-server exited; restarting in {:?}", backoff);
-                    // Wait for the backoff period, but bail immediately if stop fires.
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
-                        _ = self.stop.notified() => { return; }
-                    }
-                    // Re-check `stopped` after the backoff sleep — stop() may have
-                    // been called while we were sleeping (notify_waiters was used
-                    // as a best-effort signal only).
-                    if self.stopped.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
-                    let bin = match self.binary_dir.read_dir() {
-                        Ok(_) => self.binary_dir.join(self.binary_name_for_platform()),
-                        Err(_) => return,
-                    };
-                    if let Ok(child) = self.spawn_once_at(&bin).await {
-                        *self.child.lock().await = Some(child);
-                    } else {
-                        return;
+                    // Respawn with backoff. A failed respawn is logged and
+                    // retried (backoff climbs to the 60 s cap) rather than
+                    // silently ending supervision — a single transient spawn
+                    // failure must not permanently kill local whisper with
+                    // no trace in the log.
+                    loop {
+                        // Wait for the backoff period, but bail immediately if stop fires.
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = self.stop.notified() => { return; }
+                        }
+                        // Re-check `stopped` after the backoff sleep — stop() may have
+                        // been called while we were sleeping (notify_waiters was used
+                        // as a best-effort signal only).
+                        if self.stopped.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                        if let Err(e) = self.binary_dir.read_dir() {
+                            warn!(
+                                error = %e,
+                                "whisper binary dir unreadable; cannot respawn yet"
+                            );
+                            continue;
+                        }
+                        let bin = self.binary_dir.join(self.binary_name_for_platform());
+                        match self.spawn_once_at(&bin).await {
+                            Ok(child) => {
+                                *self.child.lock().await = Some(child);
+                                break;
+                            }
+                            Err(e) => {
+                                error!(
+                                    error = %e,
+                                    retry_in_secs = backoff.as_secs(),
+                                    "whisper-server respawn failed; will retry"
+                                );
+                            }
+                        }
                     }
                 }
                 _ = self.stop.notified() => {
@@ -498,13 +532,32 @@ fn extract_zip(bytes: &[u8], out_dir: &Path, binary_name: &str) -> Result<()> {
     let mut zip =
         zip::ZipArchive::new(cursor).map_err(|e| WhisperError::Manifest(e.to_string()))?;
     for i in 0..zip.len() {
-        let mut file = zip
+        let file = zip
             .by_index(i)
             .map_err(|e| WhisperError::Manifest(e.to_string()))?;
         let name = file.name().to_string();
         if Path::new(&name).file_name().and_then(|s| s.to_str()) == Some(binary_name) {
+            // The entry's declared size is untrusted zip metadata: refuse
+            // oversized entries up front, then bound the actual decompressed
+            // stream too, so a corrupted or tampered archive can't OOM the
+            // app via a huge allocation. The archive's SHA-256 is verified
+            // before extraction runs; this is belt-and-suspenders.
+            if file.size() > MAX_EXTRACTED_BINARY_BYTES {
+                return Err(WhisperError::Manifest(format!(
+                    "zip entry '{name}' declares {} bytes; over the {}-byte extraction cap",
+                    file.size(),
+                    MAX_EXTRACTED_BINARY_BYTES
+                )));
+            }
             let mut buf = Vec::with_capacity(file.size() as usize);
-            std::io::Read::read_to_end(&mut file, &mut buf)?;
+            let mut limited = std::io::Read::take(file, MAX_EXTRACTED_BINARY_BYTES + 1);
+            let n = std::io::Read::read_to_end(&mut limited, &mut buf)?;
+            if n as u64 > MAX_EXTRACTED_BINARY_BYTES {
+                return Err(WhisperError::Manifest(format!(
+                    "zip entry '{name}' decompressed to {n} bytes; over the {}-byte extraction cap",
+                    MAX_EXTRACTED_BINARY_BYTES
+                )));
+            }
             std::fs::write(out_dir.join(binary_name), buf)?;
             return Ok(());
         }
@@ -519,11 +572,20 @@ fn extract_tar_gz(bytes: &[u8], out_dir: &Path, binary_name: &str) -> Result<()>
     let gz = flate2::read::GzDecoder::new(cursor);
     let mut ar = tar::Archive::new(gz);
     for entry in ar.entries()? {
-        let mut e = entry?;
+        let e = entry?;
         let path = e.path()?.to_path_buf();
         if path.file_name().and_then(|s| s.to_str()) == Some(binary_name) {
+            // Bound the decompressed size — same gzip-bomb defense as the
+            // zip path.
             let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut e, &mut buf)?;
+            let mut limited = std::io::Read::take(e, MAX_EXTRACTED_BINARY_BYTES + 1);
+            let n = std::io::Read::read_to_end(&mut limited, &mut buf)?;
+            if n as u64 > MAX_EXTRACTED_BINARY_BYTES {
+                return Err(WhisperError::Manifest(format!(
+                    "tar entry '{binary_name}' decompressed to {n} bytes; over the {}-byte extraction cap",
+                    MAX_EXTRACTED_BINARY_BYTES
+                )));
+            }
             std::fs::write(out_dir.join(binary_name), buf)?;
             return Ok(());
         }
