@@ -186,15 +186,15 @@ impl SpeakerDiarizer {
 
         let mut session = Session::builder()
             .map_err(|e| {
-                AppError::SttProvider(format!(
+                AppError::stt_provider(format!(
                     "Failed to create segmentation session builder: {e}"
                 ))
             })?
             .with_intra_threads(1)
-            .map_err(|e| AppError::SttProvider(format!("Failed to set intra threads: {e}")))?
+            .map_err(|e| AppError::stt_provider(format!("Failed to set intra threads: {e}")))?
             .commit_from_file(&self.segmentation_path)
             .map_err(|e| {
-                AppError::SttProvider(format!("Failed to load segmentation model: {e}"))
+                AppError::stt_provider(format!("Failed to load segmentation model: {e}"))
             })?;
 
         let window_size = (sample_rate * 10) as usize; // 10-second windows
@@ -229,21 +229,21 @@ impl SpeakerDiarizer {
             // Shape: [1, 1, window_size]
             let input = TensorRef::from_array_view(([1_usize, 1, window_f32.len()], &*window_f32))
                 .map_err(|e| {
-                    AppError::SttProvider(format!("Failed to create input tensor: {e}"))
+                    AppError::stt_provider(format!("Failed to create input tensor: {e}"))
                 })?;
 
             let outputs = session.run(ort::inputs![input]).map_err(|e| {
-                AppError::SttProvider(format!("Segmentation inference failed: {e}"))
+                AppError::stt_provider(format!("Segmentation inference failed: {e}"))
             })?;
 
             let output = &outputs[0];
             let (shape, data) = output.try_extract_tensor::<f32>().map_err(|e| {
-                AppError::SttProvider(format!("Failed to extract segmentation output: {e}"))
+                AppError::stt_provider(format!("Failed to extract segmentation output: {e}"))
             })?;
 
             let shape_slice: Vec<usize> = (0..shape.len()).map(|i| shape[i] as usize).collect();
             let view = ArrayViewD::<f32>::from_shape(IxDyn(&shape_slice), data)
-                .map_err(|e| AppError::SttProvider(format!("Failed to reshape output: {e}")))?;
+                .map_err(|e| AppError::stt_provider(format!("Failed to reshape output: {e}")))?;
 
             // Iterate over frames in the output
             for row in view.outer_iter() {
@@ -303,12 +303,12 @@ impl SpeakerDiarizer {
     fn extract_embeddings(&self, segments: &[SpeechSegment]) -> AppResult<Vec<Vec<f32>>> {
         let mut session = Session::builder()
             .map_err(|e| {
-                AppError::SttProvider(format!("Failed to create embedding session builder: {e}"))
+                AppError::stt_provider(format!("Failed to create embedding session builder: {e}"))
             })?
             .with_intra_threads(1)
-            .map_err(|e| AppError::SttProvider(format!("Failed to set intra threads: {e}")))?
+            .map_err(|e| AppError::stt_provider(format!("Failed to set intra threads: {e}")))?
             .commit_from_file(&self.embedding_path)
-            .map_err(|e| AppError::SttProvider(format!("Failed to load embedding model: {e}")))?;
+            .map_err(|e| AppError::stt_provider(format!("Failed to load embedding model: {e}")))?;
 
         let mut embeddings = Vec::with_capacity(segments.len());
 
@@ -320,7 +320,7 @@ impl SpeakerDiarizer {
             // Compute fbank features (80-dim Mel filterbank)
             // knf-rs returns ndarray 0.16 types; extract raw data to bridge to ort's ndarray 0.17
             let features = knf_rs::compute_fbank(&samples_f32)
-                .map_err(|e| AppError::SttProvider(format!("fbank computation failed: {e}")))?;
+                .map_err(|e| AppError::stt_provider(format!("fbank computation failed: {e}")))?;
             let feat_shape = features.shape().to_vec(); // [frames, 80]
             let feat_data = features.into_raw_vec_and_offset().0;
 
@@ -329,19 +329,21 @@ impl SpeakerDiarizer {
                 [1_usize, feat_shape[0], feat_shape[1]],
                 feat_data.into_boxed_slice(),
             ))
-            .map_err(|e| AppError::SttProvider(format!("Failed to create embedding input: {e}")))?;
+            .map_err(|e| {
+                AppError::stt_provider(format!("Failed to create embedding input: {e}"))
+            })?;
 
             let outputs = session
                 .run(ort::inputs!["feats" => input])
-                .map_err(|e| AppError::SttProvider(format!("Embedding inference failed: {e}")))?;
+                .map_err(|e| AppError::stt_provider(format!("Embedding inference failed: {e}")))?;
 
             let emb_output = outputs.get("embs").ok_or_else(|| {
-                AppError::SttProvider("Embedding model missing 'embs' output".to_string())
+                AppError::stt_provider("Embedding model missing 'embs' output".to_string())
             })?;
 
             let (_, data) = emb_output
                 .try_extract_tensor::<f32>()
-                .map_err(|e| AppError::SttProvider(format!("Failed to extract embedding: {e}")))?;
+                .map_err(|e| AppError::stt_provider(format!("Failed to extract embedding: {e}")))?;
 
             embeddings.push(data.to_vec());
         }

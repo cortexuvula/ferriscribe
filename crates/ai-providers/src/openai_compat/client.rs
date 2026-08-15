@@ -283,7 +283,7 @@ impl OpenAiCompatibleClient {
                 reason,
                 provider_name: self.provider_name.clone(),
             },
-            None => medical_core::error::AppError::AiProvider(format!("HTTP request failed: {e}")),
+            None => medical_core::error::AppError::ai_provider(format!("HTTP request failed: {e}")),
         }
     }
 

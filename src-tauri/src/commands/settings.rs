@@ -167,7 +167,7 @@ pub async fn get_api_key(
     let keys = Arc::clone(&state.keys);
     tokio::task::spawn_blocking(move || {
         keys.get_key(&provider)
-            .map_err(|e| AppError::Security(e.to_string()))
+            .map_err(|e| AppError::security_with_source(e.to_string(), e))
     })
     .await
     .map_err(|e| AppError::Other(format!("keychain task failed: {e}")))?
@@ -186,7 +186,7 @@ pub async fn set_api_key(
     let keys = Arc::clone(&state.keys);
     tokio::task::spawn_blocking(move || {
         keys.store_key(&provider, &key)
-            .map_err(|e| AppError::Security(e.to_string()))
+            .map_err(|e| AppError::security_with_source(e.to_string(), e))
     })
     .await
     .map_err(|e| AppError::Other(format!("keychain task failed: {e}")))?

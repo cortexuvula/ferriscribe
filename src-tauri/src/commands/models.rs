@@ -53,7 +53,7 @@ pub async fn download_model(
         let path = stt_models::pyannote_model_path(&data_dir, &m.filename);
         (m.clone(), path)
     } else {
-        return Err(AppError::SttProvider(format!(
+        return Err(AppError::stt_provider(format!(
             "Unknown model ID: {model_id}"
         )));
     };
@@ -76,7 +76,7 @@ pub async fn download_model(
         );
     })
     .await
-    .map_err(|e| AppError::SttProvider(e.to_string()))?;
+    .map_err(|e| AppError::stt_provider_with_source(e.to_string(), e))?;
 
     // After downloading, reinitialize the STT provider so it picks up new models.
     // Load the full AppConfig so local/remote mode + remote host/port/key all flow through.
@@ -144,14 +144,14 @@ pub async fn delete_model(state: tauri::State<'_, AppState>, model_id: String) -
     } else if let Some(m) = all_pyannote.iter().find(|m| m.id == model_id) {
         stt_models::pyannote_model_path(&data_dir, &m.filename)
     } else {
-        return Err(AppError::SttProvider(format!(
+        return Err(AppError::stt_provider(format!(
             "Unknown model ID: {model_id}"
         )));
     };
 
     stt_models::delete_model(&path)
         .await
-        .map_err(|e| AppError::SttProvider(e.to_string()))?;
+        .map_err(|e| AppError::stt_provider_with_source(e.to_string(), e))?;
 
     Ok(())
 }

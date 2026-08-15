@@ -58,7 +58,7 @@ pub async fn post_audio(
             Part::bytes(wav_bytes)
                 .file_name("audio.wav")
                 .mime_str("audio/wav")
-                .map_err(|e| AppError::SttProvider(format!("multipart error: {}", e)))?,
+                .map_err(|e| AppError::stt_provider(format!("multipart error: {}", e)))?,
         )
         .text("model", model.to_string())
         .text("response_format", "verbose_json")
@@ -103,7 +103,7 @@ pub async fn post_audio(
                         reason,
                         provider_name: "Whisper STT".into(),
                     },
-                    None => AppError::SttProvider(format!("Whisper request failed: {}", e)),
+                    None => AppError::stt_provider(format!("Whisper request failed: {}", e)),
                 }
             })?
         }
@@ -132,12 +132,12 @@ pub async fn post_audio(
                 "Whisper server rejected authentication \u{2014} re-pair the client if the office server was reinstalled."
             }
         };
-        return Err(AppError::SttProvider(msg.to_string()));
+        return Err(AppError::stt_provider(msg.to_string()));
     }
 
     if status.is_client_error() {
         let body = medical_core::http_error_body::read_error_body(resp, 200).await;
-        return Err(AppError::SttProvider(format!(
+        return Err(AppError::stt_provider(format!(
             "Whisper server rejected request: {} {}",
             status, body
         )));
@@ -162,10 +162,10 @@ pub async fn post_audio(
             } else {
                 body
             };
-            return Err(AppError::SttProvider(msg));
+            return Err(AppError::stt_provider(msg));
         }
         let body = medical_core::http_error_body::read_error_body(resp, 200).await;
-        return Err(AppError::SttProvider(format!(
+        return Err(AppError::stt_provider(format!(
             "Whisper server internal error: {} {}",
             status, body
         )));
@@ -177,7 +177,7 @@ pub async fn post_audio(
         biased;
         _ = cancel.cancelled() => Err(AppError::Cancelled),
         result = resp.json::<VerboseJson>() => result.map_err(|e| {
-            AppError::SttProvider(format!("Unexpected response from Whisper server: {}", e))
+            AppError::stt_provider(format!("Unexpected response from Whisper server: {}", e))
         }),
     }
 }

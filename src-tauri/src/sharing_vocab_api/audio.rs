@@ -83,7 +83,7 @@ pub(super) async fn content_audio_get_handler(
                         medical_core::error::AppError::Other(format!("audio read failed: {e}"))
                     })
                 }
-                Err(e) => Err(medical_core::error::AppError::Security(format!(
+                Err(e) => Err(medical_core::error::AppError::security(format!(
                     "audio decrypt failed: {e}"
                 ))),
             }
@@ -171,7 +171,7 @@ pub(super) async fn content_audio_put_handler(
     tokio::task::spawn_blocking(move || -> Result<(), medical_core::error::AppError> {
         // Encrypt the plaintext bytes in memory (no disk I/O).
         let ciphertext = file_crypto::encrypt_bytes_in_memory(&body_vec).map_err(|e| {
-            medical_core::error::AppError::Security(format!("audio encrypt failed: {e}"))
+            medical_core::error::AppError::security(format!("audio encrypt failed: {e}"))
         })?;
 
         // Write ciphertext to a unique temp file, then atomic rename.

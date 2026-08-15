@@ -63,11 +63,11 @@ mod inner {
     }
 
     fn unavailable() -> AppError {
-        AppError::TtsProvider("Local TTS engine is not available on this platform".into())
+        AppError::tts_provider("Local TTS engine is not available on this platform")
     }
 
     fn thread_died() -> AppError {
-        AppError::TtsProvider("Local TTS engine thread has exited".into())
+        AppError::tts_provider("Local TTS engine thread has exited")
     }
 
     impl LocalTtsProvider {
@@ -171,13 +171,13 @@ mod inner {
         engine
             .speak(text, false)
             .map(|_| ())
-            .map_err(|e| AppError::TtsProvider(format!("TTS speak failed: {e}")))
+            .map_err(|e| AppError::tts_provider(format!("TTS speak failed: {e}")))
     }
 
     fn list_voices_on_thread(engine: &tts::Tts) -> AppResult<Vec<VoiceInfo>> {
         let os_voices = engine
             .voices()
-            .map_err(|e| AppError::TtsProvider(format!("Failed to list voices: {e}")))?;
+            .map_err(|e| AppError::tts_provider(format!("Failed to list voices: {e}")))?;
 
         Ok(os_voices
             .into_iter()

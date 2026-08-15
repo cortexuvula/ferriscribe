@@ -118,7 +118,7 @@ impl AgentOrchestrator {
                     agent.name(),
                     MAX_ITERATIONS
                 );
-                return Err(AppError::Agent(format!(
+                return Err(AppError::agent(format!(
                     "max iterations ({}) reached without a final response",
                     MAX_ITERATIONS
                 )));

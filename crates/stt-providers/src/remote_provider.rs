@@ -102,7 +102,7 @@ impl RemoteSttProvider {
             .connect_timeout(Duration::from_secs(10))
             .timeout(TRANSCRIBE_TIMEOUT)
             .build()
-            .map_err(|e| AppError::SttProvider(format!("Failed to build HTTP client: {e}")))?;
+            .map_err(|e| AppError::stt_provider(format!("Failed to build HTTP client: {e}")))?;
 
         Ok(Self {
             client,
@@ -141,7 +141,7 @@ impl RemoteSttProvider {
             .connect_timeout(Duration::from_secs(10))
             .timeout(TRANSCRIBE_TIMEOUT)
             .build()
-            .map_err(|e| AppError::SttProvider(format!("Failed to build HTTP client: {e}")))?;
+            .map_err(|e| AppError::stt_provider(format!("Failed to build HTTP client: {e}")))?;
         Ok(Self {
             client,
             base_url,
@@ -358,7 +358,7 @@ impl SttProvider for RemoteSttProvider {
         _stream: AudioStream,
         _config: SttConfig,
     ) -> AppResult<Box<dyn Stream<Item = AppResult<TranscriptChunk>> + Send + Unpin>> {
-        Err(AppError::SttProvider(
+        Err(AppError::stt_provider(
             "Remote provider does not support streaming transcription".to_owned(),
         ))
     }

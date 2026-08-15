@@ -103,7 +103,7 @@ pub async fn resolve_provider(
         .get_arc(provider_name)
         .or_else(|| registry.get_active_arc())
         .ok_or_else(|| {
-            AppError::AiProvider(
+            AppError::ai_provider(
                 "No AI provider configured. Check LM Studio / Ollama settings.".to_string(),
             )
         })
@@ -232,7 +232,7 @@ where
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            AppError::Processing(
+            AppError::processing(
                 "Recording has no SOAP note. Generate a SOAP note first.".to_string(),
             )
         })?;
@@ -266,7 +266,7 @@ where
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
         // For other errors, keep the existing nicer wrapping.
-        _ => AppError::AiProvider(format!(
+        _ => AppError::ai_provider(format!(
             "AI completion failed: {}",
             crate::commands::unwrap_app_error_message(e)
         )),
@@ -274,7 +274,7 @@ where
 
     let text = document_generator::strip_markdown(&response.content);
     if text.trim().is_empty() {
-        return Err(AppError::AiProvider(format!(
+        return Err(AppError::ai_provider(format!(
             "AI returned an empty {doc_type_label}."
         )));
     }

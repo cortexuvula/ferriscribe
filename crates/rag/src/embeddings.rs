@@ -60,12 +60,12 @@ impl EmbeddingGenerator {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AppError::AiProvider(format!("Ollama request failed: {e}")))?;
+            .map_err(|e| AppError::ai_provider(format!("Ollama request failed: {e}")))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = medical_core::http_error_body::read_error_body(resp, 200).await;
-            return Err(AppError::AiProvider(format!(
+            return Err(AppError::ai_provider(format!(
                 "Ollama API error {status}: {body_text}"
             )));
         }
@@ -73,7 +73,7 @@ impl EmbeddingGenerator {
         let parsed: OllamaResponse = resp
             .json()
             .await
-            .map_err(|e| AppError::AiProvider(format!("Ollama response parse error: {e}")))?;
+            .map_err(|e| AppError::ai_provider(format!("Ollama response parse error: {e}")))?;
 
         Ok(parsed.embedding)
     }

@@ -225,7 +225,7 @@ pub(crate) fn open_recording_wav_raw(path: &std::path::Path) -> AppResult<Vec<u8
     match decrypt_bytes(&bytes) {
         Ok(plaintext) => Ok(plaintext),
         Err(FileCryptoError::NotEncrypted) => Ok(bytes), // legacy plaintext — use the bytes we already read
-        Err(e) => Err(AppError::Processing(format!(
+        Err(e) => Err(AppError::processing(format!(
             "Failed to decrypt recording: {e}"
         ))),
     }
@@ -277,7 +277,7 @@ pub(super) fn persist_orphaned_transcript(
 /// than crash the app.
 fn compute_int_max_val(bits_per_sample: u16) -> AppResult<f32> {
     if bits_per_sample == 0 || bits_per_sample > 32 {
-        return Err(AppError::Processing(format!(
+        return Err(AppError::processing(format!(
             "Corrupt WAV: bits_per_sample is {bits_per_sample} (must be 1-32)"
         )));
     }
@@ -303,20 +303,20 @@ pub(crate) fn open_recording_wav(
     use medical_security::file_crypto::{FileCryptoError, decrypt_bytes};
 
     let raw_bytes = std::fs::read(path)
-        .map_err(|e| AppError::Processing(format!("Failed to read WAV file: {e}")))?;
+        .map_err(|e| AppError::processing(format!("Failed to read WAV file: {e}")))?;
 
     let wav_bytes: Vec<u8> = match decrypt_bytes(&raw_bytes) {
         Ok(plaintext) => plaintext,
         Err(FileCryptoError::NotEncrypted) => raw_bytes, // legacy plaintext — use the bytes we already read
         Err(e) => {
-            return Err(AppError::Processing(format!(
+            return Err(AppError::processing(format!(
                 "Failed to decrypt recording: {e}"
             )));
         }
     };
 
     hound::WavReader::new(std::io::Cursor::new(wav_bytes))
-        .map_err(|e| AppError::Processing(format!("Failed to open WAV: {e}")))
+        .map_err(|e| AppError::processing(format!("Failed to open WAV: {e}")))
 }
 
 /// Load a WAV file from disk and convert it into `AudioData` (f32 PCM).
@@ -332,13 +332,13 @@ pub(super) fn load_wav_to_audio_data(path: &std::path::Path) -> Result<AudioData
         hound::SampleFormat::Float => reader
             .into_samples::<f32>()
             .collect::<Result<Vec<f32>, _>>()
-            .map_err(|e| AppError::Processing(format!("Corrupt WAV sample data: {e}")))?,
+            .map_err(|e| AppError::processing(format!("Corrupt WAV sample data: {e}")))?,
         hound::SampleFormat::Int => {
             let max_val = compute_int_max_val(spec.bits_per_sample)?;
             reader
                 .into_samples::<i32>()
                 .collect::<Result<Vec<i32>, _>>()
-                .map_err(|e| AppError::Processing(format!("Corrupt WAV sample data: {e}")))?
+                .map_err(|e| AppError::processing(format!("Corrupt WAV sample data: {e}")))?
                 .into_iter()
                 .map(|s| s as f32 / max_val)
                 .collect()
@@ -444,7 +444,7 @@ mod tests {
     fn unwrap_app_error_message_strips_prefix() {
         // AppError::Processing has a "Processing error: " display prefix — the helper
         // must return the raw inner string, not the Display output.
-        let err = AppError::Processing("Failed to open WAV: foo".to_string());
+        let err = AppError::processing("Failed to open WAV: foo".to_string());
         assert_eq!(
             crate::commands::unwrap_app_error_message(err),
             "Failed to open WAV: foo"

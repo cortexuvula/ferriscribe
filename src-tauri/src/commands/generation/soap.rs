@@ -117,7 +117,7 @@ async fn generate_soap_inner(
         .as_deref()
         .filter(|t| !t.is_empty())
         .ok_or_else(|| {
-            AppError::Processing(
+            AppError::processing(
                 "Recording has no transcript. Run transcription first.".to_string(),
             )
         })?;
@@ -193,7 +193,7 @@ async fn generate_soap_inner(
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
         // For other errors, keep the existing nicer wrapping.
-        _ => AppError::AiProvider(format!(
+        _ => AppError::ai_provider(format!(
             "AI completion failed: {}",
             crate::commands::unwrap_app_error_message(e)
         )),
@@ -206,7 +206,7 @@ async fn generate_soap_inner(
             model = %model_name,
             "AI returned an empty SOAP note"
         );
-        return Err(AppError::AiProvider(format!(
+        return Err(AppError::ai_provider(format!(
             "AI returned an empty SOAP note (provider: {}, model: {}). \
              Check that the model is loaded and responding.",
             provider.name(),

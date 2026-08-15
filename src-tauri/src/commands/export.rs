@@ -33,15 +33,13 @@ pub async fn export_pdf(
     tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
         let recording = load_recording_blocking(&db, &recording_id)?;
         match export_type.as_str() {
-            "soap" => {
-                PdfExporter::export_soap(&recording).map_err(|e| AppError::Export(e.to_string()))
-            }
+            "soap" => PdfExporter::export_soap(&recording)
+                .map_err(|e| AppError::export_with_source(e.to_string(), e)),
             "referral" => PdfExporter::export_referral(&recording)
-                .map_err(|e| AppError::Export(e.to_string())),
-            "letter" => {
-                PdfExporter::export_letter(&recording).map_err(|e| AppError::Export(e.to_string()))
-            }
-            other => Err(AppError::Export(format!("Unknown export type: {other}"))),
+                .map_err(|e| AppError::export_with_source(e.to_string(), e)),
+            "letter" => PdfExporter::export_letter(&recording)
+                .map_err(|e| AppError::export_with_source(e.to_string(), e)),
+            other => Err(AppError::export(format!("Unknown export type: {other}"))),
         }
     })
     .await
@@ -58,15 +56,13 @@ pub async fn export_docx(
     tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
         let recording = load_recording_blocking(&db, &recording_id)?;
         match export_type.as_str() {
-            "soap" => {
-                DocxExporter::export_soap(&recording).map_err(|e| AppError::Export(e.to_string()))
-            }
+            "soap" => DocxExporter::export_soap(&recording)
+                .map_err(|e| AppError::export_with_source(e.to_string(), e)),
             "referral" => DocxExporter::export_referral(&recording)
-                .map_err(|e| AppError::Export(e.to_string())),
-            "letter" => {
-                DocxExporter::export_letter(&recording).map_err(|e| AppError::Export(e.to_string()))
-            }
-            other => Err(AppError::Export(format!("Unknown export type: {other}"))),
+                .map_err(|e| AppError::export_with_source(e.to_string(), e)),
+            "letter" => DocxExporter::export_letter(&recording)
+                .map_err(|e| AppError::export_with_source(e.to_string(), e)),
+            other => Err(AppError::export(format!("Unknown export type: {other}"))),
         }
     })
     .await
@@ -86,7 +82,7 @@ pub async fn export_fhir(
             PatientInfo::default(),
             PractitionerInfo::default(),
         )
-        .map_err(|e| AppError::Export(e.to_string()))
+        .map_err(|e| AppError::export_with_source(e.to_string(), e))
     })
     .await
     .map_err(|e| AppError::Other(format!("export task failed: {e}")))?
@@ -115,7 +111,7 @@ pub async fn export_audio(
 
         // Parse the decrypted WAV to get sample format + data.
         let reader = hound::WavReader::new(std::io::Cursor::new(&wav_bytes))
-            .map_err(|e| AppError::Audio(format!("Failed to parse WAV: {e}")))?;
+            .map_err(|e| AppError::audio(format!("Failed to parse WAV: {e}")))?;
         let spec = reader.spec();
 
         // Convert samples to i16 regardless of source format.
@@ -130,7 +126,7 @@ pub async fn export_audio(
             hound::SampleFormat::Int => {
                 let bits = spec.bits_per_sample;
                 if bits == 0 {
-                    return Err(AppError::Audio("WAV has bits_per_sample=0".to_string()));
+                    return Err(AppError::audio("WAV has bits_per_sample=0".to_string()));
                 }
                 let scale = 1i64 << (bits - 1);
                 reader
@@ -151,15 +147,15 @@ pub async fn export_audio(
             sample_format: hound::SampleFormat::Int,
         };
         let mut writer = hound::WavWriter::create(&file_path, out_spec)
-            .map_err(|e| AppError::Audio(format!("Failed to create output WAV: {e}")))?;
+            .map_err(|e| AppError::audio(format!("Failed to create output WAV: {e}")))?;
         for &sample in &samples {
             writer
                 .write_sample(sample)
-                .map_err(|e| AppError::Audio(format!("WAV write: {e}")))?;
+                .map_err(|e| AppError::audio(format!("WAV write: {e}")))?;
         }
         writer
             .finalize()
-            .map_err(|e| AppError::Audio(format!("WAV finalize: {e}")))?;
+            .map_err(|e| AppError::audio(format!("WAV finalize: {e}")))?;
 
         Ok(())
     })

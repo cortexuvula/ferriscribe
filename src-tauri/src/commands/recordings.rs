@@ -236,14 +236,14 @@ pub fn import_audio_file(
         let dest_filename = format!("{original_name}_{short_id}.wav");
         let dest = recordings_dir.join(&dest_filename);
         std::fs::copy(&source, &dest)
-            .map_err(|e| AppError::Audio(format!("Failed to copy file: {e}")))?;
+            .map_err(|e| AppError::audio(format!("Failed to copy file: {e}")))?;
         dest
     } else {
         // Non-WAV — convert to WAV.
         let dest_filename = format!("{original_name}_{short_id}.wav");
         let dest = recordings_dir.join(&dest_filename);
         medical_audio::convert::convert_to_wav(&source, &dest)
-            .map_err(|e| AppError::Audio(format!("Failed to convert audio: {e}")))?;
+            .map_err(|e| AppError::audio(format!("Failed to convert audio: {e}")))?;
         dest
     };
 
@@ -253,10 +253,10 @@ pub fn import_audio_file(
     // — surface it instead of silently setting duration=None.
     let file_size = std::fs::metadata(&dest_path)
         .map(|m| m.len())
-        .map_err(|e| AppError::Audio(format!("imported WAV unreadable: {e}")))?;
+        .map_err(|e| AppError::audio(format!("imported WAV unreadable: {e}")))?;
     let duration = {
         let reader = hound::WavReader::open(&dest_path)
-            .map_err(|e| AppError::Audio(format!("imported WAV unreadable: {e}")))?;
+            .map_err(|e| AppError::audio(format!("imported WAV unreadable: {e}")))?;
         let spec = reader.spec();
         let total_samples = reader.len() as f64;
         if spec.sample_rate > 0 && spec.channels > 0 {
