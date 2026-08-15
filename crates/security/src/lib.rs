@@ -35,19 +35,26 @@
 //! one side without the other. See the README "Cross-Crate Contracts"
 //! section for the full list.
 
-/// Audit logger — not yet wired into production; tests-only until integrated.
-#[cfg(test)]
+/// Audit logger — PHI-redacting wrapper, used by the support-bundle export
+/// (`src-tauri/src/commands/support.rs`) so redaction call-sites read as
+/// intent. See [`audit_logger`] for why it wraps [`phi_redactor`].
 pub mod audit_logger;
 pub mod file_crypto;
-/// Input sanitizer — not yet wired into production; tests-only until integrated.
+/// Input sanitizer — tests-only **by design**, not neglect. The frontend has
+/// no raw-HTML rendering surface (no `{@html}` sites; Svelte escapes all
+/// interpolation), and applying `strip_html` to clinical free-text would
+/// silently destroy legitimate content like "dose <2 tabs>". If an HTML
+/// rendering surface is ever introduced, use `ammonia` (a real parser) —
+/// see the module docs for the regex's known limits.
 #[cfg(test)]
 pub mod input_sanitizer;
 pub mod key_storage;
 pub mod keychain;
 pub mod machine_id;
 pub mod phi_redactor;
-/// Rate limiter — not yet wired into production; tests-only until integrated.
-#[cfg(test)]
+/// Rate limiter — guards the sharing auth proxy against token brute force
+/// (`crates/sharing/src/auth_proxy.rs`). Only failed bearer validations
+/// consume tokens, so valid traffic is never throttled.
 pub mod rate_limiter;
 
 use thiserror::Error;

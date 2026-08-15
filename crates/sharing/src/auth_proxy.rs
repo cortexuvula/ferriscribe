@@ -23,8 +23,14 @@
 //! |---|---|
 //! | `missing-bearer` | No `Authorization` header at all |
 //! | `unknown-token` | Token hash not found or already revoked |
+//!
+//! Failed validations are additionally rate-limited (429 + `rate-limited`)
+//! so a LAN client hammering the proxy with guessed tokens is throttled.
+//! `stt-providers` only special-cases `unknown-token`, so a 429 surfaces
+//! there as a generic auth failure — correct, since it is not a token
+//! problem a client can retry its way out of.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::{
     Router,
@@ -33,10 +39,23 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
+use medical_security::rate_limiter::RateLimiter;
 use reqwest::Client;
 use tracing::{debug, info, warn};
 
 use crate::token_store::TokenStore;
+
+/// Failed bearer validations per minute before the proxy starts answering
+/// 429 instead of 401.
+///
+/// Tokens are high-entropy random strings, so brute force is already
+/// infeasible — this is defense-in-depth for a HIPAA-context LAN service.
+/// Only *failed* validations consume tokens: clients presenting a valid
+/// token are never throttled. The bucket is shared across all clients
+/// (per-IP tracking would add state for little gain on a trusted LAN);
+/// a pathological client can at worst make other clients' *mistyped*
+/// tokens get 429s, never block valid traffic.
+const FAILED_AUTH_PER_MINUTE: u32 = 30;
 
 /// Cheap-clone byte buffer type returned by `axum::body::to_bytes`. We need to
 /// be able to clone the buffered request body so the proxy can retry the
@@ -66,6 +85,14 @@ struct AppState {
     config: ProxyConfig,
     client: Client,
     store: Arc<TokenStore>,
+    /// Token bucket over *failed* bearer validations. `RateLimiter` is `Send`
+    /// but not `Sync`; the `Mutex` is held only for the short `try_acquire`
+    /// critical section (never across an `.await`).
+    fail_limiter: Arc<Mutex<RateLimiter>>,
+}
+
+fn new_fail_limiter() -> Arc<Mutex<RateLimiter>> {
+    Arc::new(Mutex::new(RateLimiter::new(FAILED_AUTH_PER_MINUTE)))
 }
 
 /// Bind the listener synchronously (so port conflicts surface immediately as
@@ -101,6 +128,7 @@ pub async fn spawn_auth_proxy(
         config: config.clone(),
         client,
         store,
+        fail_limiter: new_fail_limiter(),
     };
     let app = Router::new().fallback(handler).with_state(state);
     Ok(tokio::spawn(async move {
@@ -142,6 +170,7 @@ pub async fn spawn_auth_proxy_on_listener(
         config: config.clone(),
         client,
         store,
+        fail_limiter: new_fail_limiter(),
     };
     let app = Router::new().fallback(handler).with_state(state);
     Ok(tokio::spawn(async move {
@@ -166,6 +195,14 @@ fn unauthorized_with_reason(reason: &'static str) -> Response {
     resp
 }
 
+/// 429 response for exhausted failed-auth budget.
+fn too_many_attempts() -> Response {
+    let mut resp = (StatusCode::TOO_MANY_REQUESTS, "").into_response();
+    resp.headers_mut()
+        .insert("x-auth-reason", HeaderValue::from_static("rate-limited"));
+    resp
+}
+
 async fn handle_inner(state: AppState, req: Request) -> Result<Response, Response> {
     let token = match extract_bearer(req.headers()) {
         Some(t) => t,
@@ -178,6 +215,19 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
     let row = match state.store.validate(&token) {
         Ok(Some(row)) => row,
         Ok(None) => {
+            // Failed validation: consume from the failure bucket. While the
+            // bucket has tokens the client gets an honest 401; once drained,
+            // further guesses get 429 until tokens refill. Valid tokens never
+            // reach this branch and are never throttled.
+            let throttled = state
+                .fail_limiter
+                .lock()
+                .map(|mut l| !l.try_acquire())
+                .unwrap_or(false);
+            if throttled {
+                warn!("proxy: 429 rate-limited (failed-auth budget exhausted)");
+                return Err(too_many_attempts());
+            }
             warn!("proxy: 401 unknown-token (no matching non-revoked row)");
             return Err(unauthorized_with_reason("unknown-token"));
         }
@@ -383,6 +433,62 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("unknown-token"),
         );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_429_after_repeated_unknown_tokens() {
+        // Failed validations drain the shared failure bucket; once empty
+        // the proxy answers 429 rate-limited instead of 401 unknown-token.
+        let (store, _dir) = fresh_store();
+        let upstream = MockServer::start().await;
+        Mock::given(http_method("GET"))
+            .and(http_path("/anything"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&upstream)
+            .await;
+        let (port, handle) = spawn_test_proxy(store.clone(), upstream.uri(), None).await;
+
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/anything");
+        let mut saw_401 = false;
+        let mut saw_429 = false;
+        for _ in 0..(FAILED_AUTH_PER_MINUTE + 5) {
+            let resp = client
+                .get(&url)
+                .bearer_auth("guessed-token")
+                .send()
+                .await
+                .expect("send");
+            let reason = resp
+                .headers()
+                .get("x-auth-reason")
+                .and_then(|v| v.to_str().ok());
+            match resp.status().as_u16() {
+                401 => {
+                    assert_eq!(reason, Some("unknown-token"));
+                    saw_401 = true;
+                }
+                429 => {
+                    assert_eq!(reason, Some("rate-limited"));
+                    saw_429 = true;
+                }
+                other => panic!("unexpected status {other}"),
+            }
+        }
+        assert!(saw_401, "early attempts should get honest 401s");
+        assert!(saw_429, "attempts beyond the budget should be throttled");
+
+        // A valid token must sail through with the failure bucket drained —
+        // valid traffic is never throttled.
+        let issued = store.issue("late-valid-client").expect("issue");
+        let resp = client
+            .get(&url)
+            .bearer_auth(&issued.token)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 200, "valid token must not be throttled");
         handle.abort();
     }
 

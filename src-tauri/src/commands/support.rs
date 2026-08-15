@@ -5,14 +5,14 @@
 use std::path::Path;
 
 use medical_core::error::{AppError, AppResult};
-use medical_security::phi_redactor::PhiRedactor;
+use medical_security::audit_logger::AuditLogger;
 
 /// Generate a PHI-redacted support bundle from all log files in `log_dir`.
 ///
 /// Reads every `.log` file (sorted oldest-first by modified time),
 /// concatenates them with `=== <filename> ===` separators, prepends a
 /// bundle header with app version + timestamp, and runs the entire string
-/// through [`PhiRedactor::redact`].
+/// through [`AuditLogger::redact_for_log`].
 pub fn export_support_bundle_inner(log_dir: &Path) -> AppResult<String> {
     // 1. Collect all log files sorted by modified time (oldest first).
     // tracing-appender names files `ferri-scribe.log.2026-06-27` (prefix
@@ -66,7 +66,7 @@ pub fn export_support_bundle_inner(log_dir: &Path) -> AppResult<String> {
     }
 
     // 3. PHI-redact the entire bundle.
-    Ok(PhiRedactor::redact(&bundle))
+    Ok(AuditLogger::redact_for_log(&bundle))
 }
 
 /// Export all app logs as a PHI-redacted plain-text file.
