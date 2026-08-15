@@ -1,7 +1,7 @@
 //! SQLite database layer for the FerriScribe medical transcription app.
 //!
 //! This crate owns all persistent state: consultation recordings, application
-//! settings, vocabulary rules, vector embeddings for RAG, a CozoDB-backed
+//! settings, vocabulary rules, vector embeddings for RAG, a SQLite-backed
 //! medical knowledge graph, processing queues, generation history, letter
 //! audiences, a user dictionary, and an append-only audit log.
 //!
@@ -11,11 +11,6 @@
 //! pool and runs all pending migrations on open. Individual domain areas are
 //! exposed as stateless repository structs (e.g. [`recordings::RecordingsRepo`],
 //! [`settings::SettingsRepo`]) whose methods take a `&Connection`.
-//!
-//! # Feature flags
-//!
-//! - **`graph`** -- enables the `graph` module (CozoDB-backed knowledge
-//!   graph). Gated because CozoDB pulls in the Sled storage engine.
 //!
 //! # Thread safety
 //!
@@ -78,9 +73,6 @@ pub enum DbError {
     /// A database constraint was violated (e.g. deleting a built-in row).
     #[error("Constraint violation: {0}")]
     Constraint(String),
-    /// An error from the CozoDB-backed knowledge graph.
-    #[error("Graph error: {0}")]
-    Graph(String),
     /// A string could not be parsed as a valid UUID.
     #[error("UUID parse error in {1}: {0}")]
     UuidParse(String, String),

@@ -8,7 +8,7 @@
 //!
 //! | Module | Purpose |
 //! |---|---|
-//! | [`pipeline`] | Per-recording processing pipeline with step-level progress events. |
+//! | [`pipeline`] | Pipeline configuration and step/progress vocabulary types. |
 //! | [`batch`] | Multi-recording batch job state tracker. |
 //! | [`soap_generator`] | SOAP note system/user prompts and AI-output post-processing. |
 //! | [`document_generator`] | Prompt builders for referrals, letters, and synopses. |
