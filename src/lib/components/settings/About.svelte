@@ -104,7 +104,7 @@
 
   <p class="privacy-note">
     FerriScribe never sends patient data to any server. Update checks contact
-    only <code>github.com/cortexuvula/rustMedicalAssistant</code> for the
+    only <code>github.com/cortexuvula/ferriscribe</code> for the
     latest version manifest.
   </p>
 
