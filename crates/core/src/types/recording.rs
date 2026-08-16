@@ -426,6 +426,35 @@ pub fn latest_tokens_per_second(metadata: &serde_json::Value) -> Option<f64> {
     best.map(|(_, tokens_per_second)| tokens_per_second)
 }
 
+/// Record a completion's throughput stat into `metadata` under `doc_type`:
+/// derive the [`GenerationStat`] (a no-op when no throughput can be
+/// computed), log it at debug level (counts and durations only — never
+/// content), and merge it. Best-effort by construction — never fails.
+pub fn record_completion_stat(
+    metadata: &mut serde_json::Value,
+    doc_type: &'static str,
+    provider: &str,
+    model: &str,
+    usage: &UsageInfo,
+    elapsed: std::time::Duration,
+) {
+    debug_assert!(
+        GENERATION_STAT_DOC_TYPES.contains(&doc_type),
+        "unknown generation-stats doc type: {doc_type}"
+    );
+    let Some(stat) = GenerationStat::from_completion(provider, model, usage, elapsed) else {
+        return;
+    };
+    tracing::debug!(
+        doc_type,
+        tokens_per_second = stat.tokens_per_second,
+        completion_tokens = stat.completion_tokens,
+        duration_ms = stat.duration_ms,
+        "generation throughput recorded"
+    );
+    merge_generation_stat(metadata, doc_type, stat);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +665,44 @@ mod tests {
             latest_tokens_per_second(&serde_json::json!({ "context": "x" })),
             None
         );
+    }
+
+    #[test]
+    fn record_completion_stat_writes_throughput() {
+        let mut metadata = serde_json::json!({ "context": "visit notes" });
+        let usage = UsageInfo {
+            prompt_tokens: 10,
+            completion_tokens: 50,
+            total_tokens: 60,
+        };
+        record_completion_stat(
+            &mut metadata,
+            "soap",
+            "ollama",
+            "llama3",
+            &usage,
+            std::time::Duration::from_millis(1000),
+        );
+        assert_eq!(
+            metadata["generation_stats"]["soap"]["tokens_per_second"],
+            serde_json::json!(50.0)
+        );
+        assert_eq!(metadata["context"], serde_json::json!("visit notes"));
+    }
+
+    #[test]
+    fn record_completion_stat_skips_zero_token_completions() {
+        let mut metadata = serde_json::json!({});
+        let usage = UsageInfo::default();
+        record_completion_stat(
+            &mut metadata,
+            "soap",
+            "ollama",
+            "llama3",
+            &usage,
+            std::time::Duration::from_secs(1),
+        );
+        assert!(metadata.get("generation_stats").is_none());
     }
 
     #[test]

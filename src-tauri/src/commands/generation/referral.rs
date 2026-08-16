@@ -214,5 +214,11 @@ mod stats_tests {
             recording.metadata["generation_stats"]["referral"]["model"],
             serde_json::json!("llama3")
         );
+        assert!(recording.referral.is_some());
+        assert_eq!(
+            medical_core::types::recording::latest_tokens_per_second(&recording.metadata)
+                .map(f64::is_finite),
+            Some(true)
+        );
     }
 }

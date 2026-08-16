@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::PatientContext;
-use medical_core::types::recording::{GenerationStat, merge_generation_stat};
 use medical_processing::soap_generator::{self, SoapPromptConfig};
 use tauri::Emitter;
 use tracing::{debug, error, info, instrument};
@@ -299,21 +298,14 @@ async fn generate_soap_inner(
         }
     }
 
-    if let Some(stat) = GenerationStat::from_completion(
+    medical_core::types::recording::record_completion_stat(
+        &mut recording.metadata,
+        "soap",
         provider.name(),
         &model_name,
         &response.usage,
         generation_elapsed,
-    ) {
-        tracing::debug!(
-            doc_type = "soap",
-            tokens_per_second = stat.tokens_per_second,
-            completion_tokens = stat.completion_tokens,
-            duration_ms = stat.duration_ms,
-            "generation throughput recorded"
-        );
-        merge_generation_stat(&mut recording.metadata, "soap", stat);
-    }
+    );
 
     // Persist to DB (on blocking thread)
     recording.soap_note = Some(soap_text.clone());
@@ -464,6 +456,7 @@ mod preflight_tests {
 mod stats_tests {
     use super::super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
     use super::*;
+    use medical_core::types::recording::GenerationStat;
     use medical_core::types::settings::AppConfig;
 
     #[tokio::test]

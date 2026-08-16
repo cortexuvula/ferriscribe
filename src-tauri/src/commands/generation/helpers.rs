@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use medical_core::error::{AppError, AppResult};
 use medical_core::traits::AiProvider;
-use medical_core::types::recording::{GenerationStat, Recording, merge_generation_stat};
+use medical_core::types::recording::{Recording, record_completion_stat};
 use medical_core::types::settings::{AppConfig, IcdVersion, SoapTemplate};
 use medical_core::types::{CompletionRequest, Message, MessageContent, PatientContext, Role};
 use medical_db::recordings::RecordingsRepo;
@@ -285,21 +285,14 @@ where
 
     set_field(recording, text.clone());
 
-    if let Some(stat) = GenerationStat::from_completion(
+    record_completion_stat(
+        &mut recording.metadata,
+        stats_key,
         provider.name(),
         &settings.model,
         &response.usage,
         generation_elapsed,
-    ) {
-        tracing::debug!(
-            doc_type = stats_key,
-            tokens_per_second = stat.tokens_per_second,
-            completion_tokens = stat.completion_tokens,
-            duration_ms = stat.duration_ms,
-            "generation throughput recorded"
-        );
-        merge_generation_stat(&mut recording.metadata, stats_key, stat);
-    }
+    );
 
     Ok(text)
 }
