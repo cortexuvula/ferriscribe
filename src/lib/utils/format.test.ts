@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { formatDuration, formatTimestamp, formatDate } from './format';
+import {
+  formatDuration,
+  formatTimestamp,
+  formatDate,
+  formatTokensPerSecond,
+} from './format';
 
 describe('formatDuration', () => {
   it('formats null as placeholder', () => {
@@ -52,5 +57,29 @@ describe('formatDate', () => {
   it('includes the year', () => {
     const out = formatDate('2026-06-25T14:30:00Z');
     expect(out).toContain('2026');
+  });
+});
+
+describe('formatTokensPerSecond', () => {
+  it('formats null/undefined as empty string', () => {
+    expect(formatTokensPerSecond(null)).toBe('');
+    expect(formatTokensPerSecond(undefined)).toBe('');
+  });
+
+  it('formats small values with one decimal', () => {
+    expect(formatTokensPerSecond(41.52)).toBe('41.5 tok/s');
+    expect(formatTokensPerSecond(7.25)).toBe('7.3 tok/s');
+  });
+
+  it('formats values of 100 or more with no decimals', () => {
+    expect(formatTokensPerSecond(99.9)).toBe('99.9 tok/s');
+    expect(formatTokensPerSecond(100)).toBe('100 tok/s');
+    expect(formatTokensPerSecond(1234.56)).toBe('1235 tok/s');
+  });
+
+  it('rejects non-finite and negative values', () => {
+    expect(formatTokensPerSecond(Number.NaN)).toBe('');
+    expect(formatTokensPerSecond(Number.POSITIVE_INFINITY)).toBe('');
+    expect(formatTokensPerSecond(-5)).toBe('');
   });
 });
