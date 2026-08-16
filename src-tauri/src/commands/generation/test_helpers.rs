@@ -3,8 +3,7 @@
 
 use std::sync::Arc;
 
-use medical_core::error::AppError;
-use medical_core::error::AppResult;
+use medical_core::error::{AppError, AppResult};
 use medical_core::types::recording::{ProcessingStatus, Recording};
 use medical_core::types::settings::AppConfig;
 use medical_db::recordings::RecordingsRepo;
@@ -33,8 +32,6 @@ pub(super) async fn build_test_state_with_recording(
 /// `config.ai_provider` must match `provider.name()` so `resolve_provider`
 /// finds it, and `config.ollama_host` should be loopback so the pre-flight
 /// probe is skipped.
-// Unused until the tokens-per-second generation tests land on this branch.
-#[allow(dead_code)]
 pub(super) async fn build_test_state_with_provider(
     config: AppConfig,
     transcript_text: &str,
@@ -152,16 +149,12 @@ async fn build_test_state_inner(
 /// `complete()` returns a fixed non-empty completion with a known token
 /// usage; every other method is unused by these tests and returns an error
 /// or an empty list. Never performs network I/O.
-// Unused until the tokens-per-second generation tests land on this branch.
-#[allow(dead_code)]
 pub(super) struct MockCompletionProvider {
     name: &'static str,
     content: String,
     usage: medical_core::types::UsageInfo,
 }
 
-// Unused until the tokens-per-second generation tests land on this branch.
-#[allow(dead_code)]
 impl MockCompletionProvider {
     /// `completion_tokens` drives the recorded throughput stat.
     pub(super) fn new(name: &'static str, content: &str, completion_tokens: u32) -> Self {
@@ -189,11 +182,11 @@ impl medical_core::traits::AiProvider for MockCompletionProvider {
 
     async fn complete(
         &self,
-        _request: medical_core::types::CompletionRequest,
+        request: medical_core::types::CompletionRequest,
     ) -> AppResult<medical_core::types::CompletionResponse> {
         Ok(medical_core::types::CompletionResponse {
             content: self.content.clone(),
-            model: "mock-model".to_string(),
+            model: request.model.clone(),
             usage: self.usage.clone(),
             tool_calls: Vec::new(),
         })

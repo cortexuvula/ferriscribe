@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::PatientContext;
+use medical_core::types::recording::{GenerationStat, merge_generation_stat};
 use medical_processing::soap_generator::{self, SoapPromptConfig};
 use tauri::Emitter;
 use tracing::{debug, error, info, instrument};
@@ -189,6 +190,7 @@ async fn generate_soap_inner(
         None,
     );
 
+    let generation_start = std::time::Instant::now();
     let response = provider.complete(request).await.map_err(|e| match e {
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
@@ -198,6 +200,7 @@ async fn generate_soap_inner(
             crate::commands::unwrap_app_error_message(e)
         )),
     })?;
+    let generation_elapsed = generation_start.elapsed();
 
     let raw_soap = response.content;
     if raw_soap.is_empty() {
@@ -294,6 +297,22 @@ async fn generate_soap_inner(
                 serde_json::to_value(pc).unwrap_or(serde_json::Value::Null),
             );
         }
+    }
+
+    if let Some(stat) = GenerationStat::from_completion(
+        provider.name(),
+        &model_name,
+        &response.usage,
+        generation_elapsed,
+    ) {
+        tracing::debug!(
+            doc_type = "soap",
+            tokens_per_second = stat.tokens_per_second,
+            completion_tokens = stat.completion_tokens,
+            duration_ms = stat.duration_ms,
+            "generation throughput recorded"
+        );
+        merge_generation_stat(&mut recording.metadata, "soap", stat);
     }
 
     // Persist to DB (on blocking thread)
@@ -437,6 +456,59 @@ mod preflight_tests {
         assert!(
             elapsed < std::time::Duration::from_secs(8),
             "should have short-circuited at ~3s; took {elapsed:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
+    use super::*;
+    use medical_core::types::settings::AppConfig;
+
+    #[tokio::test]
+    async fn generate_soap_records_generation_stats_in_metadata() {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        // Loopback → preflight probe is skipped; the mock serves completions.
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+
+        let provider = std::sync::Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "S: Headache for 3 days.\nA: Tension headache.\nP: Rest, follow up in 2 weeks.",
+            200,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports headache and fatigue.",
+            provider,
+        )
+        .await;
+
+        let soap = generate_soap_inner(&state, &recording_id, None, None, None)
+            .await
+            .expect("generation with mock provider succeeds");
+        assert!(!soap.is_empty());
+
+        let uuid = Uuid::parse_str(&recording_id).expect("valid uuid");
+        let conn = state.db.conn().expect("conn");
+        let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+            .expect("recording persisted");
+
+        let stat: GenerationStat =
+            serde_json::from_value(rec.metadata["generation_stats"]["soap"].clone())
+                .expect("soap stat recorded");
+        assert_eq!(stat.provider, "ollama");
+        assert_eq!(stat.model, "llama3");
+        assert_eq!(stat.prompt_tokens, 128);
+        assert_eq!(stat.completion_tokens, 200);
+        assert!(stat.tokens_per_second.is_finite());
+        assert!(stat.tokens_per_second > 0.0);
+
+        assert_eq!(
+            medical_core::types::recording::latest_tokens_per_second(&rec.metadata),
+            Some(stat.tokens_per_second)
         );
     }
 }
