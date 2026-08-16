@@ -222,6 +222,10 @@ mod stats_tests {
             rec.metadata["generation_stats"]["synopsis"]["completion_tokens"],
             serde_json::json!(32)
         );
+        assert_eq!(
+            rec.metadata["generation_stats"]["synopsis"]["model"],
+            serde_json::json!("llama3")
+        );
         // The synopsis text itself stays where it always was.
         assert!(rec.metadata["synopsis"].is_string());
     }

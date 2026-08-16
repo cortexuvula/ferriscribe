@@ -40,6 +40,7 @@ describe('RecordingCard — tokens per second', () => {
   it('hides the tokens-per-second span when null', () => {
     render(RecordingCard, { recording: makeSummary() });
     expect(screen.queryByText(/tok\/s/)).toBeNull();
+    expect(screen.getByRole('button').getAttribute('aria-label')).not.toContain('generation speed');
   });
 
   it('includes throughput in the aria-label when present', () => {

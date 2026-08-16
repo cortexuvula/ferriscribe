@@ -314,6 +314,10 @@ mod stats_tests {
             rec.metadata["generation_stats"]["peer_discussion"]["completion_tokens"],
             serde_json::json!(48)
         );
+        assert_eq!(
+            rec.metadata["generation_stats"]["peer_discussion"]["model"],
+            serde_json::json!("llama3")
+        );
         assert!(rec.metadata["peer_discussion_context"].is_object());
     }
 }

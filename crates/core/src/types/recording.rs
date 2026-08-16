@@ -274,6 +274,7 @@ pub struct RecordingSummary {
     /// Throughput (tokens/sec) of the most recent AI generation for this
     /// recording, from `metadata.generation_stats` — `None` when no
     /// generation has recorded stats.
+    #[serde(default)]
     pub tokens_per_second: Option<f64>,
 }
 
@@ -400,12 +401,13 @@ pub fn merge_generation_stat(
     if !stats.is_object() {
         *stats = serde_json::json!({});
     }
-    if let Some(stats_obj) = stats.as_object_mut() {
-        stats_obj.insert(
-            doc_type.to_string(),
-            serde_json::to_value(stat).expect("GenerationStat serializes infallibly"),
-        );
-    }
+    let stats_obj = stats
+        .as_object_mut()
+        .expect("replaced with an object above");
+    stats_obj.insert(
+        doc_type.to_string(),
+        serde_json::to_value(stat).expect("GenerationStat serializes infallibly"),
+    );
 }
 
 /// The `tokens_per_second` of the most recent generation across doc types
