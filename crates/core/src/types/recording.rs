@@ -330,7 +330,8 @@ pub struct GenerationStat {
     pub prompt_tokens: u32,
     /// Tokens produced by the completion (output).
     pub completion_tokens: u32,
-    /// Wall-clock duration of the completion call, in milliseconds.
+    /// Wall-clock duration of the completion call, in milliseconds (truncated;
+    /// a sub-millisecond call records 0).
     pub duration_ms: u64,
     /// Effective throughput: completion tokens divided by wall-clock seconds.
     pub tokens_per_second: f64,
@@ -350,7 +351,7 @@ impl GenerationStat {
         usage: &UsageInfo,
         elapsed: std::time::Duration,
     ) -> Option<Self> {
-        if usage.completion_tokens == 0 || elapsed.as_nanos() == 0 {
+        if usage.completion_tokens == 0 || elapsed.is_zero() {
             return None;
         }
         let seconds = elapsed.as_secs_f64();
@@ -364,6 +365,55 @@ impl GenerationStat {
             generated_at: Utc::now(),
         })
     }
+}
+
+/// Doc-type keys that may appear under `generation_stats`.
+pub const GENERATION_STAT_DOC_TYPES: [&str; 5] =
+    ["soap", "referral", "letter", "synopsis", "peer_discussion"];
+
+/// Merge `stat` into `metadata["generation_stats"][doc_type]`, creating the
+/// nested object when absent. Never touches any other metadata key.
+pub fn merge_generation_stat(
+    metadata: &mut serde_json::Value,
+    doc_type: &str,
+    stat: GenerationStat,
+) {
+    if !metadata.is_object() {
+        *metadata = serde_json::json!({});
+    }
+    let Some(obj) = metadata.as_object_mut() else {
+        return;
+    };
+    let stats = obj
+        .entry("generation_stats".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !stats.is_object() {
+        *stats = serde_json::json!({});
+    }
+    if let Some(stats_obj) = stats.as_object_mut() {
+        stats_obj.insert(
+            doc_type.to_string(),
+            serde_json::to_value(stat).unwrap_or(serde_json::Value::Null),
+        );
+    }
+}
+
+/// The `tokens_per_second` of the most recent generation across doc types
+/// (newest `generated_at`), or `None` when no valid stats are recorded.
+/// Entries that fail to deserialize as [`GenerationStat`] are skipped.
+pub fn latest_tokens_per_second(metadata: &serde_json::Value) -> Option<f64> {
+    let stats = metadata.get("generation_stats")?;
+    let mut best: Option<(DateTime<Utc>, f64)> = None;
+    for key in GENERATION_STAT_DOC_TYPES {
+        let Some(raw) = stats.get(key) else { continue };
+        let Ok(stat) = serde_json::from_value::<GenerationStat>(raw.clone()) else {
+            continue;
+        };
+        if best.is_none_or(|(best_at, _)| stat.generated_at >= best_at) {
+            best = Some((stat.generated_at, stat.tokens_per_second));
+        }
+    }
+    best.map(|(_, tokens_per_second)| tokens_per_second)
 }
 
 #[cfg(test)]
@@ -511,6 +561,84 @@ mod tests {
             GenerationStat::from_completion("ollama", "llama3", &usage, std::time::Duration::ZERO)
                 .is_none()
         );
+    }
+
+    fn stat(tokens_per_second: f64, generated_at: chrono::DateTime<Utc>) -> GenerationStat {
+        GenerationStat {
+            provider: "ollama".to_string(),
+            model: "llama3".to_string(),
+            prompt_tokens: 10,
+            completion_tokens: 100,
+            duration_ms: 1000,
+            tokens_per_second,
+            generated_at,
+        }
+    }
+
+    #[test]
+    fn merge_generation_stat_overwrites_own_slot_only() {
+        let mut metadata = serde_json::json!({ "context": "visit notes" });
+        merge_generation_stat(&mut metadata, "soap", stat(20.0, Utc::now()));
+
+        assert_eq!(metadata["context"], serde_json::json!("visit notes"));
+        assert_eq!(
+            metadata["generation_stats"]["soap"]["tokens_per_second"],
+            serde_json::json!(20.0)
+        );
+
+        merge_generation_stat(&mut metadata, "referral", stat(150.0, Utc::now()));
+        merge_generation_stat(&mut metadata, "soap", stat(75.5, Utc::now()));
+
+        // soap slot overwritten by its newest write; referral slot preserved;
+        // unrelated metadata keys untouched.
+        assert_eq!(
+            metadata["generation_stats"]["soap"]["tokens_per_second"],
+            serde_json::json!(75.5)
+        );
+        assert_eq!(
+            metadata["generation_stats"]["referral"]["tokens_per_second"],
+            serde_json::json!(150.0)
+        );
+        assert_eq!(metadata["context"], serde_json::json!("visit notes"));
+    }
+
+    #[test]
+    fn merge_generation_stat_initializes_null_metadata() {
+        let mut metadata = serde_json::Value::Null;
+        merge_generation_stat(&mut metadata, "soap", stat(20.0, Utc::now()));
+        assert!(metadata["generation_stats"]["soap"].is_object());
+    }
+
+    #[test]
+    fn latest_tokens_per_second_picks_newest_generated_at() {
+        let older_at = Utc::now() - chrono::TimeDelta::hours(2);
+        let mut metadata = serde_json::json!({});
+        merge_generation_stat(&mut metadata, "soap", stat(20.0, older_at));
+        merge_generation_stat(&mut metadata, "letter", stat(75.5, Utc::now()));
+
+        assert_eq!(latest_tokens_per_second(&metadata), Some(75.5));
+    }
+
+    #[test]
+    fn latest_tokens_per_second_none_without_stats() {
+        assert_eq!(latest_tokens_per_second(&serde_json::Value::Null), None);
+        assert_eq!(
+            latest_tokens_per_second(&serde_json::json!({ "context": "x" })),
+            None
+        );
+    }
+
+    #[test]
+    fn latest_tokens_per_second_skips_malformed_entries() {
+        let metadata = serde_json::json!({
+            "generation_stats": {
+                "soap": { "tokens_per_second": 99.0 },
+                "referral": stat(40.0, Utc::now())
+            }
+        });
+        // "soap" is missing required fields → skipped; the valid referral
+        // entry wins despite the lower value.
+        assert_eq!(latest_tokens_per_second(&metadata), Some(40.0));
     }
 
     #[test]
