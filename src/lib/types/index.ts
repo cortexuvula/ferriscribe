@@ -16,6 +16,19 @@ export interface PatientContext {
   allergies: string[];
 }
 
+// ── Generation Stats ──────────────────────────────────────────────────────────
+
+/** Mirrors Rust `GenerationStat` — throughput metrics for one LLM generation. */
+export interface GenerationStat {
+  provider: string;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  duration_ms: number;
+  tokens_per_second: number;
+  generated_at: string;
+}
+
 // ── Recording ─────────────────────────────────────────────────────────────────
 
 export interface Recording {
@@ -39,6 +52,7 @@ export interface Recording {
   metadata: {
     context?: string;
     patient_context?: PatientContext;
+    generation_stats?: { [docType: string]: GenerationStat };
     [key: string]: unknown;
   } | null;
 }
@@ -59,6 +73,7 @@ export interface RecordingSummary {
   has_letter: boolean;
   has_peer_discussion: boolean;
   is_remote: boolean;
+  tokens_per_second: number | null;
 }
 
 // ── Context Template ──────────────────────────────────────────────────────────
