@@ -39,6 +39,7 @@ pub async fn generate_referral(
             &config,
             medical_core::preflight::CommandKind::GenerateReferral,
             "referral letter",
+            "referral",
             move |soap_note, settings| {
                 document_generator::build_referral_prompt(
                     soap_note,
@@ -94,6 +95,7 @@ mod preflight_tests {
             &config,
             medical_core::preflight::CommandKind::GenerateReferral,
             "referral letter",
+            "referral",
             |soap_note, settings| {
                 document_generator::build_referral_prompt(
                     soap_note,
@@ -134,6 +136,83 @@ mod preflight_tests {
         assert!(
             elapsed < std::time::Duration::from_secs(8),
             "should have short-circuited at ~3s; took {elapsed:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
+    use super::*;
+    use medical_core::types::settings::AppConfig;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn generate_from_soap_records_referral_stats() {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+
+        let provider = Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Dear Cardiology, please assess this patient for chest pain.",
+            64,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports headache and fatigue.",
+            provider,
+        )
+        .await;
+
+        // generate_from_soap requires an existing SOAP note.
+        {
+            let uuid = uuid::Uuid::parse_str(&recording_id).expect("uuid");
+            let conn = state.db.conn().expect("conn");
+            let mut rec =
+                medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid).expect("recording");
+            rec.soap_note = Some("S: Chest pain.\nA: Angina.\nP: Cardiology referral.".to_string());
+            medical_db::recordings::RecordingsRepo::update(&conn, &rec).expect("update");
+        }
+
+        let (mut recording, settings, config) =
+            load_recording_and_settings(&state.db, &recording_id)
+                .await
+                .unwrap();
+
+        let text = generate_from_soap(
+            &state,
+            &mut recording,
+            &settings,
+            &config,
+            medical_core::preflight::CommandKind::GenerateReferral,
+            "referral letter",
+            "referral",
+            |soap_note, settings| {
+                document_generator::build_referral_prompt(
+                    soap_note,
+                    "Specialist",
+                    "routine",
+                    settings.custom_referral_prompt.as_deref(),
+                    None,
+                )
+            },
+            |rec, text| {
+                rec.referral = Some(text);
+            },
+        )
+        .await
+        .expect("referral generation succeeds");
+        assert!(!text.is_empty());
+
+        assert_eq!(
+            recording.metadata["generation_stats"]["referral"]["completion_tokens"],
+            serde_json::json!(64)
+        );
+        assert_eq!(
+            recording.metadata["generation_stats"]["referral"]["model"],
+            serde_json::json!("llama3")
         );
     }
 }
