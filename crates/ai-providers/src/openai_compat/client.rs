@@ -273,9 +273,23 @@ impl OpenAiCompatibleClient {
     /// Classify a reqwest error from a `send_with_retry` call into either a
     /// structured `EndpointOffline` (connectivity issue) or the existing
     /// `AiProvider(String)` shape (genuine application-layer error).
+    ///
+    /// Timeouts get their own actionable message first: a timeout means the
+    /// endpoint answered TCP but the model was still generating when the
+    /// wall-clock budget ran out — not an offline endpoint, and not worth
+    /// retrying (see `http_client::classify_error`).
     pub(crate) fn classify_send_error(&self, e: reqwest::Error) -> medical_core::error::AppError {
         use medical_core::error::ServiceKind;
         use medical_core::preflight::classify_reqwest_error;
+        if e.is_timeout() {
+            return medical_core::error::AppError::ai_provider(
+                "AI request timed out — the model was probably still generating. \
+                 Reasoning (\"thinking\") models can spend several minutes before \
+                 producing output. Retry, disable reasoning for this model in the \
+                 provider app, lower its context length, or pick a faster model."
+                    .to_string(),
+            );
+        }
         match classify_reqwest_error(&e) {
             Some(reason) => medical_core::error::AppError::EndpointOffline {
                 service: ServiceKind::AiProvider,
@@ -324,6 +338,41 @@ mod tests {
             "https://api.openai.com/v1",
             RetryConfig::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn timeout_surfaces_clear_error_not_offline_dialog() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Response never arrives within the client's 1s total timeout.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(3)))
+            .mount(&server)
+            .await;
+
+        let mut client = make_client();
+        client.client = Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("slow test client");
+        client.base_url = server.uri();
+
+        let err = client
+            .complete(&make_request())
+            .await
+            .expect_err("must time out");
+        assert!(
+            !matches!(err, medical_core::error::AppError::EndpointOffline { .. }),
+            "a timeout is not an offline endpoint, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timed out"),
+            "message should say timed out: {msg}"
+        );
     }
 
     fn make_request() -> CompletionRequest {

@@ -95,7 +95,11 @@ impl OllamaProvider {
         let http = Client::builder()
             .pool_max_idle_per_host(5)
             .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(300))
+            // Generous budget: reasoning ("thinking") models can spend many minutes
+            // generating before producing output. Timeouts are NOT retried
+            // (http_client::classify_error), so this is the single wall-clock
+            // ceiling per attempt.
+            .timeout(std::time::Duration::from_secs(900))
             .build()
             .map_err(|e| {
                 AppError::ai_provider(format!("Failed to build Ollama HTTP client: {e}"))
@@ -129,7 +133,11 @@ impl OllamaProvider {
         let http = Client::builder()
             .pool_max_idle_per_host(5)
             .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(300))
+            // Generous budget: reasoning ("thinking") models can spend many minutes
+            // generating before producing output. Timeouts are NOT retried
+            // (http_client::classify_error), so this is the single wall-clock
+            // ceiling per attempt.
+            .timeout(std::time::Duration::from_secs(900))
             .build()
             .map_err(|e| {
                 AppError::ai_provider(format!("Failed to build Ollama HTTP client: {e}"))
