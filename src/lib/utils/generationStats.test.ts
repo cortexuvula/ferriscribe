@@ -42,4 +42,14 @@ describe('latestTokensPerSecond', () => {
     } as Recording['metadata'];
     expect(latestTokensPerSecond(metadata)).toBe(30);
   });
+
+  it('breaks timestamp ties by doc-type order (later wins)', () => {
+    const metadata = {
+      generation_stats: {
+        soap: stat(10, '2026-08-16T11:00:00Z'),
+        peer_discussion: stat(25, '2026-08-16T11:00:00Z'),
+      },
+    } as Recording['metadata'];
+    expect(latestTokensPerSecond(metadata)).toBe(25);
+  });
 });

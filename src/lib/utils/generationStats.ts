@@ -9,10 +9,11 @@ const DOC_TYPES = ['soap', 'referral', 'letter', 'synopsis', 'peer_discussion'] 
  * (crates/core/src/types/recording.rs): the `tokens_per_second` of the
  * stat with the newest `generated_at` across doc types, or null when no
  * stats are recorded. Entries with a non-numeric throughput or an
- * unparseable `generated_at` are skipped, matching Rust's strict
- * deserialization behavior. The data arrives as freeform JSON from the
- * backend, so each entry is treated as unknown-shaped rather than
- * trusting the declared `GenerationStat` type.
+ * unparseable `generated_at` are skipped — an approximation of Rust's
+ * strict deserialization, which also rejects entries missing any struct
+ * field. The data arrives as freeform JSON from the backend, so each
+ * entry is treated as unknown-shaped rather than trusting the declared
+ * `GenerationStat` type.
  */
 export function latestTokensPerSecond(metadata: RecordingMetadata): number | null {
   if (!metadata) return null;
