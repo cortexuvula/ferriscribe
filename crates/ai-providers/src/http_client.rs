@@ -232,14 +232,19 @@ pub fn classify_status(
 ///
 /// Connection-refused (`is_connect()`) is treated as **Permanent** — the
 /// local provider isn't running, and retrying for 7 s won't change that.
-/// Read/connect timeouts and other transport errors are **Transient**.
+/// Timeouts are also **Permanent**: a timed-out completion usually means
+/// the model is still generating (reasoning/"thinking" models can spend
+/// many minutes before their first visible output). Re-issuing the request
+/// would start another full-length generation server-side while the client
+/// waits out the entire timeout again — strictly worse than failing fast
+/// with a clear error.
 /// Body/decode errors mean the server returned malformed data — Permanent.
 pub fn classify_error(err: &reqwest::Error) -> RetryDecision {
     if err.is_connect() {
         return RetryDecision::Permanent;
     }
     if err.is_timeout() {
-        return RetryDecision::Transient;
+        return RetryDecision::Permanent;
     }
     if err.is_body() || err.is_decode() {
         return RetryDecision::Permanent;
@@ -600,6 +605,35 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .expect("test client")
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_does_not_retry_timeouts() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        // Server holds the response far longer than the client's total
+        // timeout, forcing a reqwest timeout error on the first attempt.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(3_000)))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("test client");
+        let url = format!("{}/v1/chat", server.uri());
+        let policy = fast_policy(3);
+
+        let err = send_with_retry(&policy, || client.post(&url).body("hi"))
+            .await
+            .expect_err("must time out");
+        assert!(err.is_timeout(), "expected a timeout error, got: {err}");
+        // A timed-out completion must NOT be retried: the model is still
+        // generating server-side, and a retry would restart another
+        // full-length generation while waiting out the whole timeout again.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
