@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use medical_core::error::AppError;
+use medical_core::error::AppResult;
 use medical_core::types::recording::{ProcessingStatus, Recording};
 use medical_core::types::settings::AppConfig;
 use medical_db::recordings::RecordingsRepo;
@@ -22,6 +24,29 @@ use crate::state::AppState;
 pub(super) async fn build_test_state_with_recording(
     config: AppConfig,
     transcript_text: &str,
+) -> (AppState, String) {
+    build_test_state_inner(config, transcript_text, None).await
+}
+
+/// Like [`build_test_state_with_recording`], but registers `provider`
+/// (under its own `name()`, set active) instead of a real Ollama provider.
+/// `config.ai_provider` must match `provider.name()` so `resolve_provider`
+/// finds it, and `config.ollama_host` should be loopback so the pre-flight
+/// probe is skipped.
+// Unused until the tokens-per-second generation tests land on this branch.
+#[allow(dead_code)]
+pub(super) async fn build_test_state_with_provider(
+    config: AppConfig,
+    transcript_text: &str,
+    provider: Arc<dyn medical_core::traits::AiProvider>,
+) -> (AppState, String) {
+    build_test_state_inner(config, transcript_text, Some(provider)).await
+}
+
+async fn build_test_state_inner(
+    config: AppConfig,
+    transcript_text: &str,
+    provider_override: Option<Arc<dyn medical_core::traits::AiProvider>>,
 ) -> (AppState, String) {
     // ── Database ─────────────────────────────────────────────────────────────
     let db = Arc::new(medical_db::Database::open_in_memory().expect("open in-memory db"));
@@ -55,21 +80,29 @@ pub(super) async fn build_test_state_with_recording(
     // `provider.complete()` is ever called, so the unreachable endpoint is
     // never actually contacted via the provider path.
     let mut registry = medical_ai_providers::ProviderRegistry::new();
-    let ollama_host = if config.ollama_host.is_empty() {
-        "localhost"
-    } else {
-        config.ollama_host.as_str()
-    };
-    let ollama_url = format!("http://{}:{}", ollama_host, config.ollama_port);
-    if let Ok(p) = medical_ai_providers::ollama::OllamaProvider::new_with_endpoint(
-        Some(&ollama_url),
-        config.allow_public_endpoint,
-        None,
-        medical_ai_providers::http_client::RetryConfig::default(),
-        None,
-    ) {
-        registry.register(Arc::new(p) as Arc<dyn medical_core::traits::AiProvider>);
-        registry.set_active(&config.ai_provider);
+    match provider_override {
+        Some(provider) => {
+            registry.register(provider);
+            registry.set_active(&config.ai_provider);
+        }
+        None => {
+            let ollama_host = if config.ollama_host.is_empty() {
+                "localhost"
+            } else {
+                config.ollama_host.as_str()
+            };
+            let ollama_url = format!("http://{}:{}", ollama_host, config.ollama_port);
+            if let Ok(p) = medical_ai_providers::ollama::OllamaProvider::new_with_endpoint(
+                Some(&ollama_url),
+                config.allow_public_endpoint,
+                None,
+                medical_ai_providers::http_client::RetryConfig::default(),
+                None,
+            ) {
+                registry.register(Arc::new(p) as Arc<dyn medical_core::traits::AiProvider>);
+                registry.set_active(&config.ai_provider);
+            }
+        }
     }
 
     // ── Key storage ───────────────────────────────────────────────────────────
@@ -112,4 +145,82 @@ pub(super) async fn build_test_state_with_recording(
     };
 
     (state, recording_id.to_string())
+}
+
+/// Deterministic in-process `AiProvider` for generation success-path tests.
+///
+/// `complete()` returns a fixed non-empty completion with a known token
+/// usage; every other method is unused by these tests and returns an error
+/// or an empty list. Never performs network I/O.
+// Unused until the tokens-per-second generation tests land on this branch.
+#[allow(dead_code)]
+pub(super) struct MockCompletionProvider {
+    name: &'static str,
+    content: String,
+    usage: medical_core::types::UsageInfo,
+}
+
+// Unused until the tokens-per-second generation tests land on this branch.
+#[allow(dead_code)]
+impl MockCompletionProvider {
+    /// `completion_tokens` drives the recorded throughput stat.
+    pub(super) fn new(name: &'static str, content: &str, completion_tokens: u32) -> Self {
+        Self {
+            name,
+            content: content.to_string(),
+            usage: medical_core::types::UsageInfo {
+                prompt_tokens: 128,
+                completion_tokens,
+                total_tokens: 128 + completion_tokens,
+            },
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl medical_core::traits::AiProvider for MockCompletionProvider {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn available_models(&self) -> AppResult<Vec<medical_core::types::ModelInfo>> {
+        Ok(Vec::new())
+    }
+
+    async fn complete(
+        &self,
+        _request: medical_core::types::CompletionRequest,
+    ) -> AppResult<medical_core::types::CompletionResponse> {
+        Ok(medical_core::types::CompletionResponse {
+            content: self.content.clone(),
+            model: "mock-model".to_string(),
+            usage: self.usage.clone(),
+            tool_calls: Vec::new(),
+        })
+    }
+
+    async fn complete_stream(
+        &self,
+        _request: medical_core::types::CompletionRequest,
+    ) -> AppResult<
+        Box<
+            dyn futures_util::Stream<Item = AppResult<medical_core::types::StreamChunk>>
+                + Send
+                + Unpin,
+        >,
+    > {
+        Err(AppError::ai_provider(
+            "mock provider does not support streaming".to_string(),
+        ))
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: medical_core::types::CompletionRequest,
+        _tools: Vec<medical_core::types::ToolDef>,
+    ) -> AppResult<medical_core::types::ToolCompletionResponse> {
+        Err(AppError::ai_provider(
+            "mock provider does not support tools".to_string(),
+        ))
+    }
 }
