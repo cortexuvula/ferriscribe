@@ -271,6 +271,10 @@ pub struct RecordingSummary {
     /// True if this recording was synced from a remote machine (metadata
     /// contains a `synced_from` key).
     pub is_remote: bool,
+    /// Throughput (tokens/sec) of the most recent AI generation for this
+    /// recording, from `metadata.generation_stats` — `None` when no
+    /// generation has recorded stats.
+    pub tokens_per_second: Option<f64>,
 }
 
 /// Manual Debug impl that redacts the `patient_name` field. All other
@@ -291,6 +295,7 @@ impl std::fmt::Debug for RecordingSummary {
             .field("has_letter", &self.has_letter)
             .field("has_peer_discussion", &self.has_peer_discussion)
             .field("is_remote", &self.is_remote)
+            .field("tokens_per_second", &self.tokens_per_second)
             .finish()
     }
 }
@@ -311,6 +316,7 @@ impl From<&Recording> for RecordingSummary {
             has_letter: r.letter.is_some(),
             has_peer_discussion: r.peer_discussion.is_some(),
             is_remote: r.metadata.get("synced_from").is_some(),
+            tokens_per_second: latest_tokens_per_second(&r.metadata),
         }
     }
 }
@@ -378,12 +384,16 @@ pub fn merge_generation_stat(
     doc_type: &str,
     stat: GenerationStat,
 ) {
+    debug_assert!(
+        GENERATION_STAT_DOC_TYPES.contains(&doc_type),
+        "unknown generation-stats doc type: {doc_type}"
+    );
     if !metadata.is_object() {
         *metadata = serde_json::json!({});
     }
-    let Some(obj) = metadata.as_object_mut() else {
-        return;
-    };
+    let obj = metadata
+        .as_object_mut()
+        .expect("replaced with an object above");
     let stats = obj
         .entry("generation_stats".to_string())
         .or_insert_with(|| serde_json::json!({}));
@@ -393,7 +403,7 @@ pub fn merge_generation_stat(
     if let Some(stats_obj) = stats.as_object_mut() {
         stats_obj.insert(
             doc_type.to_string(),
-            serde_json::to_value(stat).unwrap_or(serde_json::Value::Null),
+            serde_json::to_value(stat).expect("GenerationStat serializes infallibly"),
         );
     }
 }
@@ -639,6 +649,32 @@ mod tests {
         // "soap" is missing required fields → skipped; the valid referral
         // entry wins despite the lower value.
         assert_eq!(latest_tokens_per_second(&metadata), Some(40.0));
+    }
+
+    #[test]
+    fn summary_tokens_per_second_from_metadata() {
+        let mut rec = Recording::new("visit.wav", PathBuf::from("/audio/visit.wav"));
+        rec.transcript = Some("Hello".into());
+
+        // No stats recorded yet → None.
+        assert_eq!(RecordingSummary::from(&rec).tokens_per_second, None);
+
+        let older_at = Utc::now() - chrono::TimeDelta::hours(1);
+        merge_generation_stat(&mut rec.metadata, "soap", stat(50.0, older_at));
+        merge_generation_stat(&mut rec.metadata, "referral", stat(100.0, Utc::now()));
+
+        let summary = RecordingSummary::from(&rec);
+        assert_eq!(summary.tokens_per_second, Some(100.0));
+    }
+
+    #[test]
+    fn merge_generation_stat_resets_corrupt_stats_blob() {
+        let mut metadata = serde_json::json!({ "generation_stats": "corrupt" });
+        merge_generation_stat(&mut metadata, "soap", stat(20.0, Utc::now()));
+        assert_eq!(
+            metadata["generation_stats"]["soap"]["tokens_per_second"],
+            serde_json::json!(20.0)
+        );
     }
 
     #[test]
