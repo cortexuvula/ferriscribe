@@ -10,6 +10,7 @@ import {
   deleteAllRecordings,
 } from '../api/recordings';
 import { syncContentNow } from '../api/contentSync';
+import { latestTokensPerSecond } from '../utils/generationStats';
 
 /// Page size for the Recordings list. The list loads this many at a time and
 /// appends more on "Load more". A full page means there may be more; a short
@@ -102,6 +103,7 @@ class RecordingsStore {
           has_letter: r.letter !== null,
           has_peer_discussion: r.peer_discussion !== null,
           is_remote: r.metadata?.synced_from != null,
+          tokens_per_second: latestTokensPerSecond(r.metadata),
         }));
         this.list = summaries;
         // Search has its own (smaller) limit and no pagination — treat the

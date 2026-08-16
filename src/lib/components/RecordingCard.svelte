@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { RecordingSummary } from '../types';
-  import { formatDate, formatDuration } from '../utils/format';
+  import { formatDate, formatDuration, formatTokensPerSecond } from '../utils/format';
 
   interface Props {
     recording: RecordingSummary;
@@ -40,6 +40,11 @@
   }
 
   const displayName = $derived(recording.patient_name ?? recording.filename);
+  const tpsLabel = $derived(formatTokensPerSecond(recording.tokens_per_second));
+  const ariaLabel = $derived(
+    `Recording: ${displayName}, ${statusLabel(recording.status)}` +
+      (tpsLabel ? `, ${tpsLabel} generation speed` : '')
+  );
 </script>
 
 <div
@@ -54,7 +59,7 @@
   }}
   role="button"
   tabindex="0"
-  aria-label="Recording: {displayName}, {statusLabel(recording.status)}"
+  aria-label={ariaLabel}
 >
   <div
     class="card-status"
@@ -72,6 +77,10 @@
       <span>{formatDate(recording.created_at)}</span>
       <span class="sep">·</span>
       <span>{formatDuration(recording.duration_seconds)}</span>
+      {#if tpsLabel}
+        <span class="sep">·</span>
+        <span title="Latest AI generation speed (tokens/sec)">{tpsLabel}</span>
+      {/if}
     </div>
   </div>
 

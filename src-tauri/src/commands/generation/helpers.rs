@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use medical_core::error::{AppError, AppResult};
 use medical_core::traits::AiProvider;
-use medical_core::types::recording::Recording;
+use medical_core::types::recording::{Recording, record_completion_stat};
 use medical_core::types::settings::{AppConfig, IcdVersion, SoapTemplate};
 use medical_core::types::{CompletionRequest, Message, MessageContent, PatientContext, Role};
 use medical_db::recordings::RecordingsRepo;
@@ -199,6 +199,7 @@ pub(super) async fn run_generation_command(
 /// - `command_kind` / `config`: forwarded to `preflight_for_command`.
 /// - `doc_type_label`: human-readable name used in the "empty response" error
 ///   and the success debug log (e.g. `"letter"`, `"referral letter"`).
+/// - `stats_key`: canonical key under metadata.generation_stats (e.g. "referral").
 /// - `build_prompt`: closure `(soap_note, &settings) -> (system_prompt,
 ///   user_prompt)`.
 /// - `set_field`: closure `(&mut Recording, String)` that assigns the
@@ -211,6 +212,7 @@ pub(super) async fn generate_from_soap<F, S>(
     config: &AppConfig,
     command_kind: medical_core::preflight::CommandKind,
     doc_type_label: &str,
+    stats_key: &'static str,
     build_prompt: F,
     set_field: S,
 ) -> AppResult<String>
@@ -262,6 +264,7 @@ where
         None,
     );
 
+    let generation_start = std::time::Instant::now();
     let response = provider.complete(request).await.map_err(|e| match e {
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
@@ -271,6 +274,7 @@ where
             crate::commands::unwrap_app_error_message(e)
         )),
     })?;
+    let generation_elapsed = generation_start.elapsed();
 
     let text = document_generator::strip_markdown(&response.content);
     if text.trim().is_empty() {
@@ -280,6 +284,16 @@ where
     }
 
     set_field(recording, text.clone());
+
+    record_completion_stat(
+        &mut recording.metadata,
+        stats_key,
+        provider.name(),
+        &settings.model,
+        &response.usage,
+        generation_elapsed,
+    );
+
     Ok(text)
 }
 

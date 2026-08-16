@@ -1,7 +1,7 @@
 # Tokens-per-second for local LLM generations — Design
 
 **Date:** 2026-08-16
-**Status:** Awaiting user review
+**Status:** Implemented on branch `feat/tokens-per-second`
 
 ## Problem
 
@@ -107,7 +107,7 @@ plus free functions (pure, unit-testable without a live provider):
   creates/updates `metadata.generation_stats[doc_type]`, never touches other keys
 - `latest_tokens_per_second(metadata: &serde_json::Value) -> Option<f64>` —
   the stat with the newest `generated_at` across the five doc-type keys;
-  entries missing an unparseable `generated_at` rank oldest
+  entries with an unparseable `generated_at` (or that fail to deserialize as `GenerationStat`) are skipped
 
 ### Backend call sites
 

@@ -24,6 +24,7 @@ function makeSummary(id: string): RecordingSummary {
     has_letter: false,
     has_peer_discussion: false,
     is_remote: false,
+    tokens_per_second: null,
   };
 }
 

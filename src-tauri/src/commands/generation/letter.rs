@@ -56,6 +56,7 @@ pub async fn generate_letter(
             &config,
             medical_core::preflight::CommandKind::GenerateLetter,
             "letter",
+            "letter",
             move |soap_note, settings| {
                 document_generator::build_letter_prompt(
                     soap_note,
@@ -110,6 +111,7 @@ mod preflight_tests {
             &settings,
             &config,
             medical_core::preflight::CommandKind::GenerateLetter,
+            "letter",
             "letter",
             |soap_note, settings| {
                 document_generator::build_letter_prompt(

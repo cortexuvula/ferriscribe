@@ -21,3 +21,9 @@ export function formatDate(iso: string): string {
     year: 'numeric',
   });
 }
+
+/** Format a tokens-per-second value as a compact label (e.g. for a meta row). */
+export function formatTokensPerSecond(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(v) || v < 0) return '';
+  return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} tok/s`;
+}
