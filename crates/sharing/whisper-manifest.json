@@ -3,7 +3,7 @@
   "version": "v1.8.4-static-2-r2",
   "binaries": {
     "macos-aarch64": {
-      "url": "https://github.com/cortexuvula/rustMedicalAssistant/releases/download/whisper-server-v1.8.4-static-2/whisper-server-macos-aarch64.zip",
+      "url": "https://github.com/cortexuvula/ferriscribe/releases/download/whisper-server-v1.8.4-static-2/whisper-server-macos-aarch64.zip",
       "sha256": "d0bf5664d150e3d954c99e2f0cbfa69be01f03498f690f412a010b8c9f7fd5b7",
       "archive": "zip",
       "binary_name": "whisper-server"
@@ -16,13 +16,13 @@
       "binary_name": "whisper-server"
     },
     "linux-x86_64": {
-      "url": "https://github.com/cortexuvula/rustMedicalAssistant/releases/download/whisper-server-v1.8.4-static-2/whisper-server-linux-x86_64.tar.gz",
+      "url": "https://github.com/cortexuvula/ferriscribe/releases/download/whisper-server-v1.8.4-static-2/whisper-server-linux-x86_64.tar.gz",
       "sha256": "4fd4eb0e979e9392f2108947b3fadccdecfad2e27c1baedd4b39320ed2f0ca5b",
       "archive": "tar.gz",
       "binary_name": "whisper-server"
     },
     "windows-x86_64": {
-      "url": "https://github.com/cortexuvula/rustMedicalAssistant/releases/download/whisper-server-v1.8.4-static-2/whisper-server-windows-x86_64.zip",
+      "url": "https://github.com/cortexuvula/ferriscribe/releases/download/whisper-server-v1.8.4-static-2/whisper-server-windows-x86_64.zip",
       "sha256": "c01d555fa8bddf312661fd773003646bb16a5fa7b9d7ddcd09cceb6c0622d972",
       "archive": "zip",
       "binary_name": "whisper-server.exe"

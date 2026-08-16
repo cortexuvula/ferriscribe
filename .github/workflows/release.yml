@@ -162,7 +162,7 @@ jobs:
 
           const tag = process.env.GITHUB_REF.replace('refs/tags/', '');
           const version = tag.replace(/^v/, '');
-          const repo = 'cortexuvula/rustMedicalAssistant';
+          const repo = process.env.GITHUB_REPOSITORY;
           const baseUrl = `https://github.com/${repo}/releases/download/${tag}`;
           const pubDate = execSync(`gh release view ${tag} --json createdAt -q .createdAt`).toString().trim();
           const notes = execSync(`gh release view ${tag} --json body -q .body`).toString().trim();
