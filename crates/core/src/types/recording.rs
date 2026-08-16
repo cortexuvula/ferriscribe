@@ -1,5 +1,6 @@
 //! Recording and processing-status types.
 
+use super::ai::UsageInfo;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -314,6 +315,57 @@ impl From<&Recording> for RecordingSummary {
     }
 }
 
+/// Throughput metrics for a single LLM generation, persisted under
+/// `recording.metadata["generation_stats"][doc_type]`.
+///
+/// Contains only counts, durations, and provider/model names — no PHI
+/// (AGENTS.md: log counts and lengths, never content).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationStat {
+    /// Provider that produced the generation (e.g. `"ollama"`, `"lmstudio"`).
+    pub provider: String,
+    /// Model used for the generation.
+    pub model: String,
+    /// Tokens consumed by the prompt (input).
+    pub prompt_tokens: u32,
+    /// Tokens produced by the completion (output).
+    pub completion_tokens: u32,
+    /// Wall-clock duration of the completion call, in milliseconds.
+    pub duration_ms: u64,
+    /// Effective throughput: completion tokens divided by wall-clock seconds.
+    pub tokens_per_second: f64,
+    /// When the generation completed.
+    pub generated_at: DateTime<Utc>,
+}
+
+impl GenerationStat {
+    /// Compute a stat from a completion response's usage plus the
+    /// wall-clock time spent in `provider.complete()`.
+    ///
+    /// Returns `None` when no throughput can be derived (zero completion
+    /// tokens or zero elapsed time) — nothing should be recorded then.
+    pub fn from_completion(
+        provider: &str,
+        model: &str,
+        usage: &UsageInfo,
+        elapsed: std::time::Duration,
+    ) -> Option<Self> {
+        if usage.completion_tokens == 0 || elapsed.as_nanos() == 0 {
+            return None;
+        }
+        let seconds = elapsed.as_secs_f64();
+        Some(Self {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            duration_ms: elapsed.as_millis() as u64,
+            tokens_per_second: usage.completion_tokens as f64 / seconds,
+            generated_at: Utc::now(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +462,55 @@ mod tests {
         assert!(!summary.has_referral);
         assert!(!summary.has_letter);
         assert_eq!(summary.patient_name.as_deref(), Some("Jane Doe"));
+    }
+
+    #[test]
+    fn generation_stat_from_completion_computes_throughput() {
+        let usage = UsageInfo {
+            prompt_tokens: 1000,
+            completion_tokens: 200,
+            total_tokens: 1200,
+        };
+        let stat = GenerationStat::from_completion(
+            "ollama",
+            "llama3",
+            &usage,
+            std::time::Duration::from_millis(4000),
+        )
+        .expect("throughput is computable");
+        assert_eq!(stat.provider, "ollama");
+        assert_eq!(stat.model, "llama3");
+        assert_eq!(stat.prompt_tokens, 1000);
+        assert_eq!(stat.completion_tokens, 200);
+        assert_eq!(stat.duration_ms, 4000);
+        assert_eq!(stat.tokens_per_second, 50.0);
+    }
+
+    #[test]
+    fn generation_stat_from_completion_rejects_zero_completion_tokens() {
+        let usage = UsageInfo::default(); // completion_tokens == 0
+        assert!(
+            GenerationStat::from_completion(
+                "ollama",
+                "llama3",
+                &usage,
+                std::time::Duration::from_secs(1)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn generation_stat_from_completion_rejects_zero_elapsed() {
+        let usage = UsageInfo {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+        };
+        assert!(
+            GenerationStat::from_completion("ollama", "llama3", &usage, std::time::Duration::ZERO)
+                .is_none()
+        );
     }
 
     #[test]
