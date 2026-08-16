@@ -68,14 +68,16 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
         recording_id,
     );
 
+    let model_name = settings.model.clone();
     let request = build_completion_request(
         system_prompt,
         user_prompt,
-        settings.model,
+        model_name.clone(),
         settings.temperature,
         None,
     );
 
+    let generation_start = std::time::Instant::now();
     let response = provider.complete(request).await.map_err(|e| match e {
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
@@ -85,6 +87,7 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
             crate::commands::unwrap_app_error_message(e)
         )),
     })?;
+    let generation_elapsed = generation_start.elapsed();
 
     let synopsis_text = response.content;
     if synopsis_text.is_empty() {
@@ -103,6 +106,16 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
             serde_json::Value::String(synopsis_text.clone()),
         );
     }
+
+    medical_core::types::recording::record_completion_stat(
+        &mut recording.metadata,
+        "synopsis",
+        provider.name(),
+        &model_name,
+        &response.usage,
+        generation_elapsed,
+    );
+
     persist_recording(&state.db, recording).await?;
 
     Ok(synopsis_text)
@@ -157,5 +170,59 @@ mod preflight_tests {
             elapsed < std::time::Duration::from_secs(8),
             "should have short-circuited at ~3s; took {elapsed:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
+    use super::*;
+    use medical_core::types::settings::AppConfig;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn generate_synopsis_records_generation_stats() {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+
+        let provider = Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Brief synopsis: tension headache, plan follow-up.",
+            32,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports headache and fatigue.",
+            provider,
+        )
+        .await;
+
+        // Synopsis generation reads recording.soap_note.
+        {
+            let uuid = uuid::Uuid::parse_str(&recording_id).expect("uuid");
+            let conn = state.db.conn().expect("conn");
+            let mut rec =
+                medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid).expect("recording");
+            rec.soap_note = Some("S: Headache.\nA: Tension headache.\nP: Follow up.".to_string());
+            medical_db::recordings::RecordingsRepo::update(&conn, &rec).expect("update");
+        }
+
+        let synopsis = generate_synopsis_inner(&state, &recording_id)
+            .await
+            .expect("synopsis generation succeeds");
+        assert!(!synopsis.is_empty());
+
+        let uuid = uuid::Uuid::parse_str(&recording_id).expect("uuid");
+        let conn = state.db.conn().expect("conn");
+        let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+            .expect("recording persisted");
+        assert_eq!(
+            rec.metadata["generation_stats"]["synopsis"]["completion_tokens"],
+            serde_json::json!(32)
+        );
+        // The synopsis text itself stays where it always was.
+        assert!(rec.metadata["synopsis"].is_string());
     }
 }

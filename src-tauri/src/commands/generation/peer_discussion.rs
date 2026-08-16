@@ -155,14 +155,16 @@ async fn generate_peer_discussion_inner(
         recording_id,
     );
 
+    let model_name = settings.model.clone();
     let request = build_completion_request(
         system_prompt,
         user_prompt,
-        settings.model,
+        model_name.clone(),
         settings.temperature,
         None,
     );
 
+    let generation_start = std::time::Instant::now();
     let response = provider.complete(request).await.map_err(|e| match e {
         AppError::EndpointOffline { .. } => e,
         _ => AppError::ai_provider(format!(
@@ -170,6 +172,7 @@ async fn generate_peer_discussion_inner(
             crate::commands::unwrap_app_error_message(e)
         )),
     })?;
+    let generation_elapsed = generation_start.elapsed();
 
     let discussion_text = response.content;
     if discussion_text.is_empty() {
@@ -191,6 +194,15 @@ async fn generate_peer_discussion_inner(
             }),
         );
     }
+
+    medical_core::types::recording::record_completion_stat(
+        &mut recording.metadata,
+        "peer_discussion",
+        provider.name(),
+        &model_name,
+        &response.usage,
+        generation_elapsed,
+    );
 
     recording.peer_discussion = Some(discussion_text.clone());
     persist_recording(&state.db, recording).await?;
@@ -253,5 +265,55 @@ mod preflight_tests {
             elapsed < std::time::Duration::from_secs(8),
             "should have short-circuited at ~3s; took {elapsed:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
+    use super::*;
+    use medical_core::types::settings::AppConfig;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn generate_peer_discussion_records_generation_stats() {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+
+        let provider = Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Discussed the case with cardiology; agreed on outpatient workup.",
+            48,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports headache and fatigue.",
+            provider,
+        )
+        .await;
+
+        let text = generate_peer_discussion_inner(
+            &state,
+            &recording_id,
+            "Smith",
+            "Cardiology",
+            "chest pain evaluation",
+            None,
+        )
+        .await
+        .expect("peer discussion generation succeeds");
+        assert!(!text.is_empty());
+
+        let uuid = uuid::Uuid::parse_str(&recording_id).expect("uuid");
+        let conn = state.db.conn().expect("conn");
+        let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+            .expect("recording persisted");
+        assert_eq!(
+            rec.metadata["generation_stats"]["peer_discussion"]["completion_tokens"],
+            serde_json::json!(48)
+        );
+        assert!(rec.metadata["peer_discussion_context"].is_object());
     }
 }
