@@ -20,6 +20,11 @@ use crate::sse::parse_sse_response;
 use super::client::OpenAiCompatibleClient;
 use super::wire::{ApiTool, ApiToolDef, ChatResponse, ModelsListResponse, StreamOptions};
 
+/// Hard ceiling for a single streamed generation. Long enough for a
+/// reasoning model to think + write; the meaningful limit is the
+/// consumer-side idle timeout (no data for N seconds), not this cap.
+const STREAM_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+
 impl OpenAiCompatibleClient {
     /// Fetch the list of model IDs from the `/models` endpoint.
     ///
@@ -165,10 +170,11 @@ impl OpenAiCompatibleClient {
             include_usage: true,
         });
 
-        let response =
-            crate::http_client::send_with_retry(&self.policy, || self.post_json(&url, &body))
-                .await
-                .map_err(|e| self.classify_send_error(e))?;
+        let response = crate::http_client::send_with_retry(&self.policy, || {
+            self.post_json_with_timeout(&url, &body, STREAM_TOTAL_TIMEOUT)
+        })
+        .await
+        .map_err(|e| self.classify_send_error(e))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -183,66 +189,22 @@ impl OpenAiCompatibleClient {
             .map(|item| -> Vec<AppResult<StreamChunk>> {
                 match item {
                     Err(e) => vec![Err(AppError::ai_provider(e))],
-                    Ok(data) => {
-                        match serde_json::from_str::<ChatResponse>(&data) {
-                            Err(e) => {
-                                // Log the failure (error + byte length only — never
-                                // the data itself, which may contain model output /
-                                // clinical text). Propagate as a stream error so the
-                                // consumer knows the stream was truncated, rather than
-                                // silently dropping the chunk (which risked incomplete
-                                // SOAP notes with no indication).
-                                warn!(error = %e, data_len = data.len(), "malformed SSE event; propagating as stream error");
-                                vec![Err(AppError::ai_provider(format!(
-                                    "malformed SSE event ({} bytes): {e}",
-                                    data.len()
-                                )))]
-                            }
-                            Ok(resp) => {
-                                let mut out = Vec::new();
-                                if let Some(choice) = resp.choices.first()
-                                    && let Some(delta) = &choice.delta {
-                                        // Text delta
-                                        if let Some(text) = &delta.content
-                                            && !text.is_empty() {
-                                                out.push(Ok(StreamChunk::Delta {
-                                                    text: text.clone(),
-                                                }));
-                                            }
-                                        // Tool-call deltas
-                                        if let Some(tc_deltas) = &delta.tool_calls {
-                                            for tc in tc_deltas {
-                                                let id = tc.id.clone().unwrap_or_default();
-                                                let name = tc
-                                                    .function
-                                                    .as_ref()
-                                                    .and_then(|f| f.name.clone());
-                                                let args_delta = tc
-                                                    .function
-                                                    .as_ref()
-                                                    .and_then(|f| f.arguments.clone())
-                                                    .unwrap_or_default();
-                                                out.push(Ok(StreamChunk::ToolCallDelta {
-                                                    id,
-                                                    name,
-                                                    arguments_delta: args_delta,
-                                                }));
-                                            }
-                                        }
-                                    }
-                                // Usage chunk (comes in a separate SSE event with usage data)
-                                if let Some(u) = resp.usage {
-                                    out.push(Ok(StreamChunk::Usage(UsageInfo {
-                                        prompt_tokens: u.prompt_tokens,
-                                        completion_tokens: u.completion_tokens,
-                                        total_tokens: u.total_tokens,
-                                    })));
-                                    out.push(Ok(StreamChunk::Done));
-                                }
-                                out
-                            }
+                    Ok(data) => match serde_json::from_str::<ChatResponse>(&data) {
+                        Err(e) => {
+                            // Log the failure (error + byte length only — never
+                            // the data itself, which may contain model output /
+                            // clinical text). Propagate as a stream error so the
+                            // consumer knows the stream was truncated, rather than
+                            // silently dropping the chunk (which risked incomplete
+                            // SOAP notes with no indication).
+                            warn!(error = %e, data_len = data.len(), "malformed SSE event; propagating as stream error");
+                            vec![Err(AppError::ai_provider(format!(
+                                "malformed SSE event ({} bytes): {e}",
+                                data.len()
+                            )))]
                         }
-                    }
+                        Ok(resp) => map_chat_event(&resp),
+                    },
                 }
             })
             .flat_map(tokio_stream::iter);
@@ -344,6 +306,60 @@ impl OpenAiCompatibleClient {
             usage,
         })
     }
+}
+
+/// Map one parsed SSE `ChatResponse` event into stream chunks (pure; testable).
+///
+/// Handles only successfully parsed events; the malformed-JSON path stays in
+/// `complete_stream`'s closure (it needs the raw `data` for `data_len`).
+fn map_chat_event(resp: &ChatResponse) -> Vec<AppResult<StreamChunk>> {
+    let mut out = Vec::new();
+    if let Some(choice) = resp.choices.first()
+        && let Some(delta) = &choice.delta
+    {
+        // Text delta
+        if let Some(text) = &delta.content
+            && !text.is_empty()
+        {
+            out.push(Ok(StreamChunk::Delta { text: text.clone() }));
+        }
+        // Reasoning/"thinking" delta — length only, never the text itself
+        // (PHI: reasoning can echo clinical content; lengths are safe to emit).
+        if let Some(reasoning) = &delta.reasoning_content
+            && !reasoning.is_empty()
+        {
+            out.push(Ok(StreamChunk::ReasoningDelta {
+                len: reasoning.len(),
+            }));
+        }
+        // Tool-call deltas
+        if let Some(tc_deltas) = &delta.tool_calls {
+            for tc in tc_deltas {
+                let id = tc.id.clone().unwrap_or_default();
+                let name = tc.function.as_ref().and_then(|f| f.name.clone());
+                let args_delta = tc
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.arguments.clone())
+                    .unwrap_or_default();
+                out.push(Ok(StreamChunk::ToolCallDelta {
+                    id,
+                    name,
+                    arguments_delta: args_delta,
+                }));
+            }
+        }
+    }
+    // Usage chunk (comes in a separate SSE event with usage data)
+    if let Some(u) = &resp.usage {
+        out.push(Ok(StreamChunk::Usage(UsageInfo {
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+        })));
+        out.push(Ok(StreamChunk::Done));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -501,5 +517,26 @@ mod tests {
         }
         assert!(saw_delta, "expected to see 'hi' delta");
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn maps_reasoning_delta_to_length_only() {
+        let raw = r#"{"choices":[{"delta":{"reasoning_content":"abc"}}]}"#;
+        let resp: ChatResponse = serde_json::from_str(raw).unwrap();
+        let chunks = map_chat_event(&resp);
+        assert!(matches!(
+            chunks[0],
+            Ok(StreamChunk::ReasoningDelta { len: 3 })
+        ));
+    }
+
+    #[test]
+    fn maps_content_delta_and_usage() {
+        let raw = r#"{"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#;
+        let resp: ChatResponse = serde_json::from_str(raw).unwrap();
+        let chunks = map_chat_event(&resp);
+        assert!(matches!(&chunks[0], Ok(StreamChunk::Delta { text }) if text == "hi"));
+        assert!(matches!(&chunks[1], Ok(StreamChunk::Usage(u)) if u.completion_tokens == 2));
+        assert!(matches!(chunks[2], Ok(StreamChunk::Done)));
     }
 }

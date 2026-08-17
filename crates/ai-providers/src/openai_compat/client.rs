@@ -322,6 +322,18 @@ impl OpenAiCompatibleClient {
         }
         req
     }
+
+    /// Like [`Self::post_json`], but overrides the client-level total
+    /// timeout for this request. Streaming requests need a generous hard
+    /// cap instead of the short non-streamed budget.
+    pub(super) fn post_json_with_timeout<T: serde::Serialize>(
+        &self,
+        url: &str,
+        body: &T,
+        timeout: std::time::Duration,
+    ) -> reqwest::RequestBuilder {
+        self.post_json(url, body).timeout(timeout)
+    }
 }
 
 #[cfg(test)]
