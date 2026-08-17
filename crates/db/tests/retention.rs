@@ -300,3 +300,21 @@ fn list_respects_cutoff() {
     let ids: Vec<Uuid> = listed.iter().map(|(id, _)| *id).collect();
     assert_eq!(ids, vec![older.id], "only the 40-day-old tombstone is due");
 }
+
+#[test]
+fn update_on_trashed_row_is_a_clean_not_found() {
+    // Regression: without the `deleted_at IS NULL` guard on `update`, an
+    // edit landing on a just-auto-trashed recording fired the FTS update
+    // trigger on a de-indexed row and failed with SQLITE_CORRUPT.
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+    let rec = seed_days_old(&conn, 1, "guard.wav");
+    let id = rec.id;
+    RecordingsRepo::soft_delete(&conn, &id).expect("trash");
+
+    let err = RecordingsRepo::update(&conn, &rec).expect_err("must not update a trashed row");
+    assert!(
+        matches!(err, medical_db::DbError::NotFound(_)),
+        "got: {err:?}"
+    );
+}
