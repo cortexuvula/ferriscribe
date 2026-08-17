@@ -16,7 +16,7 @@
 use medical_core::types::user_dict_entry::{UserDictEntry, deterministic_id};
 use rusqlite::{Connection, Row, params};
 
-use crate::{DbError, DbResult};
+use crate::DbResult;
 
 pub struct UserDictionaryRepo;
 
@@ -113,43 +113,33 @@ impl UserDictionaryRepo {
 
         // Wrap the upsert loop in a transaction so a mid-merge failure rolls
         // back all prior writes — otherwise a partial merge leaves the local
-        // store inconsistent with the remote side.
-        conn.execute_batch("BEGIN")?;
-        let result = (|| {
-            for remote_entry in remote {
-                match local_map.get(remote_entry.id.as_str()) {
-                    None => {
-                        // New entry — insert as-is (addition or tombstone).
-                        Self::upsert(conn, remote_entry)?;
-                    }
-                    Some(local) => match remote_entry.updated_at.cmp(&local.updated_at) {
-                        std::cmp::Ordering::Greater => {
-                            // Remote is newer — remote wins.
-                            Self::upsert(conn, remote_entry)?;
-                        }
-                        std::cmp::Ordering::Less => {
-                            // Local is newer — local wins, do nothing.
-                        }
-                        std::cmp::Ordering::Equal => {
-                            // Tie — tombstone wins to avoid ghost reappearance.
-                            if remote_entry.deleted_at.is_some() {
-                                Self::upsert(conn, remote_entry)?;
-                            }
-                        }
-                    },
+        // store inconsistent with the remote side. `unchecked_transaction`
+        // rolls back on drop.
+        let tx = conn.unchecked_transaction()?;
+        for remote_entry in remote {
+            match local_map.get(remote_entry.id.as_str()) {
+                None => {
+                    // New entry — insert as-is (addition or tombstone).
+                    Self::upsert(&tx, remote_entry)?;
                 }
-            }
-            Ok::<(), DbError>(())
-        })();
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
+                Some(local) => match remote_entry.updated_at.cmp(&local.updated_at) {
+                    std::cmp::Ordering::Greater => {
+                        // Remote is newer — remote wins.
+                        Self::upsert(&tx, remote_entry)?;
+                    }
+                    std::cmp::Ordering::Less => {
+                        // Local is newer — local wins, do nothing.
+                    }
+                    std::cmp::Ordering::Equal => {
+                        // Tie — tombstone wins to avoid ghost reappearance.
+                        if remote_entry.deleted_at.is_some() {
+                            Self::upsert(&tx, remote_entry)?;
+                        }
+                    }
+                },
             }
         }
+        tx.commit()?;
 
         Self::list_active(conn)
     }

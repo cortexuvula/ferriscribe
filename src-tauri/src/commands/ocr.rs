@@ -1,7 +1,5 @@
 //! Tauri command for OCR document processing.
 
-use std::sync::Arc;
-
 use medical_core::error::{AppError, AppResult};
 use medical_processing::ocr::{self, OcrPageResult};
 
@@ -40,22 +38,14 @@ pub async fn ocr_documents(
     }
 
     // Load config to get the OCR model name.
-    let db = Arc::clone(&state.db);
-    let (ocr_model, provider_name) = tokio::task::spawn_blocking(move || {
-        let conn = db.conn()?;
-        let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
-        config.migrate();
-        let model = config
-            .ocr_model
-            .clone()
-            .filter(|m| !m.is_empty())
-            .or_else(|| Some(config.ai_model.clone()))
-            .unwrap_or_default();
-        let provider = config.ai_provider.clone();
-        Ok::<_, AppError>((model, provider))
-    })
-    .await
-    .map_err(crate::commands::join_err)??;
+    let config = crate::commands::load_app_config(&state.db, "OCR").await?;
+    let ocr_model = config
+        .ocr_model
+        .clone()
+        .filter(|m| !m.is_empty())
+        .or_else(|| Some(config.ai_model.clone()))
+        .unwrap_or_default();
+    let provider_name = config.ai_provider.clone();
 
     let provider = generation::resolve_provider(&state, &provider_name).await?;
 

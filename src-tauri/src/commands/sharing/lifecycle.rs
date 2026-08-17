@@ -132,18 +132,9 @@ pub async fn start_sharing_inner(
     // calls to the upstream services on localhost directly — no proxy hop, no
     // bearer needed. Ports are the upstream ports (Ollama 11434, LM Studio 1234,
     // whisper.cpp 8080), NOT the proxy ports (11435 / 8081).
-    let allow_public = {
-        let db = Arc::clone(&state.db);
-        tokio::task::spawn_blocking(move || -> AppResult<bool> {
-            let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
-            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-                .map_err(|e| AppError::Other(e.to_string()))?;
-            cfg.migrate();
-            Ok(cfg.allow_public_endpoint)
-        })
-        .await
-        .map_err(crate::commands::join_err)??
-    };
+    let allow_public = crate::commands::load_app_config(&state.db, "sharing start")
+        .await?
+        .allow_public_endpoint;
     use medical_core::types::RemoteEndpoint;
     let local_ollama = Some(RemoteEndpoint {
         lan: Some("127.0.0.1".to_string()),
@@ -217,18 +208,9 @@ pub async fn stop_sharing_inner(state: &AppState) -> AppResult<()> {
     // Restore provider endpoints to pre-sharing configuration.
     // If this machine is also paired as a client to another server, restore the
     // paired endpoint; otherwise revert to None (local-only mode).
-    let allow_public = {
-        let db = Arc::clone(&state.db);
-        tokio::task::spawn_blocking(move || -> AppResult<bool> {
-            let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
-            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-                .map_err(|e| AppError::Other(e.to_string()))?;
-            cfg.migrate();
-            Ok(cfg.allow_public_endpoint)
-        })
-        .await
-        .map_err(crate::commands::join_err)??
-    };
+    let allow_public = crate::commands::load_app_config(&state.db, "sharing stop")
+        .await?
+        .allow_public_endpoint;
     let paired = crate::state::load_paired_connection();
     let bearer = if paired.is_some() {
         crate::state::load_sharing_bearer()

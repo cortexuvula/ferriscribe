@@ -1,102 +1,15 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { suggestedClientLabel } from '../../../api/sharing';
   import { settings } from '../../../stores/settings.svelte';
   import { formatError } from '../../../types/errors';
+  import { usePairing, friendlyName, type PairedConnection } from '../../../composables/usePairing.svelte';
 
-  type Discovered = {
-    instance_name: string;
-    host: string;
-    /// Addresses learned via mDNS broadcast (LAN multicast).
-    addresses: string[];
-    /// Addresses learned via Tailscale peer enumeration. Optional for
-    /// serde backward-compat with older clients that didn't emit this field.
-    tailscale_addresses?: string[];
-    ports: { ollama: number | null; whisper: number | null; lmstudio: number | null; pairing: number | null; vocab: number | null };
-    version: string;
-  };
-
-  type PairPorts = { ollama: number; whisper: number; pairing: number; lmstudio: number | null; vocab: number | null };
-
-  type PairedConnection = {
-    lan: string | null;
-    tailscale: string | null;
-    ports: PairPorts;
-    label: string;
-  };
-
-  let discovered = $state<Discovered[]>([]);
-  let scanning = $state(false);
-  let pasteUrl = $state('');
-  let label = $state('');
-  let busy = $state(false);
-  let error = $state<string | null>(null);
+  // Shared pairing state machine (discovery, dedupe, URL parsing, pairing
+  // call) — see usePairing.svelte.ts. On success, reload this panel's
+  // paired-connection display.
   let pairedConn = $state<PairedConnection | null>(null);
   let unpairBusy = $state(false);
-
-  // Strip the mDNS suffix `._ferriscribe._tcp.local.` to recover the
-  // human-readable friendly name the office-server admin set in the wizard.
-  function friendlyName(d: Discovered): string {
-    const m = d.instance_name.match(/^(.+?)\._ferriscribe\._tcp\.local\.?$/);
-    if (m) return m[1];
-    if (d.host) return d.host;
-    return d.instance_name;
-  }
-
-  // mDNS browsers fire one ServiceResolved event per interface, so the
-  // same logical office server appears N times with overlapping address
-  // sets. Dedupe by instance_name (unique per service registration) and
-  // merge addresses across events so the picker has every candidate.
-  //
-  // The same logical office server can also surface via both mDNS and
-  // the Tailscale peer probe — when that happens we merge the LAN
-  // addresses (`addresses`) and the tailnet addresses
-  // (`tailscale_addresses`) into a single entry, keeping each channel's
-  // set separate so the slot routing in `pairDiscovered` is correct.
-  const deduped = $derived.by(() => {
-    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- transient dedup map, not reactive state
-    const seen = new Map<string, Discovered>();
-    for (const d of discovered) {
-      const existing = seen.get(d.instance_name);
-      if (!existing) {
-        seen.set(d.instance_name, {
-          ...d,
-          addresses: [...d.addresses],
-          tailscale_addresses: [...(d.tailscale_addresses ?? [])],
-        });
-      } else {
-        for (const a of d.addresses) {
-          if (!existing.addresses.includes(a)) existing.addresses.push(a);
-        }
-        const tsList = (existing.tailscale_addresses ??= []);
-        for (const a of d.tailscale_addresses ?? []) {
-          if (!tsList.includes(a)) tsList.push(a);
-        }
-      }
-    }
-    return Array.from(seen.values());
-  });
-
-  // Pick the most useful address from a set of resolved addresses:
-  //   1. RFC1918 IPv4 (192.168/10/172.16-31) — almost always the right answer
-  //      on a clinic LAN
-  //   2. Other IPv4 (e.g. 100.x Tailscale CGNAT, public-routable)
-  //   3. IPv6 ULA (fc/fd) or globally-routable
-  //   4. IPv6 link-local (fe80::, last resort — usually unreachable across hosts)
-  function bestFrom(addresses: string[]): string | null {
-    if (addresses.length === 0) return null;
-    const score = (a: string): number => {
-      const isV6 = a.includes(':');
-      if (!isV6) {
-        if (/^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(a)) return 0;
-        return 1;
-      }
-      if (/^fe80:/i.test(a)) return 3;
-      return 2;
-    };
-    return [...addresses].sort((a, b) => score(a) - score(b))[0];
-  }
 
   async function loadPaired() {
     try {
@@ -106,138 +19,19 @@
     }
   }
 
-  async function rescan() {
-    scanning = true;
-    discovered = [];
-    try {
-      // Run mDNS (LAN broadcast) and Tailscale-peer probes in parallel.
-      // mDNS sees servers on the same physical network; Tailscale probing
-      // sees servers reachable via the tailnet overlay. Either is valid;
-      // the dedupe step (by instance_name) merges them into one entry per
-      // logical office server when both paths succeed.
-      const [lan, ts] = await Promise.all([
-        invoke<Discovered[]>('discover_servers', { timeoutMs: 3000 }).catch(() => []),
-        invoke<Discovered[]>('discover_via_tailscale', { timeoutMs: 3000 }).catch(() => []),
-      ]);
-      discovered = [...lan, ...ts];
-    } finally {
-      scanning = false;
-    }
-  }
-
-  async function pairManual(
-    lan: string | null,
-    tailscale: string | null,
-    ports: PairPorts,
-    code: string,
-  ) {
-    busy = true;
-    error = null;
-    try {
-      let tokenLabel = label.trim();
-      if (!tokenLabel) {
-        try {
-          tokenLabel = (await suggestedClientLabel()).trim();
-        } catch {
-          tokenLabel = '';
-        }
-      }
-      if (!tokenLabel) {
-        error = 'Please enter a label for this computer.';
-        busy = false;
-        return;
-      }
-      await invoke('pair_with_server', {
-        lan,
-        tailscale,
-        ports,
-        code,
-        label: tokenLabel,
-      });
-      await settings.load();
-      await loadPaired();
-    } catch (e) {
-      error = formatError(e);
-    } finally {
-      busy = false;
-    }
-  }
-
-  function pairFromUrl() {
-    if (!pasteUrl.startsWith('ferriscribe://pair?')) {
-      error = 'Not a FerriScribe pairing URL.';
-      return;
-    }
-    const u = new URL(pasteUrl.replace('ferriscribe://', 'http://x/'));
-    const lan = u.searchParams.get('lan');
-    const ts = u.searchParams.get('ts');
-    const code = u.searchParams.get('code') ?? '';
-
-    const ppRaw = u.searchParams.get('pp');
-    const pp = ppRaw ? parseInt(ppRaw, 10) : NaN;
-    if (!Number.isFinite(pp) || pp <= 0 || pp > 65535) {
-      error = 'Pairing URL is missing a valid pairing port (pp).';
-      return;
-    }
-
-    const op = parseInt(u.searchParams.get('op') ?? '', 10);
-    const wp = parseInt(u.searchParams.get('wp') ?? '', 10);
-    if (!Number.isFinite(op) || !Number.isFinite(wp)) {
-      error = 'Pairing URL is missing required ports (op or wp).';
-      return;
-    }
-
-    const lpRaw = u.searchParams.get('lp');
-    const lp = lpRaw ? parseInt(lpRaw, 10) : null;
-
-    const vpRaw = u.searchParams.get('vp');
-    const vp = vpRaw ? parseInt(vpRaw, 10) : null;
-
-    if (!lan && !ts) { error = 'No reachable address in URL'; return; }
-    pairManual(lan, ts, {
-      ollama: op,
-      whisper: wp,
-      pairing: pp,
-      lmstudio: lp !== null && Number.isFinite(lp) ? lp : null,
-      vocab: vp !== null && Number.isFinite(vp) ? vp : null,
-    }, code);
-  }
-
-  function pairDiscovered(d: Discovered) {
-    // Route discovery-channel addresses into their semantically correct
-    // RemoteEndpoint slots: mDNS-learned addresses go to `lan`,
-    // Tailscale-learned addresses (e.g. MagicDNS hostnames like
-    // `mac.tail161478.ts.net`) go to `tailscale`. `pair_with_server`
-    // already handles all three combinations (lan-only, ts-only, both).
-    const lan = bestFrom(d.addresses);
-    const tailscale = (d.tailscale_addresses ?? [])[0] ?? null;
-    if (!lan && !tailscale) {
-      error = 'No reachable address for this server.';
-      return;
-    }
-    const ports: PairPorts = {
-      ollama: d.ports.ollama ?? 11435,
-      whisper: d.ports.whisper ?? 8081,
-      pairing: d.ports.pairing ?? 11436,
-      lmstudio: d.ports.lmstudio ?? null,
-      vocab: d.ports.vocab ?? null,
-    };
-    const code = prompt('Enter the 6-digit code from the office server.') ?? '';
-    if (!code) return;
-    pairManual(lan, tailscale, ports, code);
-  }
+  const pairing = usePairing(loadPaired);
 
   async function unpair() {
     unpairBusy = true;
-    error = null;
+    pairing.error = null;
     try {
       await invoke('unpair');
       await settings.load();
       pairedConn = null;
       // Repopulate the discovery list so the connect form is immediately useful.
-      rescan();
+      pairing.rescan();
     } catch (e) {
-      error = formatError(e);
+      pairing.error = formatError(e);
     } finally {
       unpairBusy = false;
     }
@@ -246,8 +40,8 @@
   function onPairUrlEvent(e: Event) {
     const detail = (e as CustomEvent<string>).detail;
     if (typeof detail === 'string' && detail.startsWith('ferriscribe://pair?')) {
-      pasteUrl = detail;
-      pairFromUrl();
+      pairing.pasteUrl = detail;
+      pairing.pairFromUrl();
     }
   }
 
@@ -255,16 +49,9 @@
     await loadPaired();
     if (!pairedConn) {
       // Pre-fill the label from the OS hostname so the office server
-      // always sees a meaningful computer name. Failure is non-fatal —
-      // the user can still type a label manually.
-      if (!label) {
-        try {
-          label = await suggestedClientLabel();
-        } catch {
-          // ignore — leave the input empty for the user to fill
-        }
-      }
-      rescan();
+      // always sees a meaningful computer name.
+      await pairing.prefillLabel();
+      pairing.rescan();
     }
     window.addEventListener('ferriscribe-pair-url', onPairUrlEvent);
   });
@@ -294,14 +81,14 @@
       <button class="btn btn-danger" disabled={unpairBusy} onclick={unpair}>
         {unpairBusy ? 'Unpairing…' : 'Unpair'}
       </button>
-      {#if error}<div class="error">{error}</div>{/if}
+      {#if pairing.error}<div class="error">{pairing.error}</div>{/if}
     </div>
   {:else}
     <div class="label-row">
       <label for="ferri-pair-label">This computer's label</label>
       <input
         id="ferri-pair-label"
-        bind:value={label}
+        bind:value={pairing.label}
         placeholder="e.g. Dr. Smith's MacBook, Room 6"
       />
       <small class="hint">Shown in the Connected clients panel on the office server.</small>
@@ -309,14 +96,14 @@
 
     <div class="discovery">
       <h4>Found on your network</h4>
-      {#if scanning}<p class="hint">Scanning…</p>{/if}
-      {#if !scanning && deduped.length === 0}
+      {#if pairing.scanning}<p class="hint">Scanning…</p>{/if}
+      {#if !pairing.scanning && pairing.deduped.length === 0}
         <p class="hint">No servers found. Either no office server is running,
         or your Wi-Fi blocks discovery (UniFi / Meraki client isolation).
         Use the QR or code option below.</p>
       {/if}
       <ul class="servers">
-        {#each deduped as d (d.instance_name)}
+        {#each pairing.deduped as d (d.instance_name)}
           <li>
             <div class="server-info">
               <strong class="server-name">{friendlyName(d)}</strong>
@@ -324,24 +111,24 @@
                 <span class="server-host">{d.host}</span>
               {/if}
             </div>
-            <button class="btn btn-primary" onclick={() => pairDiscovered(d)}>Connect</button>
+            <button class="btn btn-primary" onclick={() => pairing.pairDiscovered(d)}>Connect</button>
           </li>
         {/each}
       </ul>
-      <button class="btn" onclick={rescan} disabled={scanning}>
-        {scanning ? 'Scanning…' : 'Rescan'}
+      <button class="btn" onclick={() => pairing.rescan()} disabled={pairing.scanning}>
+        {pairing.scanning ? 'Scanning…' : 'Rescan'}
       </button>
     </div>
 
     <div class="paste">
       <h4>Or paste a pairing URL</h4>
-      <input bind:value={pasteUrl} placeholder="ferriscribe://pair?..." />
-      <button class="btn btn-primary" disabled={busy} onclick={pairFromUrl}>
-        {busy ? 'Pairing…' : 'Pair'}
+      <input bind:value={pairing.pasteUrl} placeholder="ferriscribe://pair?..." />
+      <button class="btn btn-primary" disabled={pairing.busy} onclick={() => pairing.pairFromUrl()}>
+        {pairing.busy ? 'Pairing…' : 'Pair'}
       </button>
     </div>
 
-    {#if error}<div class="error">{error}</div>{/if}
+    {#if pairing.error}<div class="error">{pairing.error}</div>{/if}
   {/if}
 </section>
 

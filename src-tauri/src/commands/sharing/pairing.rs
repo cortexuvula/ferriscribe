@@ -237,39 +237,11 @@ pub async fn pair_with_server(
 
     // Update in-memory provider endpoints immediately so the "models visible"
     // success message in ClientPair.svelte is truthful without an app restart.
-    let allow_public = {
-        let db = std::sync::Arc::clone(&state.db);
-        tokio::task::spawn_blocking(move || -> AppResult<bool> {
-            let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
-            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-                .map_err(|e| AppError::Other(e.to_string()))?;
-            cfg.migrate();
-            Ok(cfg.allow_public_endpoint)
-        })
-        .await
-        .map_err(crate::commands::join_err)??
-    };
-    use medical_core::types::RemoteEndpoint;
+    let allow_public = crate::commands::load_app_config(&state.db, "pairing")
+        .await?
+        .allow_public_endpoint;
     let bearer = Some(token.clone());
-
-    let ollama_ep = Some(RemoteEndpoint {
-        lan: lan.clone(),
-        tailscale: tailscale.clone(),
-        port: ports.ollama,
-        bearer: bearer.clone(),
-    });
-    let lmstudio_ep = ports.lmstudio.map(|lp| RemoteEndpoint {
-        lan: lan.clone(),
-        tailscale: tailscale.clone(),
-        port: lp,
-        bearer: bearer.clone(),
-    });
-    let whisper_ep = Some(RemoteEndpoint {
-        lan: lan.clone(),
-        tailscale: tailscale.clone(),
-        port: ports.whisper,
-        bearer: bearer.clone(),
-    });
+    let (ollama_ep, lmstudio_ep, whisper_ep) = super::paired_endpoints(&conn, bearer);
 
     {
         let guard = state.ollama_provider.read().await;

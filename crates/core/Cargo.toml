@@ -15,10 +15,13 @@ futures-util = { workspace = true }
 tokio = { workspace = true, features = ["sync", "net", "time"] }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 tracing.workspace = true
 
 [dev-dependencies]
 http = "1"
+tempfile = { workspace = true }
 wiremock = "0.6"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 

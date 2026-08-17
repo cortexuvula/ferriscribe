@@ -55,19 +55,7 @@ pub async fn transcribe_recording_inner(
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
 
     // Step 1: Load AppConfig (needed for pre-flight; no recording mutation yet).
-    let app_config = {
-        let db_cfg = Arc::clone(&state.db);
-        tokio::task::spawn_blocking(
-            move || -> AppResult<medical_core::types::settings::AppConfig> {
-                let conn = db_cfg.conn()?;
-                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)?;
-                cfg.migrate();
-                Ok(cfg)
-            },
-        )
-        .await
-        .map_err(|e| AppError::Other(format!("preflight config load join error: {e}")))??
-    };
+    let app_config = crate::commands::load_app_config(&state.db, "preflight").await?;
 
     // Step 2: Pre-flight — probe the remote STT endpoint before mutating the
     // recording's status. For local whisper users stt_remote_host is empty so

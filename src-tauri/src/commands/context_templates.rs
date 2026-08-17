@@ -146,22 +146,12 @@ pub fn export_json(templates: &[ContextTemplate]) -> AppResult<String> {
     Ok(json)
 }
 
-/// Load `AppConfig` from the DB inside `spawn_blocking` so the SQLite
-/// pool checkout and JSON parse never stall the Tokio async runtime worker.
+/// Load `AppConfig` from the DB on a blocking worker (see
+/// [`crate::commands::load_app_config`]).
 async fn load_config(
     db: &Arc<medical_db::Database>,
 ) -> AppResult<medical_core::types::settings::AppConfig> {
-    let db = Arc::clone(db);
-    tokio::task::spawn_blocking(
-        move || -> AppResult<medical_core::types::settings::AppConfig> {
-            let conn = db.conn()?;
-            let mut config = SettingsRepo::load_config(&conn)?;
-            config.migrate();
-            Ok(config)
-        },
-    )
-    .await
-    .map_err(crate::commands::join_err)?
+    crate::commands::load_app_config(db, "context template").await
 }
 
 /// Save `AppConfig` to the DB inside `spawn_blocking`.

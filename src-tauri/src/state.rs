@@ -875,26 +875,7 @@ impl AppState {
         };
 
         let (ollama_ep, lmstudio_ep, whisper_ep) = if let Some(ref p) = paired {
-            (
-                Some(RemoteEndpoint {
-                    lan: p.lan.clone(),
-                    tailscale: p.tailscale.clone(),
-                    port: p.ports.ollama,
-                    bearer: bearer.clone(),
-                }),
-                p.ports.lmstudio.map(|lms_port| RemoteEndpoint {
-                    lan: p.lan.clone(),
-                    tailscale: p.tailscale.clone(),
-                    port: lms_port,
-                    bearer: bearer.clone(),
-                }),
-                Some(RemoteEndpoint {
-                    lan: p.lan.clone(),
-                    tailscale: p.tailscale.clone(),
-                    port: p.ports.whisper,
-                    bearer: bearer.clone(),
-                }),
-            )
+            crate::commands::sharing::paired_endpoints(p, bearer)
         } else {
             (None, None, None)
         };

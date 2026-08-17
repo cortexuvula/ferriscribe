@@ -14,7 +14,7 @@ use rusqlite::{Connection, Row, params};
 
 use medical_core::types::condition_chip::{ConditionChip, deterministic_id};
 
-use crate::{DbError, DbResult};
+use crate::DbResult;
 
 /// Repository for the `condition_chips` table.
 ///
@@ -169,52 +169,42 @@ impl ConditionChipsRepo {
         // Wrap the upsert loop in a transaction so a mid-merge failure
         // rolls back all prior writes — otherwise a partial merge leaves
         // the local store inconsistent with the remote side.
-        conn.execute_batch("BEGIN")?;
-        let result = (|| {
-            for remote in remote_chips {
-                match local_map.get(remote.id.as_str()) {
-                    None => {
-                        // New chip — insert as-is (addition or tombstone).
-                        Self::upsert(conn, remote)?;
-                    }
-                    Some(local) => match remote.updated_at.cmp(&local.updated_at) {
-                        std::cmp::Ordering::Greater => {
-                            // Remote is newer — remote wins the LWW fields
-                            // (text/order/deleted), but use_count takes the
-                            // MAX of both sides so the counter stays monotonic
-                            // instead of being clobbered by the winner.
-                            Self::upsert_with_max_count(conn, remote, local.use_count)?;
-                        }
-                        std::cmp::Ordering::Less => {
-                            // Local is newer — local wins LWW, so the row's
-                            // text/order/deleted are unchanged. But use_count
-                            // still reconciles via MAX: if the remote (older)
-                            // side has a larger count, adopt it without
-                            // touching the LWW fields or local updated_at.
-                            if remote.use_count > local.use_count {
-                                Self::adopt_use_count(conn, &local.id, remote.use_count)?;
-                            }
-                        }
-                        std::cmp::Ordering::Equal => {
-                            // Tie — tombstone wins to avoid ghost reappearance.
-                            if remote.deleted_at.is_some() {
-                                Self::upsert_with_max_count(conn, remote, local.use_count)?;
-                            }
-                        }
-                    },
+        // `unchecked_transaction` rolls back on drop.
+        let tx = conn.unchecked_transaction()?;
+        for remote in remote_chips {
+            match local_map.get(remote.id.as_str()) {
+                None => {
+                    // New chip — insert as-is (addition or tombstone).
+                    Self::upsert(&tx, remote)?;
                 }
-            }
-            Ok::<(), DbError>(())
-        })();
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
+                Some(local) => match remote.updated_at.cmp(&local.updated_at) {
+                    std::cmp::Ordering::Greater => {
+                        // Remote is newer — remote wins the LWW fields
+                        // (text/order/deleted), but use_count takes the
+                        // MAX of both sides so the counter stays monotonic
+                        // instead of being clobbered by the winner.
+                        Self::upsert_with_max_count(&tx, remote, local.use_count)?;
+                    }
+                    std::cmp::Ordering::Less => {
+                        // Local is newer — local wins LWW, so the row's
+                        // text/order/deleted are unchanged. But use_count
+                        // still reconciles via MAX: if the remote (older)
+                        // side has a larger count, adopt it without
+                        // touching the LWW fields or local updated_at.
+                        if remote.use_count > local.use_count {
+                            Self::adopt_use_count(&tx, &local.id, remote.use_count)?;
+                        }
+                    }
+                    std::cmp::Ordering::Equal => {
+                        // Tie — tombstone wins to avoid ghost reappearance.
+                        if remote.deleted_at.is_some() {
+                            Self::upsert_with_max_count(&tx, remote, local.use_count)?;
+                        }
+                    }
+                },
             }
         }
+        tx.commit()?;
 
         Self::list_active(conn)
     }
@@ -239,33 +229,22 @@ impl ConditionChipsRepo {
     /// transaction so a concurrent writer can't slip in between them and
     /// steal the same sort_order slot.
     pub fn add(conn: &Connection, text: &str, now_iso: &str) -> DbResult<Vec<ConditionChip>> {
-        conn.execute_batch("BEGIN")?;
-        let result = (|| {
-            let max_order: i32 = conn.query_row(
-                "SELECT COALESCE(MAX(sort_order), -1) FROM condition_chips WHERE deleted_at IS NULL",
-                [],
-                |row| row.get(0),
-            )?;
-            let chip = ConditionChip {
-                id: deterministic_id(text),
-                text: text.trim().to_string(),
-                updated_at: now_iso.to_string(),
-                deleted_at: None,
-                sort_order: max_order + 1,
-                use_count: 0,
-            };
-            Self::upsert(conn, &chip)?;
-            Ok::<(), DbError>(())
-        })();
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
-            }
-        }
+        let tx = conn.unchecked_transaction()?;
+        let max_order: i32 = tx.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM condition_chips WHERE deleted_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        let chip = ConditionChip {
+            id: deterministic_id(text),
+            text: text.trim().to_string(),
+            updated_at: now_iso.to_string(),
+            deleted_at: None,
+            sort_order: max_order + 1,
+            use_count: 0,
+        };
+        Self::upsert(&tx, &chip)?;
+        tx.commit()?;
         Self::list_active(conn)
     }
 
@@ -305,45 +284,34 @@ impl ConditionChipsRepo {
         now_iso: &str,
     ) -> DbResult<Vec<ConditionChip>> {
         let id = deterministic_id(text);
-        conn.execute_batch("BEGIN")?;
-        let result = (|| {
-            let changed = conn.execute(
-                "UPDATE condition_chips
-                 SET use_count = use_count + 1, updated_at = ?1, deleted_at = NULL
-                 WHERE id = ?2",
-                params![now_iso, id],
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE condition_chips
+             SET use_count = use_count + 1, updated_at = ?1, deleted_at = NULL
+             WHERE id = ?2",
+            params![now_iso, id],
+        )?;
+        if changed == 0 {
+            // No row at all (not even a tombstone) — create the chip with
+            // use_count = 1. sort_order appends to the end so we don't
+            // disturb existing ordering; the chip will float to its
+            // frequency rank on subsequent renders.
+            let max_order: i32 = tx.query_row(
+                "SELECT COALESCE(MAX(sort_order), -1) FROM condition_chips WHERE deleted_at IS NULL",
+                [],
+                |row| row.get(0),
             )?;
-            if changed == 0 {
-                // No row at all (not even a tombstone) — create the chip with
-                // use_count = 1. sort_order appends to the end so we don't
-                // disturb existing ordering; the chip will float to its
-                // frequency rank on subsequent renders.
-                let max_order: i32 = conn.query_row(
-                    "SELECT COALESCE(MAX(sort_order), -1) FROM condition_chips WHERE deleted_at IS NULL",
-                    [],
-                    |row| row.get(0),
-                )?;
-                let chip = ConditionChip {
-                    id,
-                    text: text.trim().to_string(),
-                    updated_at: now_iso.to_string(),
-                    deleted_at: None,
-                    sort_order: max_order + 1,
-                    use_count: 1,
-                };
-                Self::upsert(conn, &chip)?;
-            }
-            Ok::<(), DbError>(())
-        })();
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
-            }
+            let chip = ConditionChip {
+                id,
+                text: text.trim().to_string(),
+                updated_at: now_iso.to_string(),
+                deleted_at: None,
+                sort_order: max_order + 1,
+                use_count: 1,
+            };
+            Self::upsert(&tx, &chip)?;
         }
+        tx.commit()?;
         Self::list_active(conn)
     }
 

@@ -281,14 +281,15 @@ pub fn check_required_models(app_data_dir: &Path, whisper_model_id: &str) -> Vec
 /// This prevents partial downloads from corrupting an existing model file.
 ///
 /// The `on_progress` callback receives `(downloaded_bytes, total_bytes)` and
-/// is called after each chunk is written to disk.
+/// is called after each chunk is written to disk. Model URLs publish no
+/// SHA-256 digest, so hash verification is not possible here — the shared
+/// `medical_core::net` helper still provides the connect/total timeouts
+/// (the default reqwest client has none, so a stalled CDN would otherwise
+/// hang the download forever).
 pub async fn download_model<F>(url: &str, dest_path: &Path, on_progress: F) -> Result<(), SttError>
 where
     F: Fn(u64, u64) + Send + 'static,
 {
-    use tokio::io::AsyncWriteExt;
-    use tokio_stream::StreamExt;
-
     // Ensure parent directory exists
     if let Some(parent) = dest_path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -298,45 +299,9 @@ where
 
     let tmp_path = dest_path.with_extension("tmp");
 
-    let response = reqwest::get(url).await.map_err(|e| {
-        SttError::ModelDownload(format!("Failed to start download from {url}: {e}"))
-    })?;
-
-    if !response.status().is_success() {
-        return Err(SttError::ModelDownload(format!(
-            "HTTP {} downloading {url}",
-            response.status()
-        )));
-    }
-
-    let total_bytes = response.content_length().unwrap_or(0);
-
-    let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| {
-        SttError::ModelDownload(format!(
-            "Failed to create temporary file {}: {e}",
-            tmp_path.display()
-        ))
-    })?;
-
-    let mut stream = response.bytes_stream();
-    let mut downloaded: u64 = 0;
-
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| {
-            SttError::ModelDownload(format!("Stream error while downloading {url}: {e}"))
-        })?;
-
-        file.write_all(&bytes).await.map_err(|e| {
-            SttError::ModelDownload(format!("Failed to write to {}: {e}", tmp_path.display()))
-        })?;
-
-        downloaded += bytes.len() as u64;
-        on_progress(downloaded, total_bytes);
-    }
-
-    file.flush().await.map_err(|e| {
-        SttError::ModelDownload(format!("Failed to flush {}: {e}", tmp_path.display()))
-    })?;
+    medical_core::net::download_file(url, &tmp_path, None, on_progress)
+        .await
+        .map_err(|e| SttError::ModelDownload(format!("Failed to download from {url}: {e}")))?;
 
     // Atomic rename
     tokio::fs::rename(&tmp_path, dest_path).await.map_err(|e| {
