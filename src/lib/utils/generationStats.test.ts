@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { latestTokensPerSecond } from './generationStats';
+import { latestTokensPerSecond, generationProgressText } from './generationStats';
 import type { Recording } from '../types';
 
 const stat = (tokens_per_second: number, generated_at: string) => ({
@@ -51,5 +51,27 @@ describe('latestTokensPerSecond', () => {
       },
     } as Recording['metadata'];
     expect(latestTokensPerSecond(metadata)).toBe(25);
+  });
+});
+
+describe('generationProgressText', () => {
+  it('formats tokens and tok/s for an in-flight generation', () => {
+    expect(generationProgressText({ tokens: 412, elapsed_ms: 20000, tokens_per_second: 20.6 }))
+      .toBe('Generating… 412 tokens · 20.6 tok/s');
+  });
+
+  it('drops decimals at >=100 tok/s', () => {
+    expect(generationProgressText({ tokens: 1500, elapsed_ms: 12000, tokens_per_second: 125 }))
+      .toBe('Generating… 1500 tokens · 125 tok/s');
+  });
+
+  it('handles zero-token/zero-rate startup stats', () => {
+    expect(generationProgressText({ tokens: 0, elapsed_ms: 0, tokens_per_second: 0 }))
+      .toBe('Generating… 0 tokens · 0.0 tok/s');
+  });
+
+  it('omits the rate when it is not finite', () => {
+    expect(generationProgressText({ tokens: 5, elapsed_ms: 1000, tokens_per_second: Number.NaN }))
+      .toBe('Generating… 5 tokens · ');
   });
 });

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { pipeline, type PipelineStage } from '../../stores/pipeline.svelte';
+  import { generation } from '../../stores/generation.svelte';
+  import { generationProgressText } from '../../utils/generationStats';
   import { extractIcdCodesValidated } from '../../icd';
   import { icd9 as icd9Store } from '../../stores/icd9.svelte';
   import { settings } from '../../stores/settings.svelte';
@@ -98,6 +100,10 @@
     </div>
 
     <p class="pipeline-label">{stageLabel(pipeline.state.current.stage)}</p>
+
+    {#if pipeline.state.current.stage === 'generating_soap' && generation.state.progress}
+      <p class="pipeline-progress">{generationProgressText(generation.state.progress)}</p>
+    {/if}
 
     <p class="pipeline-elapsed">
       {#if pipeline.state.current.finishedAt !== null}
@@ -220,6 +226,13 @@
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
     margin-bottom: 8px;
+  }
+
+  .pipeline-progress {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    margin: 0 0 4px;
   }
 
   .pipeline-warning {
