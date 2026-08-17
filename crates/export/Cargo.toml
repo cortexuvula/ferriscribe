@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 medical-core = { path = "../core" }
-printpdf = "0.7"
+printpdf = "0.12"
 docx-rs = "0.4"
 base64 = { workspace = true }
 serde = { workspace = true }
