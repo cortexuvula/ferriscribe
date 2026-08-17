@@ -202,9 +202,16 @@ impl medical_core::traits::AiProvider for MockCompletionProvider {
                 + Unpin,
         >,
     > {
-        Err(AppError::ai_provider(
-            "mock provider does not support streaming".to_string(),
-        ))
+        let chunks = vec![
+            Ok(medical_core::types::StreamChunk::Delta {
+                text: self.content.clone(),
+            }),
+            Ok(medical_core::types::StreamChunk::Usage(self.usage.clone())),
+            Ok(medical_core::types::StreamChunk::Done),
+        ];
+        // `Box::pin` yields `Pin<Box<..>>`, but the trait wants a plain
+        // `Box<dyn Stream + Send + Unpin>`; `Iter` is already `Unpin`.
+        Ok(Box::new(tokio_stream::iter(chunks)))
     }
 
     async fn complete_with_tools(
@@ -214,6 +221,77 @@ impl medical_core::traits::AiProvider for MockCompletionProvider {
     ) -> AppResult<medical_core::types::ToolCompletionResponse> {
         Err(AppError::ai_provider(
             "mock provider does not support tools".to_string(),
+        ))
+    }
+}
+
+/// Stream-provider mock whose stream replays `chunks`, then optionally
+/// stalls forever after the last chunk (for idle-timeout tests).
+///
+/// Errors in the script are stored as messages (not `AppError`, which is not
+/// `Clone`) and re-wrapped via `AppError::ai_provider` at yield time, so the
+/// stream can be replayed by any number of `complete_stream` calls.
+pub(super) struct ScriptedStreamProvider {
+    pub name: &'static str,
+    pub chunks: Vec<Result<medical_core::types::StreamChunk, String>>,
+    pub stall_after_last: bool,
+}
+
+#[async_trait::async_trait]
+impl medical_core::traits::AiProvider for ScriptedStreamProvider {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn available_models(&self) -> AppResult<Vec<medical_core::types::ModelInfo>> {
+        Ok(Vec::new())
+    }
+
+    async fn complete(
+        &self,
+        _request: medical_core::types::CompletionRequest,
+    ) -> AppResult<medical_core::types::CompletionResponse> {
+        Err(AppError::ai_provider(
+            "scripted provider is stream-only".to_string(),
+        ))
+    }
+
+    async fn complete_stream(
+        &self,
+        _request: medical_core::types::CompletionRequest,
+    ) -> AppResult<
+        Box<
+            dyn futures_util::Stream<Item = AppResult<medical_core::types::StreamChunk>>
+                + Send
+                + Unpin,
+        >,
+    > {
+        let chunks = self.chunks.clone();
+        let stall = self.stall_after_last;
+        let stream = async_stream::stream! {
+            for c in chunks {
+                yield match c {
+                    Ok(chunk) => Ok(chunk),
+                    Err(message) => Err(AppError::ai_provider(message)),
+                };
+            }
+            if stall {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        };
+        // `Pin<Box<_>>` is always `Unpin` and implements `Stream`, so this
+        // satisfies `Box<dyn Stream + Send + Unpin>` (same pattern as
+        // `crates/ai-providers/src/ollama.rs`).
+        Ok(Box::new(Box::pin(stream)))
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: medical_core::types::CompletionRequest,
+        _tools: Vec<medical_core::types::ToolDef>,
+    ) -> AppResult<medical_core::types::ToolCompletionResponse> {
+        Err(AppError::ai_provider(
+            "scripted provider does not support tools".to_string(),
         ))
     }
 }

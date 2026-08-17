@@ -29,6 +29,14 @@ export interface GenerationStat {
   generated_at: string;
 }
 
+/** Mirrors Rust `GenerationProgressStats` — live generation throughput.
+ *  Counts and durations only, never content. */
+export interface GenerationProgressStats {
+  tokens: number;
+  elapsed_ms: number;
+  tokens_per_second: number;
+}
+
 // ── Recording ─────────────────────────────────────────────────────────────────
 
 export interface Recording {

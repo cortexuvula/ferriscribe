@@ -1,4 +1,5 @@
-import type { Recording } from '../types';
+import { formatTokensPerSecond } from './format';
+import type { Recording, GenerationProgressStats } from '../types';
 
 type RecordingMetadata = Recording['metadata'];
 
@@ -37,4 +38,9 @@ export function latestTokensPerSecond(metadata: RecordingMetadata): number | nul
     }
   }
   return bestTps;
+}
+
+/** Live progress label for an in-flight streaming generation. */
+export function generationProgressText(p: GenerationProgressStats): string {
+  return `Generating… ${p.tokens} tokens · ${formatTokensPerSecond(p.tokens_per_second)}`;
 }

@@ -1,8 +1,9 @@
 <script lang="ts">
   import GenerateItem from './GenerateItem.svelte';
   import type { LetterAudience } from '../types/letterAudience';
-  import type { Recording } from '../types';
+  import type { Recording, GenerationProgressStats } from '../types';
   import type { GeneratingType } from '../stores/generation.svelte';
+  import { generationProgressText } from '../utils/generationStats';
   import { extractIcdCodesValidated } from '../icd';
   import { icd9 as icd9Store } from '../stores/icd9.svelte';
   import { settings } from '../stores/settings.svelte';
@@ -12,6 +13,7 @@
     generationState: {
       generating: GeneratingType;
       progressStatus: string | null;
+      progress: GenerationProgressStats | null;
       error: string | null;
       lastFailedType: GeneratingType;
     };
@@ -65,6 +67,15 @@
   let letterFieldsExpanded = $state(true);
   let peerFieldsExpanded = $state(true);
 
+  /** Progress text for a GenerateItem: live throughput stats when the
+   *  backend is streaming them, otherwise the coarse status label. */
+  function liveProgressText(type: Exclude<GeneratingType, null>): string | null {
+    if (generationState.generating !== type) return null;
+    return generationState.progress
+      ? generationProgressText(generationState.progress)
+      : generationState.progressStatus;
+  }
+
   $effect(() => {
     // Reset field collapse state when the recording changes. Reading
     // `recording?.id` registers it as a dependency of this effect so
@@ -115,7 +126,7 @@
         copyStatus={copyStatus['soap']}
         icdCodes={recording?.soap_note ? extractIcdCodesValidated(recording.soap_note, icd9Store.codeSet, settings.state.icd_version) : undefined}
         generatedText={generatedSoap}
-        progressText={generationState.generating === 'soap' ? generationState.progressStatus : null}
+        progressText={liveProgressText('soap')}
         failed={!!generationState.error && generationState.lastFailedType === 'soap'}
         onGenerate={() => onGenerate('soap')}
         onCopy={() => onCopy('soap')}
@@ -175,7 +186,7 @@
           done={!!recording?.peer_discussion}
           copyStatus={copyStatus['peer_discussion']}
           generatedText={generatedPeerDiscussion}
-          progressText={generationState.generating === 'peer_discussion' ? generationState.progressStatus : null}
+          progressText={liveProgressText('peer_discussion')}
           failed={!!generationState.error && generationState.lastFailedType === 'peer_discussion'}
           onGenerate={() => onGenerate('peer_discussion')}
           onCopy={() => onCopy('peer_discussion')}
@@ -198,7 +209,7 @@
         done={!!recording?.referral}
         copyStatus={copyStatus['referral']}
         generatedText={generatedReferral}
-        progressText={generationState.generating === 'referral' ? generationState.progressStatus : null}
+        progressText={liveProgressText('referral')}
         failed={!!generationState.error && generationState.lastFailedType === 'referral'}
         onGenerate={() => onGenerate('referral')}
         onCopy={() => onCopy('referral')}
@@ -254,7 +265,7 @@
           done={!!recording?.letter}
           copyStatus={copyStatus['letter']}
           generatedText={generatedLetter}
-          progressText={generationState.generating === 'letter' ? generationState.progressStatus : null}
+          progressText={liveProgressText('letter')}
           failed={!!generationState.error && generationState.lastFailedType === 'letter'}
           onGenerate={() => onGenerate('letter')}
           onCopy={() => onCopy('letter')}

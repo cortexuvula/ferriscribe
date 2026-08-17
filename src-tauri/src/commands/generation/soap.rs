@@ -52,11 +52,13 @@ pub async fn generate_soap(
             doc_type: "soap".into(),
             status: "started".into(),
             recording_id: recording_id.clone(),
+            progress: None,
         },
     );
 
     let result = generate_soap_inner(
         &state,
+        Some(&app),
         &recording_id,
         template.as_deref(),
         context.as_deref(),
@@ -72,6 +74,7 @@ pub async fn generate_soap(
                     doc_type: "soap".into(),
                     status: "completed".into(),
                     recording_id: recording_id.clone(),
+                    progress: None,
                 },
             );
         }
@@ -82,6 +85,7 @@ pub async fn generate_soap(
                     doc_type: "soap".into(),
                     status: format_progress_error(err),
                     recording_id: recording_id.clone(),
+                    progress: None,
                 },
             );
         }
@@ -90,9 +94,10 @@ pub async fn generate_soap(
     result
 }
 
-#[instrument(skip(state, context, patient_context), fields(recording_id = %recording_id))]
+#[instrument(skip(state, app, context, patient_context), fields(recording_id = %recording_id))]
 async fn generate_soap_inner(
     state: &AppState,
+    app: Option<&tauri::AppHandle>,
     recording_id: &str,
     template: Option<&str>,
     context: Option<&str>,
@@ -190,7 +195,25 @@ async fn generate_soap_inner(
     );
 
     let generation_start = std::time::Instant::now();
-    let response = provider.complete(request).await.map_err(|e| match e {
+    let response = super::stream::stream_to_completion(
+        &provider,
+        |stats| {
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "generation-progress",
+                    GenerationProgress {
+                        doc_type: "soap".into(),
+                        status: "generating".into(),
+                        recording_id: recording_id.to_string(),
+                        progress: Some(*stats),
+                    },
+                );
+            }
+        },
+        request,
+    )
+    .await
+    .map_err(|e| match e {
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
         // For other errors, keep the existing nicer wrapping.
@@ -412,6 +435,7 @@ mod preflight_tests {
         let start = std::time::Instant::now();
         let result = generate_soap_inner(
             &state,
+            None, // app — no AppHandle in tests
             &recording_id,
             None, // template
             None, // context
@@ -479,7 +503,7 @@ mod stats_tests {
         )
         .await;
 
-        let soap = generate_soap_inner(&state, &recording_id, None, None, None)
+        let soap = generate_soap_inner(&state, None, &recording_id, None, None, None)
             .await
             .expect("generation with mock provider succeeds");
         assert!(!soap.is_empty());

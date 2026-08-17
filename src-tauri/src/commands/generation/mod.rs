@@ -14,6 +14,7 @@ pub mod letter_writer;
 pub mod peer_discussion;
 pub mod referral;
 pub mod soap;
+pub(super) mod stream;
 pub mod synopsis;
 #[cfg(test)]
 pub(super) mod test_helpers;
@@ -69,6 +70,21 @@ pub(super) struct GenerationProgress {
     pub doc_type: String,
     pub status: String,
     pub recording_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<GenerationProgressStats>,
+}
+
+/// Live throughput stats for an in-flight streaming generation.
+/// Counts and durations only — never content (AGENTS.md PHI rule).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(super) struct GenerationProgressStats {
+    /// Approximate tokens streamed so far (one SSE delta ≈ one token;
+    /// the persisted generation stat remains exact via the usage chunk).
+    pub tokens: u64,
+    /// Ms since the first streamed chunk.
+    pub elapsed_ms: u64,
+    /// Tokens/sec since the first chunk.
+    pub tokens_per_second: f64,
 }
 
 /// Format an error for a `generation-progress` "failed" event. Falls back to a

@@ -5,6 +5,7 @@
   import { icd9 as icd9Store } from './lib/stores/icd9.svelte';
   import { theme } from './lib/stores/theme.svelte';
   import { generation } from './lib/stores/generation.svelte';
+  import type { GenerationProgressStats } from './lib/types';
   import { updater } from './lib/stores/updater.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -175,13 +176,24 @@
     userDictChangedUnlisten?.();
     pipeline.destroy();
 
-    // Listen for generation progress events globally so state persists across tab switches
-    progressUnlisten = await listen<{ type: string; status: string }>(
+    // Listen for generation progress events globally so state persists across tab switches.
+    // While streaming, "generating" events carry live throughput stats
+    // (counts/durations only — no PHI); all other statuses clear them.
+    progressUnlisten = await listen<{
+      type: string;
+      status: string;
+      progress?: GenerationProgressStats;
+    }>(
       'generation-progress',
       (event) => {
         const prettyType = event.payload.type === 'peer_discussion' ? 'Peer discussion'
           : event.payload.type.charAt(0).toUpperCase() + event.payload.type.slice(1);
         generation.setProgress(`${prettyType}: ${event.payload.status}`);
+        if (event.payload.status === 'generating' && event.payload.progress) {
+          generation.setProgressStats(event.payload.progress);
+        } else {
+          generation.setProgressStats(null);
+        }
       }
     );
 
