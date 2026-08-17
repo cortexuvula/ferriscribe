@@ -275,4 +275,22 @@ mod tests {
             "duplicate find_text must map to a unique violation, got: {err}"
         );
     }
+
+    #[test]
+    fn non_unique_constraint_violations_are_not_duplicates() {
+        // NOT NULL shares the primary ConstraintViolation code with UNIQUE;
+        // only the extended code distinguishes them. A NOT NULL failure must
+        // NOT be reported to the user as "already exists".
+        let db = crate::Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+
+        let err = conn
+            .execute("INSERT INTO vocabulary_entries (id) VALUES (NULL)", [])
+            .expect_err("NOT NULL violation");
+        let err = crate::DbError::from(err);
+        assert!(
+            !err.is_unique_violation(),
+            "NOT NULL failure misclassified as duplicate: {err}"
+        );
+    }
 }

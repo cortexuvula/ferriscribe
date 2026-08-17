@@ -447,14 +447,16 @@ async fn run_sync(
                                 }
                                 return Ok(target.to_string_lossy().into_owned());
                             }
+                            // Encrypt in memory before anything touches disk —
+                            // a crash between write and encrypt would
+                            // otherwise leave plaintext PHI in a .tmp file
+                            // that no sweep cleans.
                             let tmp = target.with_extension("tmp");
-                            std::fs::write(&tmp, &plaintext_bytes)?;
-                            medical_security::file_crypto::encrypt_file_in_place(&tmp).map_err(
-                                |e| {
+                            medical_security::file_crypto::encrypt_file(&tmp, &plaintext_bytes)
+                                .map_err(|e| {
                                     let _ = std::fs::remove_file(&tmp);
                                     AppError::security(format!("audio re-encrypt failed: {e}"))
-                                },
-                            )?;
+                                })?;
                             std::fs::rename(&tmp, &target)?;
                             // Update DB.
                             let uuid = uuid::Uuid::parse_str(&rec_id_owned)
@@ -822,22 +824,23 @@ pub async fn subscribe_content_sync(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> AppResult<()> {
+    // When the gates fail (unpaired / sync disabled), cancel any existing
+    // subscriber rather than leaving it reconnecting with stale credentials.
     let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
-        return Ok(());
+        return crate::commands::swap_sse_cancel_token(
+            &state.content_sse_cancel,
+            "content_sse_cancel",
+            None,
+        );
     };
 
     // Cancel any existing SSE subscriber task before spawning a new one (H1).
     let cancel_token = tokio_util::sync::CancellationToken::new();
-    {
-        let mut guard = state
-            .content_sse_cancel
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("content_sse_cancel: {e}")))?;
-        if let Some(old) = guard.take() {
-            old.cancel();
-        }
-        *guard = Some(cancel_token.clone());
-    }
+    crate::commands::swap_sse_cancel_token(
+        &state.content_sse_cancel,
+        "content_sse_cancel",
+        Some(cancel_token.clone()),
+    )?;
 
     let mut backoff = Duration::from_secs(5);
     let conn_owned = conn;
@@ -869,9 +872,25 @@ pub async fn subscribe_content_sync(
                     // the split halves would never match and notifications
                     // would be silently dropped.
                     let mut sse_buffer = String::new();
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(bytes) => {
+                    loop {
+                        // Cancellation must interrupt a healthy stream too —
+                        // the server keep-alives the SSE connection
+                        // indefinitely, so a reconnect-boundary check alone
+                        // never fires.
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            chunk = stream.next() => {
+                                let bytes = match chunk {
+                                    Some(Ok(b)) => b,
+                                    Some(Err(e)) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "content SSE chunk error"
+                                        );
+                                        break;
+                                    }
+                                    None => break,
+                                };
                                 sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
                                 // Normalize CRLF to LF so the \n\n split works
                                 // regardless of whether intermediaries
@@ -891,13 +910,6 @@ pub async fn subscribe_content_sync(
                                     }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "content SSE chunk error"
-                                );
-                                break;
-                            }
                         }
                     }
                     tracing::info!("content SSE stream ended, reconnecting");
@@ -907,7 +919,10 @@ pub async fn subscribe_content_sync(
                     "content SSE subscription failed, reconnecting"
                 ),
             }
-            tokio::time::sleep(backoff).await;
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                _ = tokio::time::sleep(backoff) => {}
+            }
             backoff = (backoff * 2).min(Duration::from_secs(30));
         }
     });
@@ -954,19 +969,18 @@ pub async fn fetch_audio_from_server(
     let plaintext = remote.fetch_audio(&recording_id).await?;
     let byte_count = plaintext.len();
 
-    // Re-encrypt + write to disk + update DB audio_path, all on the blocking
-    // pool. We write to a temp file, encrypt in place, then atomically rename
-    // so plaintext PHI is never persisted.
+    // Encrypt + write to disk + update DB audio_path, all on the blocking
+    // pool. `encrypt_file` encrypts in memory and writes ciphertext
+    // atomically (temp + rename), so plaintext PHI is never persisted even
+    // if the process dies mid-write.
     let db2 = Arc::clone(&state.db);
     let target_for_task = target_path.clone();
     let rec_id_for_task = recording_id.clone();
     let path_str = tokio::task::spawn_blocking(move || -> AppResult<String> {
         let tmp_path =
             target_for_task.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&tmp_path, &plaintext)?;
-        medical_security::file_crypto::encrypt_file_in_place(&tmp_path).map_err(|e| {
-            // Clean up the temp plaintext on failure — never leave
-            // unencrypted PHI on disk.
+        medical_security::file_crypto::encrypt_file(&tmp_path, &plaintext).map_err(|e| {
+            // Clean up on failure — never leave PHI on disk.
             let _ = std::fs::remove_file(&tmp_path);
             AppError::security(format!("audio re-encrypt failed: {e}"))
         })?;

@@ -93,11 +93,15 @@ impl DbError {
     /// insert (or update) hit a row that already exists under a unique key.
     /// Lets command handlers turn the raw constraint text into a plain,
     /// actionable duplicate message for the UI.
+    ///
+    /// Checks the *extended* code: the primary `ConstraintViolation` code is
+    /// shared by NOT NULL / CHECK / FOREIGN KEY / PRIMARY KEY failures, which
+    /// must not be misreported as duplicates.
     pub fn is_unique_violation(&self) -> bool {
         matches!(
             self,
             DbError::Sqlite(rusqlite::Error::SqliteFailure(f, _))
-                if f.code == rusqlite::ErrorCode::ConstraintViolation
+                if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
         )
     }
 }

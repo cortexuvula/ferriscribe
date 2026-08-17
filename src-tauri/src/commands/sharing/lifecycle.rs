@@ -55,6 +55,14 @@ pub async fn start_sharing_inner(
     }
     let cfg = build_sharing_config(friendly_name).await?;
     let service = Arc::new(SharingService::new(cfg).map_err(|e| AppError::Other(e.to_string()))?);
+    // The ReadinessWatcher's probe client has no dependency on the started
+    // service — build it before start() so its (rare) failure doesn't need
+    // service cleanup.
+    let watcher_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| AppError::Other(e.to_string()))?;
     // Bind ports + start whisper here, BEFORE taking the write lock. On error,
     // stop the service so the whisper child isn't orphaned.
     if let Err(e) = service.start().await {
@@ -88,11 +96,6 @@ pub async fn start_sharing_inner(
     // turns watch-channel changes into a Tauri event the frontend listens to.
     // Layering: SharingService is a library crate with no tauri dep, so the
     // emit() happens here.
-    let watcher_client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| AppError::Other(e.to_string()))?;
     service.spawn_readiness_watcher(watcher_client);
 
     {
@@ -107,10 +110,32 @@ pub async fn start_sharing_inner(
         });
     }
 
-    // Brief write lock: just the assignment. Everything above ran unlocked.
+    // All fallible wiring runs BEFORE the state slots are assigned: a failure
+    // here unwinds (stop service, abort the vocab API) instead of leaving a
+    // dead service wedged in `state.sharing` — which would make every later
+    // start fail with "sharing already running" while an orphaned vocab API
+    // keeps serving PHI over HTTP until restart.
+    if let Err(e) = wire_upstream_endpoints(state).await {
+        if let Some(h) = vocab_handle {
+            h.abort();
+        }
+        let _ = service.stop().await;
+        return Err(e);
+    }
+
+    // Brief write lock: just the assignment. Everything above ran unlocked
+    // and nothing after this point can fail.
     *state.sharing.write().await = Some(service.clone());
     *state.vocab_api.write().await = vocab_handle;
 
+    Ok(())
+}
+
+/// Post-start wiring for the office server's own AI/STT providers: installs
+/// the persistent Ollama service (best-effort), then points the providers at
+/// the local upstream ports. Runs before `state.sharing` is assigned so a
+/// failure unwinds the whole start (see `start_sharing_inner`).
+async fn wire_upstream_endpoints(state: &AppState) -> AppResult<()> {
     // Wire up the persistent Ollama service the wizard promises ("FerriScribe
     // will configure persistent Ollama..."). Idempotent: skip when already
     // installed; surface install failures via warn rather than aborting
@@ -136,31 +161,23 @@ pub async fn start_sharing_inner(
         .await?
         .allow_public_endpoint;
     use medical_core::types::RemoteEndpoint;
-    let local_ollama = Some(RemoteEndpoint {
-        lan: Some("127.0.0.1".to_string()),
-        tailscale: None,
-        port: 11434,
-        bearer: None,
-    });
-    let local_lmstudio = Some(RemoteEndpoint {
-        lan: Some("127.0.0.1".to_string()),
-        tailscale: None,
-        port: 1234,
-        bearer: None,
-    });
-    let local_whisper = Some(RemoteEndpoint {
-        lan: Some("127.0.0.1".to_string()),
-        tailscale: None,
-        port: 8080,
-        bearer: None,
-    });
+    let endpoint = |port: u16| {
+        Some(RemoteEndpoint {
+            lan: Some("127.0.0.1".to_string()),
+            tailscale: None,
+            port,
+            bearer: None,
+        })
+    };
+    let local_ollama = endpoint(11434);
+    let local_lmstudio = endpoint(1234);
+    let local_whisper = endpoint(8080);
 
     {
         let provider = { state.ollama_provider.read().await.clone() };
         if let Some(p) = provider
             && let Err(e) = p.set_endpoint(local_ollama, allow_public).await
         {
-            let _ = service.stop().await;
             return Err(e);
         }
     }
@@ -169,7 +186,6 @@ pub async fn start_sharing_inner(
         if let Some(p) = provider
             && let Err(e) = p.set_endpoint(local_lmstudio, allow_public).await
         {
-            let _ = service.stop().await;
             return Err(e);
         }
     }
@@ -178,11 +194,9 @@ pub async fn start_sharing_inner(
         if let Some(p) = provider
             && let Err(e) = p.set_endpoint(local_whisper, allow_public).await
         {
-            let _ = service.stop().await;
             return Err(e);
         }
     }
-
     Ok(())
 }
 

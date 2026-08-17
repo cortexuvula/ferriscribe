@@ -175,8 +175,10 @@ pub(super) fn filter_cross_segment_repetitions(
                 .count();
         let run_len = run_end - i;
         if run_len >= MIN_RUN_LEN {
+            // PHI guard: log the length only — segment text is transcript
+            // content and must never reach the persistent log.
             tracing::warn!(
-                text = %current_key,
+                text_len = current_key.len(),
                 run_len,
                 "dropping cross-segment repetition (whisper hallucination)"
             );

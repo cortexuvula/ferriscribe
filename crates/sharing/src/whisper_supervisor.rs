@@ -601,27 +601,47 @@ async fn pids_on_port(port: u16) -> Vec<u32> {
         Err(_) => return Vec::new(),
     };
     let text = String::from_utf8_lossy(&out.stdout);
-    let mut pids = Vec::new();
-    if cfg!(target_os = "windows") {
-        // netstat -ano output lines look like:
-        //   TCP    127.0.0.1:8080     0.0.0.0:0     LISTENING    1234
-        for line in text.lines() {
-            if !line.contains(&format!(":{port}")) {
-                continue;
-            }
-            if let Some(pid) = line
-                .split_whitespace()
-                .last()
-                .and_then(|s| s.parse::<u32>().ok())
-            {
-                pids.push(pid);
-            }
-        }
+    let mut pids = if cfg!(target_os = "windows") {
+        parse_netstat_listening_pids(&text, port)
     } else {
-        for line in text.lines() {
-            if let Ok(pid) = line.trim().parse::<u32>() {
-                pids.push(pid);
-            }
+        text.lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .collect()
+    };
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// Extract PIDs of processes LISTENING on exactly `port` from `netstat -ano`
+/// output. Strictly column-based: only the LOCAL address column's port is
+/// matched (exact string compare after the last `:`, so `:80` never matches
+/// `:8080`), and only rows in the LISTENING state — a substring scan over
+/// whole lines would otherwise match REMOTE endpoints of unrelated outbound
+/// connections and force-kill innocent processes (`kill_pid` uses
+/// `taskkill /F`). Pure so it is unit-testable off-Windows.
+fn parse_netstat_listening_pids(text: &str, port: u16) -> Vec<u32> {
+    let port_str = port.to_string();
+    let mut pids = Vec::new();
+    for line in text.lines() {
+        // Rows: `TCP  <local>  <remote>  <state>  <pid>` (state omitted on
+        // some rows — those are not listeners and are skipped by the column
+        // count check).
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() != 5 || cols[0] != "TCP" {
+            continue;
+        }
+        let (local, state, pid) = (cols[1], cols[3], cols[4]);
+        if state != "LISTENING" {
+            continue;
+        }
+        // Local may be `127.0.0.1:8080` or IPv6 `[::]:8080` — the port is
+        // always after the last colon.
+        if local.rsplit_once(':').map(|(_, p)| p) != Some(port_str.as_str()) {
+            continue;
+        }
+        if let Ok(pid) = pid.parse::<u32>() {
+            pids.push(pid);
         }
     }
     pids.sort_unstable();
@@ -850,5 +870,31 @@ mod tests {
             }
             other => panic!("expected Err(Download) for missing sha256; got {other:?}"),
         }
+    }
+
+    #[test]
+    fn netstat_parser_matches_only_exact_listening_port() {
+        let crlf = "\r\n";
+        let text = concat!(
+            "\r\n\r\n Active Connections\r\n\r\n",
+            "  Proto  Local Address          Foreign Address        State           PID\r\n",
+            // The listener we want.
+            "  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       4242\r\n",
+            // Same port on IPv6 — same PID, must parse fine.
+            "  TCP    [::]:8080              [::]:0                 LISTENING       4242\r\n",
+            // Substring trap: port 80 must NOT match :8080, and vice versa.
+            "  TCP    127.0.0.1:80            0.0.0.0:0              LISTENING       5150\r\n",
+            // Outbound connection whose REMOTE endpoint is :8080 — must be
+            // excluded (this is the force-kill-innocent-process bug).
+            "  TCP    192.168.1.9:53214       93.184.216.34:8080     ESTABLISHED     7300\r\n",
+            // Established with LOCAL :8080 — excluded by the state filter.
+            "  TCP    127.0.0.1:8080          127.0.0.1:53215        ESTABLISHED     8100\r\n",
+            // TIME_WAIT rows carry no PID column (4 cols) — skipped.
+            "  TCP    127.0.0.1:8080          127.0.0.1:53216        TIME_WAIT\r\n",
+        );
+        assert_eq!(parse_netstat_listening_pids(text, 8080), vec![4242]);
+        assert_eq!(parse_netstat_listening_pids(text, 80), vec![5150]);
+        assert_eq!(parse_netstat_listening_pids(text, 8081), Vec::<u32>::new());
+        let _ = crlf;
     }
 }
