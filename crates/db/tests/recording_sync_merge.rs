@@ -205,6 +205,17 @@ fn merge_deletion_propagates() {
     let id = seed_recording(&conn);
     let id_str = id.to_string();
 
+    // Deletion is timestamped-LWW since the deletion-model redesign: the
+    // tombstone only applies when it is at or after the local row's
+    // `updated_at`. `seed_recording` stamps the local row with the real
+    // wall clock (2026-08+), which is NEWER than the fixed fixture base
+    // below — so pin the local row onto the fixture timeline first.
+    conn.execute(
+        "UPDATE recordings SET updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![now(0), id.to_string()],
+    )
+    .expect("pin local updated_at to fixture timeline");
+
     // Remote arrives with a deleted_at set; local is not deleted.
     let remote = SyncRecording {
         id: id_str,

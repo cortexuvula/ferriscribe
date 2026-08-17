@@ -456,28 +456,46 @@ impl ContentSyncRepo {
             // ----- Deletion handling (whole-row tombstone) -----
             if let Some(remote_deleted) = &remote.deleted_at {
                 if local_exists {
-                    let local_deleted: Option<String> = conn
-                        .query_row(
-                            "SELECT deleted_at FROM recordings WHERE id = ?1",
+                    let (local_deleted, local_updated): (Option<String>, Option<String>) =
+                        match conn.query_row(
+                            "SELECT deleted_at, updated_at FROM recordings WHERE id = ?1",
                             [id_str],
-                            |row| row.get(0),
-                        )
-                        .ok()
-                        .flatten();
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        ) {
+                            Ok(v) => v,
+                            // Unreachable in practice (`local_exists` was
+                            // checked inside this same transaction) — treat as
+                            // nothing-to-do rather than failing the whole batch.
+                            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                            Err(e) => return Err(DbError::from(e)),
+                        };
                     match local_deleted {
                         None => {
-                            // Local live, remote deleted → propagate deletion.
-                            conn.execute(
-                                "UPDATE recordings SET deleted_at = ?1, updated_at = ?1
-                                     WHERE id = ?2",
-                                params![remote_deleted, id_str],
-                            )?;
-                            changed.push(id_str.clone());
-                            tracing::info!(
-                                recording_id = %id_str,
-                                deleted_at = %remote_deleted,
-                                "sync: propagated remote deletion"
-                            );
+                            // Local live, remote tombstoned → timestamped LWW.
+                            // A remote deletion at or after the local edit
+                            // tombstones the row (ties go to the tombstone —
+                            // deletions win ties); a strictly newer local edit
+                            // keeps the row live and will be pushed back to the
+                            // deleting peer. A NULL local `updated_at` sorts
+                            // oldest, so a legacy row never outlives a real
+                            // deletion.
+                            if cmp_lww_timestamps(
+                                remote_deleted,
+                                local_updated.as_deref().unwrap_or(""),
+                            ) != std::cmp::Ordering::Less
+                            {
+                                Self::sync_tombstone(conn, id_str, remote_deleted)?;
+                                changed.push(id_str.clone());
+                                tracing::info!(
+                                    recording_id = %id_str,
+                                    "sync: applied remote tombstone (deletion at or after local edit)"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    recording_id = %id_str,
+                                    "sync: local edit newer than remote tombstone; keeping row live"
+                                );
+                            }
                         }
                         Some(local_ts) => {
                             // Both deleted — earliest (smallest timestamp) wins.
@@ -503,7 +521,17 @@ impl ContentSyncRepo {
                     continue;
                 } else {
                     // Remote is a tombstone for a recording we don't have —
-                    // insert it as a tombstone so the deletion is durable.
+                    // insert it as a tombstone so the deletion is durable,
+                    // unless the purge ledger already records this id: the
+                    // ledger row itself makes the deletion durable, and
+                    // re-inserting would resurrect a purged recording's row.
+                    if Self::purge_ledger_refuses(conn, id_str, &remote.updated_at) {
+                        tracing::warn!(
+                            recording_id = %id_str,
+                            "sync: refused tombstone insert of purged recording"
+                        );
+                        continue;
+                    }
                     Self::insert_remote_recording(conn, remote)?;
                     changed.push(id_str.clone());
                     continue;
@@ -512,6 +540,11 @@ impl ContentSyncRepo {
 
             // ----- New recording (no local row) → insert + all revisions -----
             if !local_exists {
+                if Self::purge_ledger_refuses(conn, id_str, &remote.updated_at) {
+                    tracing::warn!(recording_id = %id_str,
+                        "sync: refused re-insert of purged recording (stale copy from a machine that missed the deletion)");
+                    continue;
+                }
                 Self::insert_remote_recording(conn, remote)?;
                 for (field, value) in &remote.fields {
                     Self::apply_field(conn, id_str, field, &value.value)?;
@@ -539,7 +572,48 @@ impl ContentSyncRepo {
                 continue;
             }
 
-            // ----- Existing recording → per-field LWW -----
+            // ----- Existing recording → restore check, then per-field LWW -----
+            // A local tombstone guards every field write (`apply_field`'s
+            // `deleted_at IS NULL`), so a live incoming row must first beat
+            // the tombstone's timestamp to matter: a strictly newer live row
+            // means a peer restored the recording — revive it (FTS-safe) and
+            // fall through so the field loop below can apply the peer's
+            // edits. An older live row is a pre-delete copy — the tombstone
+            // stands and the row is skipped entirely (fields stay guarded,
+            // and we don't emit the apply_field 0-rows warning per field).
+            let local_deleted: Option<String> = match conn.query_row(
+                "SELECT deleted_at FROM recordings WHERE id = ?1",
+                [id_str],
+                |r| r.get(0),
+            ) {
+                Ok(v) => v,
+                // Defensive: `local_exists` was checked inside this same
+                // transaction, so a missing row here is a vanishing edge —
+                // skip it rather than failing the whole batch. Real DB errors
+                // (I/O, busy) are propagated; swallowing them would silently
+                // skip a legitimate restore while the cursor advances.
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(e) => return Err(DbError::from(e)),
+            };
+            if let Some(local_del) = &local_deleted {
+                if cmp_lww_timestamps(&remote.updated_at, local_del) == std::cmp::Ordering::Greater
+                {
+                    Self::sync_restore(conn, id_str, &remote.updated_at)?;
+                    changed.push(id_str.clone());
+                    tracing::info!(
+                        recording_id = %id_str,
+                        "sync: remote live row newer than local tombstone; restored"
+                    );
+                    // Fall through: the field loop is now unblocked.
+                } else {
+                    tracing::debug!(
+                        recording_id = %id_str,
+                        "sync: local tombstone newer than remote live row; staying deleted"
+                    );
+                    continue;
+                }
+            }
+
             let local_revisions = Self::revisions_for(conn, &id)?;
             let local_map: HashMap<&str, &FieldRevision> = local_revisions
                 .iter()
@@ -623,6 +697,26 @@ impl ContentSyncRepo {
             conflicts,
             changed_recording_ids: changed,
         })
+    }
+
+    /// True when the purge ledger records this id with a `purged_at` at or
+    /// after the incoming row's `updated_at` — i.e. the push is a stale copy
+    /// of a recording the practice deleted and the server purged.
+    ///
+    /// `query_row` failures here are dominated by row-not-found (no ledger
+    /// entry → allow the insert). A genuinely broken ledger read also falls
+    /// OPEN rather than closed — data availability wins over blocking sync
+    /// on a ledger hiccup.
+    fn purge_ledger_refuses(conn: &Connection, id: &str, incoming_updated_at: &str) -> bool {
+        conn.query_row(
+            "SELECT purged_at FROM purged_recordings WHERE id = ?1",
+            [id],
+            |r| r.get::<_, String>(0),
+        )
+        .map(|purged_at| {
+            cmp_lww_timestamps(&purged_at, incoming_updated_at) != std::cmp::Ordering::Less
+        })
+        .unwrap_or(false)
     }
 
     /// Write a single field value to the `recordings` table.
