@@ -267,14 +267,33 @@ pub async fn subscribe_user_dictionary(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<()> {
     // Gate the same way the other dict commands do: only subscribe when
-    // paired + sync enabled. When not paired, return quietly.
+    // paired + sync enabled. When not paired, also cancel any existing
+    // subscriber — the user may have just unpaired, and the old task must
+    // not keep reconnecting with stale credentials.
     let Some((conn, bearer)) = paired_dict_target(&state) else {
-        return Ok(());
+        return crate::commands::swap_sse_cancel_token(
+            &state.dict_sse_cancel,
+            "dict_sse_cancel",
+            None,
+        );
     };
+
+    // Replace any previous subscriber (same discipline as the content-sync
+    // and condition-chip subscribers).
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    crate::commands::swap_sse_cancel_token(
+        &state.dict_sse_cancel,
+        "dict_sse_cancel",
+        Some(cancel_token.clone()),
+    )?;
+
     let http_client = state.http_client.clone();
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(5);
         loop {
+            if cancel_token.is_cancelled() {
+                break;
+            }
             // `conn` and `bearer` are owned by this task; `UserDictRemote`
             // borrows `conn` from within the task scope (cannot borrow from the
             // calling frame because `tokio::spawn` requires `'static`).
@@ -286,7 +305,10 @@ pub async fn subscribe_user_dictionary(
                 Some(r) => r,
                 None => {
                     tracing::warn!("dict SSE subscription target unavailable, retrying");
-                    tokio::time::sleep(backoff).await;
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => break,
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                     continue;
                 }
@@ -298,8 +320,18 @@ pub async fn subscribe_user_dictionary(
                     // The stream from `filter_map` is `!Unpin`; pin it on the
                     // stack so `StreamExt::next` can borrow it mutably.
                     tokio::pin!(stream);
-                    while let Some(()) = stream.next().await {
-                        let _ = app.emit("user-dictionary-changed", ());
+                    loop {
+                        // Cancellation must interrupt a healthy stream too —
+                        // an SSE connection stays open indefinitely.
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            item = stream.next() => match item {
+                                Some(()) => {
+                                    let _ = app.emit("user-dictionary-changed", ());
+                                }
+                                None => break,
+                            },
+                        }
                     }
                     tracing::info!("dict SSE stream ended, reconnecting");
                 }
@@ -308,7 +340,10 @@ pub async fn subscribe_user_dictionary(
                     "dict SSE subscription failed, reconnecting"
                 ),
             }
-            tokio::time::sleep(backoff).await;
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                _ = tokio::time::sleep(backoff) => {}
+            }
             backoff = (backoff * 2).min(Duration::from_secs(30));
         }
     });

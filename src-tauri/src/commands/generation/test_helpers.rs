@@ -139,6 +139,8 @@ async fn build_test_state_inner(
         http_client,
         content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         content_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
+        condition_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
+        dict_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
     };
 
     (state, recording_id.to_string())

@@ -137,6 +137,25 @@ pub async fn load_app_config(
     .map_err(join_err)?
 }
 
+/// Cancel the SSE subscriber task tracked by `slot` and install `new_token`
+/// in its place (or clear the slot when `None` — used when the sync gates
+/// fail, e.g. the user unpaired, so a previous subscriber doesn't keep
+/// reconnecting with stale credentials forever).
+pub fn swap_sse_cancel_token(
+    slot: &std::sync::Arc<std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    label: &str,
+    new_token: Option<tokio_util::sync::CancellationToken>,
+) -> AppResult<()> {
+    let mut guard = slot
+        .lock()
+        .map_err(|e| AppError::MutexPoisoned(format!("{label}: {e}")))?;
+    if let Some(old) = guard.take() {
+        old.cancel();
+    }
+    *guard = new_token;
+    Ok(())
+}
+
 /// Resolve the recordings directory from settings.
 ///
 /// If the user has configured a custom `storage_path`, use it.

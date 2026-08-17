@@ -270,6 +270,12 @@ pub struct AppState {
     /// Replaced on each `subscribe_content_sync` call so re-subscribes
     /// don't leak eternal tasks.
     pub content_sse_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    /// Cancellation tokens for the condition-chip and user-dictionary SSE
+    /// subscriber tasks. Same swap-on-resubscribe discipline as
+    /// [`Self::content_sse_cancel`]: the frontend (re)subscribes on every
+    /// mount of ConditionChips, so a token-less task would leak forever.
+    pub condition_sse_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    pub dict_sse_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -738,6 +744,8 @@ impl AppState {
             http_client,
             content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             content_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
+            condition_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
+            dict_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 }
