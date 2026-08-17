@@ -81,23 +81,12 @@ pub async fn start_recording(
     let wav_path = recordings_dir.join(format!("{}.wav", friendly_name));
 
     // Read the configured input device and sample rate from settings.
-    // Wrapped in spawn_blocking so SQLite pool checkout + busy waits never
-    // stall the Tokio async runtime worker.
     let (input_device_name, sample_rate) = try_or_reset!(state, {
-        let db = Arc::clone(&state.db);
-        let result: AppResult<(Option<String>, u32)> =
-            tokio::task::spawn_blocking(move || -> AppResult<(Option<String>, u32)> {
-                let conn = db.conn()?;
-                let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
-                config.migrate();
-                Ok((
-                    config.input_device.filter(|s| !s.is_empty()),
-                    config.sample_rate,
-                ))
-            })
-            .await
-            .map_err(crate::commands::join_err)?;
-        result
+        let config = crate::commands::load_app_config(&state.db, "audio").await?;
+        AppResult::Ok((
+            config.input_device.filter(|s| !s.is_empty()),
+            config.sample_rate,
+        ))
     });
 
     // Capture values for logging before they move into closures.

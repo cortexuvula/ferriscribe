@@ -80,20 +80,7 @@ pub async fn download_model(
 
     // After downloading, reinitialize the STT provider so it picks up new models.
     // Load the full AppConfig so local/remote mode + remote host/port/key all flow through.
-    // Wrapped in spawn_blocking so SQLite pool checkout never blocks the async worker.
-    let config = {
-        let db = std::sync::Arc::clone(&state.db);
-        tokio::task::spawn_blocking(
-            move || -> AppResult<medical_core::types::settings::AppConfig> {
-                let conn = db.conn()?;
-                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)?;
-                cfg.migrate();
-                Ok(cfg)
-            },
-        )
-        .await
-        .map_err(crate::commands::join_err)??
-    };
+    let config = crate::commands::load_app_config(&state.db, "model download").await?;
     // Re-load the paired RemoteEndpoint (if any) so the reinitialised STT
     // provider routes to the office server rather than silently falling back
     // to localhost.

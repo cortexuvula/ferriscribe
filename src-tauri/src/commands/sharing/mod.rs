@@ -57,6 +57,32 @@ pub struct PairedConnection {
     pub label: String,
 }
 
+/// Build the (ollama, lmstudio, whisper) `RemoteEndpoint` triple from a
+/// paired connection, injecting `bearer` into each endpoint. Single source
+/// of truth for provider wiring — used by `AppState::initialize`,
+/// `reinit_providers`, and `pair_with_server`, so a port/bearer change
+/// lands in one place instead of three.
+pub fn paired_endpoints(
+    paired: &PairedConnection,
+    bearer: Option<String>,
+) -> (
+    Option<medical_core::types::RemoteEndpoint>,
+    Option<medical_core::types::RemoteEndpoint>,
+    Option<medical_core::types::RemoteEndpoint>,
+) {
+    let endpoint = |port| medical_core::types::RemoteEndpoint {
+        lan: paired.lan.clone(),
+        tailscale: paired.tailscale.clone(),
+        port,
+        bearer: bearer.clone(),
+    };
+    (
+        Some(endpoint(paired.ports.ollama)),
+        paired.ports.lmstudio.map(endpoint),
+        Some(endpoint(paired.ports.whisper)),
+    )
+}
+
 pub(super) fn paired_connection_path() -> AppResult<std::path::PathBuf> {
     let app_data = dirs::data_dir()
         .ok_or_else(|| AppError::Other("no app data dir".into()))?

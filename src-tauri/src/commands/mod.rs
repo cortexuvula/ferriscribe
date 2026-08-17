@@ -108,6 +108,35 @@ pub fn validate_user_path(path: &str) -> AppResult<PathBuf> {
     Ok(canonical)
 }
 
+/// Load the full `AppConfig` (with migrations applied) from the DB inside
+/// `spawn_blocking`, so the SQLite pool checkout + JSON parse never stall the
+/// Tokio async runtime worker. `context` names the calling feature for error
+/// messages (e.g. "chat", "audio", "preflight").
+///
+/// Returns a hard error if the settings can't be read — a silent fallback to
+/// defaults would route requests to the wrong provider/model. Best-effort
+/// single-field reads (with explicit fallbacks) stay at their call sites.
+pub async fn load_app_config(
+    db: &std::sync::Arc<Database>,
+    context: &str,
+) -> AppResult<medical_core::types::settings::AppConfig> {
+    let db = std::sync::Arc::clone(db);
+    let context = context.to_string();
+    tokio::task::spawn_blocking(
+        move || -> AppResult<medical_core::types::settings::AppConfig> {
+            let conn = db
+                .conn()
+                .map_err(|e| AppError::Config(format!("Failed to load {context} settings: {e}")))?;
+            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                .map_err(|e| AppError::Config(format!("Failed to load {context} settings: {e}")))?;
+            cfg.migrate();
+            Ok(cfg)
+        },
+    )
+    .await
+    .map_err(join_err)?
+}
+
 /// Resolve the recordings directory from settings.
 ///
 /// If the user has configured a custom `storage_path`, use it.
