@@ -498,21 +498,23 @@ impl ContentSyncRepo {
                             }
                         }
                         Some(local_ts) => {
-                            // Both deleted — earliest (smallest timestamp) wins.
-                            // The timestamp reconciliation is skipped when the
-                            // local row is already tombstoned: soft-deleted rows
-                            // are de-indexed from `recordings_fts`, so an UPDATE
-                            // here would fire the FTS update trigger's 'delete'
-                            // against absent index state (SQLITE_CORRUPT). The
-                            // row is already hidden locally either way, and
-                            // keeping the later local tombstone is conservative
-                            // — purge simply waits a little longer. Peers still
-                            // converge: any peer holding the earlier tombstone
-                            // keeps it by the same rule.
-                            if remote_deleted < &local_ts {
+                            // Both deleted — nothing to reconcile; the local
+                            // tombstone always stands (even when the remote
+                            // one is later). Any UPDATE here would fire the
+                            // FTS update trigger's 'delete' against absent
+                            // index state (tombstoned rows are de-indexed
+                            // from `recordings_fts` → SQLITE_CORRUPT), so
+                            // this is deliberately a conservative no-op:
+                            // keeping the local timestamp just means purge
+                            // waits a little longer, and peers converge —
+                            // any peer holding the other tombstone keeps it
+                            // by the same rule.
+                            if cmp_lww_timestamps(remote_deleted, &local_ts)
+                                == std::cmp::Ordering::Less
+                            {
                                 tracing::debug!(
                                     recording_id = %id_str,
-                                    "sync: both sides deleted; keeping later local tombstone (FTS-safe no-op)"
+                                    "sync: both sides deleted; peer holds an earlier tombstone (FTS-safe no-op)"
                                 );
                             }
                         }
@@ -525,7 +527,7 @@ impl ContentSyncRepo {
                     // unless the purge ledger already records this id: the
                     // ledger row itself makes the deletion durable, and
                     // re-inserting would resurrect a purged recording's row.
-                    if Self::purge_ledger_refuses(conn, id_str, &remote.updated_at) {
+                    if Self::purge_ledger_refuses(conn, id_str) {
                         tracing::warn!(
                             recording_id = %id_str,
                             "sync: refused tombstone insert of purged recording"
@@ -540,7 +542,7 @@ impl ContentSyncRepo {
 
             // ----- New recording (no local row) → insert + all revisions -----
             if !local_exists {
-                if Self::purge_ledger_refuses(conn, id_str, &remote.updated_at) {
+                if Self::purge_ledger_refuses(conn, id_str) {
                     tracing::warn!(recording_id = %id_str,
                         "sync: refused re-insert of purged recording (stale copy from a machine that missed the deletion)");
                     continue;
@@ -699,24 +701,25 @@ impl ContentSyncRepo {
         })
     }
 
-    /// True when the purge ledger records this id with a `purged_at` at or
-    /// after the incoming row's `updated_at` — i.e. the push is a stale copy
-    /// of a recording the practice deleted and the server purged.
+    /// True when the purge ledger records ANY row for this id.
     ///
-    /// `query_row` failures here are dominated by row-not-found (no ledger
-    /// entry → allow the insert). A genuinely broken ledger read also falls
-    /// OPEN rather than closed — data availability wins over blocking sync
-    /// on a ledger hiccup.
-    fn purge_ledger_refuses(conn: &Connection, id: &str, incoming_updated_at: &str) -> bool {
+    /// Id-only by design: a machine that was offline across the deletion can
+    /// EDIT its stale copy, giving it a fresh `updated_at` that would pierce
+    /// a `purged_at >= updated_at` comparison. Genuinely re-created content
+    /// always gets a NEW UUID, so same-UUID + a ledger hit is always a stale
+    /// copy of a recording the practice deleted and the server purged.
+    ///
+    /// COUNT always returns exactly one row, so the `unwrap_or(0)` below only
+    /// fires on a genuinely broken ledger read — which falls OPEN (allow the
+    /// insert): data availability wins over blocking sync on a ledger hiccup.
+    fn purge_ledger_refuses(conn: &Connection, id: &str) -> bool {
         conn.query_row(
-            "SELECT purged_at FROM purged_recordings WHERE id = ?1",
+            "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
             [id],
-            |r| r.get::<_, String>(0),
+            |r| r.get::<_, i64>(0),
         )
-        .map(|purged_at| {
-            cmp_lww_timestamps(&purged_at, incoming_updated_at) != std::cmp::Ordering::Less
-        })
-        .unwrap_or(false)
+        .unwrap_or(0)
+            > 0
     }
 
     /// Write a single field value to the `recordings` table.
@@ -845,6 +848,30 @@ impl ContentSyncRepo {
                 remote.deleted_at,
             ],
         )?;
+
+        // The INSERT above fires `recordings_fts_insert` unconditionally, so
+        // a row inserted AS a tombstone (the insert-as-tombstone path in
+        // `merge_incoming`) would otherwise sit indexed while tombstoned. A
+        // later `sync_restore` would re-index the already-indexed row and
+        // leave a duplicate posting — a single FTS 'delete' then removes
+        // only one copy. De-index immediately with the just-inserted values
+        // (exactly what the trigger indexed), mirroring `sync_tombstone`'s
+        // guarded de-index. Non-fatal to match its discipline: an FTS hiccup
+        // must not fail the whole sync batch.
+        if remote.deleted_at.is_some()
+            && let Err(e) = conn.execute(
+                "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT 'delete', rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1",
+                [&remote.id],
+            )
+        {
+            tracing::warn!(
+                recording_id = %remote.id,
+                error = %e,
+                "insert_remote_recording: failed to de-index inserted tombstone row"
+            );
+        }
         Ok(())
     }
 

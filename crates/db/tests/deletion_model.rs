@@ -39,9 +39,21 @@ fn sync_rec(
     deleted_at: Option<&str>,
     fields: Vec<(&str, &str, &str)>,
 ) -> SyncRecording {
+    sync_rec_as("incoming.wav", id, updated_at, deleted_at, fields)
+}
+
+/// `sync_rec` with an explicit incoming filename, for tests that probe FTS
+/// index membership via the filename token.
+fn sync_rec_as(
+    filename: &str,
+    id: &Uuid,
+    updated_at: &str,
+    deleted_at: Option<&str>,
+    fields: Vec<(&str, &str, &str)>,
+) -> SyncRecording {
     SyncRecording {
         id: id.to_string(),
-        filename: "incoming.wav".to_string(),
+        filename: filename.to_string(),
         created_at: T0.to_string(),
         updated_at: updated_at.to_string(),
         deleted_at: deleted_at.map(str::to_string),
@@ -327,40 +339,69 @@ fn remote_live_older_than_local_tombstone_stays_deleted() {
 }
 
 // -------------------------------------------------------------------------
-// Test 6: the purge ledger refuses re-insertion of a purged recording.
+// Test 6: the purge ledger refuses re-insertion of a purged recording —
+// id-only: ANY ledger hit refuses regardless of timestamps.
+//
+// A machine offline across the deletion can EDIT its stale copy (fresh
+// updated_at, same UUID); since genuinely re-created content always gets a
+// NEW UUID, same-UUID + a ledger hit is always a stale copy. The
+// purged_at-vs-updated_at comparison this test used to pin was removed for
+// exactly that reason.
 // -------------------------------------------------------------------------
 
 #[test]
-fn purged_recording_refused_on_insert() {
+fn purged_recording_refused_regardless_of_timestamps() {
     let db = Database::open_in_memory().expect("db");
     let conn = db.conn().expect("conn");
-    let id = Uuid::new_v4();
 
-    // The office server purged this recording at T2.
+    // Piercing case: the stale copy was edited AFTER the purge
+    // (incoming updated_at T2 > purged_at T0). A timestamp comparison
+    // would let it through; id-only refusal must not.
+    let edited = Uuid::new_v4();
     conn.execute(
         "INSERT INTO purged_recordings (id, purged_at) VALUES (?1, ?2)",
-        rusqlite::params![id.to_string(), T2],
+        rusqlite::params![edited.to_string(), T0],
     )
-    .expect("seed purge ledger");
+    .expect("seed ledger (purge before edit)");
 
-    // A machine that missed the deletion pushes its stale T1 live copy.
-    let remote = sync_rec(&id, T1, None, vec![("transcript", "stale copy", T1)]);
+    // Classic case: a pre-delete copy (incoming T1 < purged_at T2).
+    let stale = Uuid::new_v4();
+    conn.execute(
+        "INSERT INTO purged_recordings (id, purged_at) VALUES (?1, ?2)",
+        rusqlite::params![stale.to_string(), T2],
+    )
+    .expect("seed ledger (purge after edit)");
+
+    let remotes = vec![
+        sync_rec(
+            &edited,
+            T2,
+            None,
+            vec![("transcript", "edited stale copy", T2)],
+        ),
+        sync_rec(&stale, T1, None, vec![("transcript", "stale copy", T1)]),
+    ];
     let MergeResult {
         changed_recording_ids,
         ..
-    } = ContentSyncRepo::merge_incoming(&conn, &[remote]).expect("merge");
+    } = ContentSyncRepo::merge_incoming(&conn, &remotes).expect("merge");
 
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM recordings WHERE id = ?1",
-            [id.to_string()],
-            |r| r.get(0),
-        )
-        .expect("count");
-    assert_eq!(count, 0, "purged recording must not be re-inserted");
+    for id in [&edited, &stale] {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recordings WHERE id = ?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            count, 0,
+            "any ledger hit must refuse the insert, whatever the timestamps"
+        );
+    }
     assert!(
         changed_recording_ids.is_empty(),
-        "refused insert must not report changes"
+        "refused inserts must not report changes"
     );
 }
 
@@ -390,4 +431,159 @@ fn non_ledgered_insert_unchanged() {
         .expect("count");
     assert_eq!(count, 1, "non-ledgered recording must be inserted");
     assert!(changed_recording_ids.contains(&id.to_string()));
+}
+
+// -------------------------------------------------------------------------
+// Case C: insert-as-tombstone for an unknown recording must leave the row
+// DE-INDEXED. The FTS-insert trigger fires unconditionally on INSERT, so a
+// tombstone row inserted this way lands in the FTS index; a later
+// sync_restore would re-index the already-indexed row and leave a duplicate
+// posting (a single FTS 'delete' then only removes one copy).
+// -------------------------------------------------------------------------
+
+#[test]
+fn insert_as_tombstone_deindexes_fts() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+    let id = Uuid::new_v4();
+
+    let remote = sync_rec_as("ghstins.wav", &id, T2, Some(T2), vec![]);
+    let MergeResult {
+        changed_recording_ids,
+        ..
+    } = ContentSyncRepo::merge_incoming(&conn, &[remote]).expect("merge");
+
+    assert!(changed_recording_ids.contains(&id.to_string()));
+    assert_eq!(
+        deleted_at_raw(&conn, &id).as_deref(),
+        Some(T2),
+        "tombstone row must be inserted so the deletion is durable"
+    );
+    assert!(
+        !fts_row_present(&conn, "ghstins"),
+        "a row inserted as a tombstone must NOT sit in the FTS index"
+    );
+    assert_fts_healthy(&conn);
+}
+
+// -------------------------------------------------------------------------
+// Case C, refused variant: with a ledger row the tombstone insert is
+// refused outright (id-only refusal — the ledger already makes the
+// deletion durable).
+// -------------------------------------------------------------------------
+
+#[test]
+fn insert_as_tombstone_with_ledger_row_refused() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+    let id = Uuid::new_v4();
+
+    conn.execute(
+        "INSERT INTO purged_recordings (id, purged_at) VALUES (?1, ?2)",
+        rusqlite::params![id.to_string(), T1],
+    )
+    .expect("seed ledger");
+
+    let remote = sync_rec_as("ghstref.wav", &id, T2, Some(T2), vec![]);
+    let MergeResult {
+        changed_recording_ids,
+        ..
+    } = ContentSyncRepo::merge_incoming(&conn, &[remote]).expect("merge");
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM recordings WHERE id = ?1",
+            [id.to_string()],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(count, 0, "ledgered id must not be re-inserted as tombstone");
+    assert!(changed_recording_ids.is_empty());
+}
+
+// -------------------------------------------------------------------------
+// Restore-direction tie: an incoming live row whose updated_at EQUALS the
+// local deleted_at stays deleted (restore requires strictly newer).
+// -------------------------------------------------------------------------
+
+#[test]
+fn restore_tie_stays_deleted() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+    let rec = seed(&conn, "lwwrtie.wav");
+    soft_delete_at(&conn, &rec.id, T1);
+    assert!(!fts_row_present(&conn, "lwwrtie"));
+
+    let remote = sync_rec(&rec.id, T1, None, vec![("soap_note", "tie edit", T1)]);
+    let MergeResult {
+        changed_recording_ids,
+        ..
+    } = ContentSyncRepo::merge_incoming(&conn, &[remote]).expect("merge");
+
+    assert_eq!(
+        deleted_at_raw(&conn, &rec.id).as_deref(),
+        Some(T1),
+        "a live row merely TIED with the tombstone must not restore it"
+    );
+    assert!(
+        !fts_row_present(&conn, "lwwrtie"),
+        "row must stay out of the FTS index"
+    );
+    assert!(
+        !changed_recording_ids.contains(&rec.id.to_string()),
+        "nothing changed locally"
+    );
+    assert_fts_healthy(&conn);
+}
+
+// -------------------------------------------------------------------------
+// Repeat-merge idempotency: merging the same batch a second time reports
+// no changes and leaves the FTS index healthy.
+// -------------------------------------------------------------------------
+
+#[test]
+fn repeat_merge_is_idempotent() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+    let live = seed(&conn, "idemlive.wav");
+    set_updated_at(&conn, &live.id, T1);
+    let doomed = seed(&conn, "idemdoom.wav");
+    set_updated_at(&conn, &doomed.id, T1);
+
+    let build = || {
+        vec![
+            sync_rec(
+                &live.id,
+                T2,
+                None,
+                vec![("soap_note", "edited remotely", T2)],
+            ),
+            sync_rec(&doomed.id, T2, Some(T2), vec![]),
+        ]
+    };
+
+    let first = ContentSyncRepo::merge_incoming(&conn, &build()).expect("first merge");
+    assert!(
+        first.changed_recording_ids.contains(&live.id.to_string())
+            && first.changed_recording_ids.contains(&doomed.id.to_string()),
+        "first merge must report both recordings changed"
+    );
+
+    let second = ContentSyncRepo::merge_incoming(&conn, &build()).expect("second merge");
+    assert!(
+        second.changed_recording_ids.is_empty(),
+        "re-merging an already-applied batch must report no changes"
+    );
+    assert!(second.conflicts.is_empty());
+
+    // Final states survive the second pass untouched.
+    assert!(deleted_at_raw(&conn, &live.id).is_none());
+    assert!(fts_row_present(&conn, "idemlive"));
+    assert_eq!(
+        deleted_at_raw(&conn, &doomed.id).as_deref(),
+        Some(T2),
+        "tombstone must survive the repeat merge"
+    );
+    assert!(!fts_row_present(&conn, "idemdoom"));
+    assert_fts_healthy(&conn);
 }
