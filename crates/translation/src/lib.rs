@@ -2,15 +2,11 @@
 //!
 //! Text translation for clinician–patient conversations.
 //!
-//! This crate provides two complementary translation strategies:
+//! This crate provides AI translation:
 //!
 //! - **AI translation** ([`ai_translator::AiTranslationProvider`]) — wraps any
 //!   [`medical_core::traits::AiProvider`] to translate free-form medical text
 //!   via LLM prompts. Handles arbitrary text in 12 languages.
-//! - **Canned responses** ([`canned_responses::CannedResponseSet`]) — a small
-//!   set of pre-translated common medical phrases (greetings, pain assessment,
-//!   medication history, instructions) available instantly without an AI
-//!   round-trip.
 //!
 //! Session state is tracked via [`session::TranslationSession`], which records
 //! every translated utterance with speaker identity, timestamps, and automatic
@@ -25,9 +21,6 @@
 //! [`TranslationProvider`]: medical_core::traits::TranslationProvider
 
 pub mod ai_translator;
-/// Canned responses — not yet wired into production; tests-only until integrated.
-#[cfg(test)]
-pub mod canned_responses;
 pub mod session;
 
 use thiserror::Error;

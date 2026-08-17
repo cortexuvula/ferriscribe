@@ -1,6 +1,6 @@
 [package]
 name = "rust-medical-assistant"
-version = "0.48.0"
+version = "0.48.1"
 description = "FerriScribe"
 authors = []
 edition = "2024"
@@ -53,7 +53,7 @@ medical-sharing = { path = "../crates/sharing" }
 rand = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { workspace = true }
 axum = "0.8"
 async-stream = "0.3"
 urlencoding = { workspace = true }

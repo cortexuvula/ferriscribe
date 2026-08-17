@@ -18,7 +18,6 @@
 //! | [`graph_search`] | SQLite-backed knowledge graph (entities + relations) |
 //! | [`fusion`] | Reciprocal-rank fusion and weighted fusion of ranked result sets |
 //! | [`mmr`] | Maximal Marginal Relevance re-ranking; cosine/Jaccard similarity |
-//! | [`query_expander`] | Medical abbreviation and synonym expansion |
 //! | [`ingestion`] | End-to-end ingestion pipeline (chunk → embed → store → extract entities) |
 //!
 //! ## Crate error type
@@ -32,9 +31,6 @@ pub mod fusion;
 pub mod graph_search;
 pub mod ingestion;
 pub mod mmr;
-/// Query expander — not yet wired into production; tests-only until integrated.
-#[cfg(test)]
-pub mod query_expander;
 pub mod vector_store;
 
 use thiserror::Error;

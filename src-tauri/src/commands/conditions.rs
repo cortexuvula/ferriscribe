@@ -114,7 +114,7 @@ pub async fn list_condition_chips(
 /// sync push of the resulting active list so the server converges. The push
 /// is best-effort; a failure is retried on the next pull (list).
 #[tauri::command]
-#[instrument(skip(state), name = "conditions::add")]
+#[instrument(skip(state, text), name = "conditions::add")]
 pub async fn add_condition_chip(
     state: tauri::State<'_, AppState>,
     text: String,
@@ -170,7 +170,7 @@ pub async fn add_condition_chip(
 /// `list_active`) is essential — otherwise the tombstone would never reach the
 /// server and the chip would ghost-resurface on other machines.
 #[tauri::command]
-#[instrument(skip(state), name = "conditions::remove")]
+#[instrument(skip(state, text), name = "conditions::remove")]
 pub async fn remove_condition_chip(
     state: tauri::State<'_, AppState>,
     text: String,
@@ -299,7 +299,7 @@ pub async fn sync_condition_chips_cmd(
 /// larger count on another machine. The push is best-effort; a failure is
 /// retried on the next pull (list).
 #[tauri::command]
-#[instrument(skip(state), name = "conditions::increment_use")]
+#[instrument(skip(state, text), name = "conditions::increment_use")]
 pub async fn increment_condition_chip_use(
     state: tauri::State<'_, AppState>,
     text: String,

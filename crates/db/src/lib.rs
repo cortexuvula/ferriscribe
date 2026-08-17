@@ -26,7 +26,6 @@ pub mod letter_audiences;
 pub mod migrations;
 pub mod pool;
 pub mod processing_queue;
-pub mod recipients;
 pub mod recordings;
 pub mod search;
 pub mod settings;

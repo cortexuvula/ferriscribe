@@ -99,7 +99,7 @@ pub async fn user_dict_list(state: tauri::State<'_, AppState>) -> AppResult<Vec<
 /// converges. The push is best-effort; a failure is retried on the next pull
 /// (list). Returns `true` if a new row was inserted or a tombstone resurrected.
 #[tauri::command]
-#[instrument(skip(state), name = "user_dict::add")]
+#[instrument(skip(state, word), name = "user_dict::add")]
 pub async fn user_dict_add(state: tauri::State<'_, AppState>, word: String) -> AppResult<bool> {
     let now = now_iso();
     let word_len = word.len();
@@ -164,7 +164,7 @@ pub async fn user_dict_add(state: tauri::State<'_, AppState>, word: String) -> A
 /// active list) is essential — otherwise the tombstone would never reach the
 /// server and the word would ghost-resurface on other machines.
 #[tauri::command]
-#[instrument(skip(state), name = "user_dict::remove")]
+#[instrument(skip(state, word), name = "user_dict::remove")]
 pub async fn user_dict_remove(state: tauri::State<'_, AppState>, word: String) -> AppResult<bool> {
     let now = now_iso();
 

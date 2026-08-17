@@ -223,7 +223,7 @@ pub fn run() {
                     if let Err(e) = crate::commands::sharing::start_sharing_inner(
                         &state,
                         cfg.friendly_name,
-                        Some(app_handle.clone()),
+                        app_handle.clone(),
                     )
                     .await
                     {

@@ -1,14 +1,13 @@
 //! # medical-audio
 //!
-//! Microphone capture, audio device management, format conversion, playback,
-//! and waveform analysis for the FerriScribe medical transcription app.
+//! Microphone capture, audio device management, format conversion, and
+//! waveform analysis for the FerriScribe medical transcription app.
 //!
 //! ## Modules
 //!
 //! - [`capture`] — Real-time microphone capture via cpal with WAV file output.
 //! - [`device`] — Enumerate and select system audio input/output devices.
 //! - [`convert`] — Decode any supported audio format (MP3, FLAC, OGG, AAC) to WAV.
-//! - [`playback`] — Play audio files through the system output device via rodio.
 //! - [`state`] — Recording session state machine (Idle → Recording → Paused → Stopped).
 //! - [`waveform`] — Signal analysis utilities: RMS, peak, dB conversion, normalization.
 //!
@@ -36,7 +35,6 @@
 pub mod capture;
 pub mod convert;
 pub mod device;
-pub mod playback;
 pub mod state;
 pub mod waveform;
 

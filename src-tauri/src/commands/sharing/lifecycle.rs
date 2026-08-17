@@ -17,7 +17,7 @@ pub async fn start_sharing(
     app_handle: tauri::AppHandle,
     friendly_name: String,
 ) -> AppResult<()> {
-    start_sharing_inner(&state, friendly_name.clone(), Some(app_handle)).await?;
+    start_sharing_inner(&state, friendly_name.clone(), app_handle).await?;
     // Persist after a successful start so a crash mid-start doesn't leave a
     // stale config that would auto-resume into a half-built service.
     write_server_config(&ServerConfig {
@@ -33,13 +33,14 @@ pub async fn start_sharing(
 /// that's the caller's concern (auto-resume reads it; the Tauri command
 /// writes it).
 ///
-/// `app_handle`, when `Some`, is used to emit `sharing-readiness-changed`
-/// events to the frontend when the ReadinessWatcher brings a late-arriving
-/// upstream online. The auto-resume path passes the handle too.
+/// `app_handle` is used to emit `sharing-readiness-changed` events to the
+/// frontend when the ReadinessWatcher brings a late-arriving upstream online,
+/// and by the vocab API to emit recording-refresh events. It is a required
+/// (non-optional) parameter so the invariant is enforced at compile time.
 pub async fn start_sharing_inner(
     state: &AppState,
     friendly_name: String,
-    app_handle: Option<tauri::AppHandle>,
+    app_handle: tauri::AppHandle,
 ) -> AppResult<()> {
     // Acquire the write lock BEFORE binding ports / spawning proxies so that a
     // concurrent stop_sharing cannot return Ok while we are mid-start and leave
@@ -66,16 +67,13 @@ pub async fn start_sharing_inner(
     // expect a vocab API anyway, so they degrade gracefully. The app handle
     // lets the vocab API emit Tauri events to this server's own frontend
     // when a remote client pushes recordings (so the Recordings view
-    // refreshes). Both call sites (the Tauri command and the auto-resume
-    // setup hook) pass `Some(...)`, so unwrap is safe.
+    // refreshes).
     let vocab_handle = match crate::sharing_vocab_api::spawn(
         std::sync::Arc::clone(&state.db),
         service.token_store(),
         service.config().vocab_port,
         state.data_dir.clone(),
-        app_handle
-            .clone()
-            .expect("app_handle is always Some at both call sites of start_sharing_inner"),
+        app_handle.clone(),
     )
     .await
     {
@@ -97,8 +95,9 @@ pub async fn start_sharing_inner(
         .map_err(|e| AppError::Other(e.to_string()))?;
     service.spawn_readiness_watcher(watcher_client);
 
-    if let Some(handle) = app_handle {
+    {
         let mut rx = service.readiness_changes();
+        let handle = app_handle.clone();
         tauri::async_runtime::spawn(async move {
             use tauri::Emitter;
             // Skip the initial value; only emit on actual changes.
