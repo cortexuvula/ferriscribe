@@ -299,11 +299,6 @@ impl RecordingsRepo {
                 "recording {id} (not deleted or not found)"
             )));
         }
-        // Re-insert into FTS by touching the row (the update trigger rebuilds it).
-        conn.execute(
-            "UPDATE recordings SET metadata = metadata WHERE id = ?1",
-            [id.to_string()],
-        )?;
         Ok(())
     }
 
@@ -347,6 +342,94 @@ impl RecordingsRepo {
             trashed.push(id);
         }
         Ok(trashed)
+    }
+
+    /// List soft-deleted recordings older than the cutoff (days), for callers
+    /// that clean up external resources (RAG vectors, audio files) before
+    /// purging rows. Returns (id, audio_path) pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Sqlite`] if the query fails. Rows with an
+    /// unparseable id are skipped (logged) rather than aborting the sweep.
+    pub fn list_soft_deleted_older_than(
+        conn: &Connection,
+        days: u32,
+        now: DateTime<Utc>,
+    ) -> DbResult<Vec<(Uuid, String)>> {
+        let cutoff = (now - chrono::TimeDelta::days(days as i64)).to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT id, audio_path FROM recordings
+              WHERE deleted_at IS NOT NULL AND datetime(deleted_at) < datetime(?1)",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .filter_map(|r| {
+                r.map_err(
+                    |e| tracing::warn!(error = %e, "dropping unreadable row in tombstone listing"),
+                )
+                .ok()
+            })
+            .filter_map(|(id_str, path)| match Uuid::parse_str(&id_str) {
+                Ok(id) => Some((id, path.unwrap_or_default())),
+                Err(e) => {
+                    tracing::warn!(error = %e, "unparseable recording id in tombstone listing");
+                    None
+                }
+            })
+            .collect();
+        Ok(rows)
+    }
+
+    /// Hard-delete soft-deleted rows by id, keeping the FTS index consistent:
+    /// re-inserts each row into the external-content index immediately before
+    /// the DELETE so the delete-trigger's 'delete' command matches indexed
+    /// state. Transactional — all rows or none. Skips ids that are not
+    /// currently soft-deleted (safety). Returns the ids actually purged.
+    ///
+    /// `soft_delete` removed these rowids from `recordings_fts` when they
+    /// were trashed; without the re-insert, the `recordings_fts_delete`
+    /// trigger issues a 'delete' for a rowid the index no longer holds,
+    /// which SQLite reports as `SQLITE_CORRUPT` ("database disk image is
+    /// malformed") — the raw `DELETE` this replaces never succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Sqlite`] on any failure; the transaction is rolled
+    /// back and no rows are removed.
+    pub fn purge_soft_deleted(conn: &Connection, ids: &[Uuid]) -> DbResult<Vec<Uuid>> {
+        // `unchecked_transaction` because repo methods receive `&Connection`
+        // (the crate's established pattern — see migrations/mod.rs). If any
+        // statement fails, the transaction's Drop rolls everything back.
+        let tx = conn.unchecked_transaction()?;
+        let mut purged = Vec::new();
+        for id in ids {
+            let id_str = id.to_string();
+            // Re-index the row with its currently stored values (the exact
+            // column list `restore` re-inserts / `soft_delete` deletes), but
+            // only while it is still soft-deleted. The WHERE clause doubles
+            // as the visible-row guard: for a visible id the SELECT yields
+            // no rows, so the FTS index is never touched.
+            tx.execute(
+                "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL",
+                [&id_str],
+            )?;
+            // The delete trigger now finds matching indexed values, so the
+            // hard DELETE de-indexes cleanly instead of corrupting FTS.
+            let rows = tx.execute(
+                "DELETE FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL",
+                [&id_str],
+            )?;
+            if rows > 0 {
+                purged.push(*id);
+            }
+        }
+        tx.commit()?;
+        Ok(purged)
     }
 
     /// Delete all recordings. Returns the audio paths so callers can clean up

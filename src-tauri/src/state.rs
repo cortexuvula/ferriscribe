@@ -719,89 +719,128 @@ impl AppState {
             }
         }
 
-        // ── Tombstone sweeper (server only) ────────────────────────────────
-        // Permanently purge recordings soft-deleted >30 days ago. Runs only on
-        // machines acting as the office server (where durable deletion policy
-        // applies); client machines keep their soft-deletes for local undo.
-        // The loop sleeps a day between sweeps — the first pass runs ~24h after
-        // boot, which is fine since the 30-day window dwarfs the interval.
+        // ── Daily retention sweeper ────────────────────────────────────────
+        // Two phases per tick, both idempotent and PHI-safe (logs carry
+        // counts/ids only):
+        //
+        // 1. Tombstone purge (office server only): permanently delete
+        //    recordings soft-deleted >30 days ago, after cleaning up their
+        //    RAG vectors and audio files. Server-only because durable
+        //    deletion is the server's policy; clients keep their
+        //    soft-deletes for local undo. The server check re-runs every
+        //    tick so a machine that starts acting as the server mid-session
+        //    is picked up without a restart.
+        // 2. Retention sweep (per-machine): if the clinician configured a
+        //    retention window, move older visible recordings into the trash
+        //    (from which phase 1 will eventually purge them on the server).
+        //
+        // The loop sleeps a day between sweeps — the first pass runs ~24h
+        // after boot, which is fine since the 30-day window dwarfs the
+        // interval.
         {
             let db_clone = Arc::clone(&db);
-            let server_config = load_server_config();
-            if server_config.is_some() {
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
-                        tracing::info!("running tombstone sweeper");
-                        if let Ok(conn) = db_clone.conn() {
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
+                    tracing::info!("running tombstone sweeper");
+                    if let Ok(conn) = db_clone.conn() {
+                        // ── Phase 1: tombstone purge (server only) ─────────
+                        if load_server_config().is_some() {
                             // Get the IDs of recordings about to be purged,
                             // so we can also clean up their RAG vectors.
-                            let to_purge: Vec<(String, String)> = {
-                                let mut stmt = match conn.prepare(
-                                    "SELECT id, audio_path FROM recordings
-                                     WHERE deleted_at IS NOT NULL
-                                     AND datetime(deleted_at) < datetime('now', '-30 days')",
-                                ) {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "tombstone sweeper: prepare failed");
-                                        continue;
-                                    }
-                                };
-                                stmt.query_map([], |row| {
-                                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                                })
-                                .ok()
-                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                .unwrap_or_default()
+                            let to_purge = match RecordingsRepo::list_soft_deleted_older_than(
+                                &conn,
+                                30,
+                                chrono::Utc::now(),
+                            ) {
+                                Ok(rows) => rows,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "tombstone sweeper: list failed");
+                                    Vec::new()
+                                }
                             };
 
-                            if to_purge.is_empty() {
-                                continue;
-                            }
-
-                            // Clean up RAG vectors for each purged recording.
-                            use medical_db::vectors::VectorsRepo;
-                            for (id, _audio_path) in &to_purge {
-                                if let Err(e) = VectorsRepo::delete_by_document(&conn, id) {
-                                    tracing::warn!(
-                                        recording_id = %id,
-                                        error = %e,
-                                        "tombstone sweeper: failed to delete RAG vectors"
-                                    );
+                            if !to_purge.is_empty() {
+                                // Clean up RAG vectors for each purged recording.
+                                use medical_db::vectors::VectorsRepo;
+                                for (id, _audio_path) in &to_purge {
+                                    if let Err(e) =
+                                        VectorsRepo::delete_by_document(&conn, &id.to_string())
+                                    {
+                                        tracing::warn!(
+                                            recording_id = %id,
+                                            error = %e,
+                                            "tombstone sweeper: failed to delete RAG vectors"
+                                        );
+                                    }
                                 }
-                            }
 
-                            // Best-effort delete of audio files. Tolerate missing files.
-                            for (id, audio_path) in &to_purge {
-                                if !audio_path.is_empty()
-                                    && let Err(e) = std::fs::remove_file(audio_path)
-                                    && e.kind() != std::io::ErrorKind::NotFound
-                                {
-                                    tracing::warn!(recording_id = %id, error = %e, "tombstone sweeper: failed to delete audio file");
+                                // Best-effort delete of audio files. Tolerate missing files.
+                                for (id, audio_path) in &to_purge {
+                                    if !audio_path.is_empty()
+                                        && let Err(e) = std::fs::remove_file(audio_path)
+                                        && e.kind() != std::io::ErrorKind::NotFound
+                                    {
+                                        tracing::warn!(recording_id = %id, error = %e, "tombstone sweeper: failed to delete audio file");
+                                    }
                                 }
-                            }
 
-                            // Now permanently delete the recording rows.
-                            match conn.execute(
-                                "DELETE FROM recordings
-                                 WHERE deleted_at IS NOT NULL
-                                 AND datetime(deleted_at) < datetime('now', '-30 days')",
-                                [],
-                            ) {
-                                Ok(count) => {
-                                    tracing::info!(
-                                        purged = count,
-                                        vectors_cleaned = to_purge.len(),
-                                        "tombstone sweeper purged soft-deleted recordings + RAG vectors + audio files"
-                                    );
+                                // Now permanently delete the recording rows.
+                                // This must go through the repo: a raw DELETE
+                                // fires the FTS delete-trigger against rows
+                                // that soft_delete already de-indexed, which
+                                // fails with SQLITE_CORRUPT — the reason the
+                                // 30-day durable-deletion policy never
+                                // actually deleted rows before this fix.
+                                let ids: Vec<uuid::Uuid> =
+                                    to_purge.iter().map(|(id, _)| *id).collect();
+                                match RecordingsRepo::purge_soft_deleted(&conn, &ids) {
+                                    Ok(purged) => {
+                                        tracing::info!(
+                                            purged = purged.len(),
+                                            vectors_cleaned = to_purge.len(),
+                                            "tombstone sweeper purged soft-deleted recordings + RAG vectors + audio files"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "tombstone sweeper failed")
+                                    }
                                 }
-                                Err(e) => tracing::warn!(error = %e, "tombstone sweeper failed"),
                             }
                         }
+
+                        // ── Phase 2: per-machine retention sweep ───────────
+                        // Runs on every machine (server or client) — it only
+                        // moves old visible recordings into the trash.
+                        match medical_db::settings::SettingsRepo::load_config(&conn) {
+                            Ok(cfg) => {
+                                if let Some(days) = cfg.retention_days.filter(|d| *d > 0) {
+                                    match RecordingsRepo::retention_soft_delete_older_than(
+                                        &conn,
+                                        days,
+                                        chrono::Utc::now(),
+                                    ) {
+                                        Ok(trashed) if !trashed.is_empty() => {
+                                            tracing::info!(
+                                                count = trashed.len(),
+                                                "retention sweep: moved recordings to trash"
+                                            );
+                                        }
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "retention sweep failed")
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "retention sweep: failed to load settings"
+                            ),
+                        }
                     }
-                });
-            }
+                }
+            });
         }
 
         let config_dir = data_dir.join("config");
