@@ -24,14 +24,13 @@
 //!   at an LM Studio server (default `http://localhost:1234/v1`).
 //! - [`openai_compat::OpenAiCompatibleClient`] — generic HTTP client for any
 //!   endpoint implementing the OpenAI chat-completions protocol.
-//! - [`http_client`] — retry infrastructure: [`RetryConfig`], [`CircuitBreaker`],
+//! - [`http_client`] — retry infrastructure: [`RetryConfig`],
 //!   `send_with_retry`, and retry classification helpers.
 //! - [`sse`] — SSE stream parser for streaming AI responses.
 //!
 //! [`AiProvider`]: medical_core::traits::AiProvider
 //! [`endpoint_policy`]: medical_core::endpoint_policy
 //! [`RetryConfig`]: http_client::RetryConfig
-//! [`CircuitBreaker`]: http_client::CircuitBreaker
 
 pub mod http_client;
 pub mod lmstudio;
