@@ -839,13 +839,22 @@ impl ContentSyncRepo {
     /// and it travels in the synced `metadata` field. Missing / live row →
     /// clean no-op.
     pub fn sync_restore(conn: &Connection, id: &str, updated_at: &str) -> DbResult<()> {
-        let tombstoned: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL)",
-                [id],
-                |r| r.get(0),
-            )
-            .unwrap_or(false);
+        // EXISTS always returns exactly one row, so any error here is a
+        // genuine DB failure — propagate it. Swallowing it as "not
+        // tombstoned" (.unwrap_or(false)) would silently skip the restore
+        // while the sync cursor advances, permanently losing the peer's
+        // restore.
+        let tombstoned: bool = match conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL)",
+            [id],
+            |r| r.get(0),
+        ) {
+            Ok(v) => v,
+            // Theoretically unreachable (EXISTS always yields a row); treat
+            // it as not-tombstoned rather than failing the sync batch.
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(e) => return Err(DbError::from(e)),
+        };
         if !tombstoned {
             return Ok(());
         }
@@ -855,11 +864,28 @@ impl ContentSyncRepo {
              FROM recordings WHERE id = ?1",
             [id],
         )?;
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE recordings SET deleted_at = NULL, updated_at = ?1
              WHERE id = ?2 AND deleted_at IS NOT NULL",
             params![updated_at, id],
         )?;
+        // Close the probe→UPDATE TOCTOU. If the row flipped to live or was
+        // purged between the EXISTS probe and this UPDATE (0 rows changed),
+        // the re-insert above either added a duplicate index entry (row went
+        // live: it was already indexed) or inserted nothing (row gone).
+        // Remove exactly one entry with the mirror 'delete' so a concurrent
+        // flip can't leave a duplicate; it is a no-op when nothing was
+        // inserted.
+        if changed == 0
+            && let Err(e) = conn.execute(
+                "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT 'delete', rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1",
+                [id],
+            )
+        {
+            tracing::warn!(error = %e, "sync_restore: failed to roll back stray FTS re-index");
+        }
         Ok(())
     }
 }
@@ -1034,6 +1060,15 @@ mod sync_tombstone_tests {
         .expect("query deleted_at")
     }
 
+    fn updated_at_raw(conn: &Connection, id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT updated_at FROM recordings WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .expect("query updated_at")
+    }
+
     /// `recordings_fts` is an external-content FTS5 table
     /// (`content='recordings'`): plain SELECTs read column values from the
     /// content table, so `WHERE id = ?` always "finds" the row and never
@@ -1090,6 +1125,11 @@ mod sync_tombstone_tests {
         assert!(!fts_row_present(&conn, "revx"));
         ContentSyncRepo::sync_restore(&conn, &rec.id.to_string(), "2026-06-02T00:00:00Z").unwrap();
         assert_eq!(deleted_at_raw(&conn, &rec.id.to_string()), None);
+        assert_eq!(
+            updated_at_raw(&conn, &rec.id.to_string()).as_deref(),
+            Some("2026-06-02T00:00:00Z"),
+            "sync_restore must stamp updated_at with the caller-supplied value"
+        );
         assert!(
             fts_row_present(&conn, "revx"),
             "restored row must be searchable again"
@@ -1129,6 +1169,11 @@ mod sync_tombstone_tests {
             fts_row_present(&conn, "noopn"),
             "restore after double tombstone must re-index"
         );
+        assert_eq!(
+            updated_at_raw(&conn, &rec.id.to_string()).as_deref(),
+            Some("2027-02-02T00:00:00Z")
+        );
+        assert_fts_healthy(&conn);
     }
 
     #[test]
@@ -1143,8 +1188,14 @@ mod sync_tombstone_tests {
         .unwrap();
         let rec = seed(&conn, "livel.wav");
         let before = deleted_at_raw(&conn, &rec.id.to_string());
+        let before_updated = updated_at_raw(&conn, &rec.id.to_string());
         ContentSyncRepo::sync_restore(&conn, &rec.id.to_string(), "2026-06-02T00:00:00Z").unwrap();
         assert_eq!(deleted_at_raw(&conn, &rec.id.to_string()), before);
+        assert_eq!(
+            updated_at_raw(&conn, &rec.id.to_string()),
+            before_updated,
+            "no-op restore must not bump updated_at (would cause spurious delta re-sync)"
+        );
         assert!(
             fts_row_present(&conn, "livel"),
             "live row keeps its FTS entry"
