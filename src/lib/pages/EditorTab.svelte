@@ -143,14 +143,22 @@
         const value = pendingValue;
         const prevKey = lastSeenKey;
         pendingValue = null;
-        // Fire-and-forget the save — don't block the tab switch.
+        // Fire-and-forget the save — don't block the tab switch. A failure
+        // is surfaced as a toast: the optimistic local update above makes the
+        // edit look saved, so a silently dropped flush would be invisible
+        // data loss (the pending edit disappears on the next reload).
         if (prevKey) {
-          const [recordingId, field] = prevKey.split('::');
-          invoke('save_recording_field', {
-            recordingId,
-            field,
-            value,
-          }).catch(() => {});
+          const sep = prevKey.indexOf('::');
+          if (sep > 0) {
+            const recordingId = prevKey.slice(0, sep);
+            const field = prevKey.slice(sep + 2);
+            invoke('save_recording_field', { recordingId, field, value }).catch((e) => {
+              console.error('Failed to flush pending edit on tab switch:', e);
+              toasts.error(
+                `Save failed while switching tabs — pending ${config.label} edit may be lost (${formatError(e)})`,
+              );
+            });
+          }
         }
       } else {
         if (saveTimer !== null) {
