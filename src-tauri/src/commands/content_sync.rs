@@ -1049,3 +1049,112 @@ pub async fn upload_audio_to_server(
 // documents which fields participate in sync.
 #[allow(dead_code)]
 const _: &[&str] = SYNCABLE_FIELDS;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use medical_core::types::recording::Recording;
+    use medical_db::Database;
+    use medical_db::recordings::RecordingsRepo;
+
+    #[test]
+    fn advance_cursor_adds_exactly_one_microsecond() {
+        // Strict-`>` cursors lose same-timestamp rows; the +1µs advance is
+        // what guarantees the second of two rows sharing max(updated_at) is
+        // still picked up on the next pull.
+        let out = advance_cursor("2026-01-02T03:04:05.123456Z");
+        let dt = chrono::DateTime::parse_from_rfc3339(&out).expect("advanced parses");
+        assert_eq!(dt.to_rfc3339(), "2026-01-02T03:04:05.123457+00:00");
+        let orig = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05.123456Z")
+            .expect("orig parses");
+        assert_eq!(
+            dt.signed_duration_since(orig).num_microseconds(),
+            Some(1),
+            "exactly one microsecond added"
+        );
+    }
+
+    #[test]
+    fn advance_cursor_passthrough_on_unparseable_input() {
+        // An unparseable batch max is still a safe-enough cursor — the raw
+        // value must come back unchanged rather than empty or zeroed.
+        assert_eq!(advance_cursor("not-a-timestamp"), "not-a-timestamp");
+    }
+
+    /// Seed a recording with two populated content fields plus a metadata
+    /// blob carrying the local-only `synced_from` marker, and a revision row
+    /// for the transcript.
+    fn seed_recording(conn: &rusqlite::Connection) -> uuid::Uuid {
+        let mut rec = Recording::new("visit.wav", std::path::PathBuf::from("/audio/visit.wav"));
+        rec.transcript = Some("patient transcript text".to_string());
+        rec.soap_note = Some("subjective objective assessment plan".to_string());
+        rec.patient_name = Some("Doe".to_string());
+        rec.metadata = serde_json::json!({
+            "synced_from": "office-server-machine",
+            "context": "freeform context"
+        });
+        RecordingsRepo::insert(conn, &rec).expect("insert recording");
+
+        ContentSyncRepo::upsert_revision(
+            conn,
+            &rec.id,
+            "transcript",
+            "2026-06-01T10:00:00Z",
+            Some("laptop-a"),
+        )
+        .expect("upsert transcript revision");
+        rec.id
+    }
+
+    #[test]
+    fn build_sync_recording_is_sparse_and_strips_synced_from() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let id = seed_recording(&conn);
+
+        let sync = build_sync_recording(&conn, &id.to_string()).expect("build sync recording");
+
+        // Sparse: populated fields present, absent fields omitted entirely.
+        assert!(sync.fields.contains_key("transcript"));
+        assert!(sync.fields.contains_key("soap_note"));
+        assert!(sync.fields.contains_key("patient_name"));
+        assert!(
+            !sync.fields.contains_key("referral"),
+            "absent fields must not participate in the merge"
+        );
+
+        // The revision row wins over the row-level timestamp, and carries the
+        // origin device through to the wire payload.
+        let transcript = &sync.fields["transcript"];
+        assert_eq!(transcript.updated_at, "2026-06-01T10:00:00Z");
+        assert_eq!(transcript.origin_device.as_deref(), Some("laptop-a"));
+
+        // Fields without a revision fall back to the row-level timestamp.
+        let soap = &sync.fields["soap_note"];
+        assert_ne!(soap.updated_at, "2026-06-01T10:00:00Z");
+        assert!(soap.origin_device.is_none());
+
+        // The local-only synced_from marker must not round-trip to the origin
+        // machine, but other metadata keys survive.
+        let metadata = sync.fields["metadata"]
+            .value
+            .as_object()
+            .expect("metadata obj");
+        assert!(
+            !metadata.contains_key("synced_from"),
+            "synced_from must be stripped before push"
+        );
+        assert_eq!(metadata["context"], "freeform context");
+    }
+
+    #[test]
+    fn build_sync_recording_rejects_invalid_id() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let err = build_sync_recording(&conn, "not-a-uuid").expect_err("must reject bad id");
+        assert!(
+            err.to_string().contains("invalid recording id"),
+            "got: {err}"
+        );
+    }
+}
