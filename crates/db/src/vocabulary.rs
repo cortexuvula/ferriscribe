@@ -243,3 +243,36 @@ impl VocabularyRepo {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_entry(find_text: &str) -> VocabularyEntry {
+        VocabularyEntry {
+            id: Uuid::new_v4(),
+            find_text: find_text.to_string(),
+            replacement: format!("replacement for {find_text}"),
+            category: VocabularyCategory::from_str("general"),
+            case_sensitive: false,
+            priority: 0,
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn duplicate_insert_is_flagged_as_unique_violation() {
+        let db = crate::Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+
+        VocabularyRepo::insert(&conn, &test_entry("htn")).expect("first insert");
+        let err =
+            VocabularyRepo::insert(&conn, &test_entry("htn")).expect_err("duplicate rejected");
+        assert!(
+            err.is_unique_violation(),
+            "duplicate find_text must map to a unique violation, got: {err}"
+        );
+    }
+}

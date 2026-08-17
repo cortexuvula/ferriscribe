@@ -99,7 +99,20 @@ pub async fn add_vocabulary_entry(
     let entry_clone = entry.clone();
     tokio::task::spawn_blocking(move || {
         let conn = db.conn()?;
-        VocabularyRepo::insert(&conn, &entry_clone).map_err(AppError::from)
+        VocabularyRepo::insert(&conn, &entry_clone).map_err(|e| {
+            // A duplicate find_text trips the unique index; surface it as a
+            // plain, actionable message instead of the raw constraint text.
+            // The entry text stays out of logs (PHI guard below) and is only
+            // echoed back to the user who typed it.
+            if e.is_unique_violation() {
+                AppError::Config(format!(
+                    "A vocabulary entry for \"{}\" already exists. Edit the existing entry instead.",
+                    entry_clone.find_text
+                ))
+            } else {
+                AppError::from(e)
+            }
+        })
     })
     .await
     .map_err(crate::commands::join_err)??;

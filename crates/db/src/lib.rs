@@ -88,6 +88,20 @@ pub enum DbError {
 /// Convenience result type for database operations.
 pub type DbResult<T> = Result<T, DbError>;
 
+impl DbError {
+    /// True when this is a SQLite `UNIQUE`-constraint violation — i.e. an
+    /// insert (or update) hit a row that already exists under a unique key.
+    /// Lets command handlers turn the raw constraint text into a plain,
+    /// actionable duplicate message for the UI.
+    pub fn is_unique_violation(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlite(rusqlite::Error::SqliteFailure(f, _))
+                if f.code == rusqlite::ErrorCode::ConstraintViolation
+        )
+    }
+}
+
 /// Parse a timestamp column that may be stored in either of two legitimate
 /// formats: RFC 3339 (e.g. `2026-05-22T00:00:00Z`, used by rows written from
 /// Rust via `to_rfc3339()`) or SQLite's native `datetime('now')` format
