@@ -3,7 +3,8 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { dictionaryEnAssetResolver } from './vite-plugins/dictionary-en';
 
 export default defineConfig({
-  plugins: [dictionaryEnAssetResolver(), svelte({ compilerOptions: { runes: true } })],
+  // Runes mode comes from svelte.config.js (shared with vite.config.ts).
+  plugins: [dictionaryEnAssetResolver(), svelte()],
   resolve: {
     // Allow bare imports (no extension) to resolve .svelte.ts files so that
     // test and consumer imports like `from './recordSidebar'` still work
