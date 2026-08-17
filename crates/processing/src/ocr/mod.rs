@@ -360,6 +360,40 @@ fn pdfium_target() -> (&'static str, &'static str, &'static str) {
     }
 }
 
+/// Pinned SHA-256 digests of the `bblanchon/pdfium-binaries` release assets
+/// for [`PDFIUM_BIN_VERSION`]. The pdfium library is dlopen'd — a compromised
+/// mirror or MITM on this download would execute arbitrary code — so the
+/// digest is mandatory, exactly like the whisper-server binary in
+/// `medical-sharing`. Regenerate when bumping `PDFIUM_BIN_VERSION`:
+/// `curl -sL <release-url>/<asset>.tgz | shasum -a 256`.
+const PDFIUM_SHA256: &[(&str, &str)] = &[
+    (
+        "pdfium-mac-arm64.tgz",
+        "e214ee33f22b2204daa765a545aee1e425d88448e6154dac95c6a06206b7437f",
+    ),
+    (
+        "pdfium-mac-x64.tgz",
+        "4b924d948d2ec4863435d375a94541b4003c59f8adc28cc5e4236b0ab81a355d",
+    ),
+    (
+        "pdfium-linux-x64.tgz",
+        "c3af580f9df0fef9545b44115bc5ea440f286956b5f231df69fb373b8efc4f69",
+    ),
+    (
+        "pdfium-win-x64.tgz",
+        "55329d5cb5de8a379a2fc563106492d7f385a1f795d18970922c71f708f9fbb4",
+    ),
+];
+
+/// The pinned digest for `asset`, if this build's platform asset has one.
+/// `ensure_pdfium_available` refuses to download without it.
+fn pdfium_sha256(asset: &str) -> Option<&'static str> {
+    PDFIUM_SHA256
+        .iter()
+        .find(|(name, _)| *name == asset)
+        .map(|(_, hash)| *hash)
+}
+
 /// Serializes the pdfium download/extract/bind path. Without it, two
 /// concurrent OCR batches both seeing an empty cache would race the
 /// `.part` file writes, the archive rename (which outright fails on
@@ -390,35 +424,50 @@ pub async fn ensure_pdfium_available(data_dir: &Path) -> Result<std::path::PathB
     let lib_path = pdfium_dir.join(lib_name);
     let version_path = pdfium_dir.join(".version");
 
-    std::fs::create_dir_all(&pdfium_dir).map_err(|e| format!("create pdfium dir: {e}"))?;
-
-    // Download the .tgz to a temp file, then atomic rename.
+    // The library is dlopen'd, so an unverified download means arbitrary code
+    // execution from a compromised mirror — refuse to fetch without the
+    // pinned digest for this platform's asset.
+    let expected = pdfium_sha256(asset).ok_or_else(|| {
+        format!("no pinned SHA-256 for pdfium asset {asset} at {PDFIUM_BIN_VERSION}; refusing unverified download")
+    })?;
     let url = format!(
         "https://github.com/bblanchon/pdfium-binaries/releases/download/{PDFIUM_BIN_VERSION}/{asset}"
     );
     tracing::info!(%url, "downloading pdfium for scanned-PDF OCR");
-    let tgz_path = pdfium_dir.join("pdfium.tgz.part");
-    download_to(&url, &tgz_path).await?;
-    let final_tgz = pdfium_dir.join("pdfium.tgz");
-    std::fs::rename(&tgz_path, &final_tgz).map_err(|e| format!("rename archive: {e}"))?;
+    let bytes = medical_core::net::download_bytes(&url, Some(expected))
+        .await
+        .map_err(|e| format!("download pdfium: {e}"))?;
 
-    // Extract just the library member into place.
-    extract_member(&final_tgz, member, &lib_path).map_err(|e| format!("extract {member}: {e}"))?;
-    let _ = std::fs::remove_file(&final_tgz); // cleanup archive (lib extracted)
+    // Extract just the library member into place, then (on macOS) ad-hoc
+    // sign. Archive decompression and codesign are synchronous CPU/disk/subprocess
+    // work — keep them off the tokio worker. The `.version` stamp is written
+    // last: a torn state simply looks uncached and re-downloads next call.
+    let bin_path = tokio::task::spawn_blocking(move || -> Result<std::path::PathBuf, String> {
+        std::fs::create_dir_all(&pdfium_dir).map_err(|e| format!("create pdfium dir: {e}"))?;
+        let tgz_path = pdfium_dir.join("pdfium.tgz");
+        std::fs::write(&tgz_path, &bytes).map_err(|e| format!("write archive: {e}"))?;
+        extract_member(&tgz_path, member, &lib_path)
+            .map_err(|e| format!("extract {member}: {e}"))?;
+        let _ = std::fs::remove_file(&tgz_path); // cleanup archive (lib extracted)
 
-    // macOS: ad-hoc sign with Hardened Runtime so the dylib loads under the
-    // notarized app's Hardened Runtime. No Developer ID needed — the dylib is
-    // NOT part of the app bundle (it's in the writable data dir), so it is
-    // outside notarization scope; ad-hoc signing suffices for loading. The
-    // app's disable-library-validation entitlement permits loading a dylib
-    // not signed with its Team ID. Note: no `--timestamp` — secure timestamps
-    // contact Apple's server and add nothing to an ad-hoc signature.
-    #[cfg(target_os = "macos")]
-    ad_hoc_sign(&lib_path)?;
+        // macOS: ad-hoc sign with Hardened Runtime so the dylib loads under the
+        // notarized app's Hardened Runtime. No Developer ID needed — the dylib is
+        // NOT part of the app bundle (it's in the writable data dir), so it is
+        // outside notarization scope; ad-hoc signing suffices for loading. The
+        // app's disable-library-validation entitlement permits loading a dylib
+        // not signed with its Team ID. Note: no `--timestamp` — secure timestamps
+        // contact Apple's server and add nothing to an ad-hoc signature.
+        #[cfg(target_os = "macos")]
+        ad_hoc_sign(&lib_path)?;
 
-    std::fs::write(&version_path, PDFIUM_BIN_VERSION).map_err(|e| format!("stamp version: {e}"))?;
-    tracing::info!(path = %lib_path.display(), "pdfium ready");
-    Ok(pdfium_dir)
+        std::fs::write(&version_path, PDFIUM_BIN_VERSION)
+            .map_err(|e| format!("stamp version: {e}"))?;
+        Ok(pdfium_dir)
+    })
+    .await
+    .map_err(|e| format!("pdfium extract task failed: {e}"))??;
+    tracing::info!(path = %bin_path.display(), "pdfium ready");
+    Ok(bin_path)
 }
 
 /// The pdfium dir, if the lib is present with the pinned version stamped.
@@ -449,32 +498,6 @@ pub async fn ensure_pdfium_initialized(data_dir: &Path) -> Result<(), String> {
     } else {
         Ok(())
     }
-}
-
-/// Download `url` into `dest` (a .part temp path), streaming to disk.
-async fn download_to(url: &str, dest: &Path) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
-
-    let res = reqwest::get(url)
-        .await
-        .map_err(|e| format!("GET {url}: {e}"))?;
-    if !res.status().is_success() {
-        return Err(format!("HTTP {} for {url}", res.status()));
-    }
-    // Followed redirects via reqwest default; body is a ~7 MB archive — read
-    // fully into memory (well within bounds) then write atomically.
-    let bytes = res
-        .bytes()
-        .await
-        .map_err(|e| format!("read body {url}: {e}"))?;
-    let mut f = tokio::fs::File::create(dest)
-        .await
-        .map_err(|e| format!("create {}: {e}", dest.display()))?;
-    f.write_all(&bytes)
-        .await
-        .map_err(|e| format!("write {}: {e}", dest.display()))?;
-    f.flush().await.map_err(|e| format!("flush: {e}"))?;
-    Ok(())
 }
 
 /// Extract a single `member` from a .tggz archive to `dest`.
@@ -1047,6 +1070,16 @@ pub async fn extract_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pdfium_asset_has_pinned_hash() {
+        let (asset, _, _) = pdfium_target();
+        assert!(
+            pdfium_sha256(asset).is_some(),
+            "no pinned SHA-256 for this platform's pdfium asset {asset} at {PDFIUM_BIN_VERSION} \
+             — a version bump must regenerate PDFIUM_SHA256"
+        );
+    }
 
     #[test]
     fn text_file_passthrough_reads_content() {

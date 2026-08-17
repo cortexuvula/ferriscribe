@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -206,29 +205,17 @@ impl WhisperSupervisor {
                 "sha256 hash missing for binary {binary_name}; refusing to download without verification"
             ))
         })?;
-        // A stalled CDN must not hang start() forever — the default reqwest
-        // client has no timeout at all. Connect quickly, allow 5 min total
-        // for the binary transfer on slow clinic links.
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .map_err(|e| WhisperError::Download(format!("failed to build HTTP client: {e}")))?;
-        let bytes = client
-            .get(url)
-            .send()
+        // Shared verified-download helper: explicit connect/total timeouts
+        // (a stalled CDN must not hang start() forever — the default reqwest
+        // client has none) + SHA-256 verification before extraction.
+        let bytes = medical_core::net::download_bytes(url, Some(expected))
             .await
-            .map_err(|e| WhisperError::Download(e.to_string()))?
-            .bytes()
-            .await
-            .map_err(|e| WhisperError::Download(e.to_string()))?;
-        let got = hex::encode(Sha256::digest(&bytes));
-        if got != expected {
-            return Err(WhisperError::HashMismatch {
-                expected: expected.to_string(),
-                got,
-            });
-        }
+            .map_err(|e| match e {
+                medical_core::net::DownloadError::HashMismatch { expected, got } => {
+                    WhisperError::HashMismatch { expected, got }
+                }
+                other => WhisperError::Download(other.to_string()),
+            })?;
         // The extract + chmod are synchronous CPU/disk work (full archive
         // decompression, metadata read, permission set). Running them inline
         // stalls the tokio worker thread for the whole duration — noticeable
