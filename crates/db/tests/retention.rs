@@ -318,3 +318,63 @@ fn update_on_trashed_row_is_a_clean_not_found() {
         "got: {err:?}"
     );
 }
+
+// -------------------------------------------------------------------------
+// set_encryption_done on a trashed row must not corrupt FTS.
+// -------------------------------------------------------------------------
+
+#[test]
+fn set_encryption_done_on_trashed_row_does_not_corrupt_fts() {
+    // Regression: the startup encryption sweep's `set_encryption_done` ran
+    // an unguarded UPDATE on soft-deleted (de-indexed) rows → the FTS update
+    // trigger's 'delete' hit absent index state → SQLITE_CORRUPT. Trashed
+    // recordings deliberately remain in `list_encryption_pending` (their
+    // audio must still be encrypted at rest), so this path is reachable.
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+
+    let rec = seed_days_old(&conn, 100, "pending-encrypt.wav");
+    // Flag the row the way `stop_recording` does — while the row is still
+    // visible, so the flag UPDATE itself is FTS-safe.
+    conn.execute(
+        "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+        [rec.id.to_string()],
+    )
+    .expect("flag encryption_pending");
+
+    RecordingsRepo::soft_delete(&conn, &rec.id).expect("trash");
+
+    // Trashed recordings still show up as pending — by design.
+    let pending = RecordingsRepo::list_encryption_pending(&conn).expect("list pending");
+    assert!(
+        pending.iter().any(|(id, _)| *id == rec.id),
+        "trashed recordings must remain in the encryption sweep"
+    );
+
+    // Pre-fix this UPDATE failed with SQLITE_CORRUPT.
+    RecordingsRepo::set_encryption_done(&conn, &rec.id)
+        .expect("set_encryption_done on trashed row");
+
+    // The flag is cleared and the index is still internally consistent.
+    let flag: i64 = conn
+        .query_row(
+            "SELECT encryption_pending FROM recordings WHERE id = ?1",
+            [rec.id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("query flag");
+    assert_eq!(flag, 0, "encryption_pending must be cleared");
+    assert_fts_healthy(&conn);
+
+    // The row stays trashed (hidden), and the purge path still works on it.
+    assert!(
+        deleted_at_raw(&conn, rec.id).is_some(),
+        "row must remain soft-deleted"
+    );
+    assert!(!visible_ids(&conn).contains(&rec.id));
+    let purged =
+        RecordingsRepo::purge_soft_deleted(&conn, &[rec.id]).expect("purge after encryption");
+    assert_eq!(purged, vec![rec.id], "purged ids must be reported");
+    assert_eq!(row_count(&conn, rec.id), 0, "row must be hard-deleted");
+    assert_fts_healthy(&conn);
+}

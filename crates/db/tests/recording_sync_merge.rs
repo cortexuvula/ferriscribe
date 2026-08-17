@@ -240,3 +240,124 @@ fn merge_deletion_propagates() {
         "recording must be soft-deleted after merge"
     );
 }
+
+// -------------------------------------------------------------------------
+// FTS-safety helpers for the soft-delete regression tests below.
+// -------------------------------------------------------------------------
+
+/// Assert the external-content FTS index is internally consistent.
+fn assert_fts_healthy(conn: &rusqlite::Connection) {
+    conn.execute(
+        "INSERT INTO recordings_fts(recordings_fts) VALUES('integrity-check')",
+        [],
+    )
+    .expect("FTS integrity-check must pass");
+}
+
+// -------------------------------------------------------------------------
+// Test 5: a remote field edit on a locally-trashed recording is a safe no-op.
+// -------------------------------------------------------------------------
+
+#[test]
+fn merge_field_edit_into_locally_trashed_recording_is_fts_safe() {
+    // Regression: a remote field edit landing on a locally soft-deleted
+    // (FTS-de-indexed) recording fired the update trigger against absent
+    // index state → SQLITE_CORRUPT. A local tombstone wins over peer field
+    // edits; the merge itself must succeed so the sync cursor advances.
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+    let id = seed_recording(&conn);
+    RecordingsRepo::soft_delete(&conn, &id).expect("local soft delete");
+
+    // Remote edits the transcript; no local revision exists, so on a live
+    // row the remote value would win — on a trashed row it must not land.
+    let mut fields = HashMap::new();
+    let (k, v) = field_value("transcript", "remote edit for trashed row", 10);
+    fields.insert(k, v);
+    let remote = remote_for(id, fields);
+
+    // Pre-fix this failed inside the transaction with SQLITE_CORRUPT.
+    let MergeResult { conflicts, .. } =
+        ContentSyncRepo::merge_incoming(&conn, &[remote]).expect("merge must not corrupt FTS");
+    assert!(conflicts.is_empty(), "tombstone-wins is not a conflict");
+
+    // The row stays trashed and the edit did not land.
+    assert!(
+        get_text_column(&conn, id, "deleted_at").is_some(),
+        "local tombstone must win"
+    );
+    assert!(
+        get_text_column(&conn, id, "transcript").is_none(),
+        "remote field edit must not be applied to a trashed row"
+    );
+
+    assert_fts_healthy(&conn);
+
+    // The trashed row can still be purged without corrupting FTS.
+    let purged = RecordingsRepo::purge_soft_deleted(&conn, &[id]).expect("purge");
+    assert_eq!(purged, vec![id], "trashed row must still be purgeable");
+    assert_fts_healthy(&conn);
+}
+
+// -------------------------------------------------------------------------
+// Test 6: both-deleted earliest-wins reconciliation skips trashed rows.
+// -------------------------------------------------------------------------
+
+#[test]
+fn merge_both_deleted_reconciliation_is_fts_safe() {
+    // Regression: when both sides hold a tombstone and the remote one is
+    // earlier, the merge used to UPDATE the locally-trashed (de-indexed)
+    // row's deleted_at → the FTS update trigger fired against absent index
+    // state → SQLITE_CORRUPT. The cosmetic timestamp reconciliation is
+    // skipped instead; keeping the later local tombstone is conservative
+    // (purge simply waits a little longer).
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+    let id = seed_recording(&conn);
+    RecordingsRepo::soft_delete(&conn, &id).expect("local soft delete");
+    let local_ts = get_text_column(&conn, id, "deleted_at").expect("local tombstone");
+
+    // Remote tombstone dated earlier than the local one (the test clock's
+    // base epoch precedes real `now` by over a month).
+    let remote = SyncRecording {
+        id: id.to_string(),
+        filename: "visit.wav".to_string(),
+        created_at: now(0),
+        updated_at: now(5),
+        deleted_at: Some(now(5)),
+        patient_name: None,
+        duration_seconds: None,
+        file_size_bytes: None,
+        stt_provider: None,
+        ai_provider: None,
+        fields: HashMap::new(),
+    };
+    assert!(
+        remote.deleted_at.as_deref().unwrap() < local_ts.as_str(),
+        "fixture requires an earlier remote tombstone"
+    );
+
+    // Pre-fix this failed inside the transaction with SQLITE_CORRUPT.
+    let MergeResult {
+        conflicts,
+        changed_recording_ids,
+    } = ContentSyncRepo::merge_incoming(&conn, &[remote]).expect("merge must not corrupt FTS");
+    assert!(conflicts.is_empty());
+    assert!(
+        changed_recording_ids.is_empty(),
+        "skipping cosmetic reconciliation must not report a change"
+    );
+
+    // The local tombstone (later timestamp) is preserved untouched.
+    assert_eq!(
+        get_text_column(&conn, id, "deleted_at").as_deref(),
+        Some(local_ts.as_str()),
+        "local deleted_at must be untouched"
+    );
+    assert_fts_healthy(&conn);
+
+    // The row can still be purged cleanly.
+    let purged = RecordingsRepo::purge_soft_deleted(&conn, &[id]).expect("purge");
+    assert_eq!(purged, vec![id], "trashed row must still be purgeable");
+    assert_fts_healthy(&conn);
+}

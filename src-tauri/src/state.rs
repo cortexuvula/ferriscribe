@@ -734,14 +734,17 @@ impl AppState {
         //    retention window, move older visible recordings into the trash
         //    (from which phase 1 will eventually purge them on the server).
         //
-        // The loop sleeps a day between sweeps — the first pass runs ~24h
-        // after boot, which is fine since the 30-day window dwarfs the
-        // interval.
+        // The first sweep runs 5 minutes after boot, then daily. Machines
+        // that are powered off overnight (most clinician laptops) never
+        // accumulate 24h of uptime, so sleeping a full day BEFORE the first
+        // tick meant the retention sweep never fired on them at all; the
+        // short initial delay catches every launch while keeping the daily
+        // cadence afterwards.
         {
             let db_clone = Arc::clone(&db);
             tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
                     tracing::info!("running tombstone sweeper");
                     if let Ok(conn) = db_clone.conn() {
                         // ── Phase 1: tombstone purge (server only) ─────────
@@ -839,6 +842,9 @@ impl AppState {
                             ),
                         }
                     }
+                    // Daily cadence between sweeps after the boot-time first
+                    // tick (the 30-day window dwarfs the interval).
+                    tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
                 }
             });
         }

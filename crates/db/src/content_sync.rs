@@ -452,13 +452,21 @@ impl ContentSyncRepo {
                             }
                             Some(local_ts) => {
                                 // Both deleted — earliest (smallest timestamp) wins.
+                                // The timestamp reconciliation is skipped when the
+                                // local row is already tombstoned: soft-deleted rows
+                                // are de-indexed from `recordings_fts`, so an UPDATE
+                                // here would fire the FTS update trigger's 'delete'
+                                // against absent index state (SQLITE_CORRUPT). The
+                                // row is already hidden locally either way, and
+                                // keeping the later local tombstone is conservative
+                                // — purge simply waits a little longer. Peers still
+                                // converge: any peer holding the earlier tombstone
+                                // keeps it by the same rule.
                                 if remote_deleted < &local_ts {
-                                    conn.execute(
-                                        "UPDATE recordings SET deleted_at = ?1, updated_at = ?1
-                                         WHERE id = ?2",
-                                        params![remote_deleted, id_str],
-                                    )?;
-                                    changed.push(id_str.clone());
+                                    tracing::debug!(
+                                        recording_id = %id_str,
+                                        "sync: both sides deleted; keeping later local tombstone (FTS-safe no-op)"
+                                    );
                                 }
                             }
                         }
@@ -555,6 +563,9 @@ impl ContentSyncRepo {
                 }
                 if row_changed {
                     // Bump the row's updated_at so the next delta pull sees it.
+                    // `deleted_at IS NULL` keeps this an FTS-safe no-op on
+                    // locally-trashed rows (a local tombstone wins over peer
+                    // field edits — see `apply_field`).
                     let max_ts = remote
                         .fields
                         .values()
@@ -562,7 +573,8 @@ impl ContentSyncRepo {
                         .max()
                         .unwrap_or(&remote.updated_at);
                     conn.execute(
-                        "UPDATE recordings SET updated_at = ?1 WHERE id = ?2 AND ?1 > updated_at",
+                        "UPDATE recordings SET updated_at = ?1
+                         WHERE id = ?2 AND deleted_at IS NULL AND ?1 > updated_at",
                         params![max_ts, id_str],
                     )?;
                     changed.push(id_str.clone());
@@ -601,6 +613,13 @@ impl ContentSyncRepo {
     /// store the JSON value directly (their columns are JSON text). Unknown
     /// field names are a no-op (logged) so a newer server field doesn't
     /// break an older client.
+    ///
+    /// The UPDATE is guarded with `deleted_at IS NULL`: a local tombstone
+    /// wins over a peer's field edit (the recording is deleted locally, so
+    /// the skipped edit is correct), and — critically — an UPDATE on a
+    /// soft-deleted row would fire the `recordings_fts_update` trigger
+    /// against a de-indexed row (SQLITE_CORRUPT). The guard makes the edit
+    /// a clean no-op; the sync cursor still advances.
     fn apply_field(
         conn: &Connection,
         recording_id: &str,
@@ -643,13 +662,14 @@ impl ContentSyncRepo {
             }
         };
 
-        let sql = format!("UPDATE recordings SET {column} = ?1 WHERE id = ?2");
+        let sql =
+            format!("UPDATE recordings SET {column} = ?1 WHERE id = ?2 AND deleted_at IS NULL");
         let changed = conn.execute(&sql, params![text_value, recording_id])?;
         if changed == 0 {
             tracing::warn!(
                 recording_id = %recording_id,
                 field = %field,
-                "sync: apply_field updated 0 rows"
+                "sync: apply_field updated 0 rows (recording missing, or locally trashed — tombstone wins)"
             );
         }
         Ok(())

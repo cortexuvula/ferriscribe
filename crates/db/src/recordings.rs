@@ -288,14 +288,18 @@ impl RecordingsRepo {
         // old values on every UPDATE — for this external-content FTS table
         // that 'delete' must match the indexed state or the index corrupts
         // (SQLITE_CORRUPT).
-        if let Err(e) = conn.execute(
+        //
+        // The error is propagated (`?`), not swallowed: warn-and-continue
+        // would let the UPDATE below fire its trigger 'delete' against
+        // absent index state — corrupting the index and wedging every
+        // later FTS operation. Failing the restore leaves the row
+        // consistently trashed + de-indexed, ready for a retry.
+        conn.execute(
             "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
              SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
              FROM recordings WHERE id = ?1",
             [id.to_string()],
-        ) {
-            tracing::warn!(error = %e, "restore: failed to re-insert recording into FTS index");
-        }
+        )?;
         let rows = conn.execute(
             "UPDATE recordings SET deleted_at = NULL, updated_at = ?1, metadata = ?2 WHERE id = ?3 AND deleted_at IS NOT NULL",
             rusqlite::params![now, metadata_json, id.to_string()],
@@ -513,6 +517,27 @@ impl RecordingsRepo {
     /// plaintext at rest, which the reader (`open_recording_wav`) handles
     /// transparently.
     pub fn set_encryption_done(conn: &Connection, id: &Uuid) -> DbResult<()> {
+        // FTS guard: `soft_delete` de-indexes trashed rows from the
+        // external-content `recordings_fts` table, but the UPDATE below
+        // fires `recordings_fts_update` even though `encryption_pending`
+        // isn't an indexed column — its 'delete' command would run against
+        // absent index state and fail with SQLITE_CORRUPT. Re-index the row
+        // first with the same guarded INSERT..SELECT `purge_soft_deleted`
+        // uses; for a visible row the `deleted_at IS NOT NULL` filter
+        // matches nothing and the index is untouched.
+        //
+        // Trashed recordings deliberately still reach this point (their
+        // audio must be encrypted at rest — better posture, and purge
+        // removes the file later). After the UPDATE a trashed row is
+        // indexed again but still hidden from queries (they filter
+        // `deleted_at`), and the purge path stays safe: its DELETE-trigger
+        // 'delete' then matches indexed state.
+        conn.execute(
+            "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+             SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+             FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [&id.to_string()],
+        )?;
         conn.execute(
             "UPDATE recordings SET encryption_pending = 0 WHERE id = ?1",
             [&id.to_string()],
