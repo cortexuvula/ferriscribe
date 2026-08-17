@@ -168,6 +168,12 @@ export interface AppConfig {
    *  syncs two-way with the paired server over Tailscale. Audio is archived on the
    *  server and fetched on demand. Defaults to false. */
   sync_content: boolean;
+  /** Per-machine recordings retention policy — the daily sweeper moves
+   *  recordings older than this many days to trash. `null` = keep forever
+   *  (default; `#[serde(default)]` on the backend deserializes old configs as
+   *  null). Mirrors `retention_days: Option<u32>` in
+   *  crates/core/src/types/settings.rs. */
+  retention_days: number | null;
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

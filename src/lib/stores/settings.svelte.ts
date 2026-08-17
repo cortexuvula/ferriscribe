@@ -54,6 +54,7 @@ const defaults: AppConfig = {
   custom_conditions: [],
   sync_condition_chips: false,
   sync_content: false,
+  retention_days: null,
 };
 
 class SettingsStore {

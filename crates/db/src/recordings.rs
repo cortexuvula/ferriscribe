@@ -156,7 +156,7 @@ impl RecordingsRepo {
                 processing_status = ?15,
                 metadata = ?16,
                 updated_at = ?17
-             WHERE id = ?18",
+             WHERE id = ?18 AND deleted_at IS NULL",
             rusqlite::params![
                 recording.filename,
                 recording.transcript,
@@ -184,6 +184,12 @@ impl RecordingsRepo {
         }
         Ok(())
     }
+
+    // Guard note: the WHERE clause above must keep `AND deleted_at IS NULL`.
+    // Soft-deleted rows are de-indexed from the external-content FTS table;
+    // an UPDATE firing the FTS update trigger on such a row fails with
+    // SQLITE_CORRUPT. With the guard, updates to trashed rows are a clean
+    // no-op → `NotFound` (callers surface "recording deleted").
 
     /// Delete a recording by ID.
     ///
@@ -214,9 +220,15 @@ impl RecordingsRepo {
             return Err(DbError::NotFound(format!("recording {id}")));
         }
         // Remove from FTS so search doesn't surface the soft-deleted recording.
+        // `recordings_fts` is an external-content FTS5 table: the 'delete'
+        // command must be supplied the *currently indexed* column values.
+        // Placeholder values ('') leave the index internally inconsistent,
+        // and the next 'delete' for this rowid (e.g. the trigger fired by
+        // `restore`'s UPDATE) then fails with SQLITE_CORRUPT.
         if let Err(e) = conn.execute(
             "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
-             VALUES('delete', (SELECT rowid FROM recordings WHERE id = ?1), ?1, '', '', '', '', '', '')",
+             SELECT 'delete', rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+             FROM recordings WHERE id = ?1",
             [id.to_string()],
         ) {
             tracing::warn!(error = %e, "soft_delete: failed to remove recording from FTS index");
@@ -228,23 +240,206 @@ impl RecordingsRepo {
     ///
     /// Clears `deleted_at` so the recording reappears in queries. Also
     /// re-inserts the FTS row so search finds it again.
+    ///
+    /// Before clearing `deleted_at`, the metadata is stamped with
+    /// `retention_exempt: true` — a recording the user explicitly pulled
+    /// back out of the trash must never be re-trashed by a later
+    /// [`retention_soft_delete_older_than`](Self::retention_soft_delete_older_than)
+    /// sweep.
     pub fn restore(conn: &Connection, id: &Uuid) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
+        // Read the current row (metadata + trash state) up front. A missing
+        // row or one that isn't soft-deleted gets the same NotFound the
+        // UPDATE-based check below has always produced — checked early so
+        // no FTS mutation happens for non-restorable rows.
+        let (metadata, deleted_at): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT metadata, deleted_at FROM recordings WHERE id = ?1",
+                [&id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    DbError::NotFound(format!("recording {id} (not deleted or not found)"))
+                }
+                other => DbError::Sqlite(other),
+            })?;
+        if deleted_at.is_none() {
+            return Err(DbError::NotFound(format!(
+                "recording {id} (not deleted or not found)"
+            )));
+        }
+        // Stamp the exemption before clearing deleted_at. The metadata
+        // column is JSON (`TEXT DEFAULT 'null'`); tolerate NULL, non-JSON,
+        // and non-object values by falling back to `{}`.
+        let mut meta: serde_json::Value = metadata
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !meta.is_object() {
+            meta = serde_json::json!({});
+        }
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert("retention_exempt".to_string(), serde_json::json!(true));
+        }
+        let metadata_json = meta.to_string();
+        // Re-add the FTS row BEFORE the UPDATE. `soft_delete` removed it,
+        // and the `recordings_fts_update` trigger fires a 'delete' for the
+        // old values on every UPDATE — for this external-content FTS table
+        // that 'delete' must match the indexed state or the index corrupts
+        // (SQLITE_CORRUPT).
+        //
+        // The error is propagated (`?`), not swallowed: warn-and-continue
+        // would let the UPDATE below fire its trigger 'delete' against
+        // absent index state — corrupting the index and wedging every
+        // later FTS operation. Failing the restore leaves the row
+        // consistently trashed + de-indexed, ready for a retry.
+        conn.execute(
+            "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+             SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+             FROM recordings WHERE id = ?1",
+            [id.to_string()],
+        )?;
         let rows = conn.execute(
-            "UPDATE recordings SET deleted_at = NULL, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NOT NULL",
-            rusqlite::params![now, id.to_string()],
+            "UPDATE recordings SET deleted_at = NULL, updated_at = ?1, metadata = ?2 WHERE id = ?3 AND deleted_at IS NOT NULL",
+            rusqlite::params![now, metadata_json, id.to_string()],
         )?;
         if rows == 0 {
             return Err(DbError::NotFound(format!(
                 "recording {id} (not deleted or not found)"
             )));
         }
-        // Re-insert into FTS by touching the row (the update trigger rebuilds it).
-        conn.execute(
-            "UPDATE recordings SET metadata = metadata WHERE id = ?1",
-            [id.to_string()],
-        )?;
         Ok(())
+    }
+
+    /// Retention sweep: soft-delete every visible recording older than the
+    /// cutoff whose metadata does not carry `retention_exempt`. Returns the
+    /// ids trashed (for count-only logging — never content). Idempotent:
+    /// rows already in trash are never touched.
+    pub fn retention_soft_delete_older_than(
+        conn: &Connection,
+        days: u32,
+        now: DateTime<Utc>,
+    ) -> DbResult<Vec<Uuid>> {
+        let cutoff = (now - chrono::TimeDelta::days(days as i64)).to_rfc3339();
+        // `datetime(...) < datetime(?)` matches the tombstone sweeper's
+        // convention (src-tauri state.rs) and correctly compares the
+        // RFC3339-with-offset strings this table stores.
+        let mut stmt = conn.prepare(
+            "SELECT id, metadata FROM recordings
+              WHERE deleted_at IS NULL AND datetime(created_at) < datetime(?1)",
+        )?;
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map(rusqlite::params![cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+
+        let mut trashed = Vec::new();
+        for (id_str, metadata) in rows {
+            let Ok(id) = Uuid::parse_str(&id_str) else {
+                continue;
+            };
+            let exempt = metadata
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .and_then(|m| m.get("retention_exempt").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+            if exempt {
+                continue;
+            }
+            Self::soft_delete(conn, &id)?;
+            trashed.push(id);
+        }
+        Ok(trashed)
+    }
+
+    /// List soft-deleted recordings older than the cutoff (days), for callers
+    /// that clean up external resources (RAG vectors, audio files) before
+    /// purging rows. Returns (id, audio_path) pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Sqlite`] if the query fails. Rows with an
+    /// unparseable id are skipped (logged) rather than aborting the sweep.
+    pub fn list_soft_deleted_older_than(
+        conn: &Connection,
+        days: u32,
+        now: DateTime<Utc>,
+    ) -> DbResult<Vec<(Uuid, String)>> {
+        let cutoff = (now - chrono::TimeDelta::days(days as i64)).to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT id, audio_path FROM recordings
+              WHERE deleted_at IS NOT NULL AND datetime(deleted_at) < datetime(?1)",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .filter_map(|r| {
+                r.map_err(
+                    |e| tracing::warn!(error = %e, "dropping unreadable row in tombstone listing"),
+                )
+                .ok()
+            })
+            .filter_map(|(id_str, path)| match Uuid::parse_str(&id_str) {
+                Ok(id) => Some((id, path.unwrap_or_default())),
+                Err(e) => {
+                    tracing::warn!(error = %e, "unparseable recording id in tombstone listing");
+                    None
+                }
+            })
+            .collect();
+        Ok(rows)
+    }
+
+    /// Hard-delete soft-deleted rows by id, keeping the FTS index consistent:
+    /// re-inserts each row into the external-content index immediately before
+    /// the DELETE so the delete-trigger's 'delete' command matches indexed
+    /// state. Transactional — all rows or none. Skips ids that are not
+    /// currently soft-deleted (safety). Returns the ids actually purged.
+    ///
+    /// `soft_delete` removed these rowids from `recordings_fts` when they
+    /// were trashed; without the re-insert, the `recordings_fts_delete`
+    /// trigger issues a 'delete' for a rowid the index no longer holds,
+    /// which SQLite reports as `SQLITE_CORRUPT` ("database disk image is
+    /// malformed") — the raw `DELETE` this replaces never succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Sqlite`] on any failure; the transaction is rolled
+    /// back and no rows are removed.
+    pub fn purge_soft_deleted(conn: &Connection, ids: &[Uuid]) -> DbResult<Vec<Uuid>> {
+        // `unchecked_transaction` because repo methods receive `&Connection`
+        // (the crate's established pattern — see migrations/mod.rs). If any
+        // statement fails, the transaction's Drop rolls everything back.
+        let tx = conn.unchecked_transaction()?;
+        let mut purged = Vec::new();
+        for id in ids {
+            let id_str = id.to_string();
+            // Re-index the row with its currently stored values (the exact
+            // column list `restore` re-inserts / `soft_delete` deletes), but
+            // only while it is still soft-deleted. The WHERE clause doubles
+            // as the visible-row guard: for a visible id the SELECT yields
+            // no rows, so the FTS index is never touched.
+            tx.execute(
+                "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL",
+                [&id_str],
+            )?;
+            // The delete trigger now finds matching indexed values, so the
+            // hard DELETE de-indexes cleanly instead of corrupting FTS.
+            let rows = tx.execute(
+                "DELETE FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL",
+                [&id_str],
+            )?;
+            if rows > 0 {
+                purged.push(*id);
+            }
+        }
+        tx.commit()?;
+        Ok(purged)
     }
 
     /// Delete all recordings. Returns the audio paths so callers can clean up
@@ -322,6 +517,27 @@ impl RecordingsRepo {
     /// plaintext at rest, which the reader (`open_recording_wav`) handles
     /// transparently.
     pub fn set_encryption_done(conn: &Connection, id: &Uuid) -> DbResult<()> {
+        // FTS guard: `soft_delete` de-indexes trashed rows from the
+        // external-content `recordings_fts` table, but the UPDATE below
+        // fires `recordings_fts_update` even though `encryption_pending`
+        // isn't an indexed column — its 'delete' command would run against
+        // absent index state and fail with SQLITE_CORRUPT. Re-index the row
+        // first with the same guarded INSERT..SELECT `purge_soft_deleted`
+        // uses; for a visible row the `deleted_at IS NOT NULL` filter
+        // matches nothing and the index is untouched.
+        //
+        // Trashed recordings deliberately still reach this point (their
+        // audio must be encrypted at rest — better posture, and purge
+        // removes the file later). After the UPDATE a trashed row is
+        // indexed again but still hidden from queries (they filter
+        // `deleted_at`), and the purge path stays safe: its DELETE-trigger
+        // 'delete' then matches indexed state.
+        conn.execute(
+            "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+             SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+             FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [&id.to_string()],
+        )?;
         conn.execute(
             "UPDATE recordings SET encryption_pending = 0 WHERE id = ?1",
             [&id.to_string()],

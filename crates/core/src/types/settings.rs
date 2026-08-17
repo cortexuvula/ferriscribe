@@ -457,6 +457,12 @@ pub struct AppConfig {
     #[serde(default = "default_max_retry_attempts")]
     pub max_retry_attempts: u32,
 
+    // Retention
+    /// Per-machine recordings retention policy — soft-delete recordings
+    /// older than this many days. `None` = keep forever (default).
+    #[serde(default)]
+    pub retention_days: Option<u32>,
+
     // Window
     #[serde(default = "default_window_width")]
     pub window_width: u32,
@@ -816,5 +822,31 @@ mod tests {
             config.ocr_model.is_none(),
             "ocr_model should default to None"
         );
+    }
+
+    #[test]
+    fn retention_days_defaults_to_none_when_missing() {
+        // Older config JSON without the field must keep-forever by default.
+        let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).expect("parse old config");
+        assert_eq!(
+            cfg.retention_days, None,
+            "missing field must default to None"
+        );
+    }
+
+    #[test]
+    fn retention_days_round_trips() {
+        let json = r#"{"retention_days": 42}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(cfg.retention_days, Some(42));
+
+        let out = serde_json::to_string(&cfg).expect("serialize");
+        assert!(
+            out.contains(r#""retention_days":42"#),
+            "expected retention_days in output, got: {out}"
+        );
+        let back: AppConfig = serde_json::from_str(&out).expect("re-parse");
+        assert_eq!(back.retention_days, Some(42));
     }
 }
