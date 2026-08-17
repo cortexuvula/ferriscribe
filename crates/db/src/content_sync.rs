@@ -795,6 +795,73 @@ impl ContentSyncRepo {
         )?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------
+    // Sync-driven tombstone / restore primitives
+    // -----------------------------------------------------------------
+
+    /// Tombstone a live local row from a sync peer's deletion, with a
+    /// caller-supplied timestamp (the deletion's own `deleted_at`). Mirrors
+    /// `RecordingsRepo::soft_delete`'s FTS discipline: UPDATE first, then
+    /// remove the FTS row with the *currently indexed* column values.
+    /// Missing row / already-tombstoned → clean no-op.
+    pub fn sync_tombstone(conn: &Connection, id: &str, deleted_at: &str) -> DbResult<()> {
+        let changed = conn.execute(
+            "UPDATE recordings SET deleted_at = ?1, updated_at = ?1
+             WHERE id = ?2 AND deleted_at IS NULL",
+            params![deleted_at, id],
+        )?;
+        // Only de-index when the UPDATE actually tombstoned the row. Unlike
+        // `soft_delete` (which errors out on 0 rows and can therefore assume
+        // it runs on live rows), the no-op case here must NOT fire the FTS
+        // 'delete': the row was never indexed (missing) or is already
+        // de-indexed (tombstoned), and a 'delete' against absent index state
+        // corrupts the external-content index (SQLITE_CORRUPT on the next
+        // FTS operation).
+        if changed > 0
+            && let Err(e) = conn.execute(
+                "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT 'delete', rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1",
+                [id],
+            )
+        {
+            tracing::warn!(error = %e, "sync_tombstone: failed to remove recording from FTS index");
+        }
+        Ok(())
+    }
+
+    /// Revive a tombstoned local row from a sync peer's newer restore, with
+    /// the restore's `updated_at`. Mirrors `RecordingsRepo::restore`'s FTS
+    /// discipline: re-index BEFORE the UPDATE (the update trigger fires a
+    /// 'delete' for the old values that must match indexed state). Does NOT
+    /// stamp `retention_exempt` — the origin machine's restore stamped it
+    /// and it travels in the synced `metadata` field. Missing / live row →
+    /// clean no-op.
+    pub fn sync_restore(conn: &Connection, id: &str, updated_at: &str) -> DbResult<()> {
+        let tombstoned: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL)",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if !tombstoned {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+             SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+             FROM recordings WHERE id = ?1",
+            [id],
+        )?;
+        conn.execute(
+            "UPDATE recordings SET deleted_at = NULL, updated_at = ?1
+             WHERE id = ?2 AND deleted_at IS NOT NULL",
+            params![updated_at, id],
+        )?;
+        Ok(())
+    }
 }
 
 /// Return `true` if a recording with the given id exists locally (regardless
@@ -935,5 +1002,153 @@ mod lww_ts_tests {
             Ordering::Greater
         );
         assert_eq!(cmp_lww_timestamps("", ""), Ordering::Equal);
+    }
+}
+
+/// Tests for the FTS-disciplined sync tombstone/restore helpers.
+///
+/// **HIPAA note:** assertions touch only ids, counts, and timestamps;
+/// fixture filenames are synthetic.
+#[cfg(test)]
+mod sync_tombstone_tests {
+    use super::*;
+    use crate::Database;
+    use crate::recordings::RecordingsRepo;
+    use medical_core::types::recording::Recording;
+
+    fn seed(conn: &Connection, filename: &str) -> Recording {
+        let rec = Recording::new(
+            filename,
+            std::path::PathBuf::from(format!("/audio/{filename}")),
+        );
+        RecordingsRepo::insert(conn, &rec).expect("seed");
+        rec
+    }
+
+    fn deleted_at_raw(conn: &Connection, id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT deleted_at FROM recordings WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .expect("query deleted_at")
+    }
+
+    /// `recordings_fts` is an external-content FTS5 table
+    /// (`content='recordings'`): plain SELECTs read column values from the
+    /// content table, so `WHERE id = ?` always "finds" the row and never
+    /// observes de-indexing. Index membership must be probed with a MATCH
+    /// on a token unique to the fixture — its filename stem.
+    fn fts_row_present(conn: &Connection, filename_stem: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM recordings_fts WHERE recordings_fts MATCH ?1",
+            [format!("filename:{filename_stem}")],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    /// Assert the external-content FTS index is internally consistent.
+    /// A 'delete' issued against absent/mismatched index state corrupts the
+    /// index; this fails loudly instead of letting it surface later as
+    /// SQLITE_CORRUPT on an unrelated query.
+    fn assert_fts_healthy(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO recordings_fts(recordings_fts) VALUES('integrity-check')",
+            [],
+        )
+        .expect("FTS integrity-check must pass");
+    }
+
+    #[test]
+    fn sync_tombstone_hides_row_and_deindexes_fts() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let rec = seed(&conn, "tqz.wav");
+        assert!(fts_row_present(&conn, "tqz"));
+        ContentSyncRepo::sync_tombstone(&conn, &rec.id.to_string(), "2026-06-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(
+            deleted_at_raw(&conn, &rec.id.to_string()).as_deref(),
+            Some("2026-06-01T00:00:00Z")
+        );
+        assert!(
+            !fts_row_present(&conn, "tqz"),
+            "tombstoned row must leave the FTS index"
+        );
+        assert_fts_healthy(&conn);
+    }
+
+    #[test]
+    fn sync_restore_revives_row_and_reindexes_fts() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let rec = seed(&conn, "revx.wav");
+        assert!(fts_row_present(&conn, "revx"));
+        RecordingsRepo::soft_delete(&conn, &rec.id).unwrap();
+        assert!(!fts_row_present(&conn, "revx"));
+        ContentSyncRepo::sync_restore(&conn, &rec.id.to_string(), "2026-06-02T00:00:00Z").unwrap();
+        assert_eq!(deleted_at_raw(&conn, &rec.id.to_string()), None);
+        assert!(
+            fts_row_present(&conn, "revx"),
+            "restored row must be searchable again"
+        );
+        assert_fts_healthy(&conn);
+    }
+
+    #[test]
+    fn sync_tombstone_on_missing_or_deleted_row_is_noop() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        ContentSyncRepo::sync_tombstone(
+            &conn,
+            "00000000-0000-0000-0000-000000000000",
+            "2026-06-01T00:00:00Z",
+        )
+        .unwrap();
+        let rec = seed(&conn, "noopn.wav");
+        RecordingsRepo::soft_delete(&conn, &rec.id).unwrap();
+        // second tombstone with a different timestamp is a no-op (row already
+        // deleted). Critically it must not re-fire the FTS 'delete' against
+        // already-de-indexed state (index corruption).
+        ContentSyncRepo::sync_tombstone(&conn, &rec.id.to_string(), "2027-01-01T00:00:00Z")
+            .unwrap();
+        assert_ne!(
+            deleted_at_raw(&conn, &rec.id.to_string()).as_deref(),
+            Some("2027-01-01T00:00:00Z")
+        );
+        assert!(
+            !fts_row_present(&conn, "noopn"),
+            "double tombstone must not resurrect the row"
+        );
+        assert_fts_healthy(&conn);
+        // exercise the index further: restore + search round-trip
+        ContentSyncRepo::sync_restore(&conn, &rec.id.to_string(), "2027-02-02T00:00:00Z").unwrap();
+        assert!(
+            fts_row_present(&conn, "noopn"),
+            "restore after double tombstone must re-index"
+        );
+    }
+
+    #[test]
+    fn sync_restore_on_missing_or_live_row_is_noop() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        ContentSyncRepo::sync_restore(
+            &conn,
+            "00000000-0000-0000-0000-000000000000",
+            "2026-06-02T00:00:00Z",
+        )
+        .unwrap();
+        let rec = seed(&conn, "livel.wav");
+        let before = deleted_at_raw(&conn, &rec.id.to_string());
+        ContentSyncRepo::sync_restore(&conn, &rec.id.to_string(), "2026-06-02T00:00:00Z").unwrap();
+        assert_eq!(deleted_at_raw(&conn, &rec.id.to_string()), before);
+        assert!(
+            fts_row_present(&conn, "livel"),
+            "live row keeps its FTS entry"
+        );
+        assert_fts_healthy(&conn);
     }
 }
