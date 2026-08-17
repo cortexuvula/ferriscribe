@@ -31,6 +31,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DbError, DbResult};
 
+/// Parse a stored timestamp for LWW decisions. Accepts both legitimate
+/// stored formats: RFC 3339 (with any offset) and SQLite's space-separated
+/// `datetime('now')` format. Returns `None` for anything else.
+fn parse_lww_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+/// Chronological comparison for LWW decisions. String comparison is wrong
+/// across the two stored formats (`' '` < `T`, `Z` vs `+00:00`), so both
+/// sides are parsed. Unparseable timestamps sort as the OLDEST value —
+/// legacy or corrupt data must not win delete/restore decisions.
+pub fn cmp_lww_timestamps(a: &str, b: &str) -> std::cmp::Ordering {
+    match (parse_lww_timestamp(a), parse_lww_timestamp(b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+    }
+}
+
 /// The set of recording fields that participate in per-field LWW sync.
 ///
 /// Each name maps directly to a column on the `recordings` table. The
@@ -864,5 +889,51 @@ mod tests {
         let conn = db.conn().expect("conn");
         let map = ContentSyncRepo::revisions_for_batch(&conn, &[]).expect("batch");
         assert!(map.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod lww_ts_tests {
+    use super::cmp_lww_timestamps;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn rfc3339_offsets_compare_chronologically() {
+        // String comparison would order these wrongly (Z vs +00:00).
+        assert_eq!(
+            cmp_lww_timestamps("2026-01-02T03:04:05Z", "2026-01-02T03:04:05+00:00"),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_lww_timestamps("2026-01-02T03:04:05.500Z", "2026-01-02T03:04:05Z"),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn legacy_space_format_compares_chronologically() {
+        // ' ' (0x20) < 'T' (0x54): string comparison puts the LATER
+        // space-format timestamp before the earlier RFC one on the same day.
+        assert_eq!(
+            cmp_lww_timestamps("2026-01-02 05:00:00", "2026-01-02T03:04:05Z"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            cmp_lww_timestamps("2026-01-02 01:00:00", "2026-01-02T03:04:05Z"),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn unparseable_sorts_oldest() {
+        assert_eq!(
+            cmp_lww_timestamps("garbage", "2026-01-02T03:04:05Z"),
+            Ordering::Less
+        );
+        assert_eq!(
+            cmp_lww_timestamps("2026-01-02T03:04:05Z", "garbage"),
+            Ordering::Greater
+        );
+        assert_eq!(cmp_lww_timestamps("", ""), Ordering::Equal);
     }
 }
