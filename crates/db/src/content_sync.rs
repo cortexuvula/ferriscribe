@@ -408,190 +408,184 @@ impl ContentSyncRepo {
         let mut conflicts: Vec<MergeConflict> = Vec::new();
         let mut changed: Vec<String> = Vec::new();
 
-        conn.execute_batch("BEGIN")?;
-        let result: DbResult<()> = (|| {
-            for remote in remotes {
-                let id_str = &remote.id;
-                let id = match uuid::Uuid::parse_str(id_str) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        return Err(DbError::UuidParse(
-                            e.to_string(),
-                            format!("SyncRecording.id = {id_str}"),
-                        ));
-                    }
-                };
+        // Whole batch inside one transaction; a failure rolls back all writes
+        // so the local store is never left half-merged. `unchecked_transaction`
+        // rolls back on drop, and `Transaction` derefs to `Connection` so the
+        // merge body below uses `conn` unchanged.
+        let tx = conn.unchecked_transaction()?;
+        let conn: &Connection = &tx;
+        for remote in remotes {
+            let id_str = &remote.id;
+            let id = match uuid::Uuid::parse_str(id_str) {
+                Ok(u) => u,
+                Err(e) => {
+                    return Err(DbError::UuidParse(
+                        e.to_string(),
+                        format!("SyncRecording.id = {id_str}"),
+                    ));
+                }
+            };
 
-                let local_exists = local_recording_exists(conn, id_str)?;
+            let local_exists = local_recording_exists(conn, id_str)?;
 
-                // ----- Deletion handling (whole-row tombstone) -----
-                if let Some(remote_deleted) = &remote.deleted_at {
-                    if local_exists {
-                        let local_deleted: Option<String> = conn
-                            .query_row(
-                                "SELECT deleted_at FROM recordings WHERE id = ?1",
-                                [id_str],
-                                |row| row.get(0),
-                            )
-                            .ok()
-                            .flatten();
-                        match local_deleted {
-                            None => {
-                                // Local live, remote deleted → propagate deletion.
-                                conn.execute(
-                                    "UPDATE recordings SET deleted_at = ?1, updated_at = ?1
+            // ----- Deletion handling (whole-row tombstone) -----
+            if let Some(remote_deleted) = &remote.deleted_at {
+                if local_exists {
+                    let local_deleted: Option<String> = conn
+                        .query_row(
+                            "SELECT deleted_at FROM recordings WHERE id = ?1",
+                            [id_str],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten();
+                    match local_deleted {
+                        None => {
+                            // Local live, remote deleted → propagate deletion.
+                            conn.execute(
+                                "UPDATE recordings SET deleted_at = ?1, updated_at = ?1
                                      WHERE id = ?2",
-                                    params![remote_deleted, id_str],
-                                )?;
-                                changed.push(id_str.clone());
-                                tracing::info!(
+                                params![remote_deleted, id_str],
+                            )?;
+                            changed.push(id_str.clone());
+                            tracing::info!(
+                                recording_id = %id_str,
+                                deleted_at = %remote_deleted,
+                                "sync: propagated remote deletion"
+                            );
+                        }
+                        Some(local_ts) => {
+                            // Both deleted — earliest (smallest timestamp) wins.
+                            // The timestamp reconciliation is skipped when the
+                            // local row is already tombstoned: soft-deleted rows
+                            // are de-indexed from `recordings_fts`, so an UPDATE
+                            // here would fire the FTS update trigger's 'delete'
+                            // against absent index state (SQLITE_CORRUPT). The
+                            // row is already hidden locally either way, and
+                            // keeping the later local tombstone is conservative
+                            // — purge simply waits a little longer. Peers still
+                            // converge: any peer holding the earlier tombstone
+                            // keeps it by the same rule.
+                            if remote_deleted < &local_ts {
+                                tracing::debug!(
                                     recording_id = %id_str,
-                                    deleted_at = %remote_deleted,
-                                    "sync: propagated remote deletion"
+                                    "sync: both sides deleted; keeping later local tombstone (FTS-safe no-op)"
                                 );
                             }
-                            Some(local_ts) => {
-                                // Both deleted — earliest (smallest timestamp) wins.
-                                // The timestamp reconciliation is skipped when the
-                                // local row is already tombstoned: soft-deleted rows
-                                // are de-indexed from `recordings_fts`, so an UPDATE
-                                // here would fire the FTS update trigger's 'delete'
-                                // against absent index state (SQLITE_CORRUPT). The
-                                // row is already hidden locally either way, and
-                                // keeping the later local tombstone is conservative
-                                // — purge simply waits a little longer. Peers still
-                                // converge: any peer holding the earlier tombstone
-                                // keeps it by the same rule.
-                                if remote_deleted < &local_ts {
-                                    tracing::debug!(
-                                        recording_id = %id_str,
-                                        "sync: both sides deleted; keeping later local tombstone (FTS-safe no-op)"
-                                    );
-                                }
-                            }
                         }
-                        // Once deleted, skip field-level merge for this recording.
-                        continue;
-                    } else {
-                        // Remote is a tombstone for a recording we don't have —
-                        // insert it as a tombstone so the deletion is durable.
-                        Self::insert_remote_recording(conn, remote)?;
-                        changed.push(id_str.clone());
-                        continue;
                     }
-                }
-
-                // ----- New recording (no local row) → insert + all revisions -----
-                if !local_exists {
+                    // Once deleted, skip field-level merge for this recording.
+                    continue;
+                } else {
+                    // Remote is a tombstone for a recording we don't have —
+                    // insert it as a tombstone so the deletion is durable.
                     Self::insert_remote_recording(conn, remote)?;
-                    for (field, value) in &remote.fields {
-                        Self::apply_field(conn, id_str, field, &value.value)?;
+                    changed.push(id_str.clone());
+                    continue;
+                }
+            }
+
+            // ----- New recording (no local row) → insert + all revisions -----
+            if !local_exists {
+                Self::insert_remote_recording(conn, remote)?;
+                for (field, value) in &remote.fields {
+                    Self::apply_field(conn, id_str, field, &value.value)?;
+                    Self::upsert_revision(
+                        conn,
+                        &id,
+                        field,
+                        &value.updated_at,
+                        value.origin_device.as_deref(),
+                    )?;
+                }
+                // Stamp the synced_from marker AFTER the field merge loop,
+                // so it survives even if the sender's metadata field
+                // overwrites the initial value set by insert_remote_recording.
+                // Non-fatal: the badge is cosmetic and must never block
+                // the data sync from completing.
+                if let Err(e) = Self::stamp_synced_origin(conn, id_str, remote) {
+                    tracing::warn!(
+                        recording_id = %id_str,
+                        error = %e,
+                        "sync: stamp_synced_origin failed (non-fatal, badge will be missing)"
+                    );
+                }
+                changed.push(id_str.clone());
+                continue;
+            }
+
+            // ----- Existing recording → per-field LWW -----
+            let local_revisions = Self::revisions_for(conn, &id)?;
+            let local_map: HashMap<&str, &FieldRevision> = local_revisions
+                .iter()
+                .map(|r| (r.field.as_str(), r))
+                .collect();
+
+            let mut row_changed = false;
+            for (field, remote_value) in &remote.fields {
+                match local_map.get(field.as_str()) {
+                    None => {
+                        // No local revision → remote wins by default.
+                        Self::apply_field(conn, id_str, field, &remote_value.value)?;
                         Self::upsert_revision(
                             conn,
                             &id,
                             field,
-                            &value.updated_at,
-                            value.origin_device.as_deref(),
+                            &remote_value.updated_at,
+                            remote_value.origin_device.as_deref(),
                         )?;
+                        row_changed = true;
                     }
-                    // Stamp the synced_from marker AFTER the field merge loop,
-                    // so it survives even if the sender's metadata field
-                    // overwrites the initial value set by insert_remote_recording.
-                    // Non-fatal: the badge is cosmetic and must never block
-                    // the data sync from completing.
-                    if let Err(e) = Self::stamp_synced_origin(conn, id_str, remote) {
-                        tracing::warn!(
-                            recording_id = %id_str,
-                            error = %e,
-                            "sync: stamp_synced_origin failed (non-fatal, badge will be missing)"
-                        );
-                    }
-                    changed.push(id_str.clone());
-                    continue;
-                }
-
-                // ----- Existing recording → per-field LWW -----
-                let local_revisions = Self::revisions_for(conn, &id)?;
-                let local_map: HashMap<&str, &FieldRevision> = local_revisions
-                    .iter()
-                    .map(|r| (r.field.as_str(), r))
-                    .collect();
-
-                let mut row_changed = false;
-                for (field, remote_value) in &remote.fields {
-                    match local_map.get(field.as_str()) {
-                        None => {
-                            // No local revision → remote wins by default.
-                            Self::apply_field(conn, id_str, field, &remote_value.value)?;
-                            Self::upsert_revision(
-                                conn,
-                                &id,
-                                field,
-                                &remote_value.updated_at,
-                                remote_value.origin_device.as_deref(),
-                            )?;
-                            row_changed = true;
-                        }
-                        Some(local_rev) => {
-                            match remote_value.updated_at.cmp(&local_rev.updated_at) {
-                                std::cmp::Ordering::Greater => {
-                                    // Remote newer → remote wins.
-                                    Self::apply_field(conn, id_str, field, &remote_value.value)?;
-                                    Self::upsert_revision(
-                                        conn,
-                                        &id,
-                                        field,
-                                        &remote_value.updated_at,
-                                        remote_value.origin_device.as_deref(),
-                                    )?;
-                                    row_changed = true;
-                                }
-                                std::cmp::Ordering::Less => {
-                                    // Local newer → local wins, report conflict.
-                                    conflicts.push(MergeConflict {
-                                        field: field.clone(),
-                                        local_updated_at: local_rev.updated_at.clone(),
-                                        remote_updated_at: remote_value.updated_at.clone(),
-                                    });
-                                }
-                                std::cmp::Ordering::Equal => {
-                                    // Tie — keep local, no conflict.
-                                }
+                    Some(local_rev) => {
+                        match remote_value.updated_at.cmp(&local_rev.updated_at) {
+                            std::cmp::Ordering::Greater => {
+                                // Remote newer → remote wins.
+                                Self::apply_field(conn, id_str, field, &remote_value.value)?;
+                                Self::upsert_revision(
+                                    conn,
+                                    &id,
+                                    field,
+                                    &remote_value.updated_at,
+                                    remote_value.origin_device.as_deref(),
+                                )?;
+                                row_changed = true;
+                            }
+                            std::cmp::Ordering::Less => {
+                                // Local newer → local wins, report conflict.
+                                conflicts.push(MergeConflict {
+                                    field: field.clone(),
+                                    local_updated_at: local_rev.updated_at.clone(),
+                                    remote_updated_at: remote_value.updated_at.clone(),
+                                });
+                            }
+                            std::cmp::Ordering::Equal => {
+                                // Tie — keep local, no conflict.
                             }
                         }
                     }
                 }
-                if row_changed {
-                    // Bump the row's updated_at so the next delta pull sees it.
-                    // `deleted_at IS NULL` keeps this an FTS-safe no-op on
-                    // locally-trashed rows (a local tombstone wins over peer
-                    // field edits — see `apply_field`).
-                    let max_ts = remote
-                        .fields
-                        .values()
-                        .map(|v| v.updated_at.as_str())
-                        .max()
-                        .unwrap_or(&remote.updated_at);
-                    conn.execute(
-                        "UPDATE recordings SET updated_at = ?1
+            }
+            if row_changed {
+                // Bump the row's updated_at so the next delta pull sees it.
+                // `deleted_at IS NULL` keeps this an FTS-safe no-op on
+                // locally-trashed rows (a local tombstone wins over peer
+                // field edits — see `apply_field`).
+                let max_ts = remote
+                    .fields
+                    .values()
+                    .map(|v| v.updated_at.as_str())
+                    .max()
+                    .unwrap_or(&remote.updated_at);
+                conn.execute(
+                    "UPDATE recordings SET updated_at = ?1
                          WHERE id = ?2 AND deleted_at IS NULL AND ?1 > updated_at",
-                        params![max_ts, id_str],
-                    )?;
-                    changed.push(id_str.clone());
-                }
-            }
-            Ok(())
-        })();
-
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
+                    params![max_ts, id_str],
+                )?;
+                changed.push(id_str.clone());
             }
         }
+
+        tx.commit()?;
 
         tracing::info!(
             remote_count = remotes.len(),

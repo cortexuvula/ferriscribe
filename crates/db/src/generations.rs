@@ -76,46 +76,37 @@ impl GenerationsRepo {
         let id = Uuid::new_v4();
         // The MAX read and INSERT run inside a transaction so a concurrent
         // writer can't slip in between them and collide on regeneration_seq.
-        conn.execute_batch("BEGIN")?;
-        let result = (|| {
-            let prev_max: i64 = conn.query_row(
-                "SELECT COALESCE(MAX(regeneration_seq), 0) FROM generations \
-                     WHERE recording_id = ? AND output_type = ?",
-                params![input.recording_id.to_string(), input.output_type],
-                |r| r.get(0),
-            )?;
-            let seq = prev_max + 1;
+        // `unchecked_transaction` works on the pooled `&Connection` and rolls
+        // back on drop if the insert fails.
+        let tx = conn.unchecked_transaction()?;
+        let prev_max: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(regeneration_seq), 0) FROM generations \
+                 WHERE recording_id = ? AND output_type = ?",
+            params![input.recording_id.to_string(), input.output_type],
+            |r| r.get(0),
+        )?;
+        let seq = prev_max + 1;
 
-            conn.execute(
-                "INSERT INTO generations (
-                    id, recording_id, output_type, ai_provider, ai_model,
-                    prompt_template_name, input_transcript, input_context_json,
-                    draft_text, regeneration_seq
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![
-                    id.to_string(),
-                    input.recording_id.to_string(),
-                    input.output_type,
-                    input.ai_provider,
-                    input.ai_model,
-                    input.prompt_template_name,
-                    input.input_transcript,
-                    input.input_context_json,
-                    input.draft_text,
-                    seq,
-                ],
-            )?;
-            Ok::<(), DbError>(())
-        })();
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
-            }
-        }
+        tx.execute(
+            "INSERT INTO generations (
+                id, recording_id, output_type, ai_provider, ai_model,
+                prompt_template_name, input_transcript, input_context_json,
+                draft_text, regeneration_seq
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                id.to_string(),
+                input.recording_id.to_string(),
+                input.output_type,
+                input.ai_provider,
+                input.ai_model,
+                input.prompt_template_name,
+                input.input_transcript,
+                input.input_context_json,
+                input.draft_text,
+                seq,
+            ],
+        )?;
+        tx.commit()?;
         Self::get_by_id(conn, id)
     }
 
