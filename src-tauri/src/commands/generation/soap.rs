@@ -52,6 +52,7 @@ pub async fn generate_soap(
             doc_type: "soap".into(),
             status: "started".into(),
             recording_id: recording_id.clone(),
+            progress: None,
         },
     );
 
@@ -72,6 +73,7 @@ pub async fn generate_soap(
                     doc_type: "soap".into(),
                     status: "completed".into(),
                     recording_id: recording_id.clone(),
+                    progress: None,
                 },
             );
         }
@@ -82,6 +84,7 @@ pub async fn generate_soap(
                     doc_type: "soap".into(),
                     status: format_progress_error(err),
                     recording_id: recording_id.clone(),
+                    progress: None,
                 },
             );
         }

@@ -231,14 +231,12 @@ impl medical_core::traits::AiProvider for MockCompletionProvider {
 /// Errors in the script are stored as messages (not `AppError`, which is not
 /// `Clone`) and re-wrapped via `AppError::ai_provider` at yield time, so the
 /// stream can be replayed by any number of `complete_stream` calls.
-#[allow(dead_code)] // Unused until the stream helper tests land.
 pub(super) struct ScriptedStreamProvider {
     pub name: &'static str,
     pub chunks: Vec<Result<medical_core::types::StreamChunk, String>>,
     pub stall_after_last: bool,
 }
 
-#[allow(dead_code)] // Unused until the stream helper tests land.
 #[async_trait::async_trait]
 impl medical_core::traits::AiProvider for ScriptedStreamProvider {
     fn name(&self) -> &str {

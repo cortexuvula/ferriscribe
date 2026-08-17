@@ -154,6 +154,7 @@ pub(super) async fn run_generation_command(
             doc_type: doc_type.into(),
             status: "started".into(),
             recording_id: recording_id.to_string(),
+            progress: None,
         },
     );
 
@@ -167,6 +168,7 @@ pub(super) async fn run_generation_command(
                     doc_type: doc_type.into(),
                     status: "completed".into(),
                     recording_id: recording_id.to_string(),
+                    progress: None,
                 },
             );
         }
@@ -177,6 +179,7 @@ pub(super) async fn run_generation_command(
                     doc_type: doc_type.into(),
                     status: format_progress_error(err),
                     recording_id: recording_id.to_string(),
+                    progress: None,
                 },
             );
         }

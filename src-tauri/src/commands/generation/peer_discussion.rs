@@ -53,6 +53,7 @@ pub async fn generate_peer_discussion(
             doc_type: "peer_discussion".into(),
             status: "started".into(),
             recording_id: recording_id.clone(),
+            progress: None,
         },
     );
 
@@ -74,6 +75,7 @@ pub async fn generate_peer_discussion(
                     doc_type: "peer_discussion".into(),
                     status: "completed".into(),
                     recording_id: recording_id.clone(),
+                    progress: None,
                 },
             );
         }
@@ -84,6 +86,7 @@ pub async fn generate_peer_discussion(
                     doc_type: "peer_discussion".into(),
                     status: format_progress_error(err),
                     recording_id: recording_id.clone(),
+                    progress: None,
                 },
             );
         }
