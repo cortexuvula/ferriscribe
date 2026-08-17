@@ -106,16 +106,24 @@ pub(super) async fn insert_handler(
     };
     let db = Arc::clone(&state.db);
     let entry_clone = entry.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), medical_core::error::AppError> {
+    let insert_result = tokio::task::spawn_blocking(move || -> Result<(), medical_db::DbError> {
         let conn = db.conn()?;
-        VocabularyRepo::insert(&conn, &entry_clone).map_err(medical_core::error::AppError::from)
+        VocabularyRepo::insert(&conn, &entry_clone)
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|e| {
-        warn!("vocab_api insert failed: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match insert_result {
+        Ok(()) => {}
+        // A duplicate find_text is a client-input problem, not a server
+        // fault — 409 lets the client show its already-exists message
+        // instead of a generic 500.
+        Err(e) if e.is_unique_violation() => return Err(StatusCode::CONFLICT),
+        Err(e) => {
+            // Constraint text names the column, not the row value — safe to log.
+            warn!("vocab_api insert failed: {e}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
     info!(
         find_len = entry.find_text.len(),
         "vocab_api: inserted entry"
