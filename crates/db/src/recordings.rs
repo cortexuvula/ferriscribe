@@ -186,10 +186,10 @@ impl RecordingsRepo {
     }
 
     // Guard note: the WHERE clause above must keep `AND deleted_at IS NULL`.
-    /// Soft-deleted rows are de-indexed from the external-content FTS table;
-    /// an UPDATE firing the FTS update trigger on such a row fails with
-    /// SQLITE_CORRUPT. With the guard, updates to trashed rows are a clean
-    /// no-op → `NotFound` (callers surface "recording deleted").
+    // Soft-deleted rows are de-indexed from the external-content FTS table;
+    // an UPDATE firing the FTS update trigger on such a row fails with
+    // SQLITE_CORRUPT. With the guard, updates to trashed rows are a clean
+    // no-op → `NotFound` (callers surface "recording deleted").
 
     /// Delete a recording by ID.
     ///
