@@ -1,6 +1,16 @@
 # FerriScribe — Technical Debt Report
 
-> **⚠️ DEPRECATED (v0.30+):** This report is from v0.20–v0.24 and is kept for historical context only. All open items have been resolved or are tracked in AGENTS.md "Known deferred debt". Do not use this as a current work list.
+> **⚠️ DEPRECATED (v0.30+):** This report is from v0.20–v0.24 and is kept for historical context only. Do not use this as a current work list.
+>
+> **2026-08-17 re-audit note:** the "resolved" claim below was optimistic for a
+> few items. H11's dead modules (`rag::query_expander`,
+> `translation::canned_responses`) survived until 2026-08-17, when they were
+> deleted along with `audio::playback`, `db::recipients` and
+> `ai_providers::CircuitBreaker` (plus unused `proptest`/`machine-uid` deps).
+> M8 (patient-context duplication across RecordTab/GenerateTab) is **still
+> open**. H2 is only partially mitigated (PhiRedactor added, but free-text
+> clinical content still passes `frontend_log`). New findings from the
+> 2026-08-17 review are tracked in AGENTS.md "Known deferred debt".
 
 **Generated:** 2026-06-24 (post v0.20.6)
 **Last updated:** 2026-06-28 (post v0.24.3)
