@@ -8,7 +8,7 @@ medical-core = { path = "../core" }
 aes-gcm = "0.10"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 sha2 = { workspace = true }
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 uuid = { workspace = true }
@@ -16,7 +16,6 @@ dirs = { workspace = true }
 base64 = { workspace = true }
 regex = { workspace = true }
 lazy_static = "1"
-machine-uid = "0.6"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -25,7 +24,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-proptest = { workspace = true }
 
 [lints]
 workspace = true

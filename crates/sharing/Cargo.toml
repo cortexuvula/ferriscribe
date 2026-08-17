@@ -23,7 +23,7 @@ base64 = { workspace = true }
 urlencoding = { workspace = true }
 mdns-sd = "0.20"
 rusqlite = { workspace = true }
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { workspace = true }
 dirs = { workspace = true }
 hostname = "0.4"
 zip = "2"
