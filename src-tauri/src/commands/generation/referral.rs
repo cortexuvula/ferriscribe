@@ -34,6 +34,7 @@ pub async fn generate_referral(
         let ctx2 = ctx.clone();
         let text = generate_from_soap(
             &state,
+            Some(&app),
             &mut recording,
             &settings,
             &config,
@@ -90,6 +91,7 @@ mod preflight_tests {
                 .unwrap();
         let result = generate_from_soap(
             &state,
+            None, // app — no AppHandle in tests
             &mut recording,
             &settings,
             &config,
@@ -183,6 +185,7 @@ mod stats_tests {
 
         let text = generate_from_soap(
             &state,
+            None, // app — no AppHandle in tests
             &mut recording,
             &settings,
             &config,

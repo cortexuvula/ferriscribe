@@ -28,10 +28,12 @@ pub(super) async fn stream_to_completion(
     stream_with_idle_timeout(provider, &mut on_progress, request, STREAM_IDLE_TIMEOUT).await
 }
 
-/// Testable core with an injectable idle budget.
+/// Testable core with an injectable idle budget. The callback stays generic
+/// (not erased to `dyn FnMut`) so a `Send` closure at the call site keeps the
+/// whole future `Send` — Tauri command futures must be.
 async fn stream_with_idle_timeout(
     provider: &Arc<dyn AiProvider>,
-    on_progress: &mut dyn FnMut(&GenerationProgressStats),
+    on_progress: &mut impl FnMut(&GenerationProgressStats),
     request: CompletionRequest,
     idle: std::time::Duration,
 ) -> AppResult<CompletionResponse> {

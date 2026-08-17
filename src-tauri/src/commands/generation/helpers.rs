@@ -190,8 +190,9 @@ pub(super) async fn run_generation_command(
 
 /// Shared inner logic for document types generated from a SOAP note (referral,
 /// letter, synopsis). Handles: preflight, resolve provider, validate SOAP note,
-/// build completion request, call provider, strip markdown, check empty,
-/// persist.
+/// build completion request, stream the completion from the provider (emitting
+/// live `generation-progress` stats through `app` when present), strip
+/// markdown, check empty, persist.
 ///
 /// The recording, settings, and config must already be loaded by the caller
 /// (via [`load_recording_and_settings`]); this keeps the loading I/O to a
@@ -210,6 +211,7 @@ pub(super) async fn run_generation_command(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_from_soap<F, S>(
     state: &AppState,
+    app: Option<&tauri::AppHandle>,
     recording: &mut Recording,
     settings: &GenerationSettings,
     config: &AppConfig,
@@ -267,8 +269,27 @@ where
         None,
     );
 
+    let recording_id_str = recording.id.to_string();
     let generation_start = std::time::Instant::now();
-    let response = provider.complete(request).await.map_err(|e| match e {
+    let response = super::stream::stream_to_completion(
+        &provider,
+        |stats| {
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "generation-progress",
+                    GenerationProgress {
+                        doc_type: stats_key.into(),
+                        status: "generating".into(),
+                        recording_id: recording_id_str.clone(),
+                        progress: Some(*stats),
+                    },
+                );
+            }
+        },
+        request,
+    )
+    .await
+    .map_err(|e| match e {
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
         // For other errors, keep the existing nicer wrapping.

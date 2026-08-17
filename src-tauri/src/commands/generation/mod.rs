@@ -14,9 +14,6 @@ pub mod letter_writer;
 pub mod peer_discussion;
 pub mod referral;
 pub mod soap;
-// Unused until the next task wires streaming into the generation call
-// sites (soap/synopsis/etc.); the driver itself is production code.
-#[allow(dead_code)]
 pub(super) mod stream;
 pub mod synopsis;
 #[cfg(test)]

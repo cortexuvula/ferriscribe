@@ -59,6 +59,7 @@ pub async fn generate_peer_discussion(
 
     let result = generate_peer_discussion_inner(
         &state,
+        Some(&app),
         &recording_id,
         &physician_name,
         &specialty,
@@ -97,6 +98,7 @@ pub async fn generate_peer_discussion(
 
 async fn generate_peer_discussion_inner(
     state: &AppState,
+    app: Option<&tauri::AppHandle>,
     recording_id: &str,
     physician_name: &str,
     specialty: &str,
@@ -168,8 +170,28 @@ async fn generate_peer_discussion_inner(
     );
 
     let generation_start = std::time::Instant::now();
-    let response = provider.complete(request).await.map_err(|e| match e {
+    let response = super::stream::stream_to_completion(
+        &provider,
+        |stats| {
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "generation-progress",
+                    GenerationProgress {
+                        doc_type: "peer_discussion".into(),
+                        status: "generating".into(),
+                        recording_id: recording_id.to_string(),
+                        progress: Some(*stats),
+                    },
+                );
+            }
+        },
+        request,
+    )
+    .await
+    .map_err(|e| match e {
+        // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
+        // For other errors, keep the existing nicer wrapping.
         _ => AppError::ai_provider(format!(
             "AI completion failed: {}",
             crate::commands::unwrap_app_error_message(e)
@@ -234,6 +256,7 @@ mod preflight_tests {
         let start = std::time::Instant::now();
         let result = generate_peer_discussion_inner(
             &state,
+            None, // app — no AppHandle in tests
             &recording_id,
             "Smith",
             "Cardiology",
@@ -299,6 +322,7 @@ mod stats_tests {
 
         let text = generate_peer_discussion_inner(
             &state,
+            None, // app — no AppHandle in tests
             &recording_id,
             "Smith",
             "Cardiology",
