@@ -170,6 +170,13 @@ pub enum StreamChunk {
         /// The text fragment to append.
         text: String,
     },
+    /// A reasoning/"thinking" delta, reduced to its byte length. The
+    /// reasoning text itself never crosses the provider boundary — lengths
+    /// and counts are safe to log/emit (AGENTS.md), content is not.
+    ReasoningDelta {
+        /// Byte length of the reasoning delta text.
+        len: usize,
+    },
     /// An incremental tool-call argument delta.
     ToolCallDelta {
         /// The tool call ID being built.

@@ -308,6 +308,9 @@ pub async fn chat_stream(
                     StreamChunk::ToolCallDelta { .. } => {
                         // Tool-call deltas are not surfaced in the basic chat stream.
                     }
+                    StreamChunk::ReasoningDelta { .. } => {
+                        // Reasoning deltas carry only a length; nothing to emit.
+                    }
                     StreamChunk::Usage(usage) => {
                         let _ = worker_app.emit(
                             "chat-done",
