@@ -5270,6 +5270,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
  "tracing-appender",
