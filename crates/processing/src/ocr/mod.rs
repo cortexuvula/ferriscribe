@@ -609,6 +609,98 @@ fn render_pdf_pages(pdf_path: &Path) -> Result<Vec<(usize, Vec<u8>)>, String> {
     Ok(pages)
 }
 
+/// Per-format labels for [`run_extractor_blocking`] so the office-document
+/// strategy arms share one code path with their own wording.
+struct OfficeLabels {
+    /// Log/event label ("docx", "xlsx").
+    kind: &'static str,
+    /// User-facing noun, mid-sentence case ("Word document", "spreadsheet").
+    noun: &'static str,
+    /// Text returned when extraction succeeded but found no content.
+    empty_msg: &'static str,
+}
+
+/// Run a synchronous office-document extractor on the blocking pool with
+/// panic isolation, mapping every outcome — ok / extract-error / extractor
+/// panic / join-error — to a batch entry. One bad file must NOT abort the
+/// whole batch.
+async fn run_extractor_blocking(
+    filename: &str,
+    path: &Path,
+    labels: &OfficeLabels,
+    extract: impl FnOnce(&Path) -> Result<String, OcrError> + Send + 'static,
+) -> OcrPageResult {
+    let path_buf = path.to_path_buf();
+    let outcome = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract(&path_buf)))
+    })
+    .await;
+    let entry = |text: String, page_count: usize| OcrPageResult {
+        filename: filename.to_string(),
+        text,
+        page_count,
+    };
+    match outcome {
+        Ok(Ok(Ok(text))) => {
+            if text.is_empty() {
+                OcrPageResult {
+                    text: labels.empty_msg.to_string(),
+                    ..entry(String::new(), 0)
+                }
+            } else {
+                tracing::info!(
+                    filename,
+                    chars = text.len(),
+                    "OCR: {} text extracted",
+                    labels.kind
+                );
+                entry(text, 1)
+            }
+        }
+        Ok(Ok(Err(e))) => {
+            tracing::warn!(filename, error = %e, "OCR: {} extraction failed", labels.kind);
+            entry(format!("[Could not read {}: {e}]", labels.noun), 0)
+        }
+        Ok(Err(_)) => {
+            tracing::warn!(
+                filename,
+                "OCR: {} parser panicked (corrupt file)",
+                labels.kind
+            );
+            entry(
+                format!(
+                    "[{} appears to be corrupt or malformed.]",
+                    capitalize(labels.noun)
+                ),
+                0,
+            )
+        }
+        Err(e) => {
+            tracing::warn!(filename, error = %e, "OCR: {} task failed", labels.kind);
+            entry(
+                format!(
+                    "[{} processing failed unexpectedly: {e}]",
+                    capitalize(labels.noun)
+                ),
+                0,
+            )
+        }
+    }
+}
+
+/// First letter upper-cased (used for sentence-initial nouns in messages).
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    format!(
+        "{}{}",
+        chars
+            .next()
+            .map(|c| c.to_ascii_uppercase())
+            .unwrap_or_default(),
+        chars.as_str()
+    )
+}
+
 /// Extract text from a list of document file paths.
 ///
 /// Each file is classified by extension and processed accordingly:
@@ -861,108 +953,34 @@ pub async fn extract_text(
                 }
             }
             OcrStrategy::Docx => {
-                let path_buf = path.to_path_buf();
-                match tokio::task::spawn_blocking(move || {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        extract_docx_text(&path_buf)
-                    }))
-                })
-                .await
-                {
-                    Ok(Ok(Ok(text))) => {
-                        if text.is_empty() {
-                            results.push(OcrPageResult {
-                                filename,
-                                text: "[No text found in this Word document.]".to_string(),
-                                page_count: 0,
-                            });
-                        } else {
-                            tracing::info!(filename = %filename, chars = text.len(), "OCR: docx text extracted");
-                            results.push(OcrPageResult {
-                                filename,
-                                text,
-                                page_count: 1,
-                            });
-                        }
-                    }
-                    Ok(Ok(Err(e))) => {
-                        tracing::warn!(filename = %filename, error = %e, "OCR: docx extraction failed");
-                        results.push(OcrPageResult {
-                            filename,
-                            text: format!("[Could not read Word document: {e}]"),
-                            page_count: 0,
-                        });
-                    }
-                    Ok(Err(_)) => {
-                        tracing::warn!(filename = %filename, "OCR: docx parser panicked (corrupt file)");
-                        results.push(OcrPageResult {
-                            filename,
-                            text: "[Word document appears to be corrupt or malformed.]".to_string(),
-                            page_count: 0,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(filename = %filename, error = %e, "OCR: docx task failed");
-                        results.push(OcrPageResult {
-                            filename,
-                            text: format!("[Word document processing failed unexpectedly: {e}]"),
-                            page_count: 0,
-                        });
-                        continue;
-                    }
-                }
+                results.push(
+                    run_extractor_blocking(
+                        &filename,
+                        path,
+                        &OfficeLabels {
+                            kind: "docx",
+                            noun: "Word document",
+                            empty_msg: "[No text found in this Word document.]",
+                        },
+                        extract_docx_text,
+                    )
+                    .await,
+                );
             }
             OcrStrategy::Xlsx => {
-                let path_buf = path.to_path_buf();
-                match tokio::task::spawn_blocking(move || {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        extract_xlsx_text(&path_buf)
-                    }))
-                })
-                .await
-                {
-                    Ok(Ok(Ok(text))) => {
-                        if text.is_empty() {
-                            results.push(OcrPageResult {
-                                filename,
-                                text: "[No data found in this spreadsheet.]".to_string(),
-                                page_count: 0,
-                            });
-                        } else {
-                            tracing::info!(filename = %filename, chars = text.len(), "OCR: xlsx data extracted");
-                            results.push(OcrPageResult {
-                                filename,
-                                text,
-                                page_count: 1,
-                            });
-                        }
-                    }
-                    Ok(Ok(Err(e))) => {
-                        tracing::warn!(filename = %filename, error = %e, "OCR: xlsx extraction failed");
-                        results.push(OcrPageResult {
-                            filename,
-                            text: format!("[Could not read spreadsheet: {e}]"),
-                            page_count: 0,
-                        });
-                    }
-                    Ok(Err(_)) => {
-                        tracing::warn!(filename = %filename, "OCR: xlsx parser panicked (corrupt file)");
-                        results.push(OcrPageResult {
-                            filename,
-                            text: "[Spreadsheet appears to be corrupt or malformed.]".to_string(),
-                            page_count: 0,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(filename = %filename, error = %e, "OCR: xlsx task failed");
-                        results.push(OcrPageResult {
-                            filename,
-                            text: format!("[Spreadsheet processing failed unexpectedly: {e}]"),
-                            page_count: 0,
-                        });
-                        continue;
-                    }
-                }
+                results.push(
+                    run_extractor_blocking(
+                        &filename,
+                        path,
+                        &OfficeLabels {
+                            kind: "xlsx",
+                            noun: "spreadsheet",
+                            empty_msg: "[No data found in this spreadsheet.]",
+                        },
+                        extract_xlsx_text,
+                    )
+                    .await,
+                );
             }
             OcrStrategy::Image => {
                 // Move the sync file read off the async executor.
