@@ -79,7 +79,10 @@ async fn stream_with_idle_timeout(
         }
         let start = first_chunk_at.unwrap_or(now);
         let elapsed = now.duration_since(start);
-        let due = last_emit.is_none_or(|t| now.duration_since(t) >= PROGRESS_THROTTLE);
+        // Skip the very first chunk: elapsed is zero, so a rate would be
+        // meaningless (and enormous). The next chunk provides a real rate.
+        let due = !elapsed.is_zero()
+            && last_emit.is_none_or(|t| now.duration_since(t) >= PROGRESS_THROTTLE);
         if due {
             on_progress(&GenerationProgressStats {
                 tokens,
@@ -91,15 +94,18 @@ async fn stream_with_idle_timeout(
     }
 
     // Terminal flush: the throttle may have suppressed the most recent
-    // deltas, so always emit one final update with the complete counts.
+    // deltas, so emit one final update with the complete counts — unless
+    // the whole stream was instantaneous (zero elapsed → meaningless rate).
     if let Some(start) = first_chunk_at {
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(start);
-        on_progress(&GenerationProgressStats {
-            tokens,
-            elapsed_ms: elapsed.as_millis() as u64,
-            tokens_per_second: tokens as f64 / elapsed.as_secs_f64().max(f64::EPSILON),
-        });
+        if !elapsed.is_zero() {
+            on_progress(&GenerationProgressStats {
+                tokens,
+                elapsed_ms: elapsed.as_millis() as u64,
+                tokens_per_second: tokens as f64 / elapsed.as_secs_f64(),
+            });
+        }
     }
 
     Ok(CompletionResponse {
@@ -232,6 +238,26 @@ mod tests {
         assert_eq!(
             strip_leading_think_block("SOAP <think>late</think>"),
             "SOAP <think>late</think>"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_bogus_rate_on_instant_streams() {
+        // Regression: the very first chunk has zero elapsed time, which
+        // once produced a ~4.5e15 "tok/s" flash. Emitted stats must always
+        // carry a finite, sane rate.
+        let p = provider(
+            vec![
+                Ok(StreamChunk::Delta { text: "x".into() }),
+                Ok(StreamChunk::Done),
+            ],
+            false,
+        );
+        let mut seen = Vec::new();
+        let _ = stream_to_completion(&p, |s| seen.push(*s), req()).await;
+        assert!(
+            seen.iter()
+                .all(|s| s.tokens_per_second.is_finite() && s.tokens_per_second < 1e12)
         );
     }
 

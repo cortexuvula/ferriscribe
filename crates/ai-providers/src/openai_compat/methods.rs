@@ -150,10 +150,16 @@ impl OpenAiCompatibleClient {
     /// `ChatResponse` and mapped to one or more [`StreamChunk`] items:
     ///
     /// - `delta.content` → `StreamChunk::Delta { text }`
+    /// - `delta.reasoning_content` → `StreamChunk::ReasoningDelta { len }` (length only)
     /// - `delta.tool_calls` → `StreamChunk::ToolCallDelta { id, name, arguments_delta }`
     /// - `usage` (separate event) → `StreamChunk::Usage(...)` followed by `StreamChunk::Done`
     ///
-    /// Malformed JSON lines are silently dropped (not propagated as errors).
+    /// Malformed JSON lines are propagated as stream errors (logged with
+    /// error + byte length only — never the data itself).
+    ///
+    /// Streamed requests use a per-request 1h total-timeout override
+    /// ([`STREAM_TOTAL_TIMEOUT`]); the meaningful limit for consumers is
+    /// the idle timeout in the generation stream driver, not this cap.
     ///
     /// # Errors
     ///
