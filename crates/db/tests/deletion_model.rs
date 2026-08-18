@@ -5,6 +5,8 @@
 //! - Remote live row vs local tombstone → LWW restore when remote is newer
 //! - Purge-ledger refusal of stale re-inserts from machines that missed a
 //!   practice-wide deletion
+//! - The server-side purge writing that ledger atomically with the row
+//!   deletion (`purge_soft_deleted_with_ledger`)
 //!
 //! **HIPAA note:** assertions touch only ids, counts, timestamps, and
 //! visibility; fixture filenames and field payloads are synthetic non-PHI
@@ -585,5 +587,101 @@ fn repeat_merge_is_idempotent() {
         "tombstone must survive the repeat merge"
     );
     assert!(!fts_row_present(&conn, "idemdoom"));
+    assert_fts_healthy(&conn);
+}
+
+// -------------------------------------------------------------------------
+// The purge side of the ledger: `purge_soft_deleted_with_ledger` must
+// hard-delete the tombstoned row AND write its `purged_recordings` entry in
+// the SAME transaction — the row deletion and the resurrection block become
+// atomic, so a crash can never leave a purged row un-ledgered (or vice
+// versa). Only ids actually purged are ledgered: a visible row passed by
+// mistake must neither vanish nor acquire a ledger entry (which would
+// over-block a later legitimate sync insert — see
+// `non_ledgered_insert_unchanged`).
+// -------------------------------------------------------------------------
+
+#[test]
+fn purge_records_ledger_entries_transactionally() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+
+    // A tombstone aged 40d past the 30-day window, seeded the same way the
+    // retention sweeper test in src-tauri does: one UPDATE on the still-live
+    // row (FTS columns unchanged, so the update trigger is a no-op
+    // same-values delete+insert), then the explicit de-index.
+    let rec = seed(&conn, "ldgpurge.wav");
+    let aged = (chrono::Utc::now() - chrono::TimeDelta::days(40)).to_rfc3339();
+    soft_delete_at(&conn, &rec.id, &aged);
+
+    // Control: a visible row must never be purged or ledgered.
+    let visible = seed(&conn, "ldgkeep.wav");
+
+    let before = chrono::Utc::now();
+    let purged = RecordingsRepo::purge_soft_deleted_with_ledger(&conn, &[rec.id, visible.id])
+        .expect("purge with ledger");
+    assert_eq!(
+        purged,
+        vec![rec.id],
+        "only the tombstoned id is reported purged"
+    );
+
+    // The tombstoned row is gone from `recordings`…
+    let gone: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM recordings WHERE id = ?1",
+            [rec.id.to_string()],
+            |r| r.get(0),
+        )
+        .expect("count purged row");
+    assert_eq!(gone, 0, "purged row must be hard-deleted");
+
+    // …and present in the ledger with a fresh, parseable `purged_at`.
+    let purged_at: String = conn
+        .query_row(
+            "SELECT purged_at FROM purged_recordings WHERE id = ?1",
+            [rec.id.to_string()],
+            |r| r.get(0),
+        )
+        .expect("ledger row must exist for the purged id");
+    let parsed = chrono::DateTime::parse_from_rfc3339(&purged_at)
+        .expect("purged_at must be RFC3339")
+        .with_timezone(&chrono::Utc);
+    assert!(
+        parsed >= before,
+        "purged_at must be stamped by this purge call, got {purged_at}"
+    );
+
+    // The visible row survives un-ledgered.
+    assert_eq!(
+        deleted_at_raw(&conn, &visible.id).as_deref(),
+        None,
+        "visible row must stay live"
+    );
+    let ledgered_visible: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+            [visible.id.to_string()],
+            |r| r.get(0),
+        )
+        .expect("count ledger for visible id");
+    assert_eq!(
+        ledgered_visible, 0,
+        "an id that was not purged must never be ledgered"
+    );
+
+    // Re-purging the same id is a harmless no-op (no row, no ledger churn).
+    let again = RecordingsRepo::purge_soft_deleted_with_ledger(&conn, &[rec.id])
+        .expect("re-purge must not fail");
+    assert!(again.is_empty(), "already-purged id reports nothing");
+    let still_ledgered: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+            [rec.id.to_string()],
+            |r| r.get(0),
+        )
+        .expect("count ledger after re-purge");
+    assert_eq!(still_ledgered, 1, "ledger entry is durable");
+
     assert_fts_healthy(&conn);
 }
