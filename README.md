@@ -9,6 +9,8 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 - **Remote Whisper (optional)** — Switch STT Mode to Remote to offload transcription to any OpenAI-compatible Whisper server (e.g. `whisper.cpp server`, `faster-whisper-server`, LocalAI) running on another machine over LAN or Tailscale. See [Running Across Machines](#running-across-machines-lan--tailscale).
 - **Speaker Diarization** — Pyannote + WeSpeaker (ONNX) pipeline labels who is speaking (e.g. Doctor vs. Patient). Runs locally in both STT modes.
 - **Custom Vocabulary** — User-defined find/replace rules applied after STT, with word-boundary matching, priority ordering, and import/export compatible with the Python Medical-Assistant `vocabulary.json` format.
+- **Condition Chips** — One-tap quick-add of common conditions (e.g. hypertension, T2DM) into the patient context. Chips are frequency-ranked by usage, fully editable, and sync across machines with the same last-write-wins semantics as other content.
+- **User Dictionary** — Add words (drug names, local surnames, abbreviations) to the editor's spellchecker; the dictionary syncs across machines so corrections learned on one laptop follow the clinician everywhere.
 
 ### Documents & Review
 - **SOAP Note Generation** — AI-powered Subjective / Objective / Assessment / Plan notes from transcripts.
@@ -34,12 +36,13 @@ A privacy-first medical transcription desktop application built with Rust and Sv
   - **Images** — `.png`, `.jpg`, `.jpeg`, `.bmp`, `.webp`, `.tiff` (sent to vision model)
   - **PDF** — `.pdf` (embedded text extracted via pdf-extract; scanned/image-only PDFs are rendered page-by-page with pdfium and OCR'd through the vision model — up to 50 pages at 150 DPI)
   - **Office** — `.docx` (text from Word XML), `.xlsx` (cell data from all sheets)
-- **Scanned-PDF Renderer** — Scanned-PDF OCR is powered by [pdfium](https://github.com/bblanchon/pdfium-binaries) (Chrome's PDF engine, BSD-licensed). The library is downloaded automatically into the app data directory the first time you OCR a scanned PDF — nothing to install, and it runs entirely locally (no network after the one-time fetch).
+- **Scanned-PDF Renderer** — Scanned-PDF OCR is powered by [pdfium](https://github.com/bblanchon/pdfium-binaries) (Chrome's PDF engine, BSD-licensed). The library is downloaded automatically into the app data directory the first time you OCR a scanned PDF — nothing to install, and it runs entirely locally (no network after the one-time fetch). The download is pinned to a known release and verified against a SHA-256 digest before the library is loaded.
 - **OCR Model Setting** — Configure a dedicated vision model for OCR separately from the text generation model in **Settings → Models**.
 - **Integration** — OCR'd text is combined with notes and structured patient context (medications, allergies, conditions) and threaded into all generation types (SOAP, referral, letter, peer discussion). Available in the Record, Generate, and Letter Writer tabs.
 
 ### Content Sync
-- **Bidirectional Sync** — Sync transcripts, SOAP notes, letters, referrals, peer discussions, and audio between machines over Tailscale. Per-field last-write-wins merge with separate push/pull cursors.
+- **Bidirectional Sync** — Sync transcripts, SOAP notes, letters, referrals, peer discussions, and audio between machines over Tailscale. Per-field last-write-wins merge with separate push/pull cursors; each field carries its own timestamp and origin machine.
+- **Deletions & Restores Propagate** — Trashing a recording on one machine tombstones it everywhere; restoring it (newer write wins) revives it everywhere. The office server permanently purges trash after 30 days and keeps an id-only purge ledger, so a machine that was offline during the deletion can never resurrect purged content. Condition chips and the user dictionary sync with the same tombstone-aware merge, and a deleted chip stays deleted until explicitly re-added.
 - **Background Sync** — Automatic sync every 5 minutes when enabled, with a manual "Sync Now" button and last-synced timestamp.
 - **Cloud Badge** — Remote-synced recordings display a cloud badge for easy identification.
 - **Real-time Updates** — SSE-based change notifications refresh the recordings list instantly when new content arrives.
@@ -50,9 +53,9 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 - **Agentic Workflows** — Multi-step orchestrator with tool use (RAG search, note generation) for chat sessions.
 
 ### Data
-- **Recording Management** — Record, import, search, tag, and organize audio. SQLite-backed with soft-delete and undo (8-second window).
+- **Recording Management** — Record, import, search, tag, and organize audio. SQLite-backed with soft-delete and undo (8-second window), a 30-day trash (with a configurable retention policy under **Settings → Data Management** for auto-trashing old recordings), and permanent purge on the office server with a resurrection-proof ledger.
 - **Export** — PDF, DOCX, and FHIR R4 (healthcare interoperability standard).
-- **Encrypted Storage** — Audio recordings encrypted at rest with AES-256-GCM. Database uses SQLCipher (AES-256) via the OS keychain.
+- **Encrypted Storage** — Audio recordings encrypted at rest with AES-256-GCM; fetched/decrypted audio is re-encrypted in memory before touching disk. Database uses SQLCipher (AES-256) via the OS keychain.
 - **Secure Key Storage** — API keys encrypted at rest with AES-256-GCM; the master cipher key is derived via PBKDF2-HMAC-SHA256 (600 000 iterations) from an optional `MEDICAL_ASSISTANT_MASTER_KEY` env var or a per-machine identifier.
 
 ### Platform
@@ -111,6 +114,32 @@ npm run tauri dev
 ```
 
 Release builds are produced by the GitHub Actions workflow on tag pushes matching `v*`. Artifacts are attached to the release page.
+
+### Development
+
+```bash
+# Backend tests (lib only — integration tests are crate-scoped)
+cargo test --workspace --lib
+
+# Sharing integration tests (needs FERRISCRIBE_MDNS_TEST=1 only on Linux)
+cargo test -p medical-sharing
+
+# DB integration tests (condition_chips_sync, content_sync, deletion_model,
+# encryption, recording_sync_merge, retention — NOT covered by --lib above)
+cargo test -p medical-db
+
+# Frontend tests
+npx vitest run
+
+# Type-check (svelte-check)
+npm run check
+
+# Rust formatting + lints — both gates enforced by CI
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Audio device tests are gated behind `FERRISCRIBE_AUDIO_TEST=1` (cpal enumeration can block on machines with virtual audio hardware); without the env var they skip.
 
 ### Model Setup
 
@@ -179,7 +208,9 @@ laptop.
 
 Enable **Sync patient content via Tailscale** in **Settings → Sharing** to
 bidirectionally sync transcripts, SOAP notes, letters, referrals, peer
-discussions, and audio between machines. Background sync runs every 5
+discussions, and audio between machines, along with condition chips and
+the user dictionary (deletions propagate; restoring a trashed recording
+on any machine revives it everywhere). Background sync runs every 5
 minutes. Use the **Sync Now** button for manual sync.
 
 ### Security
