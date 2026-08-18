@@ -155,7 +155,7 @@ pub fn retention_sweep_tick(db: &Database, is_server: bool) {
                     tracing::info!(
                         purged = purged.len(),
                         vectors_cleaned = to_purge.len(),
-                        ledger_count = ids.len(),
+                        ledger_count = purged.len(),
                         "tombstone sweeper purged soft-deleted recordings + RAG vectors + audio files"
                     );
                 }

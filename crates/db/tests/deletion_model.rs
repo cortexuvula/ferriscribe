@@ -685,3 +685,57 @@ fn purge_records_ledger_entries_transactionally() {
 
     assert_fts_healthy(&conn);
 }
+
+// -------------------------------------------------------------------------
+// Atomicity by fault injection: the row deletion must never survive a
+// ledger-write failure. Dropping `purged_recordings` makes the in-transaction
+// INSERT fail; the whole transaction must roll back, leaving the tombstoned
+// row (and its FTS de-indexed state) exactly as before. Without the shared
+// transaction a partial commit would purge the row un-ledgered — a durable
+// deletion with no resurrection block.
+// -------------------------------------------------------------------------
+
+#[test]
+fn ledger_write_failure_rolls_back_row_deletion() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+    let rec = seed(&conn, "ldgfail.wav");
+    let aged = (chrono::Utc::now() - chrono::TimeDelta::days(40)).to_rfc3339();
+    soft_delete_at(&conn, &rec.id, &aged);
+
+    // Fault injection: make the ledger INSERT fail mid-transaction.
+    conn.execute("DROP TABLE purged_recordings", [])
+        .expect("drop ledger table");
+
+    let result = RecordingsRepo::purge_soft_deleted_with_ledger(&conn, &[rec.id]);
+    assert!(
+        result.is_err(),
+        "a failing ledger write must fail the whole purge"
+    );
+
+    // Rollback proof: the row must still exist, still tombstoned.
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM recordings WHERE id = ?1",
+            [rec.id.to_string()],
+            |r| r.get(0),
+        )
+        .expect("count rows");
+    assert_eq!(
+        count, 1,
+        "the row deletion must roll back with the ledger failure"
+    );
+    assert_eq!(
+        deleted_at_raw(&conn, &rec.id).as_deref(),
+        Some(aged.as_str()),
+        "the tombstone must be untouched by the rolled-back purge"
+    );
+
+    // Even the intermediate FTS re-index write rolled back: the row stays
+    // de-indexed (as `soft_delete_at` left it) and the index stays healthy.
+    assert!(
+        !fts_row_present(&conn, "ldgfail"),
+        "rolled-back purge must leave no FTS residue"
+    );
+    assert_fts_healthy(&conn);
+}
