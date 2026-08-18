@@ -164,6 +164,18 @@ pub struct MergeResult {
     pub changed_recording_ids: Vec<String>,
 }
 
+/// A purge notification travelling on the pull response: the server
+/// permanently deleted this recording; clients holding a stale live copy
+/// tombstone it locally. Carries the recording id and purge timestamp only
+/// — never content (HIPAA).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PurgedRef {
+    /// Recording UUID as a string.
+    pub id: String,
+    /// When the server purged the recording (RFC 3339 UTC string).
+    pub purged_at: String,
+}
+
 /// Repository for content-sync operations.
 ///
 /// Stateles, associated-function style matching the other repos in this crate.
@@ -414,6 +426,46 @@ impl ContentSyncRepo {
             out.truncate(limit_i64 as usize);
         }
         Ok((out, has_more))
+    }
+
+    /// Ledger entries with `purged_at > since` (all entries when `since`
+    /// is `None` — a fresh client's first pull), ordered by `purged_at`.
+    ///
+    /// The comparison is a plain string `>` on `purged_at`, which is safe
+    /// here even though [`cmp_lww_timestamps`] exists: every row in
+    /// `purged_recordings` is written by the purge path in `recordings.rs`
+    /// (`purge_soft_deleted_with_ledger`) with a single-format
+    /// `to_rfc3339()` timestamp (`+00:00` offset), and the `since` cursor a
+    /// server receives is the client's `advance_cursor`-style
+    /// `to_rfc3339()` value (also `+00:00`) — so the mixed-format hazard
+    /// that makes string comparison wrong on `recordings.updated_at` does
+    /// not apply to this table.
+    pub fn purged_since(conn: &Connection, since: Option<&str>) -> DbResult<Vec<PurgedRef>> {
+        let refs = if let Some(since) = since {
+            let mut stmt = conn.prepare(
+                "SELECT id, purged_at FROM purged_recordings
+                 WHERE purged_at > ?1
+                 ORDER BY purged_at",
+            )?;
+            stmt.query_map([since], |r| {
+                Ok(PurgedRef {
+                    id: r.get(0)?,
+                    purged_at: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            let mut stmt =
+                conn.prepare("SELECT id, purged_at FROM purged_recordings ORDER BY purged_at")?;
+            stmt.query_map([], |r| {
+                Ok(PurgedRef {
+                    id: r.get(0)?,
+                    purged_at: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(refs)
     }
 
     // -----------------------------------------------------------------
@@ -948,6 +1000,36 @@ impl ContentSyncRepo {
             )
         {
             tracing::warn!(error = %e, "sync_tombstone: failed to remove recording from FTS index");
+        }
+        Ok(())
+    }
+
+    /// Apply purge notifications from a pull response: tombstone any LOCAL
+    /// LIVE copy (FTS-safe) so a machine that missed the practice-wide
+    /// deletion converges. Unlike the LWW tombstone path in
+    /// [`Self::merge_incoming`], a purge notification tombstones
+    /// unconditionally — the server already hard-deleted the row, so there
+    /// is no newer-local-edit case to honour. Already-tombstoned and
+    /// unknown ids are no-ops: the former keeps its own `deleted_at` (the
+    /// local 30-day sweeper finishes it), and the latter never existed
+    /// here (the ledger also refuses any later stale re-insert).
+    pub fn apply_purged_refs(conn: &Connection, purged: &[PurgedRef]) -> DbResult<()> {
+        for p in purged {
+            // EXISTS always returns exactly one row; an error here is a
+            // genuine DB failure and is propagated (the caller treats the
+            // whole application as best-effort and warns).
+            let live: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM recordings WHERE id = ?1 AND deleted_at IS NULL)",
+                [&p.id],
+                |r| r.get(0),
+            )?;
+            if live {
+                Self::sync_tombstone(conn, &p.id, &p.purged_at)?;
+                tracing::info!(
+                    recording_id = %p.id,
+                    "sync: tombstoned local copy of purged recording"
+                );
+            }
         }
         Ok(())
     }

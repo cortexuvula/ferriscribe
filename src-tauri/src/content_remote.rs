@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::endpoint::http_url;
-use medical_db::content_sync::{MergeConflict, SyncRecording};
+use medical_db::content_sync::{MergeConflict, PurgedRef, SyncRecording};
 
 use crate::commands::sharing::PairedConnection;
 
@@ -45,12 +45,20 @@ pub struct ServerMeta {
 ///
 /// `has_more` is `true` when another page is available; the caller advances
 /// the cursor to the last record's `updated_at` and pulls again.
+///
+/// `purged` carries the server's purge notifications (ledger entries newer
+/// than our cursor); the caller tombstones any stale local live copy.
+/// `#[serde(default)]` keeps this deserializable against an older server
+/// that omits the field (pre-purge binaries) — wire compatibility in both
+/// directions.
 #[derive(Debug, serde::Deserialize)]
 #[allow(dead_code)] // server_time is part of the wire contract; read by diagnostics
 pub struct PullResponse {
     pub recordings: Vec<SyncRecording>,
     pub server_time: String,
     pub has_more: bool,
+    #[serde(default)]
+    pub purged: Vec<PurgedRef>,
 }
 
 /// Response to `POST /v1/content/sync` — the fields where the server's local
@@ -369,4 +377,45 @@ fn map_status_error(status: reqwest::StatusCode, ctx: &str) -> AppError {
         ));
     }
     AppError::Other(format!("{ctx}: HTTP {status}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An older server (pre-purge release) omits `purged` entirely; the
+    /// client must deserialize it as an empty vec, not error — wire
+    /// compatibility for the new-client → old-server direction.
+    #[test]
+    fn pull_response_defaults_missing_purged_to_empty() {
+        let legacy = serde_json::json!({
+            "recordings": [],
+            "server_time": "2026-08-17T00:00:00+00:00",
+            "has_more": false
+        });
+        let resp: PullResponse = serde_json::from_value(legacy).expect("legacy payload parses");
+        assert!(resp.recordings.is_empty());
+        assert!(resp.purged.is_empty());
+    }
+
+    /// A newer server includes `purged`; the ids and timestamps round-trip.
+    #[test]
+    fn pull_response_parses_purged_refs() {
+        let payload = serde_json::json!({
+            "recordings": [],
+            "server_time": "2026-08-17T00:00:00+00:00",
+            "has_more": false,
+            "purged": [
+                { "id": "11111111-1111-1111-1111-111111111111", "purged_at": "2026-08-16T00:00:00+00:00" }
+            ]
+        });
+        let resp: PullResponse = serde_json::from_value(payload).expect("payload parses");
+        assert_eq!(
+            resp.purged,
+            vec![PurgedRef {
+                id: "11111111-1111-1111-1111-111111111111".to_string(),
+                purged_at: "2026-08-16T00:00:00+00:00".to_string(),
+            }]
+        );
+    }
 }

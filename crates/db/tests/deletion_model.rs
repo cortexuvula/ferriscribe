@@ -16,7 +16,9 @@ use std::path::PathBuf;
 
 use medical_core::types::recording::Recording;
 use medical_db::Database;
-use medical_db::content_sync::{ContentSyncRepo, MergeResult, SyncFieldValue, SyncRecording};
+use medical_db::content_sync::{
+    ContentSyncRepo, MergeResult, PurgedRef, SyncFieldValue, SyncRecording,
+};
 use medical_db::recordings::RecordingsRepo;
 use uuid::Uuid;
 
@@ -737,5 +739,133 @@ fn ledger_write_failure_rolls_back_row_deletion() {
         !fts_row_present(&conn, "ldgfail"),
         "rolled-back purge must leave no FTS residue"
     );
+    assert_fts_healthy(&conn);
+}
+
+// -------------------------------------------------------------------------
+// Purged ids travelling on the pull response. `purged_since` selects the
+// ledger entries a client with the given cursor has not seen yet (all
+// entries for a fresh client); `apply_purged_refs` tombstones stale LOCAL
+// LIVE copies so a machine that missed the practice-wide deletion
+// converges.
+// -------------------------------------------------------------------------
+
+#[test]
+fn purged_since_filters_by_cutoff() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+    conn.execute(
+        "INSERT INTO purged_recordings (id, purged_at) VALUES (?1, ?2), (?3, ?4)",
+        rusqlite::params![a.to_string(), T1, b.to_string(), T2],
+    )
+    .expect("seed ledger");
+
+    // A cursor between T1 and T2: only the T2 entry is new to this client.
+    let cutoff = "2026-08-11T12:00:00Z";
+    let refs = ContentSyncRepo::purged_since(&conn, Some(cutoff)).expect("purged_since");
+    assert_eq!(
+        refs,
+        vec![PurgedRef {
+            id: b.to_string(),
+            purged_at: T2.to_string(),
+        }],
+        "only ledger entries with purged_at strictly newer than the cursor are returned"
+    );
+
+    // A fresh client (no cursor) sees every entry, ordered by purged_at.
+    let all = ContentSyncRepo::purged_since(&conn, None).expect("purged_since");
+    assert_eq!(
+        all,
+        vec![
+            PurgedRef {
+                id: a.to_string(),
+                purged_at: T1.to_string(),
+            },
+            PurgedRef {
+                id: b.to_string(),
+                purged_at: T2.to_string(),
+            },
+        ],
+        "a fresh client's first pull carries the entire ledger, ordered by purged_at"
+    );
+}
+
+#[test]
+fn apply_purged_refs_tombstones_live_copies_only() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+
+    // Two stale LIVE copies (this machine missed the deletion), one row the
+    // machine had already tombstoned itself, and one id it has never seen.
+    let live1 = seed(&conn, "prglive1.wav");
+    let live2 = seed(&conn, "prglive2.wav");
+    let gone = seed(&conn, "prggone.wav");
+    soft_delete_at(&conn, &gone.id, T1);
+    let unknown = Uuid::new_v4();
+    assert!(fts_row_present(&conn, "prglive1"));
+    assert!(fts_row_present(&conn, "prglive2"));
+
+    let refs = vec![
+        PurgedRef {
+            id: live1.id.to_string(),
+            purged_at: T2.to_string(),
+        },
+        PurgedRef {
+            id: live2.id.to_string(),
+            purged_at: T2.to_string(),
+        },
+        PurgedRef {
+            id: gone.id.to_string(),
+            purged_at: T2.to_string(),
+        },
+        PurgedRef {
+            id: unknown.to_string(),
+            purged_at: T2.to_string(),
+        },
+    ];
+    ContentSyncRepo::apply_purged_refs(&conn, &refs).expect("apply_purged_refs");
+
+    // The stale live copies are tombstoned (FTS-safe).
+    assert_eq!(
+        deleted_at_raw(&conn, &live1.id).as_deref(),
+        Some(T2),
+        "stale live copy must be tombstoned at the purge timestamp"
+    );
+    assert_eq!(
+        deleted_at_raw(&conn, &live2.id).as_deref(),
+        Some(T2),
+        "stale live copy must be tombstoned at the purge timestamp"
+    );
+    assert!(
+        !fts_row_present(&conn, "prglive1"),
+        "tombstoned copy must leave the FTS index"
+    );
+    assert!(
+        !fts_row_present(&conn, "prglive2"),
+        "tombstoned copy must leave the FTS index"
+    );
+
+    // The already-tombstoned row keeps its original deleted_at (a later
+    // re-tombstone would be a no-op at best and an FTS hazard at worst).
+    assert_eq!(
+        deleted_at_raw(&conn, &gone.id).as_deref(),
+        Some(T1),
+        "already-tombstoned row must keep its original deleted_at"
+    );
+
+    // The unknown id stays unknown — the local sweeper, not the sync
+    // layer, owns inserting durable tombstone rows for unseen ids.
+    let unknown_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM recordings WHERE id = ?1",
+            [unknown.to_string()],
+            |r| r.get(0),
+        )
+        .expect("count unknown id");
+    assert_eq!(unknown_rows, 0, "unknown id must not be inserted");
+
     assert_fts_healthy(&conn);
 }

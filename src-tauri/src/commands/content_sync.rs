@@ -317,13 +317,37 @@ async fn run_sync(
             .max()
             .map(|s| s.to_string());
 
+        // Purge notifications travel on the same response; they are applied
+        // on the same connection right after a successful merge (below).
+        // Destructured out of `batch` so the merge closure can own both.
+        let batch_recordings = batch.recordings;
+        let batch_purged = batch.purged;
+
         let merge_db = Arc::clone(&db);
-        let merge_result = tokio::task::spawn_blocking(move || {
-            let conn = merge_db.conn()?;
-            ContentSyncRepo::merge_incoming(&conn, &batch.recordings).map_err(AppError::from)
-        })
-        .await
-        .map_err(crate::commands::join_err)?;
+        let merge_result =
+            tokio::task::spawn_blocking(move || -> AppResult<medical_db::content_sync::MergeResult> {
+                let conn = merge_db.conn()?;
+                let result = ContentSyncRepo::merge_incoming(&conn, &batch_recordings)
+                    .map_err(AppError::from)?;
+                // Only reached after a successful merge. Tombstone any stale
+                // LOCAL LIVE copy of a server-purged recording so this
+                // machine converges with the practice-wide deletion.
+                // Best-effort: a failure warns (counts only) and must not
+                // fail the sync — the refs ride every pull whose cursor
+                // predates them, so the next cycle retries them.
+                if !batch_purged.is_empty()
+                    && let Err(e) = ContentSyncRepo::apply_purged_refs(&conn, &batch_purged)
+                {
+                    tracing::warn!(
+                        purged_count = batch_purged.len(),
+                        error = %e,
+                        "sync: failed to apply purge notifications (non-fatal, re-delivered next pull)"
+                    );
+                }
+                Ok(result)
+            })
+            .await
+            .map_err(crate::commands::join_err)?;
 
         // If the merge failed, do NOT advance the cursor — break out of the
         // pull loop so the next sync cycle retries the same batch from the

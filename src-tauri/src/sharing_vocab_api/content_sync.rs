@@ -19,7 +19,7 @@ use chrono::Utc;
 use futures_util::Stream;
 use medical_core::types::recording::Recording;
 use medical_db::content_sync::{
-    ContentSyncRepo, FieldRevision, MergeConflict, SyncFieldValue, SyncRecording,
+    ContentSyncRepo, FieldRevision, MergeConflict, PurgedRef, SyncFieldValue, SyncRecording,
 };
 use medical_db::recordings::RecordingsRepo;
 use serde::Deserialize;
@@ -48,6 +48,15 @@ pub(super) struct ContentPullResponse {
     recordings: Vec<SyncRecording>,
     server_time: String,
     has_more: bool,
+    /// Purge notifications: `purged_recordings` ledger entries newer than
+    /// the client's `since` cursor (all entries when it sent none — a
+    /// fresh client's first pull). Clients tombstone any local live copy
+    /// so machines that missed a deletion converge. Wire-compatible both
+    /// ways: `skip_serializing_if` keeps the payload byte-identical to the
+    /// pre-purge format when empty, and older clients ignore the unknown
+    /// field (no `deny_unknown_fields` anywhere on this path).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    purged: Vec<PurgedRef>,
 }
 
 #[derive(Deserialize)]
@@ -250,13 +259,21 @@ pub(super) async fn content_sync_pull_handler(
     let since = q.since;
     let db = Arc::clone(&state.db);
 
-    let recordings = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<SyncRecording>, bool), medical_core::error::AppError> {
+    let pulled = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<SyncRecording>, bool, Vec<PurgedRef>), medical_core::error::AppError>
+        {
             let conn = db.conn()?;
             let (ids, has_more) = ContentSyncRepo::changed_since(&conn, since.as_deref(), limit)
                 .map_err(medical_core::error::AppError::from)?;
             let recs = load_sync_recordings(&conn, &ids)?;
-            Ok((recs, has_more))
+            // Purge notifications ride on the same response: ledger entries
+            // newer than the client's cursor (all of them for a fresh
+            // client). Best-effort by design — a ledger read failure must
+            // not fail the pull; the client re-requests the same window on
+            // its next sync cycle.
+            let purged =
+                ContentSyncRepo::purged_since(&conn, since.as_deref()).unwrap_or_default();
+            Ok((recs, has_more, purged))
         },
     )
     .await
@@ -266,13 +283,19 @@ pub(super) async fn content_sync_pull_handler(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let (recordings, has_more) = recordings;
+    let (recordings, has_more, purged) = pulled;
 
-    info!(count = recordings.len(), has_more, "content_sync: pull");
+    info!(
+        count = recordings.len(),
+        has_more,
+        purged_count = purged.len(),
+        "content_sync: pull"
+    );
     Ok(Json(ContentPullResponse {
         recordings,
         server_time: Utc::now().to_rfc3339(),
         has_more,
+        purged,
     }))
 }
 
