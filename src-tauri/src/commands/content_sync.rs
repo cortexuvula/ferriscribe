@@ -195,12 +195,32 @@ fn build_sparse_fields(
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| rec.created_at.to_rfc3339());
 
+    // Field wire timestamp = max(revision, row write). Writers that bump
+    // only the row (transcription/generation completion via
+    // `RecordingsRepo::update`) leave stale revisions from a pre-edit sync
+    // round-trip; shipping the stale revision timestamp ties against the
+    // server's copy and the merge's Equal arm silently drops the newer
+    // value. Parsed comparison — string comparison is wrong across the two
+    // stored timestamp formats. When the row is newer the origin device is
+    // unknown (the row bump doesn't carry one).
+    let field_ts = |rev: Option<&FieldRevision>| -> (String, Option<String>) {
+        match rev {
+            Some(r) => {
+                if medical_db::content_sync::cmp_lww_timestamps(&r.updated_at, &row_ts)
+                    == std::cmp::Ordering::Less
+                {
+                    (row_ts.clone(), None)
+                } else {
+                    (r.updated_at.clone(), r.origin_device.clone())
+                }
+            }
+            None => (row_ts.clone(), None),
+        }
+    };
+
     let mut push_text = |name: &str, val: Option<&str>| {
         if let Some(s) = val {
-            let (ts, device) = rev_map
-                .get(name)
-                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
-                .unwrap_or_else(|| (row_ts.clone(), None));
+            let (ts, device) = field_ts(rev_map.get(name).copied());
             fields.insert(
                 name.to_string(),
                 SyncFieldValue {
@@ -222,10 +242,7 @@ fn build_sparse_fields(
 
     let mut push_json = |name: &str, val: &serde_json::Value| {
         if !val.is_null() {
-            let (ts, device) = rev_map
-                .get(name)
-                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
-                .unwrap_or_else(|| (row_ts.clone(), None));
+            let (ts, device) = field_ts(rev_map.get(name).copied());
             fields.insert(
                 name.to_string(),
                 SyncFieldValue {
@@ -1144,6 +1161,15 @@ mod tests {
             "synced_from": "office-server-machine",
             "context": "freeform context"
         });
+        // Row write OLDER than the revision below, so the revision wins the
+        // max(revision, row) stamp and its assertions below hold. (The
+        // opposite direction — newer row beating a stale revision — is
+        // covered by build_sparse_fields_row_timestamp_wins_over_stale_revision.)
+        rec.updated_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-05-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
         RecordingsRepo::insert(conn, &rec).expect("insert recording");
 
         ContentSyncRepo::upsert_revision(
@@ -1207,5 +1233,43 @@ mod tests {
             err.to_string().contains("invalid recording id"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn build_sparse_fields_row_timestamp_wins_over_stale_revision() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let mut rec = medical_core::types::recording::Recording::new(
+            "rider.wav",
+            std::path::PathBuf::from("/audio/rider.wav"),
+        );
+        rec.soap_note = Some("regenerated soap".to_string());
+        let row_time = chrono::Utc::now();
+        rec.updated_at = Some(row_time);
+        RecordingsRepo::insert(&conn, &rec).expect("insert");
+        // Stale revision from a pre-regeneration sync round-trip.
+        ContentSyncRepo::upsert_revision(&conn, &rec.id, "soap_note", "2020-01-01T00:00:00Z", None)
+            .expect("seed stale revision");
+
+        let sync = build_sync_recording(&conn, &rec.id.to_string()).expect("build");
+        let soap = &sync.fields["soap_note"];
+        assert_ne!(
+            soap.updated_at, "2020-01-01T00:00:00Z",
+            "stale revision must not mask the newer row-level write"
+        );
+        assert_eq!(soap.updated_at, row_time.to_rfc3339());
+        assert!(
+            soap.origin_device.is_none(),
+            "row-derived stamp carries no device"
+        );
+
+        // Newer revision still wins over the row.
+        let newer_rev = (row_time + chrono::TimeDelta::seconds(60)).to_rfc3339();
+        ContentSyncRepo::upsert_revision(&conn, &rec.id, "soap_note", &newer_rev, Some("desk-a"))
+            .expect("seed newer revision");
+        let sync2 = build_sync_recording(&conn, &rec.id.to_string()).expect("build 2");
+        let soap2 = &sync2.fields["soap_note"];
+        assert_eq!(soap2.updated_at, newer_rev, "newer revision wins");
+        assert_eq!(soap2.origin_device.as_deref(), Some("desk-a"));
     }
 }
