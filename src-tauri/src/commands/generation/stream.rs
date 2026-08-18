@@ -147,6 +147,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             system_prompt: None,
+            reasoning_effort: None,
         }
     }
 

@@ -114,6 +114,7 @@ impl TranslationProvider for AiTranslationProvider {
                 "You are a medical translator. Translate accurately, preserving clinical terminology."
                     .into(),
             ),
+            reasoning_effort: None,
         };
 
         let response = self.provider.complete(request).await?;
@@ -134,6 +135,7 @@ impl TranslationProvider for AiTranslationProvider {
             temperature: Some(0.0),
             max_tokens: Some(10),
             system_prompt: None,
+            reasoning_effort: None,
         };
 
         let response = self.provider.complete(request).await?;

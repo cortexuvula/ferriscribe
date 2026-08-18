@@ -343,6 +343,10 @@ pub(super) fn build_completion_request(
         temperature: Some(temperature),
         max_tokens,
         system_prompt: Some(system_prompt),
+        // Thinking control is applied provider-side (Ollama forces
+        // reasoning_effort; LM Studio injects a think-block prefill), so the
+        // generation layer always leaves the request neutral here.
+        reasoning_effort: None,
     }
 }
 

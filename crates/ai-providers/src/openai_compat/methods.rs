@@ -403,6 +403,7 @@ mod tests {
             temperature: Some(0.0),
             max_tokens: None,
             system_prompt: None,
+            reasoning_effort: None,
         }
     }
 

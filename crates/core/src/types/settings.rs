@@ -343,6 +343,13 @@ pub struct AppConfig {
     pub lmstudio_host: String,
     #[serde(default = "default_lmstudio_port")]
     pub lmstudio_port: u16,
+    /// Disable the reasoning/"thinking" phase for LM Studio models (Qwen3
+    /// & co.). LM Studio drops API-level thinking parameters, so the
+    /// provider injects an assistant prefill with a pre-closed `<think>`
+    /// block instead. Default `false` — opt-in, saves minutes of latency
+    /// per SOAP note on thinking models.
+    #[serde(default)]
+    pub lmstudio_disable_thinking: bool,
 
     // STT mode selection
     #[serde(default)]
@@ -360,6 +367,12 @@ pub struct AppConfig {
     pub ollama_host: String,
     #[serde(default = "default_ollama_port")]
     pub ollama_port: u16,
+    /// Disable the reasoning/"thinking" phase for Ollama models (Qwen3 &
+    /// co.). Sends `reasoning_effort: "none"` on the OpenAI-compatible
+    /// endpoint. Default `false` — opt-in, saves minutes of latency per
+    /// SOAP note on thinking models.
+    #[serde(default)]
+    pub ollama_disable_thinking: bool,
 
     // Temperature
     #[serde(default = "default_temperature")]
@@ -610,6 +623,8 @@ mod tests {
         assert_eq!(config.window_height, 800);
         assert_eq!(config.lmstudio_host, "localhost");
         assert_eq!(config.lmstudio_port, 1234);
+        assert!(!config.lmstudio_disable_thinking);
+        assert!(!config.ollama_disable_thinking);
         assert!(config.vocabulary_enabled);
         assert_eq!(config.rsvp_wpm, 300);
         assert_eq!(config.rsvp_font_size, 48);

@@ -148,6 +148,7 @@ async fn chat_send_inner(
         temperature: Some(settings_temp),
         max_tokens: Some(4096),
         system_prompt,
+        reasoning_effort: None,
     };
 
     debug!("chat_send: calling provider '{}'", provider.name());
@@ -224,6 +225,7 @@ pub async fn chat_stream(
         temperature: Some(settings_temp),
         max_tokens: Some(4096),
         system_prompt,
+        reasoning_effort: None,
     };
 
     debug!("chat_stream: calling provider '{}'", provider.name());

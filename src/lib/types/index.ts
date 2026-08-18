@@ -113,12 +113,21 @@ export interface AppConfig {
   tts_voice: string;
   lmstudio_host: string;
   lmstudio_port: number;
+  /** Disable the reasoning/"thinking" phase for LM Studio models. LM Studio
+   *  drops API-level thinking parameters, so the provider appends an
+   *  assistant prefill with a pre-closed <think> block instead. Mirrors
+   *  `lmstudio_disable_thinking: bool` in crates/core/src/types/settings.rs. */
+  lmstudio_disable_thinking: boolean;
   stt_mode: 'local' | 'remote';
   stt_remote_host: string;
   stt_remote_port: number;
   stt_remote_model: string;
   ollama_host: string;
   ollama_port: number;
+  /** Disable the reasoning/"thinking" phase for Ollama models — sends
+   *  `reasoning_effort: "none"` on the OpenAI-compatible endpoint. Mirrors
+   *  `ollama_disable_thinking: bool` in crates/core/src/types/settings.rs. */
+  ollama_disable_thinking: boolean;
   temperature: number;
   input_device: string | null;
   sample_rate: number;
