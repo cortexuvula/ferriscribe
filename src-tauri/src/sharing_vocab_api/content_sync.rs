@@ -98,15 +98,34 @@ fn build_sparse_fields(
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| rec.created_at.to_rfc3339());
 
+    // Field wire timestamp = max(revision, row write) — the same rider as
+    // the client-side builder in commands/content_sync.rs. Local writers
+    // that bump only the row (transcription/generation completion) leave
+    // stale revisions from a pre-edit sync round-trip; serving the stale
+    // revision timestamp makes clients' merges tie and silently drop the
+    // newer value. Parsed comparison (mixed timestamp formats compare
+    // wrongly as strings). Row-derived stamps carry no origin device.
+    let field_ts = |rev: Option<&FieldRevision>| -> (String, Option<String>) {
+        match rev {
+            Some(r) => {
+                if medical_db::content_sync::cmp_lww_timestamps(&r.updated_at, &row_ts)
+                    == std::cmp::Ordering::Less
+                {
+                    (row_ts.clone(), None)
+                } else {
+                    (r.updated_at.clone(), r.origin_device.clone())
+                }
+            }
+            None => (row_ts.clone(), None),
+        }
+    };
+
     let mut fields: HashMap<String, SyncFieldValue> = HashMap::new();
 
     // Text columns: value is a JSON string when present.
     let mut push_text = |name: &str, val: Option<&str>| {
         if let Some(s) = val {
-            let (ts, device) = rev_map
-                .get(name)
-                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
-                .unwrap_or_else(|| (row_ts.clone(), None));
+            let (ts, device) = field_ts(rev_map.get(name).copied());
             fields.insert(
                 name.to_string(),
                 SyncFieldValue {
@@ -130,10 +149,7 @@ fn build_sparse_fields(
     // serialized JSON value directly.
     let mut push_json = |name: &str, val: &serde_json::Value| {
         if !val.is_null() {
-            let (ts, device) = rev_map
-                .get(name)
-                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
-                .unwrap_or_else(|| (row_ts.clone(), None));
+            let (ts, device) = field_ts(rev_map.get(name).copied());
             fields.insert(
                 name.to_string(),
                 SyncFieldValue {
@@ -450,3 +466,32 @@ pub(super) async fn content_events_handler(
 // above compiles without a top-level `use` cluttering the module's public
 // imports. Kept private to this module.
 use tauri::Emitter as _;
+
+#[cfg(test)]
+mod sparse_fields_tests {
+    // Pins the max(revision, row) stamp on the SERVER-side builder — the
+    // pull responses clients consume. A stale revision must not mask a
+    // newer row-level write or clients' Equal-tie merges silently drop the
+    // newer value (final whole-feature review, HIGH-1).
+    use super::*;
+    use medical_db::Database;
+
+    #[test]
+    fn server_builder_row_timestamp_wins_over_stale_revision() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let mut rec = Recording::new("srv-rider.wav", std::path::PathBuf::from("/audio/srv.wav"));
+        rec.soap_note = Some("regenerated soap".to_string());
+        let row_time = chrono::Utc::now();
+        rec.updated_at = Some(row_time);
+        RecordingsRepo::insert(&conn, &rec).expect("insert");
+        ContentSyncRepo::upsert_revision(&conn, &rec.id, "soap_note", "2020-01-01T00:00:00Z", None)
+            .expect("stale revision");
+
+        let revisions = ContentSyncRepo::revisions_for(&conn, &rec.id).expect("revisions");
+        let fields = build_sparse_fields(&rec, Some(&revisions));
+        let soap = &fields["soap_note"];
+        assert_ne!(soap.updated_at, "2020-01-01T00:00:00Z");
+        assert_eq!(soap.updated_at, row_time.to_rfc3339());
+    }
+}
