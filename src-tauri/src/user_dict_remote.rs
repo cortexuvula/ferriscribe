@@ -188,11 +188,18 @@ impl<'a> UserDictRemote<'a> {
     /// handler accepts full entries); only the response loses tombstones.
     /// Legacy words are converted to entries with the repo's deterministic
     /// id derivation (see [`legacy_word_to_entry`]) so the local merge has a
-    /// uniform shape. Synthesized entries are active with `updated_at` = now.
+    /// uniform shape. Synthesized entries are active with `updated_at`
+    /// captured BEFORE the legacy request (see the fallback comment).
+    ///
+    /// Returns the entry list plus a `legacy` flag (true when the fallback
+    /// path ran): legacy responses cannot carry tombstones, so callers
+    /// should display the server's active words rather than the local list
+    /// (deletions made elsewhere are otherwise invisible in the UI until
+    /// the server is upgraded).
     pub async fn sync_full(
         &self,
         local_entries: Vec<UserDictEntry>,
-    ) -> AppResult<Vec<UserDictEntry>> {
+    ) -> AppResult<(Vec<UserDictEntry>, bool)> {
         let base = self
             .base_url()
             .ok_or_else(|| AppError::Other("paired server has no dictionary address".into()))?;
@@ -212,21 +219,34 @@ impl<'a> UserDictRemote<'a> {
         {
             // Server predates /sync-full — degrade to the legacy word-only
             // sync and synthesize entries from the returned words.
-            let words = self.sync(local_entries).await?;
+            //
+            // The synthesis timestamp is captured BEFORE the legacy request:
+            // a deletion landing on the server while the response is in
+            // transit must not be outrun by a fresher synthesized stamp
+            // (that would resurrect the word on the next push). Stamping at
+            // request time guarantees any such deletion is strictly newer
+            // and wins; exact ties are covered by the merge's
+            // tombstone-wins tie-break.
             let now = chrono::Utc::now()
                 .format("%Y-%m-%dT%H:%M:%S%.3fZ")
                 .to_string();
-            return Ok(words
-                .iter()
-                // Match `UserDictionaryRepo::add`, which skips empty input.
-                .filter(|w| !w.trim().is_empty())
-                .map(|w| legacy_word_to_entry(w, &now))
-                .collect());
+            let words = self.sync(local_entries).await?;
+            return Ok((
+                words
+                    .iter()
+                    // Match `UserDictionaryRepo::add`, which skips empty input.
+                    .filter(|w| !w.trim().is_empty())
+                    .map(|w| legacy_word_to_entry(w, &now))
+                    .collect(),
+                true,
+            ));
         }
         check_status(&resp).await?;
-        resp.json::<Vec<UserDictEntry>>()
+        let entries = resp
+            .json::<Vec<UserDictEntry>>()
             .await
-            .map_err(|e| AppError::Other(format!("dict sync-full parse: {e}")))
+            .map_err(|e| AppError::Other(format!("dict sync-full parse: {e}")))?;
+        Ok((entries, false))
     }
 
     /// Subscribe to SSE change notifications from the office server.

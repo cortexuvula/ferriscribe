@@ -90,7 +90,19 @@ pub async fn user_dict_list(state: tauri::State<'_, AppState>) -> AppResult<Vec<
         )
     {
         match remote.sync_full(load_all_local(&state.db).await?).await {
-            Ok(server_entries) => {
+            Ok((server_entries, legacy)) => {
+                // Legacy fallback: the response carried no tombstones, so
+                // the local merge cannot have learned of deletions. Capture
+                // the server's active words for display (the pre-/sync-full
+                // behavior) so deletions made elsewhere still disappear from
+                // this machine's UI. Computed before the merge move below.
+                let legacy_words = legacy.then(|| {
+                    server_entries
+                        .iter()
+                        .filter(|e| e.deleted_at.is_none())
+                        .map(|e| e.word.clone())
+                        .collect::<Vec<String>>()
+                });
                 // Merge the server's full list (including tombstones) into
                 // the local store; `merge_incoming` returns the active list.
                 let db = Arc::clone(&state.db);
@@ -104,6 +116,9 @@ pub async fn user_dict_list(state: tauri::State<'_, AppState>) -> AppResult<Vec<
                 })
                 .await
                 .map_err(crate::commands::join_err)??;
+                if let Some(words) = legacy_words {
+                    return Ok(words);
+                }
                 return Ok(active);
             }
             Err(e) => {
@@ -268,7 +283,17 @@ pub async fn sync_user_dictionary_cmd(state: tauri::State<'_, AppState>) -> AppR
             state.http_client.clone(),
         )
     {
-        let merged_entries = remote.sync_full(local_all).await?;
+        let (merged_entries, legacy) = remote.sync_full(local_all).await?;
+        // Legacy fallback: no tombstones in the response — mirror the
+        // server's active words for display (see user_dict_list). Captured
+        // before the merge move below.
+        let legacy_words = legacy.then(|| {
+            merged_entries
+                .iter()
+                .filter(|e| e.deleted_at.is_none())
+                .map(|e| e.word.clone())
+                .collect::<Vec<String>>()
+        });
         // Merge the server's post-merge FULL list (including tombstones)
         // back into the local store; `merge_incoming` returns the active
         // list for the UI.
@@ -280,6 +305,9 @@ pub async fn sync_user_dictionary_cmd(state: tauri::State<'_, AppState>) -> AppR
         })
         .await
         .map_err(crate::commands::join_err)??;
+        if let Some(words) = legacy_words {
+            return Ok(words);
+        }
         return Ok(active);
     }
 
