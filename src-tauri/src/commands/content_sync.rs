@@ -322,38 +322,33 @@ async fn run_sync(
         // Destructured out of `batch` so the merge closure can own both.
         let batch_recordings = batch.recordings;
         let batch_purged = batch.purged;
+        let batch_purged_count = batch_purged.len();
 
         let merge_db = Arc::clone(&db);
-        let merge_result =
-            tokio::task::spawn_blocking(move || -> AppResult<medical_db::content_sync::MergeResult> {
+        let merged = tokio::task::spawn_blocking(
+            move || -> AppResult<(medical_db::content_sync::MergeResult, AppResult<()>)> {
                 let conn = merge_db.conn()?;
                 let result = ContentSyncRepo::merge_incoming(&conn, &batch_recordings)
                     .map_err(AppError::from)?;
                 // Only reached after a successful merge. Tombstone any stale
                 // LOCAL LIVE copy of a server-purged recording so this
-                // machine converges with the practice-wide deletion.
-                // Best-effort: a failure warns (counts only) and must not
-                // fail the sync — the refs ride every pull whose cursor
-                // predates them, so the next cycle retries them.
-                if !batch_purged.is_empty()
-                    && let Err(e) = ContentSyncRepo::apply_purged_refs(&conn, &batch_purged)
-                {
-                    tracing::warn!(
-                        purged_count = batch_purged.len(),
-                        error = %e,
-                        "sync: failed to apply purge notifications (non-fatal, re-delivered next pull)"
-                    );
-                }
-                Ok(result)
-            })
-            .await
-            .map_err(crate::commands::join_err)?;
+                // machine converges with the practice-wide deletion. The
+                // outcome is returned separately: the caller must hold the
+                // cursor when it fails (see below) rather than treat it as
+                // a merge failure.
+                let purged_apply = ContentSyncRepo::apply_purged_refs(&conn, &batch_purged)
+                    .map_err(AppError::from);
+                Ok((result, purged_apply))
+            },
+        )
+        .await
+        .map_err(crate::commands::join_err)?;
 
         // If the merge failed, do NOT advance the cursor — break out of the
         // pull loop so the next sync cycle retries the same batch from the
         // same cursor position. Advancing past a failed merge would
         // permanently skip the failed batch (data loss).
-        let merge_result = match merge_result {
+        let (merge_result, purged_apply) = match merged {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(
@@ -373,6 +368,24 @@ async fn run_sync(
         // Emit per-recording update events so the editor can refresh (C6 fix).
         for id in &merge_result.changed_recording_ids {
             let _ = app.emit("recording-updated", serde_json::json!({ "id": id }));
+        }
+
+        // Purge application is best-effort for the SYNC (a failure never
+        // fails the round), but it must hold the cursor: the next cursor is
+        // the batch's max `updated_at`, which can exceed the failed refs'
+        // `purged_at` — advancing would make the server consider them
+        // already seen and they would never be re-delivered. Break without
+        // advancing so the next cycle unconditionally retries both the
+        // batch (idempotent re-merge) and the refs (idempotent no-ops on
+        // already-tombstoned rows).
+        if let Err(e) = purged_apply {
+            tracing::warn!(
+                purged_count = batch_purged_count,
+                batch_count,
+                error = %e,
+                "sync: failed to apply purge notifications — NOT advancing cursor, will retry next cycle"
+            );
+            break;
         }
 
         // Advance the cursor if we made progress.

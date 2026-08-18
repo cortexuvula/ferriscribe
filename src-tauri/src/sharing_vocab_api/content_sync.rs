@@ -270,9 +270,16 @@ pub(super) async fn content_sync_pull_handler(
             // newer than the client's cursor (all of them for a fresh
             // client). Best-effort by design — a ledger read failure must
             // not fail the pull; the client re-requests the same window on
-            // its next sync cycle.
-            let purged =
-                ContentSyncRepo::purged_since(&conn, since.as_deref()).unwrap_or_default();
+            // its next sync cycle. The failure is still logged (error
+            // only, no PHI) so a persistently broken ledger is diagnosable
+            // instead of silently degrading convergence.
+            let purged = match ContentSyncRepo::purged_since(&conn, since.as_deref()) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, "content_sync pull: purge-ledger read failed; continuing without purge notifications");
+                    Vec::new()
+                }
+            };
             Ok((recs, has_more, purged))
         },
     )

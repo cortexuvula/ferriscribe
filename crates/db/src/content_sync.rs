@@ -431,15 +431,25 @@ impl ContentSyncRepo {
     /// Ledger entries with `purged_at > since` (all entries when `since`
     /// is `None` — a fresh client's first pull), ordered by `purged_at`.
     ///
-    /// The comparison is a plain string `>` on `purged_at`, which is safe
-    /// here even though [`cmp_lww_timestamps`] exists: every row in
+    /// The comparison is a plain string `>` on `purged_at`. That is safe
+    /// here even though [`cmp_lww_timestamps`] exists, because every row in
     /// `purged_recordings` is written by the purge path in `recordings.rs`
     /// (`purge_soft_deleted_with_ledger`) with a single-format
-    /// `to_rfc3339()` timestamp (`+00:00` offset), and the `since` cursor a
-    /// server receives is the client's `advance_cursor`-style
-    /// `to_rfc3339()` value (also `+00:00`) — so the mixed-format hazard
-    /// that makes string comparison wrong on `recordings.updated_at` does
-    /// not apply to this table.
+    /// `to_rfc3339()` timestamp (T-format, `+00:00` offset), so the table
+    /// compares consistently with itself. The cursor is *normally* the
+    /// client's `advance_cursor` output (the same format), but a legacy
+    /// space-format value passes through `advance_cursor` unchanged — and
+    /// in string comparison `' '` sorts before `'T'`, so such a cursor can
+    /// only make the filter select MORE entries than strictly-newer, never
+    /// fewer. Over-selection is harmless: re-delivering an already-applied
+    /// purge ref is an idempotent no-op in [`Self::apply_purged_refs`]
+    /// (already-tombstoned rows keep their `deleted_at`). The dangerous
+    /// direction — under-selection, which would silently drop a purge
+    /// notification — has no reachable cause: a `Z`-offset cursor never
+    /// reaches this comparison because `advance_cursor` normalizes every
+    /// RFC 3339-parseable timestamp to `to_rfc3339()`'s `+00:00` output,
+    /// and the only non-T-format value that survives it (space format) can
+    /// only make the cursor compare as older — which over-selects.
     pub fn purged_since(conn: &Connection, since: Option<&str>) -> DbResult<Vec<PurgedRef>> {
         let refs = if let Some(since) = since {
             let mut stmt = conn.prepare(
