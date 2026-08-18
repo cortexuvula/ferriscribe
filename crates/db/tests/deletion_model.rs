@@ -7,6 +7,9 @@
 //!   practice-wide deletion
 //! - The server-side purge writing that ledger atomically with the row
 //!   deletion (`purge_soft_deleted_with_ledger`)
+//! - The same tombstone-propagation contract for condition chips
+//!   (`ConditionChipsRepo::merge_incoming`) — pins the tie-break that stops
+//!   a stale client's push from resurrecting a practice-wide chip deletion
 //!
 //! **HIPAA note:** assertions touch only ids, counts, timestamps, and
 //! visibility; fixture filenames and field payloads are synthetic non-PHI
@@ -14,8 +17,10 @@
 
 use std::path::PathBuf;
 
+use medical_core::types::condition_chip::{ConditionChip, deterministic_id};
 use medical_core::types::recording::Recording;
 use medical_db::Database;
+use medical_db::condition_chips::ConditionChipsRepo;
 use medical_db::content_sync::{
     ContentSyncRepo, MergeResult, PurgedRef, SyncFieldValue, SyncRecording,
 };
@@ -868,4 +873,96 @@ fn apply_purged_refs_tombstones_live_copies_only() {
     assert_eq!(unknown_rows, 0, "unknown id must not be inserted");
 
     assert_fts_healthy(&conn);
+}
+
+// -------------------------------------------------------------------------
+// Condition chips: the tombstone-propagation half of the chips deletion
+// model. The office server serves FULL chip lists (active + tombstones) so
+// deletions travel to every client; this test pins the `merge_incoming`
+// semantics that make that safe:
+//
+// 1. a newer remote tombstone removes the chip from the local active list
+//    (and is retained as a durable tombstone row), and
+// 2. a stale client that missed the deletion pushes its ACTIVE copy back
+//    with the SAME updated_at — the tie must keep the tombstone, so the
+//    chip cannot ghost-resurrect practice-wide. Only a strictly newer
+//    active row (a genuine re-add) may resurrect it.
+//
+// Chip text here is a synthetic generic label, matching the repo's own
+// unit-test fixtures — assertions touch only id, deleted_at, and counts.
+// -------------------------------------------------------------------------
+
+#[test]
+fn chips_merge_applies_remote_tombstone() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+
+    // Local: an active chip, seeded through the real write path.
+    ConditionChipsRepo::add(&conn, "Hypertension", T1).expect("seed local active chip");
+    let id = deterministic_id("Hypertension");
+    assert_eq!(
+        ConditionChipsRepo::list_active(&conn)
+            .expect("list_active")
+            .len(),
+        1,
+        "fixture: chip starts active"
+    );
+
+    // The same chip as a remote tombstone: newer updated_at, deleted_at set.
+    let tombstone = ConditionChip {
+        id: id.clone(),
+        text: "Hypertension".to_string(),
+        updated_at: T2.to_string(),
+        deleted_at: Some(T2.to_string()),
+        sort_order: 0,
+        use_count: 0,
+    };
+    let merged = ConditionChipsRepo::merge_incoming(&conn, std::slice::from_ref(&tombstone))
+        .expect("merge tombstone");
+    assert!(
+        merged.is_empty(),
+        "newer remote tombstone must drop the chip from the active list"
+    );
+    let all = ConditionChipsRepo::list_all(&conn).expect("list_all");
+    assert_eq!(all.len(), 1, "the tombstone row itself must be retained");
+    assert_eq!(
+        all[0].deleted_at.as_deref(),
+        Some(T2),
+        "row must carry the tombstone timestamp"
+    );
+
+    // A stale client that never saw the deletion pushes its ACTIVE copy
+    // back, with updated_at TIED to the tombstone — the tie must keep the
+    // tombstone (deletions win ties).
+    let stale_active = ConditionChip {
+        deleted_at: None,
+        ..tombstone.clone()
+    };
+    let merged_again =
+        ConditionChipsRepo::merge_incoming(&conn, &[stale_active]).expect("merge stale active");
+    assert!(
+        merged_again.is_empty(),
+        "tie on updated_at must not resurrect the tombstoned chip"
+    );
+    assert_eq!(
+        ConditionChipsRepo::list_all(&conn).expect("list_all")[0]
+            .deleted_at
+            .as_deref(),
+        Some(T2),
+        "tombstone must survive the stale client's push"
+    );
+
+    // Only a strictly newer ACTIVE row may resurrect — re-add semantics.
+    let newer_active = ConditionChip {
+        updated_at: "2026-08-13T00:00:00Z".to_string(),
+        deleted_at: None,
+        ..tombstone
+    };
+    let resurrected =
+        ConditionChipsRepo::merge_incoming(&conn, &[newer_active]).expect("merge newer active");
+    assert_eq!(resurrected.len(), 1, "a strictly newer active row re-adds");
+    assert!(
+        resurrected[0].deleted_at.is_none(),
+        "re-added chip must be active"
+    );
 }
