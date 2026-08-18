@@ -49,6 +49,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 
 ### AI providers
 - **Local and LAN-accessible only** — Ollama and LM Studio, each configurable with a remote host/port so you can run the heavy model on a separate machine over LAN or Tailscale.
+- **Thinking Control** — Reasoning models (Qwen3 & co.) can spend minutes in a "thinking" phase before writing a note. **Settings → Models** has a per-provider **Disable thinking** toggle. Ollama skips reasoning via `reasoning_effort: "none"`; LM Studio ignores API thinking parameters, so FerriScribe injects a pre-closed think-block prefill instead — for a fix that covers every app at once, edit the model's prompt template in LM Studio (Model Settings → Prompt Template, add `{%- set enable_thinking = false %}`).
 - **Retrieval-Augmented Generation (RAG)** — Ingest clinical documents; embeddings served by the same Ollama instance, with BM25 + vector + graph retrieval at query time.
 - **Agentic Workflows** — Multi-step orchestrator with tool use (RAG search, note generation) for chat sessions.
 
