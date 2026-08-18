@@ -4,8 +4,13 @@
 //! `condition_chips` table (not the settings blob). Reads/writes hit
 //! `medical_db::condition_chips::ConditionChipsRepo` directly — the same
 //! pattern as the vocabulary handlers above. Deletion is soft (tombstoned),
-//! so a two-way merge can propagate add/remove across machines. No PHI in
-//! logs; only counts and lengths are logged.
+//! so a two-way merge can propagate add/remove across machines. List and
+//! sync responses intentionally include tombstones (the FULL list) so a
+//! deletion on one machine reaches every client — a stale client pushing
+//! back an active copy cannot resurrect it (ties break toward the
+//! tombstone in `merge_incoming`). Tombstones are pruned after 365 days,
+//! long enough for every machine to have seen them. No PHI in logs; only
+//! counts and lengths are logged.
 
 use std::sync::Arc;
 
@@ -19,7 +24,12 @@ use tracing::{debug, info, warn};
 
 use super::{ApiState, authorize};
 
-/// GET /v1/condition-chips — return all active condition chips.
+/// GET /v1/condition-chips — return ALL condition chips, including
+/// tombstones. Tombstones travel intentionally: a client that never learned
+/// of a deletion must receive the tombstone so its local copy converges to
+/// deleted (a response of active-only chips would leave stale clients free
+/// to resurrect deleted chips practice-wide). Clients filter locally via
+/// `merge_incoming`, whose return value is the active list.
 pub(super) async fn condition_chips_list_handler(
     AxumState(state): AxumState<ApiState>,
     headers: HeaderMap,
@@ -29,7 +39,7 @@ pub(super) async fn condition_chips_list_handler(
     let chips = tokio::task::spawn_blocking(
         move || -> Result<Vec<medical_core::types::condition_chip::ConditionChip>, medical_core::error::AppError> {
             let conn = db.conn()?;
-            medical_db::condition_chips::ConditionChipsRepo::list_active(&conn)
+            medical_db::condition_chips::ConditionChipsRepo::list_all(&conn)
                 .map_err(medical_core::error::AppError::from)
         },
     )
@@ -46,7 +56,11 @@ pub(super) async fn condition_chips_list_handler(
 /// POST /v1/condition-chips/sync — two-way merge.
 ///
 /// Body: the client's full chip list (active chips + tombstones).
-/// Returns: the merged active chip list after applying last-write-wins.
+/// Returns: the merged FULL chip list (active chips + tombstones) after
+/// applying last-write-wins. Tombstones travel intentionally so deletions
+/// propagate to every client; each client merges the response locally via
+/// `merge_incoming`, which applies the tombstones and returns the active
+/// list for its UI.
 pub(super) async fn condition_chips_sync_handler(
     AxumState(state): AxumState<ApiState>,
     headers: HeaderMap,
@@ -57,19 +71,27 @@ pub(super) async fn condition_chips_sync_handler(
 
     let incoming_count = incoming.len();
 
-    // Prune old tombstones opportunistically (30 days). Best-effort — a
-    // prune failure must not fail the sync.
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    // Prune old tombstones opportunistically. Retention is 365 days: a
+    // tombstone must outlive every stale client's next sync, or a machine
+    // that syncs rarely (or was offline for weeks) would never learn of the
+    // deletion and could resurrect the chip practice-wide. The condition
+    // chips table is tiny, so a year of tombstones costs nothing. Best
+    // effort — a prune failure must not fail the sync.
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(365);
     let cutoff_iso = cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
     let merged = tokio::task::spawn_blocking(
         move || -> Result<Vec<medical_core::types::condition_chip::ConditionChip>, medical_core::error::AppError> {
             let conn = db.conn()?;
-            let result = medical_db::condition_chips::ConditionChipsRepo::merge_incoming(&conn, &incoming)
+            // Merge the client's list in (LWW; ties break toward the
+            // tombstone). The merge's return value is the ACTIVE list —
+            // discard it and serve the FULL list so tombstones travel.
+            medical_db::condition_chips::ConditionChipsRepo::merge_incoming(&conn, &incoming)
                 .map_err(medical_core::error::AppError::from)?;
             // Best-effort prune — don't fail the sync if pruning errors.
             let _ = medical_db::condition_chips::ConditionChipsRepo::prune_tombstones(&conn, &cutoff_iso);
-            Ok(result)
+            medical_db::condition_chips::ConditionChipsRepo::list_all(&conn)
+                .map_err(medical_core::error::AppError::from)
         },
     )
     .await

@@ -143,12 +143,19 @@ pub fn retention_sweep_tick(db: &Database, is_server: bool) {
             // against rows that soft_delete already de-indexed, which fails
             // with SQLITE_CORRUPT — the reason the 30-day durable-deletion
             // policy never actually deleted rows before this fix.
+            //
+            // The ledger variant records each purged id in
+            // `purged_recordings` inside the same transaction, so
+            // `merge_incoming` can later refuse stale copies of these
+            // recordings pushed by machines that missed the deletion.
+            // Id + timestamp only — no PHI.
             let ids: Vec<uuid::Uuid> = to_purge.iter().map(|(id, _)| *id).collect();
-            match RecordingsRepo::purge_soft_deleted(&conn, &ids) {
+            match RecordingsRepo::purge_soft_deleted_with_ledger(&conn, &ids) {
                 Ok(purged) => {
                     tracing::info!(
                         purged = purged.len(),
                         vectors_cleaned = to_purge.len(),
+                        ledger_count = purged.len(),
                         "tombstone sweeper purged soft-deleted recordings + RAG vectors + audio files"
                     );
                 }
@@ -276,6 +283,12 @@ mod tests {
             "fresh recording untouched"
         );
         assert!(row_exists(&conn, old.id), "clients never purge rows");
+        let ledger_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM purged_recordings", [], |row| {
+                row.get(0)
+            })
+            .expect("count ledger");
+        assert_eq!(ledger_rows, 0, "clients never write the purge ledger");
     }
 
     #[test]
@@ -314,6 +327,24 @@ mod tests {
             "audio file removed with the purged row"
         );
         assert!(row_exists(&conn, visible.id), "visible row kept");
+        // The purge was ledgered so a stale peer copy can't resurrect it;
+        // the kept visible row must NOT be ledgered.
+        let ledger_at: Option<String> = conn
+            .query_row(
+                "SELECT purged_at FROM purged_recordings WHERE id = ?1",
+                [rec.id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("query ledger");
+        assert!(ledger_at.is_some(), "server purge must write the ledger");
+        let ledgered_visible: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+                [visible.id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("count ledger for kept row");
+        assert_eq!(ledgered_visible, 0, "kept rows are never ledgered");
     }
 
     #[test]

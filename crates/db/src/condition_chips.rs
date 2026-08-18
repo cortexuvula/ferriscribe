@@ -267,14 +267,16 @@ impl ConditionChipsRepo {
     /// local increment. Returns the active list afterwards (now reordered by
     /// frequency, so the caller's UI reflects the new ranking immediately).
     ///
-    /// **Upsert-on-miss:** if no active chip exists for this text (e.g. a
-    /// fresh install whose default chips were never seeded, or a chip the user
-    /// is clicking from the frontend fallback list), the chip is created first
-    /// — with `use_count = 1` — and then returned. This makes frequency
+    /// **Upsert-on-miss:** if no row exists at all for this text (e.g. a
+    /// fresh install whose default chips were never seeded, or a chip the
+    /// user is clicking from the frontend fallback list), the chip is
+    /// created — with `use_count = 1` — and returned. This makes frequency
     /// tracking self-healing: the feature works out-of-box for new users
     /// without requiring a seed migration, and recovers if a row is ever
-    /// missing. A tombstoned (soft-deleted) chip is resurrected as an active
-    /// chip with count 1.
+    /// missing. A tombstoned (soft-deleted) chip is NOT resurrected by a
+    /// click — with tombstones propagating across machines, a click on a
+    /// stale list must not undelete the condition practice-wide; explicit
+    /// [`add`](Self::add) still resurrects.
     ///
     /// Runs inside a transaction so a concurrent writer can't observe a
     /// half-incremented row or a create/increment split.
@@ -285,31 +287,45 @@ impl ConditionChipsRepo {
     ) -> DbResult<Vec<ConditionChip>> {
         let id = deterministic_id(text);
         let tx = conn.unchecked_transaction()?;
+        // Active rows only: a click must not resurrect a tombstone. A
+        // tombstoned chip once carried a fresh `deleted_at = NULL` here,
+        // which (after tombstones started propagating) let one user's click
+        // on a stale list undelete the condition practice-wide. Resurrection
+        // is the explicit add's job; missing rows still self-create below.
         let changed = tx.execute(
             "UPDATE condition_chips
-             SET use_count = use_count + 1, updated_at = ?1, deleted_at = NULL
-             WHERE id = ?2",
+             SET use_count = use_count + 1, updated_at = ?1
+             WHERE id = ?2 AND deleted_at IS NULL",
             params![now_iso, id],
         )?;
         if changed == 0 {
-            // No row at all (not even a tombstone) — create the chip with
-            // use_count = 1. sort_order appends to the end so we don't
-            // disturb existing ordering; the chip will float to its
-            // frequency rank on subsequent renders.
-            let max_order: i32 = tx.query_row(
-                "SELECT COALESCE(MAX(sort_order), -1) FROM condition_chips WHERE deleted_at IS NULL",
-                [],
+            // A tombstone may exist (deleted elsewhere) — only create when
+            // there is no row at all.
+            let any_row: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM condition_chips WHERE id = ?1)",
+                [&id],
                 |row| row.get(0),
             )?;
-            let chip = ConditionChip {
-                id,
-                text: text.trim().to_string(),
-                updated_at: now_iso.to_string(),
-                deleted_at: None,
-                sort_order: max_order + 1,
-                use_count: 1,
-            };
-            Self::upsert(&tx, &chip)?;
+            if !any_row {
+                // No row at all — create the chip with use_count = 1.
+                // sort_order appends to the end so we don't disturb existing
+                // ordering; the chip will float to its frequency rank on
+                // subsequent renders.
+                let max_order: i32 = tx.query_row(
+                    "SELECT COALESCE(MAX(sort_order), -1) FROM condition_chips WHERE deleted_at IS NULL",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let chip = ConditionChip {
+                    id,
+                    text: text.trim().to_string(),
+                    updated_at: now_iso.to_string(),
+                    deleted_at: None,
+                    sort_order: max_order + 1,
+                    use_count: 1,
+                };
+                Self::upsert(&tx, &chip)?;
+            }
         }
         tx.commit()?;
         Self::list_active(conn)
@@ -590,25 +606,27 @@ mod tests {
     }
 
     #[test]
-    fn increment_use_resurrects_tombstone() {
-        // A previously-deleted chip, when incremented, comes back as active
-        // with count 1 (the UPDATE clears deleted_at and sets use_count = old+1;
-        // for a fresh tombstone that had count 0, that's 1).
+    fn increment_use_does_not_resurrect_tombstone() {
+        // A click must not undelete a condition: with tombstones propagating
+        // across machines, resurrection-by-click on a stale list would undo
+        // another machine's deletion practice-wide. The tombstone stands and
+        // the chip stays out of the active list; explicit `add` resurrects.
         let conn = fresh();
         ConditionChipsRepo::upsert(&conn, &chip("Hypertension", 0, true)).unwrap();
         assert!(ConditionChipsRepo::list_active(&conn).unwrap().is_empty());
 
         let after =
             ConditionChipsRepo::increment_use(&conn, "Hypertension", &now(10)).expect("increment");
-        assert_eq!(after.len(), 1, "chip should be resurrected");
         assert!(
-            after[0].deleted_at.is_none(),
-            "resurrected chip must be active"
+            after.is_empty(),
+            "tombstoned chip must stay deleted after a click"
         );
-        assert_eq!(
-            after[0].use_count, 1,
-            "tombstone (count 0) resurrects at count 1"
-        );
+
+        // The tombstone row itself is untouched (still deleted, count kept).
+        let all = ConditionChipsRepo::list_all(&conn).unwrap();
+        assert_eq!(all.len(), 1, "tombstone row retained");
+        assert!(all[0].deleted_at.is_some(), "row stays tombstoned");
+        assert_eq!(all[0].use_count, 0, "count not bumped through a tombstone");
     }
 
     #[test]

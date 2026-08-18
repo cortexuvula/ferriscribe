@@ -22,6 +22,7 @@
 //!     POST   /                       — add word { word }
 //!     DELETE /{word}                 — remove word
 //!     POST   /sync                   — two-way merge (client → server)
+//!     POST   /sync-full              — full-fidelity merge (entries incl. tombstones)
 //!     GET    /events                 — SSE change notifications
 //!   /v1/condition-chips
 //!     GET    /                       — list active chips
@@ -156,6 +157,10 @@ pub async fn spawn(
         .route(
             "/v1/user-dictionary/sync",
             post(user_dictionary::dict_sync_handler),
+        )
+        .route(
+            "/v1/user-dictionary/sync-full",
+            post(user_dictionary::dict_sync_full_handler),
         )
         .route(
             "/v1/user-dictionary/events",

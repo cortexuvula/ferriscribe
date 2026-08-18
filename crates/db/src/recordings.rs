@@ -405,15 +405,57 @@ impl RecordingsRepo {
     /// which SQLite reports as `SQLITE_CORRUPT` ("database disk image is
     /// malformed") — the raw `DELETE` this replaces never succeeded.
     ///
+    /// The server-side tombstone sweeper should call
+    /// [`RecordingsRepo::purge_soft_deleted_with_ledger`] instead, which
+    /// additionally records each purged id in the `purged_recordings`
+    /// resurrection-blocking ledger inside the same transaction.
+    ///
     /// # Errors
     ///
     /// Returns [`DbError::Sqlite`] on any failure; the transaction is rolled
     /// back and no rows are removed.
     pub fn purge_soft_deleted(conn: &Connection, ids: &[Uuid]) -> DbResult<Vec<Uuid>> {
+        Self::purge_soft_deleted_impl(conn, ids, false)
+    }
+
+    /// [`RecordingsRepo::purge_soft_deleted`], plus a write to the
+    /// `purged_recordings` ledger for every id actually purged — in the SAME
+    /// transaction as the row deletion, so a durable deletion can never land
+    /// without its resurrection block (or vice versa).
+    ///
+    /// The ledger is what lets `ContentSyncRepo::merge_incoming` refuse a
+    /// stale live copy of the recording pushed later by a machine that
+    /// missed the practice-wide deletion: same-UUID + ledger hit is always a
+    /// stale copy, since genuinely re-created content gets a new UUID.
+    ///
+    /// **HIPAA note:** the ledger stores the recording id and a purge
+    /// timestamp only — never filenames, transcripts, or any other content.
+    ///
+    /// Only ids whose rows were actually deleted are ledgered; a visible id
+    /// passed by mistake is neither purged nor ledgered (a spurious ledger
+    /// entry would over-block a later legitimate sync insert of that id).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Sqlite`] on any failure; the transaction is rolled
+    /// back, no rows are removed, and no ledger entries are written.
+    pub fn purge_soft_deleted_with_ledger(conn: &Connection, ids: &[Uuid]) -> DbResult<Vec<Uuid>> {
+        Self::purge_soft_deleted_impl(conn, ids, true)
+    }
+
+    /// Shared body of the two purge entry points. See their docs; the flag
+    /// selects whether purged ids are also written to the
+    /// `purged_recordings` ledger.
+    fn purge_soft_deleted_impl(
+        conn: &Connection,
+        ids: &[Uuid],
+        write_ledger: bool,
+    ) -> DbResult<Vec<Uuid>> {
         // `unchecked_transaction` because repo methods receive `&Connection`
         // (the crate's established pattern — see migrations/mod.rs). If any
         // statement fails, the transaction's Drop rolls everything back.
         let tx = conn.unchecked_transaction()?;
+        let purged_at = Utc::now().to_rfc3339();
         let mut purged = Vec::new();
         for id in ids {
             let id_str = id.to_string();
@@ -435,6 +477,16 @@ impl RecordingsRepo {
                 [&id_str],
             )?;
             if rows > 0 {
+                if write_ledger {
+                    // Upsert keeps re-purges (and any replay of this batch)
+                    // idempotent while refreshing the timestamp. Same
+                    // transaction as the DELETE above — atomic by design.
+                    tx.execute(
+                        "INSERT INTO purged_recordings (id, purged_at) VALUES (?1, ?2)
+                         ON CONFLICT(id) DO UPDATE SET purged_at = excluded.purged_at",
+                        rusqlite::params![id_str, purged_at],
+                    )?;
+                }
                 purged.push(*id);
             }
         }

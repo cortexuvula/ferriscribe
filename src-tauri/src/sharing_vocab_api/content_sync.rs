@@ -19,7 +19,7 @@ use chrono::Utc;
 use futures_util::Stream;
 use medical_core::types::recording::Recording;
 use medical_db::content_sync::{
-    ContentSyncRepo, FieldRevision, MergeConflict, SyncFieldValue, SyncRecording,
+    ContentSyncRepo, FieldRevision, MergeConflict, PurgedRef, SyncFieldValue, SyncRecording,
 };
 use medical_db::recordings::RecordingsRepo;
 use serde::Deserialize;
@@ -48,6 +48,15 @@ pub(super) struct ContentPullResponse {
     recordings: Vec<SyncRecording>,
     server_time: String,
     has_more: bool,
+    /// Purge notifications: `purged_recordings` ledger entries newer than
+    /// the client's `since` cursor (all entries when it sent none — a
+    /// fresh client's first pull). Clients tombstone any local live copy
+    /// so machines that missed a deletion converge. Wire-compatible both
+    /// ways: `skip_serializing_if` keeps the payload byte-identical to the
+    /// pre-purge format when empty, and older clients ignore the unknown
+    /// field (no `deny_unknown_fields` anywhere on this path).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    purged: Vec<PurgedRef>,
 }
 
 #[derive(Deserialize)]
@@ -89,15 +98,34 @@ fn build_sparse_fields(
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| rec.created_at.to_rfc3339());
 
+    // Field wire timestamp = max(revision, row write) — the same rider as
+    // the client-side builder in commands/content_sync.rs. Local writers
+    // that bump only the row (transcription/generation completion) leave
+    // stale revisions from a pre-edit sync round-trip; serving the stale
+    // revision timestamp makes clients' merges tie and silently drop the
+    // newer value. Parsed comparison (mixed timestamp formats compare
+    // wrongly as strings). Row-derived stamps carry no origin device.
+    let field_ts = |rev: Option<&FieldRevision>| -> (String, Option<String>) {
+        match rev {
+            Some(r) => {
+                if medical_db::content_sync::cmp_lww_timestamps(&r.updated_at, &row_ts)
+                    == std::cmp::Ordering::Less
+                {
+                    (row_ts.clone(), None)
+                } else {
+                    (r.updated_at.clone(), r.origin_device.clone())
+                }
+            }
+            None => (row_ts.clone(), None),
+        }
+    };
+
     let mut fields: HashMap<String, SyncFieldValue> = HashMap::new();
 
     // Text columns: value is a JSON string when present.
     let mut push_text = |name: &str, val: Option<&str>| {
         if let Some(s) = val {
-            let (ts, device) = rev_map
-                .get(name)
-                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
-                .unwrap_or_else(|| (row_ts.clone(), None));
+            let (ts, device) = field_ts(rev_map.get(name).copied());
             fields.insert(
                 name.to_string(),
                 SyncFieldValue {
@@ -121,10 +149,7 @@ fn build_sparse_fields(
     // serialized JSON value directly.
     let mut push_json = |name: &str, val: &serde_json::Value| {
         if !val.is_null() {
-            let (ts, device) = rev_map
-                .get(name)
-                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
-                .unwrap_or_else(|| (row_ts.clone(), None));
+            let (ts, device) = field_ts(rev_map.get(name).copied());
             fields.insert(
                 name.to_string(),
                 SyncFieldValue {
@@ -250,13 +275,28 @@ pub(super) async fn content_sync_pull_handler(
     let since = q.since;
     let db = Arc::clone(&state.db);
 
-    let recordings = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<SyncRecording>, bool), medical_core::error::AppError> {
+    let pulled = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<SyncRecording>, bool, Vec<PurgedRef>), medical_core::error::AppError>
+        {
             let conn = db.conn()?;
             let (ids, has_more) = ContentSyncRepo::changed_since(&conn, since.as_deref(), limit)
                 .map_err(medical_core::error::AppError::from)?;
             let recs = load_sync_recordings(&conn, &ids)?;
-            Ok((recs, has_more))
+            // Purge notifications ride on the same response: ledger entries
+            // newer than the client's cursor (all of them for a fresh
+            // client). Best-effort by design — a ledger read failure must
+            // not fail the pull; the client re-requests the same window on
+            // its next sync cycle. The failure is still logged (error
+            // only, no PHI) so a persistently broken ledger is diagnosable
+            // instead of silently degrading convergence.
+            let purged = match ContentSyncRepo::purged_since(&conn, since.as_deref()) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, "content_sync pull: purge-ledger read failed; continuing without purge notifications");
+                    Vec::new()
+                }
+            };
+            Ok((recs, has_more, purged))
         },
     )
     .await
@@ -266,13 +306,19 @@ pub(super) async fn content_sync_pull_handler(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let (recordings, has_more) = recordings;
+    let (recordings, has_more, purged) = pulled;
 
-    info!(count = recordings.len(), has_more, "content_sync: pull");
+    info!(
+        count = recordings.len(),
+        has_more,
+        purged_count = purged.len(),
+        "content_sync: pull"
+    );
     Ok(Json(ContentPullResponse {
         recordings,
         server_time: Utc::now().to_rfc3339(),
         has_more,
+        purged,
     }))
 }
 
@@ -420,3 +466,32 @@ pub(super) async fn content_events_handler(
 // above compiles without a top-level `use` cluttering the module's public
 // imports. Kept private to this module.
 use tauri::Emitter as _;
+
+#[cfg(test)]
+mod sparse_fields_tests {
+    // Pins the max(revision, row) stamp on the SERVER-side builder — the
+    // pull responses clients consume. A stale revision must not mask a
+    // newer row-level write or clients' Equal-tie merges silently drop the
+    // newer value (final whole-feature review, HIGH-1).
+    use super::*;
+    use medical_db::Database;
+
+    #[test]
+    fn server_builder_row_timestamp_wins_over_stale_revision() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let mut rec = Recording::new("srv-rider.wav", std::path::PathBuf::from("/audio/srv.wav"));
+        rec.soap_note = Some("regenerated soap".to_string());
+        let row_time = chrono::Utc::now();
+        rec.updated_at = Some(row_time);
+        RecordingsRepo::insert(&conn, &rec).expect("insert");
+        ContentSyncRepo::upsert_revision(&conn, &rec.id, "soap_note", "2020-01-01T00:00:00Z", None)
+            .expect("stale revision");
+
+        let revisions = ContentSyncRepo::revisions_for(&conn, &rec.id).expect("revisions");
+        let fields = build_sparse_fields(&rec, Some(&revisions));
+        let soap = &fields["soap_note"];
+        assert_ne!(soap.updated_at, "2020-01-01T00:00:00Z");
+        assert_eq!(soap.updated_at, row_time.to_rfc3339());
+    }
+}

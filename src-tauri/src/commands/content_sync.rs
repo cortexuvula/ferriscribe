@@ -195,12 +195,32 @@ fn build_sparse_fields(
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| rec.created_at.to_rfc3339());
 
+    // Field wire timestamp = max(revision, row write). Writers that bump
+    // only the row (transcription/generation completion via
+    // `RecordingsRepo::update`) leave stale revisions from a pre-edit sync
+    // round-trip; shipping the stale revision timestamp ties against the
+    // server's copy and the merge's Equal arm silently drops the newer
+    // value. Parsed comparison — string comparison is wrong across the two
+    // stored timestamp formats. When the row is newer the origin device is
+    // unknown (the row bump doesn't carry one).
+    let field_ts = |rev: Option<&FieldRevision>| -> (String, Option<String>) {
+        match rev {
+            Some(r) => {
+                if medical_db::content_sync::cmp_lww_timestamps(&r.updated_at, &row_ts)
+                    == std::cmp::Ordering::Less
+                {
+                    (row_ts.clone(), None)
+                } else {
+                    (r.updated_at.clone(), r.origin_device.clone())
+                }
+            }
+            None => (row_ts.clone(), None),
+        }
+    };
+
     let mut push_text = |name: &str, val: Option<&str>| {
         if let Some(s) = val {
-            let (ts, device) = rev_map
-                .get(name)
-                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
-                .unwrap_or_else(|| (row_ts.clone(), None));
+            let (ts, device) = field_ts(rev_map.get(name).copied());
             fields.insert(
                 name.to_string(),
                 SyncFieldValue {
@@ -222,10 +242,7 @@ fn build_sparse_fields(
 
     let mut push_json = |name: &str, val: &serde_json::Value| {
         if !val.is_null() {
-            let (ts, device) = rev_map
-                .get(name)
-                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
-                .unwrap_or_else(|| (row_ts.clone(), None));
+            let (ts, device) = field_ts(rev_map.get(name).copied());
             fields.insert(
                 name.to_string(),
                 SyncFieldValue {
@@ -317,11 +334,30 @@ async fn run_sync(
             .max()
             .map(|s| s.to_string());
 
+        // Purge notifications travel on the same response; they are applied
+        // on the same connection right after a successful merge (below).
+        // Destructured out of `batch` so the merge closure can own both.
+        let batch_recordings = batch.recordings;
+        let batch_purged = batch.purged;
+        let batch_purged_count = batch_purged.len();
+
         let merge_db = Arc::clone(&db);
-        let merge_result = tokio::task::spawn_blocking(move || {
-            let conn = merge_db.conn()?;
-            ContentSyncRepo::merge_incoming(&conn, &batch.recordings).map_err(AppError::from)
-        })
+        let merged = tokio::task::spawn_blocking(
+            move || -> AppResult<(medical_db::content_sync::MergeResult, AppResult<()>)> {
+                let conn = merge_db.conn()?;
+                let result = ContentSyncRepo::merge_incoming(&conn, &batch_recordings)
+                    .map_err(AppError::from)?;
+                // Only reached after a successful merge. Tombstone any stale
+                // LOCAL LIVE copy of a server-purged recording so this
+                // machine converges with the practice-wide deletion. The
+                // outcome is returned separately: the caller must hold the
+                // cursor when it fails (see below) rather than treat it as
+                // a merge failure.
+                let purged_apply = ContentSyncRepo::apply_purged_refs(&conn, &batch_purged)
+                    .map_err(AppError::from);
+                Ok((result, purged_apply))
+            },
+        )
         .await
         .map_err(crate::commands::join_err)?;
 
@@ -329,7 +365,7 @@ async fn run_sync(
         // pull loop so the next sync cycle retries the same batch from the
         // same cursor position. Advancing past a failed merge would
         // permanently skip the failed batch (data loss).
-        let merge_result = match merge_result {
+        let (merge_result, purged_apply) = match merged {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(
@@ -349,6 +385,24 @@ async fn run_sync(
         // Emit per-recording update events so the editor can refresh (C6 fix).
         for id in &merge_result.changed_recording_ids {
             let _ = app.emit("recording-updated", serde_json::json!({ "id": id }));
+        }
+
+        // Purge application is best-effort for the SYNC (a failure never
+        // fails the round), but it must hold the cursor: the next cursor is
+        // the batch's max `updated_at`, which can exceed the failed refs'
+        // `purged_at` — advancing would make the server consider them
+        // already seen and they would never be re-delivered. Break without
+        // advancing so the next cycle unconditionally retries both the
+        // batch (idempotent re-merge) and the refs (idempotent no-ops on
+        // already-tombstoned rows).
+        if let Err(e) = purged_apply {
+            tracing::warn!(
+                purged_count = batch_purged_count,
+                batch_count,
+                error = %e,
+                "sync: failed to apply purge notifications — NOT advancing cursor, will retry next cycle"
+            );
+            break;
         }
 
         // Advance the cursor if we made progress.
@@ -1107,6 +1161,15 @@ mod tests {
             "synced_from": "office-server-machine",
             "context": "freeform context"
         });
+        // Row write OLDER than the revision below, so the revision wins the
+        // max(revision, row) stamp and its assertions below hold. (The
+        // opposite direction — newer row beating a stale revision — is
+        // covered by build_sparse_fields_row_timestamp_wins_over_stale_revision.)
+        rec.updated_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-05-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
         RecordingsRepo::insert(conn, &rec).expect("insert recording");
 
         ContentSyncRepo::upsert_revision(
@@ -1170,5 +1233,43 @@ mod tests {
             err.to_string().contains("invalid recording id"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn build_sparse_fields_row_timestamp_wins_over_stale_revision() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let mut rec = medical_core::types::recording::Recording::new(
+            "rider.wav",
+            std::path::PathBuf::from("/audio/rider.wav"),
+        );
+        rec.soap_note = Some("regenerated soap".to_string());
+        let row_time = chrono::Utc::now();
+        rec.updated_at = Some(row_time);
+        RecordingsRepo::insert(&conn, &rec).expect("insert");
+        // Stale revision from a pre-regeneration sync round-trip.
+        ContentSyncRepo::upsert_revision(&conn, &rec.id, "soap_note", "2020-01-01T00:00:00Z", None)
+            .expect("seed stale revision");
+
+        let sync = build_sync_recording(&conn, &rec.id.to_string()).expect("build");
+        let soap = &sync.fields["soap_note"];
+        assert_ne!(
+            soap.updated_at, "2020-01-01T00:00:00Z",
+            "stale revision must not mask the newer row-level write"
+        );
+        assert_eq!(soap.updated_at, row_time.to_rfc3339());
+        assert!(
+            soap.origin_device.is_none(),
+            "row-derived stamp carries no device"
+        );
+
+        // Newer revision still wins over the row.
+        let newer_rev = (row_time + chrono::TimeDelta::seconds(60)).to_rfc3339();
+        ContentSyncRepo::upsert_revision(&conn, &rec.id, "soap_note", &newer_rev, Some("desk-a"))
+            .expect("seed newer revision");
+        let sync2 = build_sync_recording(&conn, &rec.id.to_string()).expect("build 2");
+        let soap2 = &sync2.fields["soap_note"];
+        assert_eq!(soap2.updated_at, newer_rev, "newer revision wins");
+        assert_eq!(soap2.origin_device.as_deref(), Some("desk-a"));
     }
 }
