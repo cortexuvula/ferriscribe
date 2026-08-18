@@ -20,6 +20,7 @@
 use async_trait::async_trait;
 use futures_core::Stream;
 use reqwest::Client;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock};
 
 use medical_core::{
@@ -27,8 +28,8 @@ use medical_core::{
     traits::AiProvider,
     types::endpoint::http_url,
     types::{
-        CompletionRequest, CompletionResponse, ModelInfo, RemoteEndpoint, StreamChunk,
-        ToolCompletionResponse, ToolDef,
+        CompletionRequest, CompletionResponse, Message, MessageContent, ModelInfo, RemoteEndpoint,
+        Role, StreamChunk, ToolCompletionResponse, ToolDef,
     },
 };
 
@@ -68,7 +69,18 @@ pub struct LmStudioProvider {
     /// Optional LAN/Tailscale endpoint; takes precedence over `static_base_url`.
     endpoint: RwLock<Option<RemoteEndpoint>>,
     url_cache: Mutex<Option<ResolvedCache>>,
+    /// When `true`, an assistant prefill message closing the model's
+    /// `<think>` block is appended to every request (see
+    /// [`apply_thinking_control`]). Set via [`set_thinking_disabled`] from
+    /// AppConfig; changes only take effect when `reinit_providers` rebuilds
+    /// the provider.
+    thinking_disabled: AtomicBool,
 }
+
+/// The assistant-prefill payload used to suppress the reasoning/"thinking"
+/// phase: an already-opened-and-closed empty `<think>` block. The model sees
+/// that thinking has "happened" and continues straight to the answer.
+const THINKING_PREFILL: &str = "<think>\n\n</think>\n\n";
 
 impl LmStudioProvider {
     /// Create a new LM Studio provider.
@@ -109,6 +121,7 @@ impl LmStudioProvider {
             )),
             endpoint: RwLock::new(None),
             url_cache: Mutex::new(None),
+            thinking_disabled: AtomicBool::new(false),
         })
     }
 
@@ -149,7 +162,43 @@ impl LmStudioProvider {
             )),
             endpoint: RwLock::new(ep),
             url_cache: Mutex::new(None),
+            thinking_disabled: AtomicBool::new(false),
         })
+    }
+
+    /// Toggle the reasoning/"thinking" phase off for this provider.
+    ///
+    /// LM Studio (as of 0.4.16+) silently drops every API-level thinking
+    /// parameter (`enable_thinking`, `reasoning_effort`,
+    /// `chat_template_kwargs`), so unlike Ollama we cannot ask for it in the
+    /// request body. Instead [`apply_thinking_control`] appends an assistant
+    /// prefill message containing a pre-closed `<think>` block — the
+    /// model-side equivalent of the recommended server-side fix of editing
+    /// the model's Jinja prompt template with
+    /// `{%- set enable_thinking = false %}` (LM Studio → Model Settings →
+    /// Prompt Template; lmstudio.ai/docs/app/advanced/prompt-template),
+    /// which needs no FerriScribe code and also disables thinking for every
+    /// other client.
+    ///
+    /// Called from `init_ai_providers` with the user's
+    /// `lmstudio_disable_thinking` setting; the frontend must call
+    /// `reinit_providers` after changing that setting for it to take effect.
+    pub fn set_thinking_disabled(&self, disabled: bool) {
+        self.thinking_disabled.store(disabled, Ordering::Relaxed);
+    }
+
+    /// Append the pre-closed `<think>`-block assistant prefill to an
+    /// outgoing request when the user has disabled thinking. The prefill is
+    /// the LAST message so the model continues from it directly into the
+    /// answer instead of opening a new thinking block.
+    fn apply_thinking_control(&self, request: &mut CompletionRequest) {
+        if self.thinking_disabled.load(Ordering::Relaxed) {
+            request.messages.push(Message {
+                role: Role::Assistant,
+                content: MessageContent::Text(THINKING_PREFILL.into()),
+                tool_calls: vec![],
+            });
+        }
     }
 
     /// Override the remote endpoint used for LAN/Tailscale resolution.
@@ -287,26 +336,29 @@ impl AiProvider for LmStudioProvider {
         }])
     }
 
-    async fn complete(&self, request: CompletionRequest) -> AppResult<CompletionResponse> {
+    async fn complete(&self, mut request: CompletionRequest) -> AppResult<CompletionResponse> {
         let client = self.sync_client_url().await?;
+        self.apply_thinking_control(&mut request);
         client.complete(&request).await
     }
 
     async fn complete_stream(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> AppResult<Box<dyn Stream<Item = AppResult<StreamChunk>> + Send + Unpin>> {
         let client = self.sync_client_url().await?;
+        self.apply_thinking_control(&mut request);
         let pinned = client.complete_stream(&request).await?;
         Ok(Box::new(pinned))
     }
 
     async fn complete_with_tools(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
         tools: Vec<ToolDef>,
     ) -> AppResult<ToolCompletionResponse> {
         let client = self.sync_client_url().await?;
+        self.apply_thinking_control(&mut request);
         client.complete_with_tools(&request, tools).await
     }
 }
@@ -468,6 +520,75 @@ mod tests {
         };
         assert!(p.set_endpoint(Some(good), false).await.is_ok());
     }
+
+    #[test]
+    fn thinking_control_leaves_messages_alone_when_not_disabled() {
+        let p = LmStudioProvider::new(None, false, None, RetryConfig::default()).expect("build");
+        let mut req = offline_tests::minimal_request("default");
+        p.apply_thinking_control(&mut req);
+        assert_eq!(
+            req.messages.len(),
+            1,
+            "no prefill must be injected when thinking is enabled"
+        );
+    }
+
+    #[test]
+    fn thinking_control_appends_prefill_as_last_message_when_disabled() {
+        let p = LmStudioProvider::new(None, false, None, RetryConfig::default()).expect("build");
+        p.set_thinking_disabled(true);
+        let mut req = offline_tests::minimal_request("qwen3.8-27b");
+        p.apply_thinking_control(&mut req);
+        assert_eq!(req.messages.len(), 2);
+        let prefill = req.messages.last().expect("prefill present");
+        assert!(matches!(prefill.role, Role::Assistant));
+        match &prefill.content {
+            MessageContent::Text(text) => {
+                assert_eq!(text, "<think>\n\n</think>\n\n");
+                assert!(text.contains("</think>"), "think block must be closed");
+            }
+            other => panic!("prefill must be plain text, got {other:?}"),
+        }
+    }
+
+    /// End-to-end over HTTP: with thinking disabled, the POST body's last
+    /// message must be the assistant prefill with the closed think block.
+    #[tokio::test]
+    async fn complete_wire_body_carries_think_prefill() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "<think>\n\n</think>\n\n"}
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": "qwen3.8-27b",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let policy = RetryConfig {
+            max_retries: 0,
+            ..RetryConfig::default()
+        };
+        let p = LmStudioProvider::new(Some(&server.uri()), false, None, policy).expect("build");
+        p.set_thinking_disabled(true);
+
+        let resp = p
+            .complete(offline_tests::minimal_request("qwen3.8-27b"))
+            .await
+            .expect("complete should succeed against mock");
+        assert_eq!(resp.content, "ok");
+        server.verify().await;
+    }
 }
 
 #[cfg(test)]
@@ -486,7 +607,7 @@ mod offline_tests {
         port
     }
 
-    fn minimal_request(model: &str) -> CompletionRequest {
+    pub(super) fn minimal_request(model: &str) -> CompletionRequest {
         CompletionRequest {
             model: model.to_string(),
             messages: vec![Message {
@@ -497,6 +618,7 @@ mod offline_tests {
             temperature: Some(0.0),
             max_tokens: Some(10),
             system_prompt: None,
+            reasoning_effort: None,
         }
     }
 

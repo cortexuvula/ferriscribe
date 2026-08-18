@@ -201,6 +201,7 @@ impl OpenAiCompatibleClient {
             stream: None,
             tools: None,
             stream_options: None,
+            reasoning_effort: request.reasoning_effort.clone(),
         }
     }
 
@@ -398,6 +399,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             system_prompt: Some("You are a helpful assistant.".into()),
+            reasoning_effort: None,
         }
     }
 
@@ -424,6 +426,25 @@ mod tests {
         assert!(chat_req.stream.is_none());
         chat_req.stream = Some(true);
         assert_eq!(chat_req.stream, Some(true));
+    }
+
+    #[test]
+    fn build_request_maps_reasoning_effort_onto_wire() {
+        let c = make_client();
+        let mut req = make_request();
+        req.reasoning_effort = Some("none".into());
+        let chat_req = c.build_request(&req);
+        assert_eq!(chat_req.reasoning_effort.as_deref(), Some("none"));
+        let json = serde_json::to_value(&chat_req).expect("serialize");
+        assert_eq!(json["reasoning_effort"], "none");
+
+        // Neutral requests must not carry the field at all.
+        let neutral = c.build_request(&make_request());
+        let json = serde_json::to_value(&neutral).expect("serialize");
+        assert!(
+            json.get("reasoning_effort").is_none(),
+            "None reasoning_effort must be skipped: {json}"
+        );
     }
 
     #[test]

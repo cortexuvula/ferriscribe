@@ -261,6 +261,29 @@
     {/if}
   </div>
 
+  <div class="form-group">
+    <label class="form-row">
+      <input
+        type="checkbox"
+        checked={settings.state.lmstudio_disable_thinking ?? false}
+        onchange={async (e) => {
+          await settings.updateField('lmstudio_disable_thinking', (e.target as HTMLInputElement).checked);
+          try { await reinitProviders(); } catch (err) { console.error('Failed to reinit providers after thinking toggle:', err); }
+        }}
+      />
+      <span>
+        Disable thinking (reasoning models)
+        <p class="form-hint">
+          Skips the minutes-long reasoning/"thinking" phase on models like Qwen3
+          before they write a SOAP note. LM Studio ignores API thinking parameters,
+          so FerriScribe injects a pre-closed think block instead. For a fix that
+          covers every app, edit the model's Prompt Template in LM Studio
+          (Model Settings → Prompt Template, add <code>{'{%- set enable_thinking = false %}'}</code>).
+        </p>
+      </span>
+    </label>
+  </div>
+
   <!-- Ollama Server -->
   <div class="form-group-divider"></div>
   <h4 class="subsection-title">Ollama Server</h4>
@@ -351,6 +374,27 @@
     {:else if ollamaTestStatus === 'error'}
       <span class="test-result test-error">✗ {ollamaTestMessage}</span>
     {/if}
+  </div>
+
+  <div class="form-group">
+    <label class="form-row">
+      <input
+        type="checkbox"
+        checked={settings.state.ollama_disable_thinking ?? false}
+        onchange={async (e) => {
+          await settings.updateField('ollama_disable_thinking', (e.target as HTMLInputElement).checked);
+          try { await reinitProviders(); } catch (err) { console.error('Failed to reinit providers after thinking toggle:', err); }
+        }}
+      />
+      <span>
+        Disable thinking (reasoning models)
+        <p class="form-hint">
+          Skips the minutes-long reasoning/"thinking" phase on models like Qwen3
+          before they write a SOAP note. Sends <code>reasoning_effort: "none"</code>
+          to Ollama's OpenAI-compatible endpoint.
+        </p>
+      </span>
+    </label>
   </div>
 </section>
 
@@ -464,5 +508,19 @@
     color: var(--text-muted);
     margin: 4px 0 0;
     line-height: 1.5;
+  }
+
+  .form-hint code {
+    font-size: 10px;
+    background-color: var(--bg-tertiary, #374151);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  .form-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    cursor: pointer;
   }
 </style>

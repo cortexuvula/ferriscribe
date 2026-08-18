@@ -40,6 +40,14 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u32>,
     /// System prompt prepended to the conversation.
     pub system_prompt: Option<String>,
+    /// Reasoning/"thinking" effort hint for providers that support it
+    /// (e.g. `"none"`, `"low"`, `"medium"`, `"high"` on Ollama's
+    /// OpenAI-compatible endpoint, where `"none"` disables the thinking
+    /// phase). `None` leaves the model's default behavior unchanged.
+    /// Providers that ignore the parameter (LM Studio as of 0.4.16+)
+    /// silently drop it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// A single message in a conversation.
@@ -310,5 +318,38 @@ mod tests {
         };
         let json_val = serde_json::to_value(&msg).expect("serialize");
         assert_eq!(json_val["content"], serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn completion_request_reasoning_effort_round_trip() {
+        let req = CompletionRequest {
+            model: "qwen3.8:27b".into(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            system_prompt: None,
+            reasoning_effort: Some("none".into()),
+        };
+        let json = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(json["reasoning_effort"], "none");
+        let back: CompletionRequest = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.reasoning_effort.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn completion_request_without_reasoning_effort_deserializes() {
+        // Pre-thinking-control JSON must still load — the field is
+        // `#[serde(default)]` and absent from the wire when `None`.
+        let json = serde_json::json!({
+            "model": "llama3",
+            "messages": []
+        });
+        let req: CompletionRequest = serde_json::from_value(json).expect("deserialize legacy");
+        assert_eq!(req.reasoning_effort, None);
+        let serialized = serde_json::to_value(&req).expect("serialize");
+        assert!(
+            serialized.get("reasoning_effort").is_none(),
+            "None must be skipped on the wire: {serialized}"
+        );
     }
 }

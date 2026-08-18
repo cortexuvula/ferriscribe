@@ -49,6 +49,11 @@ pub(super) struct ChatRequest {
     pub tools: Option<Vec<ApiTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
+    /// Reasoning/"thinking" effort hint (e.g. `"none"` disables thinking on
+    /// Ollama). Honored by Ollama's OpenAI-compatible endpoint; silently
+    /// dropped by LM Studio (as of 0.4.16+). Never serialized when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

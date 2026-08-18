@@ -142,6 +142,7 @@ fn build_image_ocr_request(image_data_url: &str, model: &str) -> CompletionReque
         temperature: Some(0.0),
         max_tokens: None,
         system_prompt: Some(OCR_SYSTEM_PROMPT.to_string()),
+        reasoning_effort: None,
     }
 }
 

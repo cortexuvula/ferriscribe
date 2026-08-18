@@ -375,6 +375,9 @@ pub fn init_ai_providers(
         ollama_ep,
     ) {
         Ok(p) => {
+            // Captured at construction — a settings toggle only takes effect
+            // after reinit_providers rebuilds the registry.
+            p.set_thinking_disabled(config.ollama_disable_thinking);
             info!(url = %ollama_url, "Registering Ollama provider");
             let arc = Arc::new(p);
             registry.register(Arc::clone(&arc) as Arc<dyn medical_core::traits::AiProvider>);
@@ -401,6 +404,9 @@ pub fn init_ai_providers(
         lmstudio_ep,
     ) {
         Ok(p) => {
+            // Captured at construction — a settings toggle only takes effect
+            // after reinit_providers rebuilds the registry.
+            p.set_thinking_disabled(config.lmstudio_disable_thinking);
             info!(url = %lmstudio_url, "Registering LM Studio provider");
             let arc = Arc::new(p);
             registry.register(Arc::clone(&arc) as Arc<dyn medical_core::traits::AiProvider>);

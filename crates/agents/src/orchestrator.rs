@@ -132,6 +132,7 @@ impl AgentOrchestrator {
                 temperature: Some(temperature),
                 max_tokens: Some(4096),
                 system_prompt: Some(agent.system_prompt().to_string()),
+                reasoning_effort: None,
             };
 
             debug!(

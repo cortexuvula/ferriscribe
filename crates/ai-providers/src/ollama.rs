@@ -20,6 +20,7 @@
 use async_trait::async_trait;
 use futures_core::Stream;
 use reqwest::Client;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock};
 
 use medical_core::{
@@ -46,6 +47,13 @@ struct ResolvedCache {
 
 const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The `reasoning_effort` value that disables thinking on Ollama's
+/// OpenAI-compatible `/v1/chat/completions` endpoint. Verified against
+/// Ollama 0.32.14, which 400-rejects `"off"` — its allowlist is
+/// `minimal|low|medium|high|xhigh|ultra|max|none`, with `"none"` as the
+/// disable value. (The native-API `think: false` does NOT work on `/v1`.)
+const REASONING_EFFORT_DISABLE: &str = "none";
+
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Ollama provider implementing the [`AiProvider`] trait.
@@ -68,6 +76,12 @@ pub struct OllamaProvider {
     /// Optional LAN/Tailscale endpoint; takes precedence over `static_base_url`.
     endpoint: RwLock<Option<RemoteEndpoint>>,
     url_cache: Mutex<Option<ResolvedCache>>,
+    /// When `true`, every completion request carries `reasoning_effort: "none"`
+    /// so reasoning/"thinking" models (Qwen3 & co.) skip their minutes-long
+    /// thinking phase. Set via [`set_thinking_disabled`] from AppConfig;
+    /// like `allow_public`, the value is captured at construction and only
+    /// changes when `reinit_providers` rebuilds the provider.
+    thinking_disabled: AtomicBool,
 }
 
 impl OllamaProvider {
@@ -111,6 +125,7 @@ impl OllamaProvider {
             )),
             endpoint: RwLock::new(None),
             url_cache: Mutex::new(None),
+            thinking_disabled: AtomicBool::new(false),
         })
     }
 
@@ -149,7 +164,30 @@ impl OllamaProvider {
             )),
             endpoint: RwLock::new(ep),
             url_cache: Mutex::new(None),
+            thinking_disabled: AtomicBool::new(false),
         })
+    }
+
+    /// Toggle the reasoning/"thinking" phase off for this provider.
+    ///
+    /// When disabled, `complete` and `complete_stream` force
+    /// `reasoning_effort: "none"` on every request — the disable value
+    /// Ollama's OpenAI-compatible `/v1/chat/completions` endpoint honors
+    /// (see [`REASONING_EFFORT_DISABLE`]). Called from `init_ai_providers`
+    /// with the user's `ollama_disable_thinking` setting; the frontend must
+    /// call `reinit_providers` after changing that setting for it to take
+    /// effect.
+    pub fn set_thinking_disabled(&self, disabled: bool) {
+        self.thinking_disabled.store(disabled, Ordering::Relaxed);
+    }
+
+    /// Force `reasoning_effort: "none"` on an outgoing request when the user
+    /// has disabled thinking. Kept as a named helper so the intent (and the
+    /// /v1-vs-native-API distinction above) lives in one place.
+    fn apply_thinking_control(&self, request: &mut CompletionRequest) {
+        if self.thinking_disabled.load(Ordering::Relaxed) {
+            request.reasoning_effort = Some(REASONING_EFFORT_DISABLE.into());
+        }
     }
 
     /// Override the remote endpoint used for LAN/Tailscale resolution.
@@ -288,16 +326,18 @@ impl AiProvider for OllamaProvider {
         }])
     }
 
-    async fn complete(&self, request: CompletionRequest) -> AppResult<CompletionResponse> {
+    async fn complete(&self, mut request: CompletionRequest) -> AppResult<CompletionResponse> {
         let client = self.sync_client_url().await?;
+        self.apply_thinking_control(&mut request);
         client.complete(&request).await
     }
 
     async fn complete_stream(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> AppResult<Box<dyn Stream<Item = AppResult<StreamChunk>> + Send + Unpin>> {
         let client = self.sync_client_url().await?;
+        self.apply_thinking_control(&mut request);
         let pinned = client.complete_stream(&request).await?;
         Ok(Box::new(pinned))
     }
@@ -484,6 +524,65 @@ mod tests {
         };
         assert!(p.set_endpoint(Some(good), false).await.is_ok());
     }
+
+    #[test]
+    fn thinking_control_leaves_request_alone_when_enabled_disabled_off() {
+        let p = OllamaProvider::new(None, false, None, RetryConfig::default()).expect("build");
+        let mut req = offline_tests::minimal_request("llama3");
+        p.apply_thinking_control(&mut req);
+        assert_eq!(
+            req.reasoning_effort, None,
+            "default provider must not touch reasoning_effort"
+        );
+    }
+
+    #[test]
+    fn thinking_control_forces_reasoning_effort_off_when_disabled() {
+        let p = OllamaProvider::new(None, false, None, RetryConfig::default()).expect("build");
+        p.set_thinking_disabled(true);
+        let mut req = offline_tests::minimal_request("qwen3.8:27b");
+        p.apply_thinking_control(&mut req);
+        assert_eq!(
+            req.reasoning_effort.as_deref(),
+            Some(REASONING_EFFORT_DISABLE)
+        );
+    }
+
+    /// End-to-end over HTTP: with thinking disabled, the POST body sent to
+    /// Ollama's OpenAI-compatible endpoint must carry the disable effort value.
+    #[tokio::test]
+    async fn complete_wire_body_carries_reasoning_effort_off() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "reasoning_effort": REASONING_EFFORT_DISABLE
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": "qwen3.8:27b",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let policy = RetryConfig {
+            max_retries: 0,
+            ..RetryConfig::default()
+        };
+        let p = OllamaProvider::new(Some(&server.uri()), false, None, policy).expect("build");
+        p.set_thinking_disabled(true);
+
+        let resp = p
+            .complete(offline_tests::minimal_request("qwen3.8:27b"))
+            .await
+            .expect("complete should succeed against mock");
+        assert_eq!(resp.content, "ok");
+        server.verify().await;
+    }
 }
 
 #[cfg(test)]
@@ -502,7 +601,7 @@ mod offline_tests {
         port
     }
 
-    fn minimal_request(model: &str) -> CompletionRequest {
+    pub(super) fn minimal_request(model: &str) -> CompletionRequest {
         CompletionRequest {
             model: model.to_string(),
             messages: vec![Message {
@@ -513,6 +612,7 @@ mod offline_tests {
             temperature: Some(0.0),
             max_tokens: Some(10),
             system_prompt: None,
+            reasoning_effort: None,
         }
     }
 
