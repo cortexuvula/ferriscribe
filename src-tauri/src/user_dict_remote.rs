@@ -6,15 +6,17 @@
 //! local SQLite repo so the server stays the canonical source of truth.
 //!
 //! In addition to the original list/add/remove CRUD, this client exposes a
-//! `sync` (two-way merge) method and a `subscribe_events` (SSE) method that
-//! mirror `conditions_remote`.
+//! `sync` (two-way merge, legacy word-only response) method, a
+//! [`UserDictRemote::sync_full`] (full-fidelity merge whose response carries
+//! tombstones, with a legacy fallback), and a `subscribe_events` (SSE)
+//! method that mirror `conditions_remote`.
 
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::endpoint::http_url;
-use medical_core::types::user_dict_entry::UserDictEntry;
+use medical_core::types::user_dict_entry::{UserDictEntry, deterministic_id};
 use serde::Serialize;
 
 use crate::commands::sharing::PairedConnection;
@@ -171,6 +173,62 @@ impl<'a> UserDictRemote<'a> {
             .map_err(|e| AppError::Other(format!("dict sync parse: {e}")))
     }
 
+    /// Full-fidelity sync (entries incl. tombstones) so deletions propagate.
+    ///
+    /// Pushes the local full list (active + tombstones) and receives the
+    /// server's post-merge FULL entry list, which the caller merges back
+    /// into the local store — a deletion on the server (or on another
+    /// client) then converges here too, mirroring the condition-chips path.
+    ///
+    /// Falls back to the legacy word-only [`Self::sync`] when the server
+    /// predates the endpoint: a 404 (route unknown) or a 405 (the path
+    /// falls through to the DELETE-only `/v1/user-dictionary/{word}` route,
+    /// so an older axum server answers POST with Method Not Allowed).
+    /// Deletions still propagate TO the server in that mode (the legacy
+    /// handler accepts full entries); only the response loses tombstones.
+    /// Legacy words are converted to entries with the repo's deterministic
+    /// id derivation (see [`legacy_word_to_entry`]) so the local merge has a
+    /// uniform shape. Synthesized entries are active with `updated_at` = now.
+    pub async fn sync_full(
+        &self,
+        local_entries: Vec<UserDictEntry>,
+    ) -> AppResult<Vec<UserDictEntry>> {
+        let base = self
+            .base_url()
+            .ok_or_else(|| AppError::Other("paired server has no dictionary address".into()))?;
+        let url = format!("{base}/v1/user-dictionary/sync-full");
+        let resp = self
+            .client
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(15))
+            .bearer_auth(&self.bearer)
+            .json(&local_entries)
+            .send()
+            .await
+            .map_err(|e| AppError::Other(format!("dict sync-full: {e}")))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
+            // Server predates /sync-full — degrade to the legacy word-only
+            // sync and synthesize entries from the returned words.
+            let words = self.sync(local_entries).await?;
+            let now = chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string();
+            return Ok(words
+                .iter()
+                // Match `UserDictionaryRepo::add`, which skips empty input.
+                .filter(|w| !w.trim().is_empty())
+                .map(|w| legacy_word_to_entry(w, &now))
+                .collect());
+        }
+        check_status(&resp).await?;
+        resp.json::<Vec<UserDictEntry>>()
+            .await
+            .map_err(|e| AppError::Other(format!("dict sync-full parse: {e}")))
+    }
+
     /// Subscribe to SSE change notifications from the office server.
     ///
     /// Returns a stream that yields `()` for each `data: changed` event pushed
@@ -248,4 +306,69 @@ async fn check_status(resp: &reqwest::Response) -> AppResult<()> {
         ));
     }
     Err(AppError::Other(format!("dictionary API: HTTP {status}")))
+}
+
+/// Convert one legacy (word-only) sync response word into a full entry.
+///
+/// Uses the exact id + normalization derivation `UserDictionaryRepo::add`
+/// applies — trim, then [`deterministic_id`] (UUID v5 of the lowercased
+/// trimmed word), keeping the trimmed word's case in `word`. A mismatched
+/// synthetic id would make the local merge see two distinct entries for
+/// one word and duplicate it; the equality is pinned by
+/// `legacy_word_to_entry_matches_repo_add` below.
+fn legacy_word_to_entry(word: &str, now_iso: &str) -> UserDictEntry {
+    let trimmed = word.trim();
+    UserDictEntry {
+        id: deterministic_id(trimmed),
+        word: trimmed.to_string(),
+        updated_at: now_iso.to_string(),
+        deleted_at: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The legacy-fallback word → entry synthesis must produce the SAME id
+    /// and word value that `UserDictionaryRepo::add` wrote for that word —
+    /// a mismatched synthetic id would make the local merge treat one word
+    /// as two entries and duplicate it. Round-trips several words (mixed
+    /// case, padding) through the repo's real write path and compares
+    /// against the stored rows.
+    #[test]
+    fn legacy_word_to_entry_matches_repo_add() {
+        let db = medical_db::Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let stored_at = "2026-08-17T00:00:00.000Z";
+
+        for raw in ["Lisinopril", "  atenolol  ", "METFORMIN", "hctz"] {
+            // The real write path (trims + derives the id internally).
+            medical_db::user_dictionary::UserDictionaryRepo::add(&conn, raw, stored_at)
+                .expect("add via repo");
+
+            // What the legacy server echoes back: the stored (trimmed) word.
+            let stored = medical_db::user_dictionary::UserDictionaryRepo::list_all(&conn)
+                .expect("list_all")
+                .into_iter()
+                .find(|e| e.word == raw.trim())
+                .expect("stored entry");
+
+            // Synthesis at a LATER timestamp — only id and word must match;
+            // updated_at is deliberately "now" for the merge clock.
+            let synthesized = legacy_word_to_entry(&stored.word, "2026-08-17T12:00:00.000Z");
+            assert_eq!(
+                synthesized.id, stored.id,
+                "synthesized id must equal the repo-derived id"
+            );
+            assert_eq!(
+                synthesized.word, stored.word,
+                "synthesized word must equal the repo-stored word"
+            );
+            assert!(
+                synthesized.deleted_at.is_none(),
+                "legacy words are active by construction"
+            );
+        }
+    }
 }

@@ -10,6 +10,10 @@
 //! - The same tombstone-propagation contract for condition chips
 //!   (`ConditionChipsRepo::merge_incoming`) — pins the tie-break that stops
 //!   a stale client's push from resurrecting a practice-wide chip deletion
+//! - The same contract for the spellcheck dictionary
+//!   (`UserDictionaryRepo::merge_incoming`) — backs the full-fidelity
+//!   `/v1/user-dictionary/sync-full` endpoint, the only dict surface that
+//!   can carry tombstones (the legacy `/sync` speaks `Vec<String>`)
 //!
 //! **HIPAA note:** assertions touch only ids, counts, timestamps, and
 //! visibility; fixture filenames and field payloads are synthetic non-PHI
@@ -19,12 +23,16 @@ use std::path::PathBuf;
 
 use medical_core::types::condition_chip::{ConditionChip, deterministic_id};
 use medical_core::types::recording::Recording;
+use medical_core::types::user_dict_entry::{
+    UserDictEntry, deterministic_id as dict_deterministic_id,
+};
 use medical_db::Database;
 use medical_db::condition_chips::ConditionChipsRepo;
 use medical_db::content_sync::{
     ContentSyncRepo, MergeResult, PurgedRef, SyncFieldValue, SyncRecording,
 };
 use medical_db::recordings::RecordingsRepo;
+use medical_db::user_dictionary::UserDictionaryRepo;
 use uuid::Uuid;
 
 /// Fixed, strictly-ordered timestamps: T0 < T1 < T2.
@@ -964,5 +972,68 @@ fn chips_merge_applies_remote_tombstone() {
     assert!(
         resurrected[0].deleted_at.is_none(),
         "re-added chip must be active"
+    );
+}
+
+// -------------------------------------------------------------------------
+// User dictionary: the same deletion-model contract, pinned for the
+// full-fidelity `/v1/user-dictionary/sync-full` surface. The legacy
+// `/sync` endpoint speaks `Vec<String>` (active words) and can never carry
+// tombstones back to a client, so the client-side merge of the full list
+// is what makes a deletion on one machine converge everywhere. Seeded
+// through the real write path (`add`, which derives the deterministic id).
+//
+// Dictionary words here are synthetic generic drug names, matching the
+// repo's own unit-test fixtures — assertions touch only id, deleted_at,
+// and counts.
+// -------------------------------------------------------------------------
+
+#[test]
+fn dict_merge_applies_remote_tombstone() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+
+    // Local: an active word, seeded through the real write path (same path
+    // `user_dict_add` uses, including the deterministic id derivation).
+    UserDictionaryRepo::add(&conn, "Lisinopril", T1).expect("seed local active word");
+    assert_eq!(
+        UserDictionaryRepo::list(&conn).expect("list").len(),
+        1,
+        "fixture: word starts active"
+    );
+
+    // The same word as a remote tombstone: newer updated_at, deleted_at set.
+    let tombstone = UserDictEntry {
+        id: dict_deterministic_id("Lisinopril"),
+        word: "Lisinopril".to_string(),
+        updated_at: T2.to_string(),
+        deleted_at: Some(T2.to_string()),
+    };
+    let merged = UserDictionaryRepo::merge_incoming(&conn, std::slice::from_ref(&tombstone))
+        .expect("merge tombstone");
+    assert!(
+        merged.is_empty(),
+        "newer remote tombstone must drop the word from the active list"
+    );
+    let all = UserDictionaryRepo::list_all(&conn).expect("list_all");
+    assert_eq!(all.len(), 1, "the tombstone row itself must be retained");
+    assert_eq!(
+        all[0].deleted_at.as_deref(),
+        Some(T2),
+        "row must carry the tombstone timestamp"
+    );
+
+    // A stale client that never saw the deletion pushes its ACTIVE copy
+    // back, with updated_at TIED to the tombstone — the tie must keep the
+    // tombstone (deletions win ties), so the word cannot ghost-resurrect.
+    let stale_active = UserDictEntry {
+        deleted_at: None,
+        ..tombstone
+    };
+    let merged_again =
+        UserDictionaryRepo::merge_incoming(&conn, &[stale_active]).expect("merge stale active");
+    assert!(
+        merged_again.is_empty(),
+        "tie on updated_at must not resurrect the tombstoned word"
     );
 }

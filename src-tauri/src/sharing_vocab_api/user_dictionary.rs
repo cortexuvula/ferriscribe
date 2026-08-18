@@ -9,7 +9,10 @@
 //!
 //! In addition to the original list/add/remove CRUD, this module serves the
 //! sync surface that mirrors `/v1/condition-chips`: a `POST /sync` two-way
-//! merge and a `GET /events` SSE stream. See [`dict_sync_handler`] and
+//! merge (legacy wire shape — `Vec<String>` of active words), a
+//! `POST /sync-full` full-fidelity merge whose response carries tombstones
+//! so deletions propagate to every client, and a `GET /events` SSE stream.
+//! See [`dict_sync_handler`], [`dict_sync_full_handler`], and
 //! [`dict_events_handler`].
 
 use std::sync::Arc;
@@ -109,14 +112,19 @@ pub(super) async fn dict_remove_handler(
     Ok(Json(removed))
 }
 
-/// POST /v1/user-dictionary/sync — two-way merge.
+/// POST /v1/user-dictionary/sync — two-way merge (legacy wire shape).
 ///
 /// Body: the client's full entry list (active words + tombstones).
 /// Returns: the merged active word list after applying last-write-wins.
 ///
-/// Mirrors `/v1/condition-chips/sync`. Tombstones older than 30 days are
+/// Mirrors `/v1/condition-chips/sync`. Tombstones older than 365 days are
 /// pruned opportunistically (best-effort — a prune failure must not fail the
 /// sync). Fires `dict_changed_tx` so SSE subscribers refresh.
+///
+/// The `Vec<String>` response cannot carry tombstones back to clients, so
+/// deletions only propagate server-side here; full-fidelity propagation
+/// (both directions) lives in [`dict_sync_full_handler`]. The legacy shape
+/// is kept so old clients keep working unchanged.
 pub(super) async fn dict_sync_handler(
     AxumState(state): AxumState<ApiState>,
     headers: HeaderMap,
@@ -127,9 +135,12 @@ pub(super) async fn dict_sync_handler(
 
     let incoming_count = incoming.len();
 
-    // Prune old tombstones opportunistically (30 days). Best-effort — a
-    // prune failure must not fail the sync.
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    // Prune old tombstones opportunistically (365 days — matches
+    // `/sync-full` and the condition-chips sync: a tombstone must outlive
+    // every stale client's next sync, or a machine that syncs rarely would
+    // never learn of the deletion and could resurrect the word). Best-effort
+    // — a prune failure must not fail the sync.
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(365);
     let cutoff_iso = cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
     let merged = tokio::task::spawn_blocking(
@@ -162,6 +173,76 @@ pub(super) async fn dict_sync_handler(
         incoming_count,
         result_count = merged.len(),
         "dict_api: sync"
+    );
+    Ok(Json(merged))
+}
+
+/// POST /v1/user-dictionary/sync-full — full-fidelity two-way merge.
+///
+/// Body: the client's full entry list (active words + tombstones).
+/// Returns: the merged FULL entry list (active words + tombstones) after
+/// applying last-write-wins. Tombstones travel intentionally so a deletion
+/// on the server reaches every client; each client merges the response
+/// locally via `merge_incoming`, which applies the tombstones and returns
+/// the active list for its UI.
+///
+/// Mirrors `/v1/condition-chips/sync`. Clients running against an older
+/// server get a 404/405 here and fall back to the legacy `/sync` (see
+/// `UserDictRemote::sync_full`). Tombstones older than 365 days are pruned
+/// opportunistically (best-effort — a prune failure must not fail the
+/// sync). Fires `dict_changed_tx` so SSE subscribers refresh.
+pub(super) async fn dict_sync_full_handler(
+    AxumState(state): AxumState<ApiState>,
+    headers: HeaderMap,
+    Json(incoming): Json<Vec<medical_core::types::user_dict_entry::UserDictEntry>>,
+) -> Result<Json<Vec<medical_core::types::user_dict_entry::UserDictEntry>>, StatusCode> {
+    let _ = authorize(&state, &headers)?;
+    let db = Arc::clone(&state.db);
+
+    let incoming_count = incoming.len();
+
+    // Prune old tombstones opportunistically. Retention is 365 days: a
+    // tombstone must outlive every stale client's next sync, or a machine
+    // that syncs rarely (or was offline for weeks) would never learn of the
+    // deletion and could resurrect the word practice-wide. The dictionary
+    // table is tiny, so a year of tombstones costs nothing. Best-effort —
+    // a prune failure must not fail the sync.
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(365);
+    let cutoff_iso = cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+
+    let merged = tokio::task::spawn_blocking(
+        move || -> Result<Vec<medical_core::types::user_dict_entry::UserDictEntry>, medical_core::error::AppError> {
+            let conn = db.conn()?;
+            // Merge the client's list in (LWW; ties break toward the
+            // tombstone). The merge's return value is the ACTIVE list —
+            // discard it and serve the FULL list so tombstones travel.
+            medical_db::user_dictionary::UserDictionaryRepo::merge_incoming(&conn, &incoming)
+                .map_err(medical_core::error::AppError::from)?;
+            // Best-effort prune — don't fail the sync if pruning errors.
+            let _ = medical_db::user_dictionary::UserDictionaryRepo::prune_tombstones(
+                &conn,
+                &cutoff_iso,
+            );
+            medical_db::user_dictionary::UserDictionaryRepo::list_all(&conn)
+                .map_err(medical_core::error::AppError::from)
+        },
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        warn!("dict_api sync-full failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Notify SSE subscribers that the dictionary changed. Best-effort: no
+    // receivers is not an error (send returns Err only when there are no
+    // active receivers, which is the normal idle case).
+    let _ = state.dict_changed_tx.send(());
+
+    info!(
+        incoming_count,
+        result_count = merged.len(),
+        "dict_api: sync-full"
     );
     Ok(Json(merged))
 }

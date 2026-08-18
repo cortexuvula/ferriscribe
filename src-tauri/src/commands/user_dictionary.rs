@@ -7,10 +7,17 @@
 //! 2. This client must be paired with an office server that advertised a
 //!    `vocab` port (which also hosts `/v1/user-dictionary`).
 //!
-//! When both hold, list pulls from the server and merges locally, and
-//! add/remove push the local state to the server in the background. When
-//! either gate fails, operations run against the local SQLite repo only —
-//! the feature is fully usable offline or unpaired.
+//! When both hold, list/sync use the full-fidelity `/sync-full` endpoint:
+//! they push the local full list (active + tombstones), receive the
+//! server's post-merge FULL list, and merge it back into the local store so
+//! deletions propagate in both directions (mirroring the condition-chips
+//! path). Against an older server the remote transparently falls back to
+//! the legacy word-only `/sync`. Add/remove push the local state to the
+//! server in the background over the legacy `/sync` endpoint — the legacy
+//! handler already accepts full entries (tombstones included) and the push
+//! discards the response, so the fallback hop would only add a wasted
+//! round-trip. When either gate fails, operations run against the local
+//! SQLite repo only — the feature is fully usable offline or unpaired.
 //!
 //! Writes (add/remove) always update the local DB first for instant UI
 //! feedback, then fire a best-effort background sync push that does not
@@ -64,11 +71,14 @@ fn now_iso() -> String {
 /// List active dictionary words.
 ///
 /// When paired + sync enabled, push the local full list (active + tombstones)
-/// to the server and return the server's post-merge active word list. The
-/// push converges both sides via the server's last-write-wins merge, so the
-/// returned list reflects the union across machines. A remote failure logs a
-/// warning and falls back to the local active list so the UI keeps working
-/// offline.
+/// to the server via the full-fidelity `/sync-full` endpoint, then merge the
+/// server's post-merge FULL list (including tombstones) back into the local
+/// store — so a deletion made on the server or another client converges here
+/// too (mirroring the condition-chips path). Returns the local active list
+/// post-merge. Against an older server the remote falls back to the legacy
+/// word-only `/sync` (deletions still propagate TO the server; the response
+/// just cannot carry tombstones back). A remote failure logs a warning and
+/// falls back to the local active list so the UI keeps working offline.
 #[tauri::command]
 #[instrument(skip(state), name = "user_dict::list")]
 pub async fn user_dict_list(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
@@ -79,8 +89,23 @@ pub async fn user_dict_list(state: tauri::State<'_, AppState>) -> AppResult<Vec<
             state.http_client.clone(),
         )
     {
-        match remote.sync(load_all_local(&state.db).await?).await {
-            Ok(server_words) => return Ok(server_words),
+        match remote.sync_full(load_all_local(&state.db).await?).await {
+            Ok(server_entries) => {
+                // Merge the server's full list (including tombstones) into
+                // the local store; `merge_incoming` returns the active list.
+                let db = Arc::clone(&state.db);
+                let active = tokio::task::spawn_blocking(move || -> AppResult<Vec<String>> {
+                    let conn = db.conn()?;
+                    medical_db::user_dictionary::UserDictionaryRepo::merge_incoming(
+                        &conn,
+                        &server_entries,
+                    )
+                    .map_err(AppError::from)
+                })
+                .await
+                .map_err(crate::commands::join_err)??;
+                return Ok(active);
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "dict remote sync failed, using local");
                 // Fall through to local fallback below.
@@ -221,10 +246,16 @@ pub async fn user_dict_remove(state: tauri::State<'_, AppState>, word: String) -
 
 /// Manually trigger a full bidirectional user-dictionary sync.
 ///
-/// Pushes the local full list (including tombstones) to the server, receives
-/// the server's merged active word list, and returns it. Used when the user
-/// toggles `sync_user_dictionary` on or reconnects after being offline. When
-/// not paired / sync disabled, it simply returns the local active list.
+/// Pushes the local full list (including tombstones) to the server via the
+/// full-fidelity `/sync-full` endpoint, receives the server's post-merge
+/// FULL list (including tombstones), merges that back into the local store
+/// (so remote deletions converge here — mirroring the condition-chips sync
+/// command), and returns the local active list afterwards. Against an older
+/// server the remote falls back to the legacy word-only `/sync`.
+///
+/// Used when the user toggles `sync_user_dictionary` on or reconnects after
+/// being offline. When not paired / sync disabled, it simply returns the
+/// local active list.
 #[tauri::command]
 #[instrument(skip(state), name = "user_dict::sync")]
 pub async fn sync_user_dictionary_cmd(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
@@ -237,10 +268,19 @@ pub async fn sync_user_dictionary_cmd(state: tauri::State<'_, AppState>) -> AppR
             state.http_client.clone(),
         )
     {
-        let merged_words = remote.sync(local_all).await?;
-        // The server's response is its post-merge active word list. The push
-        // already converged the server with us; return that list.
-        return Ok(merged_words);
+        let merged_entries = remote.sync_full(local_all).await?;
+        // Merge the server's post-merge FULL list (including tombstones)
+        // back into the local store; `merge_incoming` returns the active
+        // list for the UI.
+        let db = Arc::clone(&state.db);
+        let active = tokio::task::spawn_blocking(move || -> AppResult<Vec<String>> {
+            let conn = db.conn()?;
+            medical_db::user_dictionary::UserDictionaryRepo::merge_incoming(&conn, &merged_entries)
+                .map_err(AppError::from)
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
+        return Ok(active);
     }
 
     // Not paired / sync disabled — return the local active list.
