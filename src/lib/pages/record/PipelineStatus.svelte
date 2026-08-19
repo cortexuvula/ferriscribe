@@ -2,6 +2,7 @@
   import { pipeline, type PipelineStage } from '../../stores/pipeline.svelte';
   import { generation } from '../../stores/generation.svelte';
   import { generationProgressText } from '../../utils/generationStats';
+  import { formatTokensPerSecond } from '../../utils/format';
   import { extractIcdCodesValidated } from '../../icd';
   import { icd9 as icd9Store } from '../../stores/icd9.svelte';
   import { settings } from '../../stores/settings.svelte';
@@ -12,6 +13,9 @@
   interface Props {
     copyStatus?: CopyStatus;
     soapNoteText?: string | null;
+    /** Throughput of the most recent AI generation for this recording
+     *  (tokens/sec, from `metadata.generation_stats`); null hides it. */
+    tokensPerSecond?: number | null;
     regenerating?: boolean;
     onCancel: () => void;
     onRetry: () => void;
@@ -22,6 +26,7 @@
   let {
     copyStatus = $bindable<CopyStatus>('idle'),
     soapNoteText,
+    tokensPerSecond = null,
     regenerating = false,
     onCancel,
     onRetry,
@@ -62,6 +67,10 @@
     const s = secs % 60;
     return m > 0 ? `${m}m ${s}s` : `${s}s`;
   }
+
+  // "42.3 tok/s" or '' when no generation stat is available (imported
+  // recordings, failed generations).
+  const tpsLabel = $derived(formatTokensPerSecond(tokensPerSecond));
 </script>
 
 {#if pipeline.state.current}
@@ -108,7 +117,7 @@
     <p class="pipeline-elapsed">
       {#if pipeline.state.current.finishedAt !== null}
         {#if pipeline.state.current.stage === 'completed'}
-          Processing took {formatPipelineElapsed(pipeline.state.current.finishedAt - pipeline.state.current.startedAt)}
+          Processing took {formatPipelineElapsed(pipeline.state.current.finishedAt - pipeline.state.current.startedAt)}{tpsLabel ? ` · ${tpsLabel}` : ''}
         {:else}
           Stopped after {formatPipelineElapsed(pipeline.state.current.finishedAt - pipeline.state.current.startedAt)}
         {/if}

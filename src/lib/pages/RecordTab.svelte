@@ -25,6 +25,7 @@
   import { contextFromMetadata } from '../utils/recordingContext';
   import { generateSoap } from '../api/generation';
   import { generation } from '../stores/generation.svelte';
+  import { latestTokensPerSecond } from '../utils/generationStats';
   import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
   import { useOcr } from '../composables/useOcr.svelte';
 
@@ -147,17 +148,25 @@
   // SOAP note text for ICD code extraction — fetched when pipeline completes
   let soapNoteText = $state<string | null>(null);
 
+  // Throughput of the most recent AI generation for the pipeline's recording
+  // (from metadata.generation_stats), shown next to the elapsed time in
+  // PipelineStatus. Refreshed on pipeline completion and after Regenerate.
+  let pipelineTokensPerSecond = $state<number | null>(null);
+
   // Fetch SOAP note when pipeline completes
   $effect(() => {
     const current = pipeline.state.current;
     if (current?.stage === 'completed' && pipelineRecordingId) {
       getRecording(pipelineRecordingId).then((rec) => {
         soapNoteText = rec?.soap_note ?? null;
+        pipelineTokensPerSecond = rec ? latestTokensPerSecond(rec.metadata) : null;
       }).catch(() => {
         soapNoteText = null;
+        pipelineTokensPerSecond = null;
       });
     } else {
       soapNoteText = null;
+      pipelineTokensPerSecond = null;
     }
   });
 
@@ -325,6 +334,7 @@
       // Re-fetch so soapNoteText (and the editor) reflect the new note.
       const rec = await getRecording(rid);
       soapNoteText = rec?.soap_note ?? null;
+      pipelineTokensPerSecond = rec ? latestTokensPerSecond(rec.metadata) : null;
       await recordings.load();
       generation.finish();
       toasts.success('SOAP note generated');
@@ -465,6 +475,7 @@
         <PipelineStatus
           bind:copyStatus
           soapNoteText={soapNoteText}
+          tokensPerSecond={pipelineTokensPerSecond}
           {regenerating}
           onCancel={handleCancelPipeline}
           onRetry={handleRetry}
