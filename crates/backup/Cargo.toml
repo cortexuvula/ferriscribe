@@ -1,0 +1,38 @@
+[package]
+name = "medical-backup"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Encrypted off-machine backup tooling for FerriScribe: snapshots, key escrow, restore drills, append-only target agent"
+
+[lib]
+name = "medical_backup"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ferriscribe-backup"
+path = "src/main.rs"
+
+[dependencies]
+medical-core = { path = "../core" }
+medical-db = { path = "../db" }
+medical-security = { path = "../security" }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+rusqlite = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+keyring = { workspace = true }

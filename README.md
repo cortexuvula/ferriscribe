@@ -248,6 +248,78 @@ Inside you'll find `medical.db` (SQLCipher-encrypted SQLite), `config/keys.json`
 
 By default the keystore's master cipher key is derived from the machine identifier. To bind it to a secret you control — for example if multiple users share the same machine — set `MEDICAL_ASSISTANT_MASTER_KEY` in the environment FerriScribe is launched from; PBKDF2-HMAC-SHA256 will derive the cipher key from that value instead. Losing the env var value makes the keystore unrecoverable.
 
+## Off-machine backup (encrypted, append-only)
+
+Disk #1 dying is the one failure that actually happens, and until now it meant total
+clinical loss — DB, encrypted recordings, and keys all lived on one machine. The
+`ferriscribe-backup` binary (in `crates/backup`, buildable via
+`cargo build -p medical-backup`) fixes that with a pull-based, append-only design:
+
+- **Snapshots** are consistent (`VACUUM INTO` while the app may be open), fully
+  encrypted (DB and recordings are already ciphertext at rest; the DB key itself
+  travels inside every snapshot, wrapped under a separate *backup wrapping key*),
+  authenticated with an HMAC over every payload byte, and carry **no PHI in any
+  filename or receipt** — only counts, sizes, and opaque ids.
+- **Key escrow**: the wrapping key's off-machine copies are two *independently
+  sufficient* artifacts — a printable recovery sheet (for the safe) and an offline
+  USB file — each self-verifying via an embedded check code. Losing the machine's
+  keychain loses nothing; the sheet alone restores everything.
+- **Append-only target**: the target machine (e.g. `cortex-home` over Tailscale)
+  runs `ferriscribe-backup serve`. The token the *source* holds can only append new
+  snapshots — there is no route it can reach that deletes or overwrites anything, so
+  ransomware on the clinical machine cannot erase its own history. Pruning (keep
+  newest N) requires the target-side admin token that never leaves the target.
+- **Tested restore**: `ferriscribe-backup drill` restores the latest snapshot to a
+  throwaway directory, opens the restored SQLCipher DB with the escrow-recovered
+  key, decrypts a sample recording, and diffs record counts — failing loudly on any
+  mismatch. The scheduled job drills after every backup.
+
+### Setup (one time)
+
+```bash
+# 1. On the clinical machine: create the wrapping key + escrow artifacts.
+ferriscribe-backup escrow init --out-dir ~/Desktop
+#    PRINT the recovery sheet → safe. Copy the .escrow file → offline USB.
+#    Verify each: ferriscribe-backup escrow verify --file <path>
+
+# 2. On the target machine (cortex-home, over Tailscale):
+export FERRISCRIBE_BACKUP_APPEND_TOKEN=<random>
+export FERRISCRIBE_BACKUP_ADMIN_TOKEN=<different random>
+ferriscribe-backup serve --root /srv/ferriscribe-backups --bind 100.64.0.2:8741
+#    (run it under launchd/systemd; the admin token never leaves this machine)
+
+# 3. On the clinical machine: schedule the daily 03:30 backup + push + drill.
+ferriscribe-backup install-schedule --hour 3 --minute 30 \
+  --url http://100.64.0.2:8741 --token <the append token>
+```
+
+### Disaster recovery (clean machine)
+
+```bash
+ferriscribe-backup pull --url http://100.64.0.2:8741 --token <append> \
+  --out ~/restored --escrow-file /path/to/recovery-sheet.txt
+ferriscribe-backup restore --snapshot-dir ~/restored/<snap-id> \
+  --dest "~/Library/Application Support/rust-medical-assistant" \
+  --escrow-file /path/to/recovery-sheet.txt
+ferriscribe-backup drill --url http://100.64.0.2:8741 --token <append> \
+  --escrow-file /path/to/recovery-sheet.txt
+```
+
+The schedule runs **outside the app** (a launchd LaunchAgent), so backups continue
+even if FerriScribe is closed or crashed. On Linux, point a systemd timer
+(`OnCalendar=daily`) at the same `backup-and-push` command. If you configured a
+custom recordings storage path, pass `--recordings-dir` to the backup commands.
+
+**Operational notes.** `serve` refuses to start without an explicit `--bind` — never
+expose it to `0.0.0.0`. The target bounds growth with disk-measured caps (default
+1 TiB / 1,000 snapshots; override with `FERRISCRIBE_BACKUP_MAX_BYTES` /
+`FERRISCRIBE_BACKUP_MAX_SNAPSHOTS`) and sweeps crashed in-flight uploads after 7
+days; the daily job verifies the *target's* copy by re-pulling and drilling it,
+then trims local staging copies to the newest 14 (`--keep-local N`). One known
+limitation: files are hashed and transferred whole in memory — for recording
+libraries in the tens of GB, run the backup on a machine with ample RAM until a
+streaming refactor lands.
+
 ## Disclaimer
 
 FerriScribe is a transcription and note-drafting tool. It is **not** a medical device and has not been reviewed or approved by the FDA, CE, TGA, or any other regulatory body. Clinicians are responsible for verifying transcript accuracy and any AI-generated content before relying on it for patient care.
