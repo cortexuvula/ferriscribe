@@ -32,8 +32,11 @@ use medical_security::file_crypto;
 use crate::keys;
 use crate::{BackupError, BackupResult};
 
-/// Snapshot format version (bump on breaking layout changes).
-pub const SNAPSHOT_VERSION: u32 = 1;
+/// Snapshot format version (bump on breaking layout changes). v2: the
+/// receipt HMAC now covers `relative_path` + `encrypted` per manifest
+/// entry (v1 covered only name+hash) — v1 snapshots are refused with an
+/// explicit "unsupported version" error rather than an HMAC mismatch.
+pub const SNAPSHOT_VERSION: u32 = 2;
 /// Plaintext receipt filename (the only file without the payload naming).
 pub const RECEIPT_FILE: &str = "receipt.json";
 /// Encrypted manifest filename.
@@ -484,21 +487,28 @@ fn compute_tag(
     recording_count: u64,
     entries: &[ManifestEntry],
 ) -> String {
+    // Length-prefixed canonical buffer: no delimiter can be forged by a
+    // value containing it (recording filenames may legally contain `|`
+    // and `:`). Every restore-affecting field is covered (finding 4).
+    fn put(buf: &mut Vec<u8>, bytes: &[u8]) {
+        buf.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        buf.extend_from_slice(bytes);
+    }
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"FBTAG1");
+    put(&mut buf, version.to_string().as_bytes());
+    put(&mut buf, snapshot_id.as_bytes());
+    put(&mut buf, created_at.to_rfc3339().as_bytes());
+    buf.extend_from_slice(&recording_count.to_le_bytes());
+    for entry in entries {
+        put(&mut buf, entry.opaque_name.as_bytes());
+        put(&mut buf, entry.sha256.as_bytes());
+        put(&mut buf, entry.relative_path.as_bytes());
+        buf.push(u8::from(entry.encrypted));
+    }
     let mut mac = Hmac::<Sha256>::new_from_slice(&keys::snapshot_hmac_key(wrapping_key))
         .expect("32-byte HMAC key is always accepted");
-    mac.update(version.to_string().as_bytes());
-    mac.update(b"|");
-    mac.update(snapshot_id.as_bytes());
-    mac.update(b"|");
-    mac.update(created_at.to_rfc3339().as_bytes());
-    mac.update(b"|");
-    mac.update(recording_count.to_string().as_bytes());
-    for entry in entries {
-        mac.update(b"|");
-        mac.update(entry.opaque_name.as_bytes());
-        mac.update(b":");
-        mac.update(entry.sha256.as_bytes());
-    }
+    mac.update(&buf);
     hex::encode(mac.finalize().into_bytes())
 }
 
@@ -808,5 +818,66 @@ mod tests {
         assert!(safe_join(Path::new("/tmp/x"), "recordings/a.enc").is_ok());
         assert!(safe_join(Path::new("/tmp/x"), "../escape").is_err());
         assert!(safe_join(Path::new("/tmp/x"), "/absolute").is_err());
+    }
+
+    /// Finding 4: a manifest whose GCM layer is VALID (re-encrypted under
+    /// the real snapshot key by an attacker who holds the wrapping key)
+    /// but whose relative_path was altered must still fail verification
+    /// via the independent HMAC.
+    #[test]
+    fn verify_fails_on_tampered_manifest_path() {
+        let src = tempfile::tempdir().expect("src");
+        let db_key = [0xC7u8; 32];
+        let wrapping = [0xD8u8; 32];
+        let (dest, opts) = fixture_opts(src.path(), db_key, wrapping);
+        let receipt = build_snapshot(&opts).expect("build");
+        let dir = snapshot_dir(dest.path(), &receipt);
+        let aes_key = keys::snapshot_aes_key(&wrapping);
+
+        // Rewrite the manifest with a tampered path, re-encrypted so the
+        // GCM layer itself is perfectly valid.
+        let blob = fs::read(dir.join(MANIFEST_FILE)).unwrap();
+        let plain = file_crypto::decrypt_bytes_with_key(&aes_key, &blob).unwrap();
+        let mut manifest: SnapshotManifest = serde_json::from_slice(&plain).unwrap();
+        let entry = manifest
+            .entries
+            .iter_mut()
+            .find(|e| e.relative_path.starts_with("recordings/"))
+            .expect("recording entry");
+        entry.relative_path = "recordings/tampered-name.enc".into();
+        let re_enc =
+            file_crypto::encrypt_bytes_with_key(&aes_key, &serde_json::to_vec(&manifest).unwrap())
+                .unwrap();
+        fs::write(dir.join(MANIFEST_FILE), re_enc).unwrap();
+
+        // Receipt untouched → the HMAC (now covering relative_path) must
+        // catch what the payload hashes alone never would.
+        let result = verify_snapshot(&dir, &wrapping);
+        assert!(
+            matches!(result, Err(BackupError::Verification(ref msg))
+                if msg.contains("HMAC")),
+            "expected HMAC mismatch, got: {result:?}"
+        );
+    }
+
+    /// v1 snapshots (old tag format) are refused with an explicit version
+    /// error, not a confusing HMAC mismatch.
+    #[test]
+    fn verify_rejects_v1_snapshots_with_version_error() {
+        let src = tempfile::tempdir().expect("src");
+        let (dest, opts) = fixture_opts(src.path(), [0xE9u8; 32], [0xFAu8; 32]);
+        let mut receipt = build_snapshot(&opts).expect("build");
+        let dir = snapshot_dir(dest.path(), &receipt);
+        receipt.version = 1;
+        fs::write(
+            dir.join(RECEIPT_FILE),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        let result = verify_snapshot(&dir, &[0xFAu8; 32]);
+        assert!(
+            matches!(result, Err(BackupError::Format(ref msg)) if msg.contains("unsupported")),
+            "expected unsupported-version error, got: {result:?}"
+        );
     }
 }
