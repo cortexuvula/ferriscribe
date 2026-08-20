@@ -535,7 +535,7 @@ pub fn prune_local_snapshots(backups_dir: &Path, keep: usize) -> Vec<String> {
         };
         dated.push((receipt.created_at, dir, receipt.snapshot_id));
     }
-    dated.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    dated.sort_by_key(|a| std::cmp::Reverse(a.0)); // newest first
     let mut removed = Vec::new();
     for (_, dir, id) in dated.into_iter().skip(keep) {
         if fs::remove_dir_all(&dir).is_ok() {

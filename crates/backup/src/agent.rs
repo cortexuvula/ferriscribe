@@ -399,7 +399,7 @@ async fn list_snapshots(
             receipts.push(receipt);
         }
     }
-    receipts.sort_by(|a, b| b.created_at.cmp(&a.created_at)); // newest first
+    receipts.sort_by_key(|r| std::cmp::Reverse(r.created_at)); // newest first
     Ok(Json(receipts))
 }
 
@@ -455,7 +455,7 @@ async fn prune(
             Err(_) => continue,
         }
     }
-    committed.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    committed.sort_by_key(|a| std::cmp::Reverse(a.0)); // newest first
     let mut pruned = Vec::new();
     for (_, dir) in committed.iter().skip(q.keep) {
         unfreeze_and_remove(dir).map_err(internal)?;
