@@ -128,7 +128,7 @@ impl Flags {
 
     fn req(&self, name: &str) -> Result<String, medical_backup::BackupError> {
         self.get(name).map(|s| s.to_string()).ok_or_else(|| {
-            medical_backup::BackupError::Escrow(format!("missing required flag --{name}"))
+            medical_backup::BackupError::Setup(format!("missing required flag --{name}"))
         })
     }
 }
@@ -263,7 +263,10 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
         keystore_path: Some(data_dir.join("config").join("keys.json")),
         data_dir,
         target: match flags.get("url") {
-            Some(url) => Some((url.to_string(), flags.req("token")?)),
+            Some(url) => Some(medical_backup::job::BackupTarget {
+                url: url.to_string(),
+                token: flags.req("token")?,
+            }),
             None => None,
         },
         keep_local: flags
@@ -280,7 +283,7 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
         medical_backup::job::run_backup_job(&cfg, db_key, wrapping)
     })
     .await
-    .map_err(|e| medical_backup::BackupError::Escrow(format!("job task: {e}")))?;
+    .map_err(|e| medical_backup::BackupError::Setup(format!("job task: {e}")))?;
 
     for event in &outcome.events {
         match event.kind {
@@ -293,9 +296,14 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
         println!("backup job passed");
         Ok(())
     } else {
-        Err(medical_backup::BackupError::Verification(
-            "backup job failed — see lines above".into(),
-        ))
+        Err(medical_backup::BackupError::Setup(format!(
+            "backup job failed: {}",
+            outcome
+                .status
+                .failure
+                .as_deref()
+                .unwrap_or("unknown failure")
+        )))
     }
 }
 

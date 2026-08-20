@@ -300,6 +300,26 @@ fn default_rsvp_remembered_sections() -> Vec<String> {
     Vec::new()
 }
 
+/// Credential wrapper whose `Debug` redacts the value — the `RemoteEndpoint`
+/// precedent ("bearer tokens must not leak to logs"). Serializes as a plain
+/// string, so the wire format and TS types are unchanged.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretString(#[serde(default)] pub String);
+
+// Manual Debug — the derived one would print the credential verbatim
+// into any {:?}/tracing/panic sink.
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretString(<redacted>)")
+    }
+}
+
+impl SecretString {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AppConfig
 // ---------------------------------------------------------------------------
@@ -505,7 +525,7 @@ pub struct AppConfig {
     /// the in-app "Back up now" reuses the scheduled job's credentials.
     /// The admin/prune token NEVER lives on this machine.
     #[serde(default)]
-    pub backup_append_token: Option<String>,
+    pub backup_append_token: Option<SecretString>,
 
     // Onboarding
     /// `true` once the user has completed (or skipped through) the first-run

@@ -11,6 +11,7 @@ use tauri::Emitter;
 use tracing::warn;
 
 use medical_core::error::{AppError, AppResult};
+use medical_core::types::settings::SecretString;
 use medical_db::settings::SettingsRepo;
 use medical_security::keychain;
 
@@ -71,27 +72,36 @@ fn recordings_dir_for(
 #[tauri::command]
 pub async fn backup_status(state: tauri::State<'_, AppState>) -> AppResult<BackupStatus> {
     let data_dir = state.data_dir.clone();
-    let run = tokio::task::spawn_blocking(move || status::read_status(&data_dir))
+    // Everything below touches the keychain (which can prompt) and the
+    // filesystem (tens-of-MB sidecar) — one blocking thread, not the
+    // async worker (review: runtime starvation on every pane refresh).
+    let (run, wrapping_key_present, schedule_installed, tool_copy_ok) =
+        tokio::task::spawn_blocking(move || {
+            let run = status::read_status(&data_dir);
+            let wrapping_key_present = keychain::get_secret(keychain::KEYCHAIN_BACKUP_KEY_ACCOUNT)
+                .map(|k| k.is_some())
+                .unwrap_or(false);
+            let schedule_installed =
+                cfg!(target_os = "macos") && schedule::plist_path().is_ok_and(|p| p.exists());
+            // Tool-copy freshness: size + mtime compare. This is a UI
+            // HINT — the authoritative copy/repair happens in
+            // ensure_binary_copy at install time, so an approximation is
+            // fine here and avoids hashing two binaries per refresh.
+            let stable = data_dir.join("bin").join("ferriscribe-backup");
+            let tool_copy_ok = match schedule::bundled_binary_path() {
+                Some(bundled) => {
+                    metadata_of(&stable)
+                        .zip(metadata_of(&bundled))
+                        .is_some_and(|(s, b)| {
+                            s.len() == b.len() && s.modified().ok() == b.modified().ok()
+                        })
+                }
+                None => stable.is_file(),
+            };
+            (run, wrapping_key_present, schedule_installed, tool_copy_ok)
+        })
         .await
         .map_err(|e| AppError::Config(format!("status task: {e}")))?;
-
-    let wrapping_key_present = keychain::get_secret(keychain::KEYCHAIN_BACKUP_KEY_ACCOUNT)
-        .map(|k| k.is_some())
-        .unwrap_or(false);
-
-    let schedule_installed =
-        cfg!(target_os = "macos") && schedule::plist_path().is_ok_and(|p| p.exists());
-
-    // Tool copy is current when the stable copy exists and matches the
-    // bundled sidecar (byte compare; the sidecar is ~tens of MB at most).
-    let stable = state.data_dir.join("bin").join("ferriscribe-backup");
-    let tool_copy_ok = match schedule::bundled_binary_path() {
-        Some(bundled) => std::fs::read(&stable)
-            .ok()
-            .zip(std::fs::read(&bundled).ok())
-            .is_some_and(|(a, b)| a == b),
-        None => stable.is_file(),
-    };
 
     Ok(BackupStatus {
         ever_ran: run.is_some(),
@@ -120,7 +130,18 @@ pub struct EscrowArtifacts {
 /// file — a key in the keychain without escrow copies is NOT off-machine.
 #[tauri::command]
 pub async fn backup_escrow_init(out_dir: String) -> AppResult<EscrowArtifacts> {
-    let out = PathBuf::from(&out_dir);
+    // Expand a leading `~` (the UI placeholder suggests ~/Desktop), then
+    // validate BEFORE writing key material: the path must resolve to an
+    // absolute, existing directory — never scatter recovery artifacts
+    // relative to the process CWD.
+    let expanded = expand_tilde(&out_dir);
+    let out = crate::commands::validate_user_path(&expanded.to_string_lossy())?;
+    if !out.is_dir() {
+        return Err(AppError::InvalidInput(format!(
+            "not a directory: {}",
+            out.display()
+        )));
+    }
     // Keychain access can prompt; keep it off the async worker.
     let wrapping = tokio::task::spawn_blocking(keys::load_or_create_wrapping_key)
         .await
@@ -152,6 +173,20 @@ pub async fn backup_escrow_verify(file: String) -> AppResult<String> {
         .map_err(backup_err)
 }
 
+/// Expand a leading `~/` to the user's home directory.
+fn expand_tilde(input: &str) -> PathBuf {
+    if let Some(rest) = input.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    PathBuf::from(input)
+}
+
+fn metadata_of(path: &std::path::Path) -> Option<std::fs::Metadata> {
+    std::fs::metadata(path).ok()
+}
+
 /// Merge install-time target args into the persisted config and validate.
 /// `None` KEEPS the stored value (the UI never re-populates the token
 /// field, so a time-only reinstall must not erase the credential); a URL
@@ -166,10 +201,14 @@ fn merge_target(
         config.backup_target_url = url;
     }
     if token.is_some() {
-        config.backup_append_token = token;
+        config.backup_append_token = token.map(SecretString);
     }
     let eff_url = config.backup_target_url.clone().unwrap_or_default();
-    let eff_token = config.backup_append_token.clone().unwrap_or_default();
+    let eff_token = config
+        .backup_append_token
+        .as_ref()
+        .map(|t| t.0.clone())
+        .unwrap_or_default();
     if !eff_url.is_empty() && eff_token.is_empty() {
         return Err(AppError::InvalidInput(
             "a target URL needs an append token — paste the target's \
@@ -286,7 +325,12 @@ pub async fn backup_run_now(
         config.backup_target_url.clone(),
         config.backup_append_token.clone(),
     ) {
-        (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => Some((url, token)),
+        (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => {
+            Some(job::BackupTarget {
+                url,
+                token: token.0,
+            })
+        }
         _ => None,
     };
 
@@ -344,13 +388,16 @@ mod tests {
     fn merge_target_preserves_stored_values_on_none_args() {
         let mut config = AppConfig::default();
         config.backup_target_url = Some("http://t:8741".into());
-        config.backup_append_token = Some("secret".into());
+        config.backup_append_token = Some(SecretString("secret".into()));
 
         let (url, token) = merge_target(&mut config, None, None).expect("merge");
         assert_eq!(url, "http://t:8741");
         assert_eq!(token, "secret");
         // And the config still holds them.
-        assert_eq!(config.backup_append_token.as_deref(), Some("secret"));
+        assert_eq!(
+            config.backup_append_token.as_ref().map(|t| t.0.as_str()),
+            Some("secret")
+        );
     }
 
     #[test]
@@ -378,7 +425,7 @@ mod tests {
         assert!(merge_target(&mut config, Some("http://t:8741".into()), None).is_err());
 
         // A stored token satisfies the requirement.
-        config.backup_append_token = Some("kept".into());
+        config.backup_append_token = Some(SecretString("kept".into()));
         let (_, token) = merge_target(&mut config, Some("http://t:8741".into()), None).unwrap();
         assert_eq!(token, "kept");
     }

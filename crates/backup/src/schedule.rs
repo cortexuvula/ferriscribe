@@ -150,7 +150,7 @@ pub fn bundled_binary_path() -> Option<PathBuf> {
 /// when the stable copy is missing the executable bit (partial install).
 pub fn ensure_binary_copy(dest_dir: &Path) -> BackupResult<PathBuf> {
     let bundled = bundled_binary_path().ok_or_else(|| {
-        crate::BackupError::Escrow(
+        crate::BackupError::Setup(
             "ferriscribe-backup sidecar not found next to the app executable".into(),
         )
     })?;
@@ -205,11 +205,7 @@ fn is_executable(_path: &Path) -> bool {
 }
 
 fn file_hash(path: &Path) -> BackupResult<String> {
-    use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok(hex::encode(hasher.finalize()))
+    Ok(sha256_hex(&std::fs::read(path)?))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

@@ -38,10 +38,17 @@ impl BackupRunStatus {
 }
 
 /// Write the status file into `data_dir` (atomic temp + rename so a
-/// crash mid-write never corrupts the previous status).
+/// crash mid-write never corrupts the previous status). The temp name is
+/// UNIQUE per writer: the launchd sidecar and the app's run-now can run
+/// concurrently against the same data_dir, and a shared `.tmp` path
+/// would let one writer publish the other's partial bytes (or silently
+/// drop one status via a failed rename).
 pub fn write_status(data_dir: &Path, status: &BackupRunStatus) -> BackupResult<()> {
     let path = data_dir.join(STATUS_FILE);
-    let tmp = data_dir.join(format!("{STATUS_FILE}.tmp"));
+    let tmp = data_dir.join(format!(
+        "{STATUS_FILE}.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
     std::fs::create_dir_all(data_dir)?;
     std::fs::write(&tmp, serde_json::to_vec_pretty(status)?)?;
     std::fs::rename(&tmp, &path)?;

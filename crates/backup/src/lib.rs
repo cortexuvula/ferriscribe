@@ -52,6 +52,10 @@ pub enum BackupError {
     Transport(#[from] reqwest::Error),
     #[error("snapshot verification failed: {0}")]
     Verification(String),
+    /// Installation/deployment failures (sidecar staging, scheduling,
+    /// task join errors) — nothing to do with key escrow.
+    #[error("setup error: {0}")]
+    Setup(String),
     #[error("escrow error: {0}")]
     Escrow(String),
     #[error("missing key material: {0}")]
