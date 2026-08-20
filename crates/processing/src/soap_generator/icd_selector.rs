@@ -250,7 +250,6 @@ pub fn select_icd9_candidates(
     // 3. Always-include baseline — these survive the cap regardless of
     //    score, so common presentations are never blanked out by
     //    incidental noise.
-    //    common presentations are never blanked out by incidental noise.
     let baseline_floor = 1;
     let mut baseline: Vec<(usize, &'static Icd9Entry)> = Vec::new();
     let mut seen_codes: HashSet<String> = HashSet::new();
