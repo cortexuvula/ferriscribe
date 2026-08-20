@@ -159,6 +159,9 @@ pub fn ensure_binary_copy(dest_dir: &Path) -> BackupResult<PathBuf> {
 
 /// Testable core of [`ensure_binary_copy`]: copy `bundled` into `dest_dir`
 /// when missing, non-executable, or content-different from what's there.
+/// ATOMIC: copies to a temp sibling, fsyncs, marks executable, then
+/// renames — a crash mid-copy can never leave a truncated binary for
+/// launchd to execute.
 pub(crate) fn copy_binary_if_changed(bundled: &Path, dest_dir: &Path) -> BackupResult<PathBuf> {
     std::fs::create_dir_all(dest_dir)?;
     let dest = dest_dir.join("ferriscribe-backup");
@@ -171,12 +174,19 @@ pub(crate) fn copy_binary_if_changed(bundled: &Path, dest_dir: &Path) -> BackupR
         Err(_) => true,
     };
     if needs_copy {
-        std::fs::copy(bundled, &dest)?;
+        let tmp = dest.with_extension("tmp");
+        std::fs::copy(bundled, &tmp)?;
+        // fsync before rename so the published bytes are durable, and set
+        // the exec bit on the TEMP file so the rename lands an executable
+        // atomically. A permissions failure here must NOT be swallowed —
+        // a non-executable binary means every scheduled run fails.
+        std::fs::File::open(&tmp)?.sync_all()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
         }
+        std::fs::rename(&tmp, &dest)?;
     }
     Ok(dest)
 }
@@ -281,6 +291,11 @@ mod tests {
         let dest_dir = tempfile::TempDir::new().unwrap();
         let dest = copy_binary_if_changed(&bundled, dest_dir.path()).unwrap();
         assert!(dest.is_file());
+        // Atomic copy leaves no temp sibling behind.
+        assert!(
+            !dest.with_extension("tmp").exists(),
+            "no .tmp residue after copy"
+        );
 
         // Idempotent: same content → no error, path unchanged.
         let dest2 = copy_binary_if_changed(&bundled, dest_dir.path()).unwrap();

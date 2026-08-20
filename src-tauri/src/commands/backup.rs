@@ -152,6 +152,34 @@ pub async fn backup_escrow_verify(file: String) -> AppResult<String> {
         .map_err(backup_err)
 }
 
+/// Merge install-time target args into the persisted config and validate.
+/// `None` KEEPS the stored value (the UI never re-populates the token
+/// field, so a time-only reinstall must not erase the credential); a URL
+/// without any token (passed or stored) is rejected — the scheduled job
+/// would otherwise push with an empty credential, failing unattended.
+fn merge_target(
+    config: &mut medical_core::types::settings::AppConfig,
+    url: Option<String>,
+    token: Option<String>,
+) -> AppResult<(String, String)> {
+    if url.is_some() {
+        config.backup_target_url = url;
+    }
+    if token.is_some() {
+        config.backup_append_token = token;
+    }
+    let eff_url = config.backup_target_url.clone().unwrap_or_default();
+    let eff_token = config.backup_append_token.clone().unwrap_or_default();
+    if !eff_url.is_empty() && eff_token.is_empty() {
+        return Err(AppError::InvalidInput(
+            "a target URL needs an append token — paste the target's \
+             FERRISCRIBE_BACKUP_APPEND_TOKEN"
+                .into(),
+        ));
+    }
+    Ok((eff_url, eff_token))
+}
+
 /// Install the daily launchd agent (macOS only). Stages the bundled
 /// sidecar to the stable `bin/` copy the plist points at, persists the
 /// target URL + append token to AppConfig (encrypted DB) so "Back up now"
@@ -176,23 +204,26 @@ pub async fn backup_install_schedule(
     }
 
     // Persist target + token FIRST so the schedule and the in-app
-    // "Back up now" share one source of truth.
-    {
+    // "Back up now" share one source of truth. MERGE semantics: the UI
+    // never re-populates the token field ("never shown again after
+    // saving"), so a `None` argument must NOT erase a stored credential —
+    // a time-only reinstall would otherwise wipe the token and the new
+    // plist would push with an empty token, failing unattended.
+    let (effective_url, effective_token) = {
         let db = std::sync::Arc::clone(&state.db);
         let url = url.clone();
         let token = token.clone();
-        tokio::task::spawn_blocking(move || -> AppResult<()> {
+        tokio::task::spawn_blocking(move || -> AppResult<(String, String)> {
             let conn = db.conn()?;
             let mut config = SettingsRepo::load_config(&conn)?;
             config.migrate();
-            config.backup_target_url = url;
-            config.backup_append_token = token;
+            let merged = merge_target(&mut config, url, token)?;
             SettingsRepo::save_config(&conn, &config)?;
-            Ok(())
+            Ok(merged)
         })
         .await
-        .map_err(|e| AppError::Config(format!("config task: {e}")))??;
-    }
+        .map_err(|e| AppError::Config(format!("config task: {e}")))??
+    };
 
     let data_dir = state.data_dir.clone();
     let (binary_path, plist_name) =
@@ -202,8 +233,8 @@ pub async fn backup_install_schedule(
                 binary_path: binary.clone(),
                 hour,
                 minute,
-                url: url.unwrap_or_default(),
-                token: token.unwrap_or_default(),
+                url: effective_url,
+                token: effective_token,
                 snapshots_dir: data_dir.join("backups"),
                 log_dir: data_dir.join("logs"),
             };
@@ -300,4 +331,64 @@ pub async fn backup_run_now(
         warn!("in-app backup job failed (see status pane)");
     }
     Ok(outcome.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use medical_core::types::settings::AppConfig;
+
+    /// Ship-blocker regression: a time-only reinstall (None args) must
+    /// never erase a stored target/token.
+    #[test]
+    fn merge_target_preserves_stored_values_on_none_args() {
+        let mut config = AppConfig::default();
+        config.backup_target_url = Some("http://t:8741".into());
+        config.backup_append_token = Some("secret".into());
+
+        let (url, token) = merge_target(&mut config, None, None).expect("merge");
+        assert_eq!(url, "http://t:8741");
+        assert_eq!(token, "secret");
+        // And the config still holds them.
+        assert_eq!(config.backup_append_token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn merge_target_updates_when_provided() {
+        let mut config = AppConfig::default();
+        config.backup_target_url = Some("http://old:1".into());
+        let (url, token) =
+            merge_target(&mut config, Some("http://new:2".into()), Some("tok".into()))
+                .expect("merge");
+        assert_eq!(url, "http://new:2");
+        assert_eq!(token, "tok");
+    }
+
+    /// A URL with no token anywhere must be rejected AT INSTALL TIME —
+    /// not discovered by a failing unattended 3am push.
+    #[test]
+    fn merge_target_rejects_url_without_token() {
+        let mut config = AppConfig::default();
+        let err = merge_target(&mut config, Some("http://t:8741".into()), None);
+        assert!(err.is_err(), "fresh config + URL + no token must fail");
+
+        // Also when a token was never stored and only the URL is re-sent.
+        config.backup_target_url = Some("http://t:8741".into());
+        config.backup_append_token = None;
+        assert!(merge_target(&mut config, Some("http://t:8741".into()), None).is_err());
+
+        // A stored token satisfies the requirement.
+        config.backup_append_token = Some("kept".into());
+        let (_, token) = merge_target(&mut config, Some("http://t:8741".into()), None).unwrap();
+        assert_eq!(token, "kept");
+    }
+
+    /// Local-only schedules (no URL, no token) are fine.
+    #[test]
+    fn merge_target_allows_local_only() {
+        let mut config = AppConfig::default();
+        let (url, token) = merge_target(&mut config, None, None).unwrap();
+        assert_eq!(url, "");
+        assert_eq!(token, "");
+    }
 }

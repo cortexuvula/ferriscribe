@@ -37,7 +37,10 @@ execSync(`cargo build -p medical-backup --release --target ${target}`, {
 const bin = process.platform === 'win32' ? 'ferriscribe-backup.exe' : 'ferriscribe-backup';
 const src = join(root, 'target', target, 'release', bin);
 const destDir = join(root, 'src-tauri', 'binaries');
-const dest = join(destDir, `ferriscribe-backup-${target}`);
+// Tauri resolves externalBin entries as <name>-<triple>.exe on Windows —
+// without the extension the Windows bundle/dev build cannot find the sidecar.
+const ext = process.platform === 'win32' ? '.exe' : '';
+const dest = join(destDir, `ferriscribe-backup-${target}${ext}`);
 
 if (!existsSync(src)) {
   console.error(`sidecar binary not found after build: ${src}`);
