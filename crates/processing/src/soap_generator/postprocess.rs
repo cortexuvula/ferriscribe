@@ -60,7 +60,10 @@ const SECTION_HEADERS: &[&str] = &[
 ];
 
 /// Remove markdown formatting and citation markers from AI output.
-fn clean_text(text: &str) -> String {
+///
+/// `pub(crate)` so the anti-drift contract suite in [`crate::markdown`]
+/// can pin its behavior alongside `document_generator::strip_markdown`.
+pub(crate) fn clean_text(text: &str) -> String {
     let mut result = CODE_BLOCK_RE.replace_all(text, "").into_owned();
     result = INLINE_CODE_RE.replace_all(&result, "$1").into_owned();
     result = MARKDOWN_HEADING_RE.replace_all(&result, "").into_owned();

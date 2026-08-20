@@ -281,8 +281,11 @@ fn resolve_audience_user_template(
     out
 }
 
-// NOTE: see also `postprocess::clean_text` which strips similar markdown patterns
-// for SOAP output. If consolidating in the future, extract shared helpers.
+// NOTE: see also `postprocess::clean_text` which strips similar markdown
+// patterns for SOAP output. The two have intentionally different contracts
+// (headings, bullets, links, citations, code fences) — documented and
+// pinned by the anti-drift suite in `crate::markdown`. Do NOT merge them
+// blindly: every nominally-shared regex differs in a quantifier.
 
 /// Remove common markdown syntax from AI-generated text.
 ///

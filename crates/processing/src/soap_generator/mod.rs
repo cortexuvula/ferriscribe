@@ -35,6 +35,10 @@ pub(crate) mod user_prompt;
 pub mod icd_selector;
 
 pub use postprocess::postprocess_soap;
+// Crate-visible in test builds only, for the anti-drift suite in
+// `crate::markdown` (pins clean_text's contract next to strip_markdown's).
+#[cfg(test)]
+pub(crate) use postprocess::clean_text;
 pub use prompt_template::{build_soap_prompt, default_soap_prompt};
 pub use user_prompt::build_user_prompt;
 

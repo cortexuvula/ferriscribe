@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, load_recording_and_settings, parse_soap_template,
-    patient_context_is_empty, persist_recording, resolve_provider, validate_patient_context,
+    build_completion_request, load_recording_and_settings, patient_context_is_empty,
+    persist_recording, resolve_provider, resolve_soap_template, validate_patient_context,
 };
 use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_TRANSCRIPT_CHARS, format_progress_error};
 
@@ -135,10 +135,16 @@ async fn generate_soap_inner(
         )));
     }
 
+    // Explicit template wins; otherwise the stored preference from
+    // AppConfig. Resolved here so every caller path (pipeline, Generate
+    // tab, Regenerate) honors the stored setting — previously a call with
+    // no template silently used FollowUp.
+    let soap_template = resolve_soap_template(template, &config);
+
     info!(
         provider = %provider.name(),
         model = %settings.model,
-        template = template.unwrap_or("follow_up"),
+        template = ?soap_template,
         transcript_len = transcript.len(),
         context_len = context.map(|c| c.len()).unwrap_or(0),
         patient_context_present = patient_context.is_some(),
@@ -146,7 +152,6 @@ async fn generate_soap_inner(
     );
 
     // Build prompts with full config
-    let soap_template = template.map(parse_soap_template).unwrap_or_default();
     let model_name = settings.model.clone();
 
     // Select BC MSP ICD-9 candidates relevant to this visit. Only
@@ -169,14 +174,14 @@ async fn generate_soap_inner(
         "ICD-9 candidate selection complete"
     );
 
-    let config = SoapPromptConfig {
+    let prompt_config = SoapPromptConfig {
         template: soap_template,
         icd_version: settings.icd_version,
         custom_prompt: settings.custom_soap_prompt,
         icd9_candidates,
     };
 
-    let system_prompt = soap_generator::build_soap_prompt(&config);
+    let system_prompt = soap_generator::build_soap_prompt(&prompt_config);
     let user_prompt = soap_generator::build_user_prompt(transcript, context, patient_context);
 
     debug!(
@@ -247,56 +252,28 @@ async fn generate_soap_inner(
     // Post-process: strip markdown, fix paragraph formatting
     let soap_text = soap_generator::postprocess_soap(&raw_soap);
 
-    // ── Training-corpus capture (Task 6a) ────────────────────────────────
-    // Gated on AppConfig.capture_for_training (default: false). Failure
-    // must never break the user's workflow — log at warn and continue.
-    let recording_uuid = Uuid::parse_str(recording_id).ok(); // already validated by load_recording_and_settings; unwrap safe
+    // ── Training-corpus capture ─────────────────────────────────────────
+    // The two helpers below are the entire training-capture surface of the
+    // SOAP path: gated on AppConfig.capture_for_training (default false),
+    // best-effort by construction — failures log at warn and NEVER break
+    // the SOAP workflow.
 
-    let capture_generation_id: Option<Uuid> = if let Some(rec_uuid) = recording_uuid {
-        match state.db.conn() {
-            Ok(conn) => {
-                let cfg =
-                    medical_db::settings::SettingsRepo::load_config(&conn).unwrap_or_default();
-                if cfg.capture_for_training {
-                    let context_blob = serde_json::json!({
-                        "context": context,
-                        "patient_context": patient_context,
-                    });
-                    let context_json = context_blob.to_string();
-                    let provider_name = provider.name().to_string();
-                    let insert = medical_db::generations::GenerationInsert {
-                        recording_id: rec_uuid,
-                        output_type: "soap",
-                        ai_provider: &provider_name,
-                        ai_model: &model_name,
-                        prompt_template_name: template,
-                        input_transcript: transcript,
-                        input_context_json: Some(context_json.as_str()),
-                        draft_text: &soap_text,
-                    };
-                    match medical_db::generations::GenerationsRepo::record_generation(&conn, insert)
-                    {
-                        Ok(g) => {
-                            tracing::debug!(generation_id = %g.id, "captured SOAP generation for training corpus");
-                            Some(g.id)
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "training-corpus capture failed; continuing");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "training-corpus capture: could not open DB connection; continuing");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Validated by load_recording_and_settings; .ok() is purely defensive —
+    // a malformed ID yields None and training capture is skipped.
+    let recording_uuid = Uuid::parse_str(recording_id).ok();
+
+    let capture_generation_id = capture_training_generation(
+        &state.db,
+        recording_uuid,
+        config.capture_for_training,
+        template,
+        transcript,
+        context,
+        patient_context,
+        provider.name(),
+        &model_name,
+        &soap_text,
+    );
 
     // Save context to recording metadata for future reference.
     if recording.metadata.is_null() {
@@ -334,42 +311,105 @@ async fn generate_soap_inner(
     recording.soap_note = Some(soap_text.clone());
     persist_recording(&state.db, recording).await?;
 
-    // ── Training-corpus finalize (Task 6b) ───────────────────────────────
-    // Mirror the saved text into the generations row's final_text. Only
-    // runs when capture actually inserted a row above — gating on
-    // capture_generation_id avoids an unnecessary DB query (and the
-    // SettingsRepo / GenerationsRepo round trips) on every SOAP
-    // generation for users who haven't opted into capture.
-    if capture_generation_id.is_some() {
-        let rec_uuid =
-            recording_uuid.expect("capture_generation_id Some implies recording_uuid Some");
-        match state.db.conn() {
-            Ok(conn) => {
-                match medical_db::generations::GenerationsRepo::update_final_text(
-                    &conn, rec_uuid, "soap", &soap_text,
-                ) {
-                    Ok(Some(g)) => {
-                        tracing::debug!(generation_id = %g.id, "updated final_text on generations row");
-                        spawn_edit_distance_task(
-                            Arc::clone(&state.db),
-                            g.id,
-                            g.draft_text.clone(),
-                            soap_text.clone(),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "training-corpus finalize failed; continuing");
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "training-corpus finalize: could not open DB connection; continuing");
-            }
-        }
-    }
+    finalize_training_generation(&state.db, capture_generation_id, recording_uuid, &soap_text);
 
     Ok(soap_text)
+}
+
+/// Record the draft generation into the `generations` table (training
+/// corpus, capture step). Returns the new row's ID when capture actually
+/// inserted one — `None` otherwise (capture disabled, recording ID
+/// unparseable, DB unavailable, or insert failure). Never errors.
+#[allow(clippy::too_many_arguments)]
+fn capture_training_generation(
+    db: &medical_db::Database,
+    recording_uuid: Option<Uuid>,
+    capture_enabled: bool,
+    template: Option<&str>,
+    transcript: &str,
+    context: Option<&str>,
+    patient_context: Option<&PatientContext>,
+    provider_name: &str,
+    model_name: &str,
+    soap_text: &str,
+) -> Option<Uuid> {
+    let rec_uuid = recording_uuid?;
+    if !capture_enabled {
+        return None;
+    }
+    let conn = match db.conn() {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(error = %e, "training-corpus capture: could not open DB connection; continuing");
+            return None;
+        }
+    };
+    let context_blob =
+        serde_json::json!({ "context": context, "patient_context": patient_context });
+    let context_json = context_blob.to_string();
+    let insert = medical_db::generations::GenerationInsert {
+        recording_id: rec_uuid,
+        output_type: "soap",
+        ai_provider: provider_name,
+        ai_model: model_name,
+        prompt_template_name: template,
+        input_transcript: transcript,
+        input_context_json: Some(context_json.as_str()),
+        draft_text: soap_text,
+    };
+    match medical_db::generations::GenerationsRepo::record_generation(&conn, insert) {
+        Ok(g) => {
+            tracing::debug!(generation_id = %g.id, "captured SOAP generation for training corpus");
+            Some(g.id)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "training-corpus capture failed; continuing");
+            None
+        }
+    }
+}
+
+/// Mirror the saved text into the generations row's `final_text` and kick
+/// off the edit-distance task (training corpus, finalize step). Only runs
+/// when capture actually inserted a row above — gating on
+/// `capture_generation_id` avoids the GenerationsRepo round trip on every
+/// SOAP generation for users who haven't opted into capture. Never errors.
+fn finalize_training_generation(
+    db: &Arc<medical_db::Database>,
+    capture_generation_id: Option<Uuid>,
+    recording_uuid: Option<Uuid>,
+    soap_text: &str,
+) {
+    if capture_generation_id.is_none() {
+        return;
+    }
+    // Invariant: capture_generation_id is Some only when recording_uuid was
+    // Some (capture_training_generation returns None otherwise).
+    let rec_uuid = recording_uuid.expect("capture_generation_id Some implies recording_uuid Some");
+    let conn = match db.conn() {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(error = %e, "training-corpus finalize: could not open DB connection; continuing");
+            return;
+        }
+    };
+    match medical_db::generations::GenerationsRepo::update_final_text(
+        &conn, rec_uuid, "soap", soap_text,
+    ) {
+        Ok(Some(g)) => {
+            tracing::debug!(generation_id = %g.id, "updated final_text on generations row");
+            spawn_edit_distance_task(
+                Arc::clone(db),
+                g.id,
+                g.draft_text.clone(),
+                soap_text.to_string(),
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "training-corpus finalize failed; continuing");
+        }
+    }
 }
 
 /// Spawn a blocking task that computes word-level Levenshtein between the

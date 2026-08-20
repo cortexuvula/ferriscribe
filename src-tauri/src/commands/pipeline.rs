@@ -75,36 +75,11 @@ pub async fn process_recording(
         key: recording_id.clone(),
     };
 
-    // If no explicit template, read the user's preferred template from settings.
-    let template = match template {
-        Some(t) => Some(t),
-        None => {
-            let db = std::sync::Arc::clone(&state.db);
-            tokio::task::spawn_blocking(move || {
-                let conn = db.conn().map_err(|e| {
-                    tracing::warn!(error = %e, "could not get DB conn for SOAP template lookup");
-                    e
-                }).ok()?;
-                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn).map_err(|e| {
-                    tracing::warn!(error = %e, "could not load config for SOAP template lookup");
-                    e
-                }).ok()?;
-                cfg.migrate();
-                let t = match cfg.soap_template {
-                    medical_core::types::settings::SoapTemplate::FollowUp => "follow_up",
-                    medical_core::types::settings::SoapTemplate::NewPatient => "new_patient",
-                    medical_core::types::settings::SoapTemplate::Telehealth => "telehealth",
-                    medical_core::types::settings::SoapTemplate::Emergency => "emergency",
-                    medical_core::types::settings::SoapTemplate::Pediatric => "pediatric",
-                    medical_core::types::settings::SoapTemplate::Geriatric => "geriatric",
-                };
-                Some(t.to_string())
-            })
-            .await
-            .ok()
-            .flatten()
-        }
-    };
+    // NOTE: no template lookup here. When `template` is None,
+    // `generate_soap` resolves the user's stored preference from
+    // AppConfig itself (generation::helpers::resolve_soap_template) —
+    // and fails loudly if config can't be loaded, rather than silently
+    // falling back to FollowUp the way the old lookup here did.
 
     // --- Stage 1: Transcribe ---
     emit_progress(&app, &rid, "transcribing", None);
