@@ -138,13 +138,14 @@
     if (!localStorage.getItem('ferriscribe-backup-nudge-dismissed')) {
       getBackupStatus()
         .then((s) => {
-          if (!s.wrappingKeyPresent) backupNudgeVisible = true;
+          if (backupNudgeAlive && !s.wrappingKeyPresent) backupNudgeVisible = true;
         })
         .catch(() => {});
     }
   });
 
   onDestroy(() => {
+    backupNudgeAlive = false;
     window.removeEventListener('keydown', handleGlobalKeydown);
   });
 
@@ -152,11 +153,26 @@
   let importedRecordingId = $state<string | null>(null);
   // Off-machine-backup nudge (existing users; dismissed is sticky via localStorage)
   let backupNudgeVisible = $state(false);
+  // Guards the async status fetch against component teardown.
+  let backupNudgeAlive = true;
 
+  /** ✕ — permanent dismissal. The "Set up backup" action does NOT use
+   *  this: navigating to the pane isn't completing setup, and a sticky
+   *  dismissal there would kill the only existing-user reminder while
+   *  backup is still unconfigured. */
   function dismissBackupNudge() {
     backupNudgeVisible = false;
     localStorage.setItem('ferriscribe-backup-nudge-dismissed', '1');
-  }  let importedFilename = $state<string | null>(null);
+  }
+
+  /** "Set up backup" — hide for this session only; the banner returns on
+   *  the next launch until backup is genuinely configured. */
+  function openBackupSettings() {
+    backupNudgeVisible = false;
+    settingsNav.navigateTo('backup');
+  }
+
+  let importedFilename = $state<string | null>(null);
   let importing = $state(false);
   let importError = $state<string | null>(null);
 
@@ -488,10 +504,7 @@
       </span>
       <button
         class="nudge-action"
-        onclick={() => {
-          dismissBackupNudge();
-          settingsNav.navigateTo('backup');
-        }}
+        onclick={openBackupSettings}
       >
         Set up backup
       </button>
@@ -576,7 +589,7 @@
     margin-bottom: 10px;
     border: 1px solid var(--warning, #d97706);
     border-radius: var(--radius-md);
-    background: rgba(217, 119, 6, 0.08);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
     font-size: 13px;
     color: var(--text-primary);
   }

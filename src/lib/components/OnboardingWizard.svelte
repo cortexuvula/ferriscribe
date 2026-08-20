@@ -57,9 +57,18 @@
   let finishError = $state<string | null>(null);
   async function setUpBackup() {
     // Complete onboarding first (unmounts the wizard on success), then
-    // open Settings already navigated to the Backup pane.
+    // open Settings already navigated to the Backup pane. finish()
+    // swallows errors into finishError — only navigate on success, or a
+    // failed save would open the dialog behind the still-mounted wizard.
     await finish();
-    settingsNav.navigateTo('backup');
+    if (!finishError) settingsNav.navigateTo('backup');
+  }
+
+  function deferBackup() {
+    // "Set up later": suppress the Record-tab nudge so the user isn't
+    // re-prompted immediately after explicitly deferring here.
+    localStorage.setItem('ferriscribe-backup-nudge-dismissed', '1');
+    void finish();
   }
   async function finish() {
     if (finishing) return;
@@ -106,7 +115,7 @@
       {:else if mode === 'local' && step === 6}
         <StepFolder onDone={next} {finishing} {finishError} />
       {:else if mode === 'local' && step === 7}
-        <StepBackup onDone={finish} onSetUp={setUpBackup} {finishing} {finishError} />
+        <StepBackup onDone={deferBackup} onSetUp={setUpBackup} {finishing} {finishError} />
       {:else if mode === 'server' && step === 5}
         <StepFolder onDone={finish} {finishing} {finishError} />
       {/if}

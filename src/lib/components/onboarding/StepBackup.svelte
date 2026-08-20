@@ -22,7 +22,7 @@
 </p>
 
 {#if finishError}
-  <p class="error">{finishError}</p>
+  <p class="error" role="alert">{finishError}</p>
 {/if}
 
 <div class="actions">

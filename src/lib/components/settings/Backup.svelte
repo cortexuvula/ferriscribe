@@ -11,6 +11,7 @@
     type BackupStatus,
     type BackupJobEvent,
   } from '../../api/backup';
+  import type { UnlistenFn } from '@tauri-apps/api/event';
   import { settings } from '../../stores/settings.svelte';
   import { formatError } from '../../types/errors';
 
@@ -33,22 +34,32 @@
   let jobLines = $state<BackupJobEvent[]>([]);
   let jobRunning = $state(false);
 
-  async function refresh() {
+  async function refresh(prefillUrl = false) {
     statusError = null;
     try {
       status = await getBackupStatus();
-      if (status) {
+      // Prefill only when explicitly requested (initial load / after
+      // install) — a plain refresh must never clobber user edits.
+      if (prefillUrl) {
         targetUrl = settings.state.backup_target_url ?? '';
-        // Never echo the stored token back into the field.
       }
+      // Never echo the stored token back into the field.
     } catch (e) {
       statusError = formatError(e) || 'failed to read backup status';
     }
   }
 
-  onMount(async () => {
-    await refresh();
-    await onBackupJobEvent((e) => jobLines.push(e));
+  onMount(() => {
+    // Async setup + teardown-safe cleanup: Svelte's onMount only accepts
+    // a cleanup return from its synchronous form.
+    let unlisten: UnlistenFn | null = null;
+    void (async () => {
+      unlisten = await onBackupJobEvent((e) => jobLines.push(e));
+      await refresh(true);
+    })();
+    return () => {
+      unlisten?.();
+    };
   });
 
   async function handleEscrowInit() {
@@ -86,10 +97,31 @@
 
   async function handleInstallSchedule() {
     message = null;
+    // #27: clamp/validate before invoke — a cleared number input binds
+    // NaN, which serializes to null and confuses serde downstream.
+    const h = Math.trunc(Number(hour));
+    const m = Math.trunc(Number(minute));
+    if (!Number.isInteger(h) || h < 0 || h > 23 || !Number.isInteger(m) || m < 0 || m > 59) {
+      message = { kind: 'error', text: 'Time must be a valid 24h hour (0-23) and minute (0-59).' };
+      return;
+    }
+    // #25: a URL without a token silently degrades run-now to local-only
+    // and the scheduled job to failing pushes — say it now, not at 3am.
+    if (targetUrl.trim() && !appendToken.trim()) {
+      message = {
+        kind: 'error',
+        text: 'A target URL needs the append token — paste the target\'s FERRISCRIBE_BACKUP_APPEND_TOKEN.',
+      };
+      return;
+    }
     busy = 'schedule';
     try {
-      message = { kind: 'ok', text: await installBackupSchedule(hour, minute, targetUrl || null, appendToken || null) };
-      await refresh();
+      message = { kind: 'ok', text: await installBackupSchedule(h, m, targetUrl.trim() || null, appendToken.trim() || null) };
+      // #25: wipe the plaintext from the field/state immediately, and
+      // #24: reload the store so the pane reflects what was persisted.
+      appendToken = '';
+      await settings.load();
+      await refresh(true);
     } catch (e) {
       message = { kind: 'error', text: formatError(e) || 'schedule install failed' };
     } finally {
@@ -144,7 +176,7 @@
     return { label: `Healthy · ran ${fmtWhen(status.lastRunAt)}`, cls: 'good' };
   });
 
-  const isMac = $derived(/Mac/.test(navigator.platform || navigator.userAgent));
+  const scheduleSupported = $derived(status?.scheduleSupported ?? false);
 </script>
 
 <section class="settings-section">
@@ -210,7 +242,7 @@
       id="escrow-dir"
       type="text"
       bind:value={escrowDir}
-      placeholder="~/Desktop"
+      placeholder="/Users/you/Desktop"
       class="text-input"
     />
     <button class="btn-secondary" onclick={handleEscrowInit} disabled={busy !== null}>
@@ -237,7 +269,7 @@
   <!-- Schedule -->
   <div class="form-group-divider"></div>
   <h4 class="subsection-title">Daily schedule</h4>
-  {#if !isMac}
+  {#if !scheduleSupported}
     <p class="subsection-hint">
       Scheduled backups are macOS-only in this build (launchd). On Linux, point a systemd
       timer at the bundled <code>ferriscribe-backup backup-and-push</code> command — see
@@ -261,11 +293,11 @@
     <p class="form-hint">Stored encrypted in the app database; never shown again after saving.</p>
   </div>
   <div class="form-group">
-    <button class="btn-secondary" onclick={handleInstallSchedule} disabled={busy !== null || !isMac}>
+    <button class="btn-secondary" onclick={handleInstallSchedule} disabled={busy !== null || !scheduleSupported}>
       {busy === 'schedule' ? 'Installing…' : 'Install daily schedule'}
     </button>
     {#if status?.scheduleInstalled}
-      <button class="btn-secondary danger" onclick={handleUninstallSchedule} disabled={busy !== null || !isMac}>
+      <button class="btn-secondary danger" onclick={handleUninstallSchedule} disabled={busy !== null || !scheduleSupported}>
         Remove schedule
       </button>
     {/if}
