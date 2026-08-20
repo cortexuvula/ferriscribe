@@ -203,6 +203,12 @@ fn too_many_attempts() -> Response {
     resp
 }
 
+// Clippy ≥1.98 flags `Result<Response, Response>` as result_large_err:
+// axum's Response crossed the 128-byte threshold after a 2026-08 lockfile
+// re-resolution (axum 0.8.9 itself unchanged — a transitive dep grew).
+// This is an internal service handler whose Err path IS a fully-formed
+// response; boxing it would churn every call site for no runtime gain.
+#[allow(clippy::result_large_err)]
 async fn handle_inner(state: AppState, req: Request) -> Result<Response, Response> {
     let token = match extract_bearer(req.headers()) {
         Some(t) => t,
