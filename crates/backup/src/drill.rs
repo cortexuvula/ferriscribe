@@ -54,8 +54,15 @@ pub fn run_drill(snapshot_dir: &Path, wrapping_key: &[u8; 32]) -> DrillOutcome {
     let snapshot_id = summary.receipt.snapshot_id.clone();
 
     // 2. Restore into a throwaway directory (R6 path, exercised for real).
+    // KeyInstall::Skip — the drill runs on the LIVE machine and must never
+    // touch the operator's real keychain.
     let scratch = drill_scratch_dir(&snapshot_id);
-    let report = match snapshot::restore_snapshot(snapshot_dir, wrapping_key, &scratch) {
+    let report = match snapshot::restore_snapshot(
+        snapshot_dir,
+        wrapping_key,
+        &scratch,
+        snapshot::KeyInstall::Skip,
+    ) {
         Ok(r) => r,
         Err(e) => {
             failures.push(format!("restore failed: {e}"));
@@ -74,20 +81,8 @@ pub fn run_drill(snapshot_dir: &Path, wrapping_key: &[u8; 32]) -> DrillOutcome {
         checks.push("restore OK: DB key recovered from escrow material".into());
     }
 
-    // 3. Recover the key, open the restored DB, diff record counts (R4).
-    let db_key = match snapshot::recover_db_key(snapshot_dir, wrapping_key) {
-        Ok(k) => k,
-        Err(e) => {
-            failures.push(format!("DB key recovery failed: {e}"));
-            let _ = std::fs::remove_dir_all(&scratch);
-            return DrillOutcome {
-                passed: false,
-                snapshot_id,
-                checks,
-                failures,
-            };
-        }
-    };
+    // 3. Open the restored DB with the recovered key, diff record counts (R4).
+    let db_key = report.db_key;
     let restored_db = scratch.join("medical.db");
     match medical_db::Database::open(&restored_db, Some(db_key)) {
         Ok(db) => {

@@ -3360,6 +3360,7 @@ dependencies = [
  "dirs",
  "hex",
  "hmac",
+ "keyring",
  "medical-core",
  "medical-db",
  "medical-security",

@@ -121,6 +121,11 @@ impl Flags {
             .filter(|s| !s.is_empty())
     }
 
+    /// True when a boolean flag was passed (`--force`).
+    fn has(&self, name: &str) -> bool {
+        self.values.contains_key(name)
+    }
+
     fn req(&self, name: &str) -> Result<String, medical_backup::BackupError> {
         self.get(name).map(|s| s.to_string()).ok_or_else(|| {
             medical_backup::BackupError::Escrow(format!("missing required flag --{name}"))
@@ -318,10 +323,33 @@ async fn cmd_restore(flags: &Flags) -> CmdResult {
     let dir = flags.req("snapshot-dir")?;
     let dest = flags.req("dest")?;
     let wrapping = resolve_wrapping_key(flags)?;
-    let report = snapshot::restore_snapshot(Path::new(&dir), &wrapping, Path::new(&dest))?;
+    // R6: install the recovered DB key so the restored database actually
+    // opens on this machine. Refuse to clobber a differing live key
+    // unless --force (which locks out the CURRENT database).
+    let mode = if flags.has("force") {
+        snapshot::KeyInstall::Overwrite
+    } else {
+        snapshot::KeyInstall::IfAbsentOrEqual
+    };
+    let report = snapshot::restore_snapshot(Path::new(&dir), &wrapping, Path::new(&dest), mode)?;
     println!(
         "restored {} → {} ({} files, db key recovered: {})",
         report.snapshot_id, dest, report.files_restored, report.db_key_recovered
+    );
+    if report.key_install == snapshot::KeyInstallOutcome::RefusedExistingKeyDiffers {
+        eprintln!(
+            "REFUSED: this machine's keychain already holds a DIFFERENT database key.\n\
+             The snapshot files are restored, but its key was NOT installed —\n\
+             installing it would lock you out of your CURRENT database.\n\
+             Re-run with --force only if you intend to replace the current key."
+        );
+        return Err(medical_backup::BackupError::Verification(
+            "key install refused: existing keychain key differs".into(),
+        ));
+    }
+    println!(
+        "db key: {:?} — the restored database will open on this machine",
+        report.key_install
     );
     println!("verify with: ferriscribe-backup drill --snapshot-dir {dir}");
     Ok(())

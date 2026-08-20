@@ -35,3 +35,4 @@ dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+keyring = { workspace = true }

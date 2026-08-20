@@ -100,12 +100,86 @@ pub struct SnapshotSummary {
 }
 
 /// What [`restore_snapshot`] recovered.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RestoreReport {
     pub snapshot_id: String,
     pub files_restored: u64,
     pub recording_files: u64,
     pub db_key_recovered: bool,
+    /// The recovered SQLCipher key — the secret that opens the restored
+    /// database. Never logged or printed: `Debug` redacts it (same
+    /// discipline as `RecordingSummary::patient_name`).
+    pub db_key: [u8; 32],
+    pub key_install: KeyInstallOutcome,
+}
+
+/// Manual Debug that redacts key material.
+impl std::fmt::Debug for RestoreReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestoreReport")
+            .field("snapshot_id", &self.snapshot_id)
+            .field("files_restored", &self.files_restored)
+            .field("recording_files", &self.recording_files)
+            .field("db_key_recovered", &self.db_key_recovered)
+            .field("db_key", &"<redacted>")
+            .field("key_install", &self.key_install)
+            .finish()
+    }
+}
+
+/// Whether `restore_snapshot` may write the recovered DB key into this
+/// machine's OS keychain (R6: a restored database must actually open).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyInstall {
+    /// Never touch the keychain — used by drills restoring into scratch
+    /// dirs on the LIVE machine, where clobbering the real key would be
+    /// catastrophic.
+    Skip,
+    /// Install only when the keychain has no key or the identical key
+    /// (the default). A differing existing key refuses, so restoring an
+    /// old snapshot cannot silently lock out the current database.
+    IfAbsentOrEqual,
+    /// Overwrite even a differing existing key (explicit `--force`).
+    Overwrite,
+}
+
+/// Result of the key-installation step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyInstallOutcome {
+    /// Not requested (`KeyInstall::Skip`) or nothing to install.
+    Skipped,
+    /// Key written to the keychain.
+    Installed,
+    /// Keychain already held the identical key — nothing to do.
+    AlreadyPresent,
+    /// Keychain holds a DIFFERENT key and the mode forbids overwriting.
+    /// The files are restored, but the caller must resolve the conflict.
+    RefusedExistingKeyDiffers,
+}
+
+/// Pure decision core for the guarded install (unit-tested without the
+/// OS keychain; the EntryOnly keyring mock cannot exercise cross-call
+/// persistence).
+fn key_install_decision(
+    existing: Option<[u8; 32]>,
+    recovered: [u8; 32],
+    mode: KeyInstall,
+) -> KeyInstallOutcome {
+    match mode {
+        KeyInstall::Skip => KeyInstallOutcome::Skipped,
+        KeyInstall::Overwrite => {
+            if existing == Some(recovered) {
+                KeyInstallOutcome::AlreadyPresent
+            } else {
+                KeyInstallOutcome::Installed
+            }
+        }
+        KeyInstall::IfAbsentOrEqual => match existing {
+            None => KeyInstallOutcome::Installed,
+            Some(k) if k == recovered => KeyInstallOutcome::AlreadyPresent,
+            Some(_) => KeyInstallOutcome::RefusedExistingKeyDiffers,
+        },
+    }
 }
 
 /// Build a new snapshot under `opts.dest_dir` and return its receipt.
@@ -294,11 +368,14 @@ pub fn verify_snapshot(dir: &Path, wrapping_key: &[u8; 32]) -> BackupResult<Snap
 
 /// Restore a verified snapshot into `dest_data_dir`, reconstructing the
 /// original layout (medical.db, recordings/, config/) and recovering the
-/// DB key. Returns the report; logs counts only (no PHI).
+/// DB key. Depending on `key_install`, the recovered key is written to
+/// this machine's keychain so the restored database actually opens (R6).
+/// Returns the report; logs counts only (no PHI, no key material).
 pub fn restore_snapshot(
     dir: &Path,
     wrapping_key: &[u8; 32],
     dest_data_dir: &Path,
+    key_install: KeyInstall,
 ) -> BackupResult<RestoreReport> {
     // Fail closed: never write anything from an unverified snapshot.
     let _summary = verify_snapshot(dir, wrapping_key)?;
@@ -308,13 +385,15 @@ pub fn restore_snapshot(
 
     let mut files_restored: u64 = 0;
     let mut recording_files: u64 = 0;
-    let mut db_key_recovered = false;
+    let mut db_key: Option<[u8; 32]> = None;
 
     for entry in &manifest.entries {
         if entry.relative_path == DB_KEY_ENTRY_PATH {
             let blob = fs::read(payload_dir.join(&entry.opaque_name))?;
-            let _db_key = file_crypto::decrypt_bytes_with_key(&aes_key, &blob)?;
-            db_key_recovered = true;
+            let plain = file_crypto::decrypt_bytes_with_key(&aes_key, &blob)?;
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&plain);
+            db_key = Some(key);
             continue;
         }
         let dest = safe_join(dest_data_dir, &entry.relative_path)?;
@@ -328,18 +407,42 @@ pub fn restore_snapshot(
         }
     }
 
+    // R6: persist the recovered key so the restored DB opens on this
+    // machine. Guarded — never clobber a differing live key without force.
+    let key_install_outcome = match db_key {
+        None => KeyInstallOutcome::Skipped,
+        Some(recovered) => {
+            let existing = medical_security::keychain::get_secret(
+                medical_security::keychain::KEYCHAIN_DB_KEY_ACCOUNT,
+            )?;
+            match key_install_decision(existing, recovered, key_install) {
+                KeyInstallOutcome::Installed => {
+                    medical_security::keychain::set_secret(
+                        medical_security::keychain::KEYCHAIN_DB_KEY_ACCOUNT,
+                        recovered,
+                    )?;
+                    KeyInstallOutcome::Installed
+                }
+                other => other,
+            }
+        }
+    };
+
     tracing::info!(
         snapshot_id = %manifest.snapshot_id,
         files_restored,
         recording_files,
-        db_key_recovered,
+        db_key_recovered = db_key.is_some(),
+        key_install = ?key_install_outcome,
         "snapshot restored"
     );
     Ok(RestoreReport {
         snapshot_id: manifest.snapshot_id,
         files_restored,
         recording_files,
-        db_key_recovered,
+        db_key_recovered: db_key.is_some(),
+        db_key: db_key.unwrap_or([0u8; 32]),
+        key_install: key_install_outcome,
     })
 }
 
@@ -538,20 +641,105 @@ mod tests {
             &snapshot_dir(dest.path(), &receipt),
             &wrapping,
             restore_dest.path(),
+            // Keychain-free test context: skip the install, prove the key
+            // still reaches the caller via the report.
+            KeyInstall::Skip,
         )
         .expect("restore");
         assert!(report.db_key_recovered);
+        assert_eq!(report.key_install, KeyInstallOutcome::Skipped);
+        assert!(report.debug_string_has_no_key()); // see helper below
         assert_eq!(report.recording_files, 1);
         assert!(restore_dest.path().join("medical.db").exists());
         assert!(restore_dest.path().join("recordings/visit-0.enc").exists());
 
-        // The restored DB opens with the recovered key.
-        let recovered =
-            recover_db_key(&snapshot_dir(dest.path(), &receipt), &wrapping).expect("recover key");
-        assert_eq!(recovered, db_key);
-        let reopened =
-            medical_db::Database::open(&restore_dest.path().join("medical.db"), Some(recovered));
+        // The restored DB opens with the key returned in the report —
+        // the exact credential a clean-machine restore would install.
+        let reopened = medical_db::Database::open(
+            &restore_dest.path().join("medical.db"),
+            Some(report.db_key),
+        );
         assert!(reopened.is_ok(), "restored DB must open with recovered key");
+    }
+
+    #[test]
+    fn key_install_decision_guards_overwrite() {
+        use super::{KeyInstall, KeyInstallOutcome as O, key_install_decision};
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        // Skip never installs.
+        assert_eq!(key_install_decision(None, a, KeyInstall::Skip), O::Skipped);
+        assert_eq!(
+            key_install_decision(Some(b), a, KeyInstall::Skip),
+            O::Skipped
+        );
+        // Default mode: install when absent, no-op when equal, refuse when
+        // a DIFFERENT live key exists (restoring an old snapshot must not
+        // lock out the current database).
+        assert_eq!(
+            key_install_decision(None, a, KeyInstall::IfAbsentOrEqual),
+            O::Installed
+        );
+        assert_eq!(
+            key_install_decision(Some(a), a, KeyInstall::IfAbsentOrEqual),
+            O::AlreadyPresent
+        );
+        assert_eq!(
+            key_install_decision(Some(b), a, KeyInstall::IfAbsentOrEqual),
+            O::RefusedExistingKeyDiffers
+        );
+        // Force overwrites a differing key.
+        assert_eq!(
+            key_install_decision(Some(b), a, KeyInstall::Overwrite),
+            O::Installed
+        );
+        assert_eq!(
+            key_install_decision(Some(a), a, KeyInstall::Overwrite),
+            O::AlreadyPresent
+        );
+    }
+
+    #[test]
+    fn restore_installs_recovered_key_when_keychain_absent() {
+        // Restore on a machine with no db-key entry installs the snapshot's
+        // key (R6). Uses the EntryOnly keyring mock — cross-call persistence
+        // is not observable, so we assert the decision outcome + the
+        // returned key, per the keychain module's documented test limits.
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+
+        let src = tempfile::tempdir().expect("src");
+        let db_key = [0x71u8; 32];
+        let wrapping = [0x82u8; 32];
+        let (dest, opts) = fixture_opts(src.path(), db_key, wrapping);
+        let receipt = build_snapshot(&opts).expect("build");
+        let restore_dest = tempfile::tempdir().expect("restore");
+        let report = restore_snapshot(
+            &snapshot_dir(dest.path(), &receipt),
+            &wrapping,
+            restore_dest.path(),
+            KeyInstall::IfAbsentOrEqual,
+        )
+        .expect("restore");
+        assert_eq!(report.key_install, KeyInstallOutcome::Installed);
+        // And the key in the report opens the restored DB.
+        assert!(
+            medical_db::Database::open(
+                &restore_dest.path().join("medical.db"),
+                Some(report.db_key)
+            )
+            .is_ok()
+        );
+    }
+
+    impl RestoreReport {
+        /// Test helper: the redacted Debug output must not contain the key
+        /// in hex form (any prefix of it).
+        fn debug_string_has_no_key(&self) -> bool {
+            let dbg = format!("{self:?}");
+            let key_hex = hex::encode(self.db_key);
+            let prefix = &key_hex[..16];
+            !dbg.contains(prefix)
+        }
     }
 
     #[test]
