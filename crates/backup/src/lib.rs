@@ -368,4 +368,68 @@ mod transport_tests {
         );
         assert_eq!(c.list_snapshots().await.unwrap().len(), 1);
     }
+
+    /// Finding 3a: the target validates the receipt envelope (file count
+    /// + byte total) against the files it ACTUALLY received — a truncated
+    /// or corrupt push, or a lying receipt, commits to nothing.
+    #[tokio::test]
+    async fn commit_rejects_receipt_not_matching_uploaded_files() {
+        let env = spawn_agent().await;
+        let built = tempfile::tempdir().expect("built");
+        let receipt = build_fixture_snapshot(built.path(), 0x66);
+        let dir = built.path().join(&receipt.snapshot_id);
+        let http = reqwest::Client::new();
+
+        // Upload only SOME of the real files (the fixture has more)…
+        for rel in ["manifest.json.enc", "payload/f000000.bin"] {
+            let bytes = std::fs::read(dir.join(rel)).expect("file");
+            let resp = http
+                .put(format!(
+                    "{}/v1/snapshots/{}/file?path={rel}",
+                    env.base_url, receipt.snapshot_id
+                ))
+                .bearer_auth(&env.append)
+                .body(bytes)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 201, "upload {rel}");
+        }
+        // …so the HONEST receipt must be rejected: its totals describe
+        // files the target never received (count/bytes mismatch).
+        let resp = http
+            .post(format!(
+                "{}/v1/snapshots/{}/commit",
+                env.base_url, receipt.snapshot_id
+            ))
+            .bearer_auth(&env.append)
+            .json(&receipt)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "under-uploaded payload must not commit: {}",
+            resp.text().await.unwrap_or_default()
+        );
+
+        // A doctored receipt (inflated byte total) is rejected too.
+        let mut lying = receipt.clone();
+        lying.total_bytes += 1;
+        let resp = http
+            .post(format!(
+                "{}/v1/snapshots/{}/commit",
+                env.base_url, receipt.snapshot_id
+            ))
+            .bearer_auth(&env.append)
+            .json(&lying)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "lying receipt rejected");
+
+        // Nothing committed; the target stays clean for a retry.
+        assert!(client(&env).list_snapshots().await.unwrap().is_empty());
+    }
 }

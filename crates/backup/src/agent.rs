@@ -33,7 +33,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use tracing::info;
 
-use crate::snapshot::{RECEIPT_FILE, SnapshotReceipt};
+use crate::snapshot::{PAYLOAD_DIR, RECEIPT_FILE, SnapshotReceipt};
 
 /// Default total-bytes cap (1 TiB) — bounded growth for the append-only
 /// store. Override via `FERRISCRIBE_BACKUP_MAX_BYTES`.
@@ -321,6 +321,43 @@ async fn commit_snapshot(
         );
         return Err(insufficient_storage(
             "committed-snapshot count cap exceeded — prune old snapshots on the target",
+        ));
+    }
+
+    // Envelope validation (finding 3a): the receipt must describe exactly
+    // the files the target actually holds. The target is key-free — it
+    // cannot (and must not) verify the HMAC — but count/size agreement
+    // catches truncated or corrupt pushes here, and closes the
+    // lying-receipt bypass against the byte cap. Receipt totals count
+    // PAYLOAD files only (manifest.json.enc is not a manifest entry).
+    let payload_dir = snap_dir.join(PAYLOAD_DIR);
+    let mut uploaded_count: u64 = 0;
+    let mut uploaded_bytes: u64 = 0;
+    match std::fs::read_dir(&payload_dir) {
+        Ok(rd) => {
+            for entry in rd.flatten() {
+                if let Ok(meta) = entry.metadata()
+                    && meta.is_file()
+                {
+                    uploaded_count += 1;
+                    uploaded_bytes += meta.len();
+                }
+            }
+        }
+        Err(_) => {
+            return Err(bad_request("no payload files uploaded for this snapshot"));
+        }
+    }
+    if uploaded_count != receipt.file_count || uploaded_bytes != receipt.total_bytes {
+        tracing::warn!(
+            uploaded_count,
+            receipt_file_count = receipt.file_count,
+            uploaded_bytes,
+            receipt_total_bytes = receipt.total_bytes,
+            "commit rejected: receipt does not match received files"
+        );
+        return Err(bad_request(
+            "receipt file_count/total_bytes do not match the uploaded payload files",
         ));
     }
 

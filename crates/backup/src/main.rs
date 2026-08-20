@@ -257,14 +257,31 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
         receipt.snapshot_id, receipt.total_bytes
     );
 
-    if let Some(url) = flags.get("url") {
+    // Finding 3b: when a target is configured, drill the copy the TARGET
+    // holds — pull the just-pushed snapshot back and drill THAT. Drilling
+    // the local staging copy would leave a corrupted transfer unnoticed
+    // until a manual `drill --url`. (Cost: one extra pull per backup —
+    // acceptable for clinical volumes.)
+    let drill_dir = if let Some(url) = flags.get("url") {
         let token = flags.req("token")?;
         let client = BackupClient::new(url, token);
         client.push_snapshot(&local_dir).await?;
         println!("pushed to {url}");
-    }
+        let staging = std::env::temp_dir().join(format!(
+            "ferriscribe-postpush-drill-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&staging)?;
+        let pulled = client
+            .pull_snapshot(Some(&receipt.snapshot_id), &staging, &opts.wrapping_key)
+            .await?;
+        println!("drilling the target's copy (re-pulled + verified)");
+        pulled
+    } else {
+        local_dir
+    };
 
-    let outcome = drill::run_drill(&local_dir, &opts.wrapping_key);
+    let outcome = drill::run_drill(&drill_dir, &opts.wrapping_key);
     for check in &outcome.checks {
         println!("  ✓ {check}");
     }
