@@ -3352,6 +3352,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "medical-backup"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "hmac",
+ "medical-core",
+ "medical-db",
+ "medical-security",
+ "rand 0.9.5",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "medical-core"
 version = "0.1.0"
 dependencies = [

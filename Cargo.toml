@@ -14,6 +14,7 @@ members = [
     "crates/processing",
     "crates/export",
     "crates/translation",
+    "crates/backup",
     "src-tauri",
 ]
 
