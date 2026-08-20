@@ -325,6 +325,21 @@ pub(super) fn parse_soap_template(s: &str) -> SoapTemplate {
     }
 }
 
+/// Resolve the effective SOAP template: an explicit request wins, otherwise
+/// the user's stored preference (`AppConfig.soap_template`).
+///
+/// This lives here — not in the pipeline command — so that EVERY caller
+/// which passes no template (Generate tab, Regenerate, the pipeline) honors
+/// the stored setting. Previously only the pipeline did its own settings
+/// lookup, and a silent error there (or a direct `generate_soap` call)
+/// fell back to FollowUp regardless of the user's configured template.
+pub(super) fn resolve_soap_template(template: Option<&str>, config: &AppConfig) -> SoapTemplate {
+    match template {
+        Some(t) => parse_soap_template(t),
+        None => config.soap_template.clone(),
+    }
+}
+
 /// Build a single-turn `CompletionRequest` from system and user prompts.
 pub(super) fn build_completion_request(
     system_prompt: String,
@@ -403,6 +418,46 @@ pub(super) fn patient_context_is_empty(pc: &PatientContext) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_soap_template_falls_back_to_stored_preference() {
+        // The bug this pins: a caller passing no template must get the
+        // user's configured template, not a silent FollowUp default.
+        let mut config = AppConfig::default();
+        config.soap_template = SoapTemplate::Pediatric;
+        assert_eq!(
+            resolve_soap_template(None, &config),
+            SoapTemplate::Pediatric
+        );
+    }
+
+    #[test]
+    fn resolve_soap_template_explicit_request_wins() {
+        let mut config = AppConfig::default();
+        config.soap_template = SoapTemplate::Pediatric;
+        assert_eq!(
+            resolve_soap_template(Some("telehealth"), &config),
+            SoapTemplate::Telehealth
+        );
+    }
+
+    #[test]
+    fn resolve_soap_template_unparseable_string_defaults_to_follow_up() {
+        let mut config = AppConfig::default();
+        config.soap_template = SoapTemplate::Geriatric;
+        assert_eq!(
+            resolve_soap_template(Some("not-a-template"), &config),
+            SoapTemplate::FollowUp
+        );
+    }
+
+    #[test]
+    fn resolve_soap_template_default_config_is_follow_up() {
+        assert_eq!(
+            resolve_soap_template(None, &AppConfig::default()),
+            SoapTemplate::FollowUp
+        );
+    }
 
     fn pc(meds: &[&str], allergies: &[&str], conditions: &[&str]) -> PatientContext {
         PatientContext {

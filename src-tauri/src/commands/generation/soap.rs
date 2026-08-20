@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, load_recording_and_settings, parse_soap_template,
-    patient_context_is_empty, persist_recording, resolve_provider, validate_patient_context,
+    build_completion_request, load_recording_and_settings, patient_context_is_empty,
+    persist_recording, resolve_provider, resolve_soap_template, validate_patient_context,
 };
 use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_TRANSCRIPT_CHARS, format_progress_error};
 
@@ -135,10 +135,16 @@ async fn generate_soap_inner(
         )));
     }
 
+    // Explicit template wins; otherwise the stored preference from
+    // AppConfig. Resolved here so every caller path (pipeline, Generate
+    // tab, Regenerate) honors the stored setting — previously a call with
+    // no template silently used FollowUp.
+    let soap_template = resolve_soap_template(template, &config);
+
     info!(
         provider = %provider.name(),
         model = %settings.model,
-        template = template.unwrap_or("follow_up"),
+        template = ?soap_template,
         transcript_len = transcript.len(),
         context_len = context.map(|c| c.len()).unwrap_or(0),
         patient_context_present = patient_context.is_some(),
@@ -146,7 +152,6 @@ async fn generate_soap_inner(
     );
 
     // Build prompts with full config
-    let soap_template = template.map(parse_soap_template).unwrap_or_default();
     let model_name = settings.model.clone();
 
     // Select BC MSP ICD-9 candidates relevant to this visit. Only
