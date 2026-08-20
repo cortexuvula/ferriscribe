@@ -174,14 +174,14 @@ async fn generate_soap_inner(
         "ICD-9 candidate selection complete"
     );
 
-    let config = SoapPromptConfig {
+    let prompt_config = SoapPromptConfig {
         template: soap_template,
         icd_version: settings.icd_version,
         custom_prompt: settings.custom_soap_prompt,
         icd9_candidates,
     };
 
-    let system_prompt = soap_generator::build_soap_prompt(&config);
+    let system_prompt = soap_generator::build_soap_prompt(&prompt_config);
     let user_prompt = soap_generator::build_user_prompt(transcript, context, patient_context);
 
     debug!(
@@ -260,9 +260,9 @@ async fn generate_soap_inner(
     let capture_generation_id: Option<Uuid> = if let Some(rec_uuid) = recording_uuid {
         match state.db.conn() {
             Ok(conn) => {
-                let cfg =
-                    medical_db::settings::SettingsRepo::load_config(&conn).unwrap_or_default();
-                if cfg.capture_for_training {
+                // In-scope AppConfig (loaded at the top of this request) —
+                // no second SettingsRepo round-trip needed here.
+                if config.capture_for_training {
                     let context_blob = serde_json::json!({
                         "context": context,
                         "patient_context": patient_context,
