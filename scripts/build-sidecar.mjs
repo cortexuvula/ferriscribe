@@ -22,11 +22,18 @@ const targetArg = process.argv.indexOf('--target');
 const target =
   targetArg !== -1 && process.argv[targetArg + 1]
     ? process.argv[targetArg + 1]
-    : execSync('rustc -vV', { encoding: 'utf8' })
-        .split('\n')
-        .find((l) => l.startsWith('host:'))
-        .split(':')[1]
-        .trim();
+    : (() => {
+        const host = execSync('rustc -vV', { encoding: 'utf8' })
+          .split('\n')
+          .find((l) => l.startsWith('host:'))
+          ?.split(':')[1]
+          ?.trim();
+        if (!host) {
+          console.error('could not determine host target triple from `rustc -vV`');
+          process.exit(1);
+        }
+        return host;
+      })();
 
 console.log(`building ferriscribe-backup for ${target}…`);
 execSync(`cargo build -p medical-backup --release --target ${target}`, {
