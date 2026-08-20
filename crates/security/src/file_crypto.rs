@@ -62,7 +62,11 @@ pub enum FileCryptoError {
 /// produces a distinct, fixed-length key for file encryption. (This is a
 /// KDF on a high-entropy 32-byte root key, so a single hash round is
 /// sufficient — unlike a password, the input already has full entropy.)
-fn derive_file_key(db_key: &[u8; 32]) -> [u8; 32] {
+///
+/// Public so the backup/restore tooling (`medical-backup`) can re-derive
+/// the exact WAV-file key from a restored DB key when verifying snapshot
+/// contents — the derivation must never be re-implemented downstream.
+pub fn derive_file_key(db_key: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(db_key);
     hasher.update(b"ferriescribe-file-v1");
@@ -70,6 +74,25 @@ fn derive_file_key(db_key: &[u8; 32]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
+}
+
+/// Encrypt `plaintext` under an explicit 32-byte key (FE1 format:
+/// magic + nonce + AES-256-GCM ciphertext). Keychain-free counterpart of
+/// [`encrypt_bytes_in_memory`], used by the backup tooling where the key
+/// is a domain-derived snapshot key rather than the keychain DB key.
+pub fn encrypt_bytes_with_key(
+    key: &[u8; 32],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, FileCryptoError> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    encrypt_with_key(&cipher, plaintext)
+}
+
+/// Decrypt an FE1 blob under an explicit 32-byte key. Keychain-free
+/// counterpart of [`decrypt_bytes`].
+pub fn decrypt_bytes_with_key(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, FileCryptoError> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    decrypt_bytes_with(bytes, &cipher)
 }
 
 /// Obtain the AES-256-GCM cipher, deriving the key from the keychain DB key.
@@ -297,6 +320,41 @@ mod tests {
         assert_eq!(MAGIC.len(), 3);
         assert_ne!(MAGIC.as_slice(), b"RIFF"); // not confused with WAV
         assert_ne!(MAGIC.as_slice(), b"ID3"); // not confused with MP3
+    }
+
+    #[test]
+    fn key_taking_roundtrip_and_wrong_key_fails() {
+        let key = [7u8; 32];
+        let secret = b"backup manifest bytes";
+        let blob = encrypt_bytes_with_key(&key, secret).expect("encrypt");
+        assert!(blob.starts_with(MAGIC));
+        assert_eq!(
+            decrypt_bytes_with_key(&key, &blob).expect("decrypt"),
+            secret
+        );
+        // A different key must fail GCM authentication, not return garbage.
+        let wrong = decrypt_bytes_with_key(&[8u8; 32], &blob);
+        assert!(matches!(wrong, Err(FileCryptoError::Decrypt(_))));
+    }
+
+    #[test]
+    fn key_taking_decrypt_rejects_tampered_ciphertext() {
+        // Flip one bit of ciphertext — GCM must fail closed.
+        let key = [9u8; 32];
+        let mut blob = encrypt_bytes_with_key(&key, b"integrity matters").expect("encrypt");
+        let last = blob.len() - 1;
+        blob[last] ^= 0x01;
+        let result = decrypt_bytes_with_key(&key, &blob);
+        assert!(matches!(result, Err(FileCryptoError::Decrypt(_))));
+    }
+
+    #[test]
+    fn derive_file_key_is_domain_separated_and_stable() {
+        let db_key = [1u8; 32];
+        let k1 = derive_file_key(&db_key);
+        let k2 = derive_file_key(&db_key);
+        assert_eq!(k1, k2, "derivation must be deterministic");
+        assert_ne!(k1, db_key, "derived key must differ from root");
     }
 
     // ---- encrypt_file_in_place (the production PHI-at-rest path) ----
