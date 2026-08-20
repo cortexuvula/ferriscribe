@@ -35,6 +35,9 @@
 pub mod batch;
 pub mod document_generator;
 pub mod edit_distance;
+// Private: contract documentation + anti-drift tests for the two markdown
+// strippers (document_generator::strip_markdown vs postprocess::clean_text).
+mod markdown;
 pub mod ocr;
 pub mod peer_discussion;
 pub mod pipeline;
