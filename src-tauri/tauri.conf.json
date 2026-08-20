@@ -4,7 +4,7 @@
   "version": "0.52.0",
   "identifier": "com.ferriscribe.app",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run build:sidecar && npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
@@ -24,6 +24,7 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "rpm", "msi", "nsis", "dmg", "app"],
+    "externalBin": ["binaries/ferriscribe-backup"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

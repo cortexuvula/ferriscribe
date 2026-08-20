@@ -40,6 +40,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 npm run tauri dev
 ```
 
+`npm run tauri dev` chains `npm run build:sidecar` (stages the `ferriscribe-backup` Tauri sidecar under `src-tauri/binaries/`, gitignored). The first run pays one `medical-backup` release build; afterwards cargo's cache makes it seconds. Local release builds (`npm run tauri build`) must run `npm run build:sidecar` first — CI's `release.yml` does this explicitly per target. Never commit anything under `src-tauri/binaries/`.
+
 CI (`ci.yml`, lint job) enforces `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` on every push to master and every PR. Run both locally before pushing — there is no separate "lint" npm script; invoke the cargo commands directly as shown. Frontend linting uses `npm run lint` (eslint), also gated in CI.
 
 `npm run check` runs `svelte-check` — an earlier version invoked `svelte-kit sync`; that prefix was removed because **this is not a SvelteKit project**. The README's mention of "SvelteKit" is stale; treat Svelte 5 + Vite as the truth.

@@ -73,6 +73,17 @@ jobs:
             clang \
             cmake
 
+      - name: Build ferriscribe-backup sidecar
+        # The backup sidecar is bundled via externalBin and must be staged
+        # with the target-triple suffix BEFORE tauri-action builds (it
+        # builds with --target). beforeBuildCommand can't know the
+        # cross-target, so this step is explicit.
+        run: node scripts/build-sidecar.mjs --target ${{ matrix.target }}
+        env:
+          # Match the main build's deployment target (sqlcipher builds).
+          MACOSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '11.0' || '' }}
+          CMAKE_OSX_DEPLOYMENT_TARGET: ${{ runner.os == 'macOS' && '11.0' || '' }}
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:

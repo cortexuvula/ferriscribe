@@ -10,7 +10,7 @@
 //! systemd timer (OnCalendar=) — the same binary, the same arguments.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::BackupResult;
 
@@ -130,6 +130,85 @@ pub fn install(cfg: &ScheduleConfig) -> BackupResult<PathBuf> {
     Ok(path)
 }
 
+/// Resolve the sidecar binary bundled next to the app executable
+/// (`FerriScribe.app/Contents/MacOS/ferriscribe-backup` on macOS). Returns
+/// `None` when not running from a bundle with the sidecar present (dev
+/// builds without `npm run build:sidecar`, or an installed app predating
+/// the sidecar).
+pub fn bundled_binary_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let sibling = exe.parent()?.join("ferriscribe-backup");
+    sibling.is_file().then_some(sibling)
+}
+
+/// Copy the bundled sidecar into `dest_dir` and return the stable path.
+/// The stable copy is what the launchd plist points at — it survives the
+/// app being moved, updated, or dragged to the trash, none of which are
+/// true of the path inside the .app bundle. Re-copies when the bundled
+/// binary's content hash differs (app update shipped a newer tool);
+/// returns the existing path unchanged when already current. Also copies
+/// when the stable copy is missing the executable bit (partial install).
+pub fn ensure_binary_copy(dest_dir: &Path) -> BackupResult<PathBuf> {
+    let bundled = bundled_binary_path().ok_or_else(|| {
+        crate::BackupError::Escrow(
+            "ferriscribe-backup sidecar not found next to the app executable".into(),
+        )
+    })?;
+    copy_binary_if_changed(&bundled, dest_dir)
+}
+
+/// Testable core of [`ensure_binary_copy`]: copy `bundled` into `dest_dir`
+/// when missing, non-executable, or content-different from what's there.
+pub(crate) fn copy_binary_if_changed(bundled: &Path, dest_dir: &Path) -> BackupResult<PathBuf> {
+    std::fs::create_dir_all(dest_dir)?;
+    let dest = dest_dir.join("ferriscribe-backup");
+    let src_hash = file_hash(bundled)?;
+    let needs_copy = match std::fs::read(&dest) {
+        Ok(existing) => {
+            let dest_hash = sha256_hex(&existing);
+            dest_hash != src_hash || !is_executable(&dest)
+        }
+        Err(_) => true,
+    };
+    if needs_copy {
+        std::fs::copy(bundled, &dest)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    Ok(dest)
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    true
+}
+
+fn file_hash(path: &Path) -> BackupResult<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
 /// Remove the plist and (best-effort) unload the agent. Idempotent.
 pub fn uninstall() -> BackupResult<()> {
     let path = plist_path()?;
@@ -186,5 +265,46 @@ mod tests {
         local.url = String::new();
         let args = schedule_args(&local);
         assert!(!args.contains(&"--url".to_string()));
+    }
+
+    #[test]
+    fn copy_binary_if_changed_copies_missing_then_skips_unchanged() {
+        let src_dir = tempfile::TempDir::new().unwrap();
+        let bundled = src_dir.path().join("ferriscribe-backup");
+        std::fs::write(&bundled, b"tool-bytes-v1").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bundled, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let dest_dir = tempfile::TempDir::new().unwrap();
+        let dest = copy_binary_if_changed(&bundled, dest_dir.path()).unwrap();
+        assert!(dest.is_file());
+
+        // Idempotent: same content → no error, path unchanged.
+        let dest2 = copy_binary_if_changed(&bundled, dest_dir.path()).unwrap();
+        assert_eq!(dest, dest2);
+
+        // A NEWER bundled tool (different bytes) replaces the stale copy —
+        // the "app update shipped a newer backup tool" path.
+        std::fs::write(&bundled, b"tool-bytes-v2").unwrap();
+        copy_binary_if_changed(&bundled, dest_dir.path()).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"tool-bytes-v2");
+    }
+
+    #[test]
+    fn copy_binary_if_changed_restores_missing_exec_bit() {
+        // A copy written without the exec bit (partial install / manual
+        // copy) must be repaired even when the bytes match.
+        let src_dir = tempfile::TempDir::new().unwrap();
+        let bundled = src_dir.path().join("ferriscribe-backup");
+        std::fs::write(&bundled, b"tool-bytes").unwrap();
+        let dest_dir = tempfile::TempDir::new().unwrap();
+        let dest = dest_dir.path().join("ferriscribe-backup");
+        std::fs::write(&dest, b"tool-bytes").unwrap(); // same bytes, no +x
+
+        copy_binary_if_changed(&bundled, dest_dir.path()).unwrap();
+        assert!(is_executable(&dest), "exec bit must be restored");
     }
 }
