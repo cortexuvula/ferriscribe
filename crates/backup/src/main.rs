@@ -245,67 +245,56 @@ async fn cmd_backup(flags: &Flags) -> CmdResult {
     Ok(())
 }
 
-/// The scheduled unit: build → push (if configured) → drill the local
-/// snapshot. A drill failure is a loud non-zero exit so launchd logs and
-/// the user notices (R4).
+/// The scheduled unit, now delegating to `job::run_backup_job` — the SAME
+/// code path the app's "Back up now" button runs. A failure is a loud
+/// non-zero exit so launchd logs and the user notices (R4); the status
+/// file the pane reads is written either way.
 async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
-    let opts = build_options_from(flags)?;
-    let receipt = snapshot::build_snapshot(&opts)?;
-    let local_dir = opts.dest_dir.join(&receipt.snapshot_id);
-    println!(
-        "snapshot {} built ({} bytes)",
-        receipt.snapshot_id, receipt.total_bytes
-    );
-
-    // Finding 3b: when a target is configured, drill the copy the TARGET
-    // holds — pull the just-pushed snapshot back and drill THAT. Drilling
-    // the local staging copy would leave a corrupted transfer unnoticed
-    // until a manual `drill --url`. (Cost: one extra pull per backup —
-    // acceptable for clinical volumes.)
-    let drill_dir = if let Some(url) = flags.get("url") {
-        let token = flags.req("token")?;
-        let client = BackupClient::new(url, token);
-        client.push_snapshot(&local_dir).await?;
-        println!("pushed to {url}");
-        // Local retention (finding 6): after a successful push the local
-        // staging copies are redundant — keep the newest N so the local
-        // disk doesn't fill while the target is healthy. Skipped when the
-        // drill fails, so the suspect staging copy survives for forensics.
-        let keep: usize = flags
+    let data_dir = flags
+        .get("data-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_data_dir);
+    let cfg = medical_backup::job::JobConfig {
+        recordings_dir: flags
+            .get("recordings-dir")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("recordings")),
+        db_path: data_dir.join("medical.db"),
+        keystore_path: Some(data_dir.join("config").join("keys.json")),
+        data_dir,
+        target: match flags.get("url") {
+            Some(url) => Some((url.to_string(), flags.req("token")?)),
+            None => None,
+        },
+        keep_local: flags
             .get("keep-local")
             .and_then(|v| v.parse().ok())
-            .unwrap_or(14);
-        let removed = snapshot::prune_local_snapshots(&opts.dest_dir, keep);
-        if !removed.is_empty() {
-            println!("local retention: removed {} old snapshot(s)", removed.len());
-        }
-        let staging = std::env::temp_dir().join(format!(
-            "ferriscribe-postpush-drill-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(&staging)?;
-        let pulled = client
-            .pull_snapshot(Some(&receipt.snapshot_id), &staging, &opts.wrapping_key)
-            .await?;
-        println!("drilling the target's copy (re-pulled + verified)");
-        pulled
-    } else {
-        local_dir
+            .unwrap_or(14),
     };
+    let db_key = medical_security::keychain::get_or_create_db_key()?;
+    let wrapping = keys::load_or_create_wrapping_key()?;
 
-    let outcome = drill::run_drill(&drill_dir, &opts.wrapping_key);
-    for check in &outcome.checks {
-        println!("  ✓ {check}");
+    // The job is sync (it builds nested runtimes for client calls), so it
+    // must run on a blocking thread, not this async one.
+    let outcome = tokio::task::spawn_blocking(move || {
+        medical_backup::job::run_backup_job(&cfg, db_key, wrapping)
+    })
+    .await
+    .map_err(|e| medical_backup::BackupError::Escrow(format!("job task: {e}")))?;
+
+    for event in &outcome.events {
+        match event.kind {
+            medical_backup::job::JobEventKind::Ok => println!("  ✓ {}", event.line),
+            medical_backup::job::JobEventKind::Fail => eprintln!("  ✗ {}", event.line),
+            medical_backup::job::JobEventKind::Step => println!("{}", event.line),
+        }
     }
-    if outcome.passed {
-        println!("drill passed for {}", outcome.snapshot_id);
+    if outcome.success() {
+        println!("backup job passed");
         Ok(())
     } else {
-        for failure in &outcome.failures {
-            eprintln!("  ✗ {failure}");
-        }
         Err(medical_backup::BackupError::Verification(
-            "restore drill failed".into(),
+            "backup job failed — see lines above".into(),
         ))
     }
 }

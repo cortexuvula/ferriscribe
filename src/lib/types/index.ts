@@ -165,6 +165,12 @@ export interface AppConfig {
   capture_for_training: boolean;
   // Security
   allow_public_endpoint: boolean;
+  /** Backup target agent URL; null until configured. Mirrors
+   *  `backup_target_url: Option<String>` in crates/core/src/types/settings.rs. */
+  backup_target_url: string | null;
+  /** Append token for the backup target (encrypted at rest in the DB).
+   *  The target-side admin/prune token never lives on this machine. */
+  backup_append_token: string | null;
   // Onboarding
   onboarding_completed: boolean;
   // Updates

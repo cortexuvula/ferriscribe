@@ -5225,6 +5225,7 @@ dependencies = [
  "medical-agents",
  "medical-ai-providers",
  "medical-audio",
+ "medical-backup",
  "medical-core",
  "medical-db",
  "medical-export",

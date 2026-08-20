@@ -4,6 +4,7 @@
   import Prompts from './settings/Prompts.svelte';
   import Models from './settings/Models.svelte';
   import Audio from './settings/Audio.svelte';
+  import Backup from './settings/Backup.svelte';
   import Sharing from './settings/Sharing.svelte';
   import TrainingCorpus from './settings/TrainingCorpus.svelte';
   import LetterAudiences from './settings/LetterAudiences.svelte';
@@ -29,6 +30,7 @@
     { id: 'prompts', label: 'Prompts' },
     { id: 'models', label: 'AI Models' },
     { id: 'audio', label: 'Audio / STT' },
+    { id: 'backup', label: 'Backup' },
     { id: 'sharing', label: 'Sharing' },
     { id: 'training-corpus', label: 'Training Corpus' },
     { id: 'letter-audiences', label: 'Letter Audiences' },
@@ -61,6 +63,9 @@
 
     {:else if activeSection === 'audio'}
       <Audio />
+
+    {:else if activeSection === 'backup'}
+      <Backup />
 
     {:else if activeSection === 'sharing'}
       <Sharing />

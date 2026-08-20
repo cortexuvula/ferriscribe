@@ -1,0 +1,303 @@
+//! Backup UI commands — thin, in-process wrappers over the `medical-backup`
+//! LIBRARY (never the sidecar binary: the app configures, launchd fires).
+//! One exception: `install-schedule` stages the bundled sidecar to a stable
+//! path, because the plist needs an executable that outlives the app bundle.
+
+use std::path::PathBuf;
+
+use medical_backup::{escrow, job, keys, schedule, status};
+use serde::Serialize;
+use tauri::Emitter;
+use tracing::warn;
+
+use medical_core::error::{AppError, AppResult};
+use medical_db::settings::SettingsRepo;
+use medical_security::keychain;
+
+use crate::state::AppState;
+
+fn backup_err(e: medical_backup::BackupError) -> AppError {
+    AppError::Config(format!("backup: {e}"))
+}
+
+/// Everything the Settings → Backup pane renders. Counts/timestamps/bools
+/// only — no PHI, no key material.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupStatus {
+    pub ever_ran: bool,
+    pub last_run_at: Option<String>,
+    pub snapshot_id: Option<String>,
+    pub drill_passed: bool,
+    pub stale: bool,
+    pub failure: Option<String>,
+    pub pushed_to: Option<String>,
+    /// Escrow bootstrap state: wrapping key exists in the keychain.
+    pub wrapping_key_present: bool,
+    /// launchd agent plist exists (macOS; always false elsewhere).
+    pub schedule_installed: bool,
+    /// The stable binary copy exists and matches the bundled sidecar
+    /// (or simply exists when no sidecar is bundled, e.g. dev builds).
+    pub tool_copy_ok: bool,
+    /// Scheduling is macOS-only in this build (launchd).
+    pub schedule_supported: bool,
+}
+
+/// Load the persisted AppConfig (migrated) off the async worker.
+async fn load_config(state: &AppState) -> AppResult<medical_core::types::settings::AppConfig> {
+    let db = std::sync::Arc::clone(&state.db);
+    tokio::task::spawn_blocking(move || -> AppResult<_> {
+        let conn = db.conn()?;
+        let mut config = SettingsRepo::load_config(&conn)?;
+        config.migrate();
+        Ok(config)
+    })
+    .await
+    .map_err(|e| AppError::Config(format!("config task: {e}")))?
+}
+
+/// Resolve the recordings dir: the configured storage path when set,
+/// otherwise inside the app data dir. Mirrors how the app stores audio.
+fn recordings_dir_for(
+    config: &medical_core::types::settings::AppConfig,
+    data_dir: &std::path::Path,
+) -> PathBuf {
+    match config.storage_path.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => data_dir.join("recordings"),
+    }
+}
+
+#[tauri::command]
+pub async fn backup_status(state: tauri::State<'_, AppState>) -> AppResult<BackupStatus> {
+    let data_dir = state.data_dir.clone();
+    let run = tokio::task::spawn_blocking(move || status::read_status(&data_dir))
+        .await
+        .map_err(|e| AppError::Config(format!("status task: {e}")))?;
+
+    let wrapping_key_present = keychain::get_secret(keychain::KEYCHAIN_BACKUP_KEY_ACCOUNT)
+        .map(|k| k.is_some())
+        .unwrap_or(false);
+
+    let schedule_installed =
+        cfg!(target_os = "macos") && schedule::plist_path().is_ok_and(|p| p.exists());
+
+    // Tool copy is current when the stable copy exists and matches the
+    // bundled sidecar (byte compare; the sidecar is ~tens of MB at most).
+    let stable = state.data_dir.join("bin").join("ferriscribe-backup");
+    let tool_copy_ok = match schedule::bundled_binary_path() {
+        Some(bundled) => std::fs::read(&stable)
+            .ok()
+            .zip(std::fs::read(&bundled).ok())
+            .is_some_and(|(a, b)| a == b),
+        None => stable.is_file(),
+    };
+
+    Ok(BackupStatus {
+        ever_ran: run.is_some(),
+        stale: run.as_ref().is_none_or(|r| r.is_stale()),
+        last_run_at: run.as_ref().map(|r| r.last_run_at.to_rfc3339()),
+        snapshot_id: run.as_ref().and_then(|r| r.snapshot_id.clone()),
+        drill_passed: run.as_ref().is_some_and(|r| r.drill_passed),
+        failure: run.as_ref().and_then(|r| r.failure.clone()),
+        pushed_to: run.as_ref().and_then(|r| r.pushed_to.clone()),
+        wrapping_key_present,
+        schedule_installed,
+        tool_copy_ok,
+        schedule_supported: cfg!(target_os = "macos"),
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EscrowArtifacts {
+    pub sheet_path: String,
+    pub usb_path: String,
+}
+
+/// Generate (first run) or re-emit the escrow artifacts into `out_dir`.
+/// The frontend MUST tell the user to print the sheet and copy the USB
+/// file — a key in the keychain without escrow copies is NOT off-machine.
+#[tauri::command]
+pub async fn backup_escrow_init(out_dir: String) -> AppResult<EscrowArtifacts> {
+    let out = PathBuf::from(&out_dir);
+    // Keychain access can prompt; keep it off the async worker.
+    let wrapping = tokio::task::spawn_blocking(keys::load_or_create_wrapping_key)
+        .await
+        .map_err(|e| AppError::Config(format!("escrow task: {e}")))?
+        .map_err(backup_err)?;
+    let sheet = out.join(escrow::SHEET_FILENAME);
+    let usb = out.join(escrow::USB_FILENAME);
+    escrow::write_recovery_sheet(&sheet, &wrapping)
+        .map_err(|e| AppError::Config(format!("escrow: {e}")))?;
+    escrow::write_usb_file(&usb, &wrapping)
+        .map_err(|e| AppError::Config(format!("escrow: {e}")))?;
+    Ok(EscrowArtifacts {
+        sheet_path: sheet.to_string_lossy().into_owned(),
+        usb_path: usb.to_string_lossy().into_owned(),
+    })
+}
+
+/// Verify an escrow artifact (sheet or USB). Returns a status message.
+#[tauri::command]
+pub async fn backup_escrow_verify(file: String) -> AppResult<String> {
+    let path = PathBuf::from(&file);
+    let expected = tokio::task::spawn_blocking(keys::load_wrapping_key)
+        .await
+        .map_err(|e| AppError::Config(format!("escrow task: {e}")))?
+        .ok();
+    tokio::task::spawn_blocking(move || escrow::verify_artifact(&path, expected.as_ref()))
+        .await
+        .map_err(|e| AppError::Config(format!("escrow task: {e}")))?
+        .map_err(backup_err)
+}
+
+/// Install the daily launchd agent (macOS only). Stages the bundled
+/// sidecar to the stable `bin/` copy the plist points at, persists the
+/// target URL + append token to AppConfig (encrypted DB) so "Back up now"
+/// reuses them, then writes + loads the plist.
+#[tauri::command]
+pub async fn backup_install_schedule(
+    state: tauri::State<'_, AppState>,
+    hour: u32,
+    minute: u32,
+    url: Option<String>,
+    token: Option<String>,
+) -> AppResult<String> {
+    if !cfg!(target_os = "macos") {
+        return Err(AppError::Config(
+            "scheduled backups are macOS-only in this build (launchd); see the README for Linux systemd instructions".into(),
+        ));
+    }
+    if hour > 23 || minute > 59 {
+        return Err(AppError::InvalidInput(
+            "time must be a valid 24h hour/minute".into(),
+        ));
+    }
+
+    // Persist target + token FIRST so the schedule and the in-app
+    // "Back up now" share one source of truth.
+    {
+        let db = std::sync::Arc::clone(&state.db);
+        let url = url.clone();
+        let token = token.clone();
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db.conn()?;
+            let mut config = SettingsRepo::load_config(&conn)?;
+            config.migrate();
+            config.backup_target_url = url;
+            config.backup_append_token = token;
+            SettingsRepo::save_config(&conn, &config)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Config(format!("config task: {e}")))??;
+    }
+
+    let data_dir = state.data_dir.clone();
+    let (binary_path, plist_name) =
+        tokio::task::spawn_blocking(move || -> AppResult<(PathBuf, String)> {
+            let binary = schedule::ensure_binary_copy(&data_dir.join("bin")).map_err(backup_err)?;
+            let cfg = schedule::ScheduleConfig {
+                binary_path: binary.clone(),
+                hour,
+                minute,
+                url: url.unwrap_or_default(),
+                token: token.unwrap_or_default(),
+                snapshots_dir: data_dir.join("backups"),
+                log_dir: data_dir.join("logs"),
+            };
+            let plist = schedule::install(&cfg).map_err(backup_err)?;
+            let name = plist
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok((binary, name))
+        })
+        .await
+        .map_err(|e| AppError::Config(format!("schedule task: {e}")))??;
+
+    Ok(format!(
+        "Daily backup scheduled at {hour:02}:{minute:02} ({plist_name}); tool staged at {}",
+        binary_path.display()
+    ))
+}
+
+/// Remove the launchd agent. Idempotent.
+#[tauri::command]
+pub async fn backup_uninstall_schedule() -> AppResult<String> {
+    if !cfg!(target_os = "macos") {
+        return Err(AppError::Config("macOS-only".into()));
+    }
+    tokio::task::spawn_blocking(schedule::uninstall)
+        .await
+        .map_err(|e| AppError::Config(format!("schedule task: {e}")))?
+        .map_err(backup_err)?;
+    Ok("Scheduled backup removed".into())
+}
+
+/// Run the full backup job NOW (same code path as the schedule) using the
+/// persisted target, emitting `backup-job` events `{kind, line}` as it
+/// goes. Returns whether the job passed; the pane refreshes status after.
+#[tauri::command]
+pub async fn backup_run_now(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> AppResult<bool> {
+    #[derive(Clone, Serialize)]
+    struct JobEventPayload {
+        kind: &'static str,
+        line: String,
+    }
+
+    let config = load_config(&state).await?;
+    let target = match (
+        config.backup_target_url.clone(),
+        config.backup_append_token.clone(),
+    ) {
+        (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => Some((url, token)),
+        _ => None,
+    };
+
+    let db_key = tokio::task::spawn_blocking(keychain::get_or_create_db_key)
+        .await
+        .map_err(|e| AppError::Config(format!("keychain task: {e}")))?
+        .map_err(|e| AppError::Config(format!("keychain: {e}")))?;
+    let wrapping = tokio::task::spawn_blocking(keys::load_or_create_wrapping_key)
+        .await
+        .map_err(|e| AppError::Config(format!("keychain task: {e}")))?
+        .map_err(backup_err)?;
+
+    let data_dir = state.data_dir.clone();
+    let cfg = job::JobConfig {
+        data_dir: data_dir.clone(),
+        db_path: data_dir.join("medical.db"),
+        recordings_dir: recordings_dir_for(&config, &data_dir),
+        keystore_path: Some(data_dir.join("config").join("keys.json")),
+        target,
+        keep_local: 14,
+    };
+
+    let outcome = tokio::task::spawn_blocking(move || job::run_backup_job(&cfg, db_key, wrapping))
+        .await
+        .map_err(|e| AppError::Config(format!("job task: {e}")))?;
+
+    for event in &outcome.events {
+        let kind = match event.kind {
+            job::JobEventKind::Ok => "ok",
+            job::JobEventKind::Fail => "fail",
+            job::JobEventKind::Step => "step",
+        };
+        let _ = app.emit(
+            "backup-job",
+            JobEventPayload {
+                kind,
+                line: event.line.clone(),
+            },
+        );
+    }
+    if !outcome.success() {
+        warn!("in-app backup job failed (see status pane)");
+    }
+    Ok(outcome.success())
+}

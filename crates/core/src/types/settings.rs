@@ -495,6 +495,18 @@ pub struct AppConfig {
     #[serde(default)]
     pub allow_public_endpoint: bool,
 
+    // Off-machine backup (configured by Settings → Backup; the schedule
+    // itself is a launchd agent invoking the bundled sidecar, NOT the app)
+    /// Backup target agent URL (e.g. http://100.64.0.2:8741). None until
+    /// the user configures the target.
+    #[serde(default)]
+    pub backup_target_url: Option<String>,
+    /// Append token for the backup target. Stored here (encrypted DB) so
+    /// the in-app "Back up now" reuses the scheduled job's credentials.
+    /// The admin/prune token NEVER lives on this machine.
+    #[serde(default)]
+    pub backup_append_token: Option<String>,
+
     // Onboarding
     /// `true` once the user has completed (or skipped through) the first-run
     /// onboarding wizard. The wizard is shown only when this is `false` AND no

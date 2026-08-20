@@ -29,9 +29,11 @@ pub mod agent;
 pub mod client;
 pub mod drill;
 pub mod escrow;
+pub mod job;
 pub mod keys;
 pub mod schedule;
 pub mod snapshot;
+pub mod status;
 
 /// Errors surfaced by the backup tooling.
 #[derive(Debug, thiserror::Error)]
