@@ -43,6 +43,12 @@
 
   let activeTab = $state('record');
   let settingsOpen = $state(false);
+
+  // Any settingsNav.navigateTo(...) request also OPENS the dialog —
+  // callers (onboarding deep-link, backup banner) don't need prop plumbing.
+  $effect(() => {
+    if (settingsNav.state.requestedSection) settingsOpen = true;
+  });
   let previousTab = $state('record');
 
   /** Shared helper: open Settings dialog and navigate to a specific pane. */

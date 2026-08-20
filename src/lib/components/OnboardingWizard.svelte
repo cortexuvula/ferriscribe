@@ -7,7 +7,9 @@
   import StepModel from './onboarding/StepModel.svelte';
   import StepPair from './onboarding/StepPair.svelte';
   import StepFolder from './onboarding/StepFolder.svelte';
+  import StepBackup from './onboarding/StepBackup.svelte';
   import { settings } from '../stores/settings.svelte';
+  import { settingsNav } from '../stores/settingsNav.svelte';
   import { setOnboardingStarted } from '../api/settings';
 
   ///   0 = Welcome
@@ -16,12 +18,13 @@
   ///   3 = Mode (branch point)
   ///   4 = Provider (local) / Pair (server)
   ///   5 = Model (local) / Folder+Done (server — skips ahead)
-  ///   6 = Folder+Done (local)
+  ///   6 = Folder (local)
+  ///   7 = Backup+Done (local)
   type Mode = 'local' | 'server' | null;
   let step = $state(0);
   let mode = $state<Mode>(null);
 
-  const localSteps = ['Welcome', 'Updates', 'Language', 'Setup mode', 'AI provider', 'Whisper model', 'Recordings'];
+  const localSteps = ['Welcome', 'Updates', 'Language', 'Setup mode', 'AI provider', 'Whisper model', 'Recordings', 'Backup'];
   const serverSteps = ['Welcome', 'Updates', 'Language', 'Setup mode', 'Connect to server', 'Recordings'];
   const stepLabels = $derived(mode === 'server' ? serverSteps : localSteps);
   const totalSteps = $derived(stepLabels.length);
@@ -52,6 +55,12 @@
   }
   let finishing = $state(false);
   let finishError = $state<string | null>(null);
+  async function setUpBackup() {
+    // Complete onboarding first (unmounts the wizard on success), then
+    // open Settings already navigated to the Backup pane.
+    await finish();
+    settingsNav.navigateTo('backup');
+  }
   async function finish() {
     if (finishing) return;
     finishing = true;
@@ -94,7 +103,11 @@
         <StepModel onNext={next} onSkip={skip} />
       {:else if mode === 'server' && step === 4}
         <StepPair onNext={next} onSkip={skip} />
-      {:else if (mode === 'local' && step === 6) || (mode === 'server' && step === 5)}
+      {:else if mode === 'local' && step === 6}
+        <StepFolder onDone={next} {finishing} {finishError} />
+      {:else if mode === 'local' && step === 7}
+        <StepBackup onDone={finish} onSetUp={setUpBackup} {finishing} {finishError} />
+      {:else if mode === 'server' && step === 5}
         <StepFolder onDone={finish} {finishing} {finishError} />
       {/if}
     </div>
