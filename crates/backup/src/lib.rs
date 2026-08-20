@@ -30,6 +30,7 @@ pub mod client;
 pub mod drill;
 pub mod escrow;
 pub mod keys;
+pub mod schedule;
 pub mod snapshot;
 
 /// Errors surfaced by the backup tooling.

@@ -31,6 +31,7 @@ rusqlite = { workspace = true }
 axum = { version = "0.8" }
 tokio = { workspace = true }
 reqwest = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
