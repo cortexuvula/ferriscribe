@@ -92,7 +92,7 @@ mod transport_tests {
         _root: tempfile::TempDir,
     }
 
-    async fn spawn_agent() -> Env {
+    async fn spawn_agent_with(max_bytes: u64, max_snapshots: usize) -> Env {
         let root = tempfile::tempdir().expect("root");
         std::fs::create_dir_all(root.path()).unwrap();
         let append = format!("append-{}", Uuid::new_v4());
@@ -101,6 +101,8 @@ mod transport_tests {
             root: root.path().to_path_buf(),
             append_token: append.clone(),
             admin_token: admin.clone(),
+            max_bytes,
+            max_snapshots,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -111,6 +113,10 @@ mod transport_tests {
             admin,
             _root: root,
         }
+    }
+
+    async fn spawn_agent() -> Env {
+        spawn_agent_with(agent::DEFAULT_MAX_BYTES, agent::DEFAULT_MAX_SNAPSHOTS).await
     }
 
     fn build_fixture_snapshot(dest: &Path, salt: u8) -> SnapshotReceipt {
@@ -300,5 +306,66 @@ mod transport_tests {
         let listed = c.list_snapshots().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].snapshot_id, r2.snapshot_id, "newest survives");
+    }
+
+    /// Finding 2 (bounded growth): uploads past the byte cap are rejected
+    /// with 507 while already-committed snapshots survive.
+    #[tokio::test]
+    async fn quota_rejects_uploads_over_byte_cap() {
+        let env = spawn_agent_with(1024 * 1024, agent::DEFAULT_MAX_SNAPSHOTS).await;
+        let c = client(&env);
+
+        // A normal (small) fixture snapshot fits under the 1 MiB cap.
+        let built = tempfile::tempdir().expect("built");
+        let r1 = build_fixture_snapshot(built.path(), 0x44);
+        c.push_snapshot(&built.path().join(&r1.snapshot_id))
+            .await
+            .expect("first push fits");
+        assert_eq!(c.list_snapshots().await.unwrap().len(), 1);
+
+        // A 2 MiB upload must be rejected at PUT time (507), even though
+        // it never commits — an attacker must not fill the disk with
+        // in-flight garbage either.
+        let resp = reqwest::Client::new()
+            .put(format!(
+                "{}/v1/snapshots/snap-flood-0001/file?path=payload/f000000.bin",
+                env.base_url
+            ))
+            .bearer_auth(&env.append)
+            .body(vec![0u8; 2 * 1024 * 1024])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 507, "over-cap upload rejected");
+
+        // The committed snapshot is untouched.
+        let listed = c.list_snapshots().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].snapshot_id, r1.snapshot_id);
+    }
+
+    /// Finding 2: the (N+1)-th COMMIT is rejected when the snapshot-count
+    /// cap is reached; existing history survives.
+    #[tokio::test]
+    async fn quota_rejects_commit_over_count_cap() {
+        let env = spawn_agent_with(agent::DEFAULT_MAX_BYTES, 1).await;
+        let c = client(&env);
+        let built = tempfile::tempdir().expect("built");
+        let r1 = build_fixture_snapshot(built.path(), 0x55);
+        c.push_snapshot(&built.path().join(&r1.snapshot_id))
+            .await
+            .expect("first push commits");
+
+        // Second snapshot: uploads fine, commit must fail with 507.
+        let r2 = build_fixture_snapshot(built.path(), 0x55);
+        let err = c
+            .push_snapshot(&built.path().join(&r2.snapshot_id))
+            .await
+            .expect_err("count cap must reject the second commit");
+        assert!(
+            err.to_string().contains("507"),
+            "expected 507 in error, got: {err}"
+        );
+        assert_eq!(c.list_snapshots().await.unwrap().len(), 1);
     }
 }

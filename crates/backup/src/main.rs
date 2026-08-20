@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use medical_backup::agent::{self, AgentConfig};
+use medical_backup::agent;
 use medical_backup::client::BackupClient;
 use medical_backup::escrow;
 use medical_backup::keys;
@@ -401,32 +401,24 @@ async fn cmd_drill(flags: &Flags) -> CmdResult {
 
 async fn cmd_serve(flags: &Flags) -> CmdResult {
     let root = flags.req("root")?;
+    // Fail closed: never default-bind to the world (finding 8).
     let bind = flags
         .get("bind")
-        .unwrap_or("0.0.0.0:8741")
+        .ok_or_else(|| {
+            medical_backup::BackupError::Escrow(
+                "--bind is required (use your Tailscale IP, or 127.0.0.1:8741 for local testing)"
+                    .into(),
+            )
+        })?
         .parse::<std::net::SocketAddr>()
         .map_err(|e| medical_backup::BackupError::Escrow(format!("--bind: {e}")))?;
-    let append_token = std::env::var("FERRISCRIBE_BACKUP_APPEND_TOKEN").map_err(|_| {
-        medical_backup::BackupError::Escrow("FERRISCRIBE_BACKUP_APPEND_TOKEN is required".into())
-    })?;
-    let admin_token = std::env::var("FERRISCRIBE_BACKUP_ADMIN_TOKEN").map_err(|_| {
-        medical_backup::BackupError::Escrow(
-            "FERRISCRIBE_BACKUP_ADMIN_TOKEN is required (target-side prune credential)".into(),
-        )
-    })?;
-    std::fs::create_dir_all(&root)?;
+    let cfg = agent::AgentConfig::from_env(PathBuf::from(&root))
+        .map_err(medical_backup::BackupError::Escrow)?;
     println!(
-        "serving append-only backup agent on {bind} (root: {root}) — bind to a Tailscale IP, not 0.0.0.0, when possible"
+        "serving append-only backup agent on {bind} (root: {root}); caps: {} bytes, {} snapshots",
+        cfg.max_bytes, cfg.max_snapshots
     );
-    agent::serve(
-        AgentConfig {
-            root: PathBuf::from(&root),
-            append_token,
-            admin_token,
-        },
-        bind,
-    )
-    .await?;
+    agent::serve(cfg, bind).await?;
     Ok(())
 }
 

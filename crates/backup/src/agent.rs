@@ -35,12 +35,139 @@ use tracing::info;
 
 use crate::snapshot::{RECEIPT_FILE, SnapshotReceipt};
 
-/// Agent configuration: storage root + the two credentials.
+/// Default total-bytes cap (1 TiB) — bounded growth for the append-only
+/// store. Override via `FERRISCRIBE_BACKUP_MAX_BYTES`.
+pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+/// Default committed-snapshot cap. Override via
+/// `FERRISCRIBE_BACKUP_MAX_SNAPSHOTS`.
+pub const DEFAULT_MAX_SNAPSHOTS: usize = 1000;
+/// Uncommitted (in-flight) snapshot dirs older than this are swept at
+/// agent startup — a crashed push must not leak disk forever.
+pub const STALE_INCOMING_AFTER: std::time::Duration =
+    std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Agent configuration: storage root + the two credentials + growth caps.
 #[derive(Clone)]
 pub struct AgentConfig {
     pub root: PathBuf,
     pub append_token: String,
     pub admin_token: String,
+    /// Cap on total on-disk snapshot bytes (committed + incoming). Uploads
+    /// and commits that would exceed it are rejected with 507.
+    pub max_bytes: u64,
+    /// Cap on the number of COMMITTED snapshots; the (N+1)-th commit is
+    /// rejected with 507.
+    pub max_snapshots: usize,
+}
+
+impl AgentConfig {
+    /// Build from environment: tokens are required; caps fall back to
+    /// [`DEFAULT_MAX_BYTES`] / [`DEFAULT_MAX_SNAPSHOTS`] unless
+    /// `FERRISCRIBE_BACKUP_MAX_BYTES` / `FERRISCRIBE_BACKUP_MAX_SNAPSHOTS`
+    /// are set.
+    pub fn from_env(root: PathBuf) -> Result<Self, String> {
+        let append_token = std::env::var("FERRISCRIBE_BACKUP_APPEND_TOKEN")
+            .map_err(|_| "FERRISCRIBE_BACKUP_APPEND_TOKEN is required".to_string())?;
+        let admin_token = std::env::var("FERRISCRIBE_BACKUP_ADMIN_TOKEN")
+            .map_err(|_| "FERRISCRIBE_BACKUP_ADMIN_TOKEN is required".to_string())?;
+        let max_bytes = match std::env::var("FERRISCRIBE_BACKUP_MAX_BYTES") {
+            Ok(v) => v
+                .parse()
+                .map_err(|_| "FERRISCRIBE_BACKUP_MAX_BYTES must be a u64".to_string())?,
+            Err(_) => DEFAULT_MAX_BYTES,
+        };
+        let max_snapshots = match std::env::var("FERRISCRIBE_BACKUP_MAX_SNAPSHOTS") {
+            Ok(v) => v
+                .parse()
+                .map_err(|_| "FERRISCRIBE_BACKUP_MAX_SNAPSHOTS must be a usize".to_string())?,
+            Err(_) => DEFAULT_MAX_SNAPSHOTS,
+        };
+        Ok(Self {
+            root,
+            append_token,
+            admin_token,
+            max_bytes,
+            max_snapshots,
+        })
+    }
+}
+
+/// Actual on-disk usage: total bytes across ALL snapshot dirs (committed
+/// AND incoming — an attacker who never commits must not be able to fill
+/// the disk either) plus the count of committed snapshots. Measured from
+/// the filesystem, never from client-declared receipt numbers, so lying
+/// receipts cannot bypass the caps.
+fn disk_usage(root: &Path) -> (u64, usize) {
+    fn dir_bytes(dir: &Path) -> u64 {
+        let mut total = 0u64;
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    total += dir_bytes(&path);
+                } else if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
+                }
+            }
+        }
+        total
+    }
+    let mut bytes = 0u64;
+    let mut committed = 0usize;
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            bytes += dir_bytes(&path);
+            if is_committed(&path) {
+                committed += 1;
+            }
+        }
+    }
+    (bytes, committed)
+}
+
+/// Remove uncommitted snapshot dirs whose newest mtime is older than
+/// `cutoff`. Agent-side housekeeping (the append credential has no say);
+/// called at startup BEFORE the listener binds, so no push is in flight.
+/// Returns the swept ids (for logging — counts only).
+pub fn sweep_stale_incoming(root: &Path, cutoff: std::time::SystemTime) -> Vec<String> {
+    let mut swept = Vec::new();
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return swept;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || is_committed(&path) {
+            continue;
+        }
+        // Newest mtime inside the dir (or the dir itself when empty).
+        let newest = newest_mtime(&path).unwrap_or_else(std::time::SystemTime::now);
+        if newest < cutoff && unfreeze_and_remove(&path).is_ok() {
+            swept.push(
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    swept
+}
+
+fn newest_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+    let mut newest = std::fs::metadata(dir).and_then(|m| m.modified()).ok();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            if let Ok(t) = entry.metadata().and_then(|m| m.modified())
+                && newest.is_none_or(|n| t > n)
+            {
+                newest = Some(t);
+            }
+        }
+    }
+    newest
 }
 
 /// What a request's bearer token is allowed to do.
@@ -89,8 +216,21 @@ pub fn router(cfg: AgentConfig) -> Router {
 /// Serve until the process is stopped. Binds `addr` (typically a
 /// Tailscale IP — see the README deployment notes).
 pub async fn serve(cfg: AgentConfig, addr: SocketAddr) -> Result<(), std::io::Error> {
+    // Housekeeping BEFORE binding: sweep crashed in-flight uploads so a
+    // dead push can't leak disk under the byte cap forever. Startup-only
+    // (no request can be in flight yet).
+    let swept = sweep_stale_incoming(
+        &cfg.root,
+        std::time::SystemTime::now()
+            .checked_sub(STALE_INCOMING_AFTER)
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+    );
+    if !swept.is_empty() {
+        info!(count = swept.len(), "swept stale in-flight snapshot dirs");
+    }
+    std::fs::create_dir_all(&cfg.root)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "ferriscribe-backup agent listening");
+    info!(%addr, max_bytes = cfg.max_bytes, max_snapshots = cfg.max_snapshots, "ferriscribe-backup agent listening");
     axum::serve(listener, router(cfg)).await
 }
 
@@ -116,6 +256,20 @@ async fn put_file(
     let snap_dir = cfg.root.join(&id);
     if is_committed(&snap_dir) {
         return Err(conflict("snapshot already committed — append-only"));
+    }
+    // Bounded growth (R3): reject uploads that would push actual on-disk
+    // bytes past the cap. Measured from the filesystem, never from
+    // client-declared numbers. (Small race window between concurrent
+    // PUTs is acceptable — the commit-time check re-verifies.)
+    let (used_bytes, _) = disk_usage(&cfg.root);
+    if used_bytes + body.len() as u64 > cfg.max_bytes {
+        tracing::warn!(
+            used_bytes,
+            body_len = body.len(),
+            max_bytes = cfg.max_bytes,
+            "upload rejected: byte cap would be exceeded"
+        );
+        return Err(insufficient_storage("byte cap would be exceeded"));
     }
     let dest = snap_dir.join(&rel);
     if dest.exists() {
@@ -146,6 +300,28 @@ async fn commit_snapshot(
     }
     if !snap_dir.is_dir() {
         return Err(bad_request("no files uploaded for this snapshot"));
+    }
+
+    // Bounded growth (R3): re-check both caps against actual disk usage
+    // at commit time — the moment the snapshot becomes immutable history.
+    let (used_bytes, committed_count) = disk_usage(&cfg.root);
+    if used_bytes > cfg.max_bytes {
+        tracing::warn!(
+            used_bytes,
+            max_bytes = cfg.max_bytes,
+            "commit rejected: byte cap exceeded"
+        );
+        return Err(insufficient_storage("byte cap exceeded"));
+    }
+    if committed_count + 1 > cfg.max_snapshots {
+        tracing::warn!(
+            committed_count,
+            max_snapshots = cfg.max_snapshots,
+            "commit rejected: snapshot-count cap exceeded"
+        );
+        return Err(insufficient_storage(
+            "committed-snapshot count cap exceeded — prune old snapshots on the target",
+        ));
     }
 
     // Write the receipt, then freeze: mark everything read-only and lay
@@ -377,6 +553,9 @@ fn forbidden(msg: &str) -> (StatusCode, String) {
 fn conflict(msg: &str) -> (StatusCode, String) {
     (StatusCode::CONFLICT, msg.into())
 }
+fn insufficient_storage(msg: &str) -> (StatusCode, String) {
+    (StatusCode::INSUFFICIENT_STORAGE, msg.into())
+}
 fn bad_request(msg: &str) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, msg.into())
 }
@@ -412,5 +591,49 @@ mod tests {
         assert!(validate_snapshot_id("../etc").is_err());
         assert!(validate_snapshot_id("a b").is_err());
         assert!(validate_snapshot_id("").is_err());
+    }
+
+    #[test]
+    fn sweep_removes_stale_incoming_but_never_committed() {
+        let root = tempfile::TempDir::new().unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60 * 24 * 8);
+
+        // A committed snapshot (marker + receipt).
+        let committed = root.path().join("snap-committed");
+        std::fs::create_dir_all(committed.join("payload")).unwrap();
+        std::fs::write(committed.join(".committed"), b"1").unwrap();
+        std::fs::write(committed.join("receipt.json"), b"{}").unwrap();
+        // Age it past the cutoff — committed history is never swept.
+        set_mtime_old(&committed.join(".committed"), old);
+
+        // A crashed in-flight upload, stale (every path inside aged —
+        // the sweep judges by the NEWEST mtime, dirs included).
+        let incoming = root.path().join("snap-crashed");
+        std::fs::create_dir_all(incoming.join("payload")).unwrap();
+        std::fs::write(incoming.join("payload/f000000.bin"), b"bytes").unwrap();
+        set_mtime_old(&incoming, old);
+        set_mtime_old(&incoming.join("payload"), old);
+        set_mtime_old(&incoming.join("payload/f000000.bin"), old);
+
+        // A FRESH in-flight upload — recent, must survive.
+        let fresh = root.path().join("snap-inprogress");
+        std::fs::create_dir_all(fresh.join("payload")).unwrap();
+        std::fs::write(fresh.join("payload/f000000.bin"), b"bytes").unwrap();
+
+        let swept = sweep_stale_incoming(
+            root.path(),
+            std::time::SystemTime::now() - STALE_INCOMING_AFTER,
+        );
+        assert_eq!(swept, vec!["snap-crashed".to_string()]);
+        assert!(committed.join(".committed").exists(), "committed survives");
+        assert!(fresh.join("payload/f000000.bin").exists(), "fresh survives");
+        assert!(!incoming.exists(), "stale incoming removed");
+    }
+
+    fn set_mtime_old(path: &Path, t: std::time::SystemTime) {
+        // Read-only handle works for directories too (futimens checks
+        // ownership, not fd access mode; the test owns everything).
+        let f = std::fs::File::open(path).unwrap();
+        f.set_modified(t).unwrap();
     }
 }
