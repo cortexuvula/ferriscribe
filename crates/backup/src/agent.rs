@@ -177,7 +177,7 @@ enum Scope {
     Admin,
 }
 
-fn auth_scope(headers: &HeaderMap, cfg: &AgentConfig) -> Option<Scope> {
+fn auth_scope(headers: &HeaderMap, cfg: &AgentConfig, route: &'static str) -> Option<Scope> {
     let value = headers.get(axum::http::header::AUTHORIZATION)?;
     let raw = value.to_str().ok()?;
     let token = raw.strip_prefix("Bearer ")?;
@@ -186,19 +186,21 @@ fn auth_scope(headers: &HeaderMap, cfg: &AgentConfig) -> Option<Scope> {
     } else if constant_time_eq(token, &cfg.append_token) {
         Some(Scope::Append)
     } else {
+        // Counts/routes only — never the token, never PHI (finding 8).
+        tracing::warn!(route, "authentication failed");
         None
     }
 }
 
-/// Constant-time-ish comparison (length check + byte fold) so a token
-/// probe can't shortcut on prefix matches. Not a cryptographic CT guard,
-/// but raises the bar over `==` on a LAN-facing service.
+/// Bearer-token comparison over SHA-256 digests: both sides hash to a
+/// fixed 32 bytes first, so there is no length leak and no early exit —
+/// the fold runs over equal-length digests regardless of input (finding 9).
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.bytes()
-        .zip(b.bytes())
+    use sha2::{Digest, Sha256};
+    let da: [u8; 32] = Sha256::digest(a.as_bytes()).into();
+    let db: [u8; 32] = Sha256::digest(b.as_bytes()).into();
+    da.iter()
+        .zip(db.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
 }
@@ -248,7 +250,7 @@ async fn put_file(
     Query(q): Query<FilePathQuery>,
     body: axum::body::Bytes,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let scope = auth_scope(&headers, &cfg).ok_or(unauthorized())?;
+    let scope = auth_scope(&headers, &cfg, "put_file").ok_or(unauthorized())?;
     let _ = scope; // both scopes may upload
     validate_snapshot_id(&id)?;
     let rel = validate_rel_path(&q.path)?;
@@ -289,7 +291,7 @@ async fn commit_snapshot(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(receipt): Json<SnapshotReceipt>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    auth_scope(&headers, &cfg).ok_or(unauthorized())?;
+    auth_scope(&headers, &cfg, "commit_snapshot").ok_or(unauthorized())?;
     validate_snapshot_id(&id)?;
     if receipt.snapshot_id != id {
         return Err(bad_request("receipt id does not match URL id"));
@@ -383,7 +385,7 @@ async fn list_snapshots(
     State(cfg): State<AgentConfig>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SnapshotReceipt>>, (StatusCode, String)> {
-    auth_scope(&headers, &cfg).ok_or(unauthorized())?;
+    auth_scope(&headers, &cfg, "list_snapshots").ok_or(unauthorized())?;
     let mut receipts = Vec::new();
     let mut rd = tokio::fs::read_dir(&cfg.root).await.map_err(internal)?;
     while let Ok(Some(entry)) = rd.next_entry().await {
@@ -407,7 +409,7 @@ async fn get_file(
     axum::extract::Path(id): axum::extract::Path<String>,
     Query(q): Query<FilePathQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    auth_scope(&headers, &cfg).ok_or(unauthorized())?;
+    auth_scope(&headers, &cfg, "get_file").ok_or(unauthorized())?;
     validate_snapshot_id(&id)?;
     let rel = validate_rel_path_read(&q.path)?;
     let snap_dir = cfg.root.join(&id);
@@ -433,7 +435,7 @@ async fn prune(
     headers: HeaderMap,
     Query(q): Query<PruneQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let scope = auth_scope(&headers, &cfg).ok_or(unauthorized())?;
+    let scope = auth_scope(&headers, &cfg, "prune").ok_or(unauthorized())?;
     if scope != Scope::Admin {
         return Err(forbidden("prune requires the target-side admin token"));
     }

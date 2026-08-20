@@ -310,6 +310,16 @@ even if FerriScribe is closed or crashed. On Linux, point a systemd timer
 (`OnCalendar=daily`) at the same `backup-and-push` command. If you configured a
 custom recordings storage path, pass `--recordings-dir` to the backup commands.
 
+**Operational notes.** `serve` refuses to start without an explicit `--bind` — never
+expose it to `0.0.0.0`. The target bounds growth with disk-measured caps (default
+1 TiB / 1,000 snapshots; override with `FERRISCRIBE_BACKUP_MAX_BYTES` /
+`FERRISCRIBE_BACKUP_MAX_SNAPSHOTS`) and sweeps crashed in-flight uploads after 7
+days; the daily job verifies the *target's* copy by re-pulling and drilling it,
+then trims local staging copies to the newest 14 (`--keep-local N`). One known
+limitation: files are hashed and transferred whole in memory — for recording
+libraries in the tens of GB, run the backup on a machine with ample RAM until a
+streaming refactor lands.
+
 ## Disclaimer
 
 FerriScribe is a transcription and note-drafting tool. It is **not** a medical device and has not been reviewed or approved by the FDA, CE, TGA, or any other regulatory body. Clinicians are responsible for verifying transcript accuracy and any AI-generated content before relying on it for patient care.

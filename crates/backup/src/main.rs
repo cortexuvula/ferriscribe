@@ -267,6 +267,18 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
         let client = BackupClient::new(url, token);
         client.push_snapshot(&local_dir).await?;
         println!("pushed to {url}");
+        // Local retention (finding 6): after a successful push the local
+        // staging copies are redundant — keep the newest N so the local
+        // disk doesn't fill while the target is healthy. Skipped when the
+        // drill fails, so the suspect staging copy survives for forensics.
+        let keep: usize = flags
+            .get("keep-local")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(14);
+        let removed = snapshot::prune_local_snapshots(&opts.dest_dir, keep);
+        if !removed.is_empty() {
+            println!("local retention: removed {} old snapshot(s)", removed.len());
+        }
         let staging = std::env::temp_dir().join(format!(
             "ferriscribe-postpush-drill-{}",
             uuid::Uuid::new_v4().simple()

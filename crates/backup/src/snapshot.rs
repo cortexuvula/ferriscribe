@@ -512,6 +512,39 @@ fn compute_tag(
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// Local retention (finding 6): remove the OLDEST local snapshot dirs
+/// beyond `keep`, judged by receipt `created_at`. Purely local
+/// housekeeping — the target's admin credential is never involved.
+/// Dirs without a parseable receipt are left alone (never delete what
+/// can't be dated). Returns the removed snapshot ids.
+pub fn prune_local_snapshots(backups_dir: &Path, keep: usize) -> Vec<String> {
+    let mut dated: Vec<(chrono::DateTime<Utc>, PathBuf, String)> = Vec::new();
+    let Ok(rd) = fs::read_dir(backups_dir) else {
+        return Vec::new();
+    };
+    for entry in rd.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(bytes) = fs::read(dir.join(RECEIPT_FILE)) else {
+            continue;
+        };
+        let Ok(receipt) = serde_json::from_slice::<SnapshotReceipt>(&bytes) else {
+            continue;
+        };
+        dated.push((receipt.created_at, dir, receipt.snapshot_id));
+    }
+    dated.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    let mut removed = Vec::new();
+    for (_, dir, id) in dated.into_iter().skip(keep) {
+        if fs::remove_dir_all(&dir).is_ok() {
+            removed.push(id);
+        }
+    }
+    removed
+}
+
 /// Opaque snapshot id: UTC timestamp + random hex. No hostnames, no
 /// patient-identifying material (PHI rule).
 fn new_snapshot_id() -> String {
@@ -525,6 +558,10 @@ fn new_snapshot_id() -> String {
     )
 }
 
+/// NOTE (finding 7): whole files are read into memory to hash them. For
+/// very large recording libraries (tens of GB) run the backup on a
+/// machine with ample RAM; a streaming hash/transfer refactor must
+/// preserve the HMAC-over-full-bytes model — do not half-fix it.
 fn push_entry(
     entries: &mut Vec<ManifestEntry>,
     path: &Path,
@@ -879,5 +916,40 @@ mod tests {
             matches!(result, Err(BackupError::Format(ref msg)) if msg.contains("unsupported")),
             "expected unsupported-version error, got: {result:?}"
         );
+    }
+    /// Finding 6: local retention keeps the NEWEST N snapshot dirs by
+    /// receipt created_at; undated dirs are never touched.
+    #[test]
+    fn prune_local_snapshots_keeps_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = chrono::Utc::now();
+        for i in 0..3 {
+            let snap = dir.path().join(format!("snap-{i}"));
+            fs::create_dir_all(&snap).unwrap();
+            let receipt = SnapshotReceipt {
+                snapshot_id: format!("snap-{i}"),
+                version: SNAPSHOT_VERSION,
+                created_at: base - chrono::Duration::hours(i as i64), // 0 newest
+                file_count: 1,
+                total_bytes: 1,
+                recording_count: 0,
+                hmac_tag: "x".into(),
+            };
+            fs::write(
+                snap.join(RECEIPT_FILE),
+                serde_json::to_vec(&receipt).unwrap(),
+            )
+            .unwrap();
+        }
+        // A dir with no receipt — undatable, must survive.
+        fs::create_dir_all(dir.path().join("snap-undated")).unwrap();
+
+        let removed = prune_local_snapshots(dir.path(), 1);
+        assert_eq!(removed.len(), 2, "removed the two oldest");
+        // Newest + undated survive.
+        assert!(dir.path().join("snap-0").join(RECEIPT_FILE).exists());
+        assert!(dir.path().join("snap-undated").exists());
+        assert!(!dir.path().join("snap-1").exists());
+        assert!(!dir.path().join("snap-2").exists());
     }
 }

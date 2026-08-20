@@ -18,7 +18,7 @@ medical-core = { path = "../core" }
 medical-db = { path = "../db" }
 medical-security = { path = "../security" }
 sha2 = { workspace = true }
-hmac = "0.12"
+hmac = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
@@ -28,7 +28,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 rusqlite = { workspace = true }
-axum = { version = "0.8" }
+axum = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 dirs = { workspace = true }
