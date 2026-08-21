@@ -20,6 +20,32 @@ const USB_MAGIC: &[u8; 4] = b"FBK1";
 const SHEET_BEGIN: &str = "-----BEGIN RECOVERY KEY-----";
 const SHEET_END: &str = "-----END RECOVERY KEY-----";
 
+/// Create (or truncate) `path` restricted to the owning user.
+///
+/// Called before any key material is written: both artifacts carry the
+/// full wrapping key, so the default umask's group/other read bits (0644)
+/// must never apply to them — especially since the suggested output
+/// folder is `~/Desktop`, which sync/backup services routinely scoop.
+fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let file = std::fs::File::create(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // set_permissions rather than OpenOptions::mode(0o600): mode() only
+        // applies at creation and is masked by the umask, and a pre-existing
+        // file keeps its old permissions. An explicit chmod covers both,
+        // before the payload is written.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: new files inherit the containing directory's ACL; the
+        // user-profile directories this tool writes into are already
+        // user-scoped.
+    }
+    Ok(file)
+}
+
 /// Render the printable recovery sheet and write it to `path`.
 ///
 /// Format: 8 lines of two 4-hex groups (64 hex chars total) between
@@ -58,7 +84,7 @@ pub fn write_recovery_sheet(path: &Path, wrapping: &[u8; 32]) -> std::io::Result
                        --snapshot-dir <snapshot> --dest <empty-dir>\n",
         canary_prefix = &canary[..16],
     );
-    let mut f = std::fs::File::create(path)?;
+    let mut f = create_private_file(path)?;
     f.write_all(text.as_bytes())?;
     f.sync_all()
 }
@@ -71,7 +97,7 @@ pub fn write_usb_file(path: &Path, wrapping: &[u8; 32]) -> std::io::Result<()> {
     out.extend_from_slice(USB_MAGIC);
     out.extend_from_slice(wrapping);
     out.extend_from_slice(&canary);
-    let mut f = std::fs::File::create(path)?;
+    let mut f = create_private_file(path)?;
     f.write_all(&out)?;
     f.sync_all()
 }
@@ -211,6 +237,26 @@ mod tests {
         write_recovery_sheet(&path, &key).expect("write sheet");
         let recovered = read_key_from_sheet(&path).expect("parse sheet");
         assert_eq!(recovered, key);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn escrow_artifacts_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp();
+        let sheet = dir.path().join(SHEET_FILENAME);
+        write_recovery_sheet(&sheet, &[0x11u8; 32]).expect("write sheet");
+        let usb = dir.path().join(USB_FILENAME);
+        write_usb_file(&usb, &[0x22u8; 32]).expect("write usb");
+        for p in [&sheet, &usb] {
+            let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "{} must not be group/other readable",
+                p.display()
+            );
+        }
     }
 
     #[test]

@@ -77,12 +77,22 @@ fn advance_cursor(ts: &str) -> String {
 pub(crate) fn content_sync_target(
     state: &AppState,
 ) -> Option<(PairedConnection, String, Arc<reqwest::Client>)> {
+    content_sync_target_parts(&state.db, state.http_client.clone())
+}
+
+/// Same gates as [`content_sync_target`], split out for `spawn_blocking`
+/// call sites, which can't borrow `tauri::State` across the thread boundary.
+/// Blocking-safe: config load (SQLite) + keychain read happen here.
+pub(crate) fn content_sync_target_parts(
+    db: &Arc<medical_db::Database>,
+    http_client: Arc<reqwest::Client>,
+) -> Option<(PairedConnection, String, Arc<reqwest::Client>)> {
     // Each gate logs WHY it failed at debug level, so a silently-zero sync is
     // diagnosable from the logs instead of being indistinguishable from
     // "synced, nothing changed". Debug (not info) because the per-edit push
     // paths call this too and would spam when gates are down.
     // Gate 1: user opt-in.
-    let Ok(config) = crate::commands::settings::load_config_sync(&state.db) else {
+    let Ok(config) = crate::commands::settings::load_config_sync(db) else {
         tracing::debug!("content sync skipped: could not load settings");
         return None;
     };
@@ -113,7 +123,7 @@ pub(crate) fn content_sync_target(
         tracing::debug!("content sync skipped: no sharing bearer token (unpaired?)");
         return None;
     };
-    Some((conn, bearer, state.http_client.clone()))
+    Some((conn, bearer, http_client))
 }
 
 /// Build a sparse [`SyncRecording`] from a local recording row + its field

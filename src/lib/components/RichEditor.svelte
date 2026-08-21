@@ -90,8 +90,14 @@
   // have, to avoid clobbering the user's cursor mid-edit.
   $effect(() => {
     if (!editor) return;
-    const current = (editor.storage as { markdown?: { getMarkdown: () => string } })
+    const raw = (editor.storage as { markdown?: { getMarkdown: () => string } })
       .markdown?.getMarkdown() ?? '';
+    // Apply the same hard-break-escape strip onUpdate applies before
+    // reporting (see above): `value` arrives stripped, `raw` still carries
+    // tiptap-markdown's `\` escapes. Without this, any document containing
+    // a hard break never compares equal and every keystroke round-trips
+    // into setContent — resetting the cursor mid-typing.
+    const current = raw.replace(/(?<=\S)\\\n/g, '\n');
     if (value !== current) {
       editor.commands.setContent(value, false);
     }

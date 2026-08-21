@@ -212,7 +212,14 @@ impl RecordingsRepo {
     /// sweeper will permanently delete soft-deleted recordings after 30 days.
     pub fn soft_delete(conn: &Connection, id: &Uuid) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        let rows = conn.execute(
+        // Single transaction: the row UPDATE and the FTS 'delete' must land
+        // together. A crash between them leaves soft-deleted PHI still
+        // searchable (disclosure), and a partial retry then fires the
+        // trigger 'delete' against mismatched index state (SQLITE_CORRUPT).
+        // `unchecked_transaction` because repo methods receive `&Connection`
+        // (the crate's established pattern — see purge_soft_deleted_impl).
+        let tx = conn.unchecked_transaction()?;
+        let rows = tx.execute(
             "UPDATE recordings SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             rusqlite::params![now, id.to_string()],
         )?;
@@ -225,14 +232,19 @@ impl RecordingsRepo {
         // Placeholder values ('') leave the index internally inconsistent,
         // and the next 'delete' for this rowid (e.g. the trigger fired by
         // `restore`'s UPDATE) then fails with SQLITE_CORRUPT.
-        if let Err(e) = conn.execute(
+        //
+        // The error is propagated, not swallowed: warn-and-continue would
+        // commit the row UPDATE with the row still indexed — the exact
+        // inconsistent state the transaction exists to prevent. Failing
+        // rolls both statements back, leaving the recording visible and
+        // indexed, ready for a retry.
+        tx.execute(
             "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
              SELECT 'delete', rowid, id, filename, transcript, soap_note, referral, letter, patient_name
              FROM recordings WHERE id = ?1",
             [id.to_string()],
-        ) {
-            tracing::warn!(error = %e, "soft_delete: failed to remove recording from FTS index");
-        }
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -248,11 +260,16 @@ impl RecordingsRepo {
     /// sweep.
     pub fn restore(conn: &Connection, id: &Uuid) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
+        // Single transaction for the read + FTS insert + UPDATE: the FTS
+        // re-insert and the row UPDATE must land together, or a crash in
+        // between re-indexes a trashed row / untrashes an unindexed one and
+        // the next trigger 'delete' corrupts the index (SQLITE_CORRUPT).
+        let tx = conn.unchecked_transaction()?;
         // Read the current row (metadata + trash state) up front. A missing
         // row or one that isn't soft-deleted gets the same NotFound the
         // UPDATE-based check below has always produced — checked early so
         // no FTS mutation happens for non-restorable rows.
-        let (metadata, deleted_at): (Option<String>, Option<String>) = conn
+        let (metadata, deleted_at): (Option<String>, Option<String>) = tx
             .query_row(
                 "SELECT metadata, deleted_at FROM recordings WHERE id = ?1",
                 [&id.to_string()],
@@ -294,13 +311,13 @@ impl RecordingsRepo {
         // absent index state — corrupting the index and wedging every
         // later FTS operation. Failing the restore leaves the row
         // consistently trashed + de-indexed, ready for a retry.
-        conn.execute(
+        tx.execute(
             "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
              SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
              FROM recordings WHERE id = ?1",
             [id.to_string()],
         )?;
-        let rows = conn.execute(
+        let rows = tx.execute(
             "UPDATE recordings SET deleted_at = NULL, updated_at = ?1, metadata = ?2 WHERE id = ?3 AND deleted_at IS NOT NULL",
             rusqlite::params![now, metadata_json, id.to_string()],
         )?;
@@ -309,6 +326,7 @@ impl RecordingsRepo {
                 "recording {id} (not deleted or not found)"
             )));
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -584,16 +602,22 @@ impl RecordingsRepo {
         // indexed again but still hidden from queries (they filter
         // `deleted_at`), and the purge path stays safe: its DELETE-trigger
         // 'delete' then matches indexed state.
-        conn.execute(
+        //
+        // Both statements in one transaction so the re-index and the flag
+        // UPDATE land together (same crash-consistency rationale as
+        // `soft_delete`/`restore`).
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
              SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
              FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL",
             [&id.to_string()],
         )?;
-        conn.execute(
+        tx.execute(
             "UPDATE recordings SET encryption_pending = 0 WHERE id = ?1",
             [&id.to_string()],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

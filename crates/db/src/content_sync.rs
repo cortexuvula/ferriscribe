@@ -700,7 +700,11 @@ impl ContentSyncRepo {
                         row_changed = true;
                     }
                     Some(local_rev) => {
-                        match remote_value.updated_at.cmp(&local_rev.updated_at) {
+                        // `cmp_lww_timestamps`, not raw `.cmp()`: stored
+                        // timestamps legitimately exist in both RFC-3339 and
+                        // SQLite formats, and lexicographic compare orders
+                        // them wrongly (' ' < 'T') — a stale side could win.
+                        match cmp_lww_timestamps(&remote_value.updated_at, &local_rev.updated_at) {
                             std::cmp::Ordering::Greater => {
                                 // Remote newer → remote wins.
                                 Self::apply_field(conn, id_str, field, &remote_value.value)?;
