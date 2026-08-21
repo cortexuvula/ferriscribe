@@ -139,16 +139,11 @@ pub async fn start_recording(
         .map_err(|e| AppError::audio(format!("capture join: {e}")))?
     );
 
-    // Store capture handle in AppState.
-    {
-        let mut handle_lock = state
-            .capture_handle
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
-        *handle_lock = send_handle;
-    }
-
-    // Store current recording info.
+    // Store current recording info BEFORE storing the capture handle: the
+    // handle is the "publish" point for stop/cancel (see
+    // take_capture_handle_for_stop below). Once the handle is visible, the
+    // recording info must already be there, or a racing stop would take the
+    // handle and then find no duration/path to finalize.
     {
         let mut rec_lock = state
             .current_recording
@@ -161,6 +156,16 @@ pub async fn start_recording(
             paused_at: None,
             accumulated_pause: std::time::Duration::ZERO,
         });
+    }
+
+    // Store capture handle in AppState — the last step, publishing the
+    // recording as stoppable/cancelable.
+    {
+        let mut handle_lock = state
+            .capture_handle
+            .lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
+        *handle_lock = send_handle;
     }
 
     info!(
@@ -196,6 +201,56 @@ pub async fn start_recording(
 // 3. stop_recording
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Take the capture handle for stop/cancel, waiting out an in-flight
+/// `start_recording`.
+///
+/// `start_recording` publishes `recording_active = true` before the capture
+/// handle exists (device init can take seconds). A stop/cancel arriving in
+/// that window used to read the missing handle as "nothing running", clear
+/// the flag, and error — after which start finished with a live capture but
+/// `active == false`, and the next start overwrote `capture_handle`,
+/// dropping a `CaptureHandle` on an async worker and orphaning the WAV.
+///
+/// Instead: while the flag is set but the handle hasn't landed, a start is
+/// in flight — poll until it resolves.
+///
+/// Returns `Ok(None)` when nothing is running (flag false, no handle), or
+/// `Err` if startup is still unresolved after `MAX_WAIT` (cleared flag +
+/// retry-later error, so a wedged start can't lock the user out forever —
+/// same anti-lockout tradeoff the old immediate-clear made, just 15 s
+/// later).
+async fn take_capture_handle_for_stop(state: &AppState) -> AppResult<Option<SendCaptureHandle>> {
+    const POLL_MS: u64 = 25;
+    const MAX_WAIT_SECS: u64 = 15;
+    let deadline = Instant::now() + std::time::Duration::from_secs(MAX_WAIT_SECS);
+    loop {
+        // Wrap the taken handle immediately: the bare Option<CaptureHandle>
+        // is !Send and must never live across the awaits below.
+        let wrapper = {
+            let mut handle_lock = state
+                .capture_handle
+                .lock()
+                .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
+            SendCaptureHandle(handle_lock.0.take())
+        };
+        if wrapper.0.is_some() {
+            return Ok(Some(wrapper));
+        }
+        // No handle: nothing running at all, or a start still in flight?
+        if !*state.recording_active.lock().await {
+            return Ok(None);
+        }
+        if Instant::now() >= deadline {
+            warn!("stop/cancel waited out the startup window with no capture handle; clearing the flag");
+            *state.recording_active.lock().await = false;
+            return Err(AppError::audio(
+                "Recording startup is taking unusually long; try stopping again".to_string(),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+    }
+}
+
 /// Stop the active recording and finalize the WAV file.
 ///
 /// Drains the audio buffer, closes the capture stream, and updates the
@@ -207,24 +262,10 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
     // Take the CaptureHandle out of AppState as a SendCaptureHandle (which is
     // Send+Sync).  We must NOT hold a bare CaptureHandle across an .await
     // because CaptureHandle is !Send.
-    let wrapper = {
-        let mut handle_lock = state
-            .capture_handle
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
-        let inner = handle_lock.0.take();
-        SendCaptureHandle(inner)
+    let wrapper = match take_capture_handle_for_stop(&state).await? {
+        Some(wrapper) => wrapper,
+        None => return Err(AppError::audio("No active recording to stop".to_string())),
     };
-
-    if wrapper.0.is_none() {
-        // Desync safety: clear the active flag too, otherwise a stale `true`
-        // leaves the user permanently locked out of starting a new recording.
-        {
-            let mut active = state.recording_active.lock().await;
-            *active = false;
-        }
-        return Err(AppError::audio("No active recording to stop".to_string()));
-    }
 
     // Drop the wrapper on a blocking worker so CaptureHandle::drop (which
     // joins the drain thread) doesn't block the async runtime.
@@ -390,33 +431,22 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
 /// Cancel the current recording, discarding the audio file without saving.
 #[tauri::command]
 pub async fn cancel_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
-    // Take the CaptureHandle out of AppState.
-    let wrapper = {
-        let mut handle_lock = state
-            .capture_handle
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
-        let inner = handle_lock.0.take();
-        SendCaptureHandle(inner)
-    };
-
-    if wrapper.0.is_none() {
-        // Clear the active flag even on the no-op path so a desynced `true`
-        // doesn't leave the user locked out.
-        {
-            let mut active = state.recording_active.lock().await;
-            *active = false;
-        }
-        // Also clear any stale current_recording slot.
-        {
+    // Take the CaptureHandle out of AppState (waiting out an in-flight
+    // start — see take_capture_handle_for_stop).
+    let wrapper = match take_capture_handle_for_stop(&state).await? {
+        Some(wrapper) => wrapper,
+        None => {
+            // Nothing running. Also clear any stale current_recording slot
+            // (e.g. a start that failed between storing the recording info
+            // and publishing the handle).
             let mut rec_lock = state
                 .current_recording
                 .lock()
                 .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
             *rec_lock = None;
+            return Err(AppError::audio("No active recording to cancel".to_string()));
         }
-        return Err(AppError::audio("No active recording to cancel".to_string()));
-    }
+    };
 
     // Drop the capture handle on a blocking worker so its drop (which joins
     // the drain thread) doesn't stall the async runtime.
