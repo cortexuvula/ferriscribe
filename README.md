@@ -250,10 +250,10 @@ By default the keystore's master cipher key is derived from the machine identifi
 
 ## Off-machine backup (encrypted, append-only)
 
-Disk #1 dying is the one failure that actually happens, and until now it meant total
-clinical loss — DB, encrypted recordings, and keys all lived on one machine. The
-`ferriscribe-backup` binary (in `crates/backup`, buildable via
-`cargo build -p medical-backup`) fixes that with a pull-based, append-only design:
+Disk #1 dying is the one failure that actually happens, and until FerriScribe's
+backup existed it meant total clinical loss — DB, encrypted recordings, and keys
+all lived on one machine. The `ferriscribe-backup` tool fixes that with a
+pull-based, append-only design:
 
 - **Snapshots** are consistent (`VACUUM INTO` while the app may be open), fully
   encrypted (DB and recordings are already ciphertext at rest; the DB key itself
@@ -262,60 +262,124 @@ clinical loss — DB, encrypted recordings, and keys all lived on one machine. T
   filename or receipt** — only counts, sizes, and opaque ids.
 - **Key escrow**: the wrapping key's off-machine copies are two *independently
   sufficient* artifacts — a printable recovery sheet (for the safe) and an offline
-  USB file — each self-verifying via an embedded check code. Losing the machine's
-  keychain loses nothing; the sheet alone restores everything.
+  USB file — each self-verifying via an embedded check code (one mistyped hex
+  digit fails loudly instead of restoring garbage). Losing the machine's keychain
+  loses nothing; the sheet alone restores everything.
 - **Append-only target**: the target machine (e.g. `cortex-home` over Tailscale)
-  runs `ferriscribe-backup serve`. The token the *source* holds can only append new
-  snapshots — there is no route it can reach that deletes or overwrites anything, so
-  ransomware on the clinical machine cannot erase its own history. Pruning (keep
-  newest N) requires the target-side admin token that never leaves the target.
-- **Tested restore**: `ferriscribe-backup drill` restores the latest snapshot to a
-  throwaway directory, opens the restored SQLCipher DB with the escrow-recovered
-  key, decrypts a sample recording, and diffs record counts — failing loudly on any
-  mismatch. The scheduled job drills after every backup.
+  runs `ferriscribe-backup serve`. The token the *source* holds can only append
+  new snapshots — there is no route it can reach that deletes or overwrites
+  anything, so ransomware on the clinical machine cannot erase its own history.
+  Pruning (keep newest N) requires the target-side admin token that never leaves
+  the target, and growth is capped (disk-measured) so a compromised source can't
+  fill the target's disk either.
+- **Tested restore**: every backup ends with a drill — the job re-pulls the
+  snapshot from the target, restores it to a throwaway directory, opens the
+  restored SQLCipher DB with the escrow-recovered key, decrypts a sample
+  recording, and diffs record counts. Any mismatch fails the job loudly.
+  Settings → Backup shows the verdict and turns red on failure or >48h staleness.
+
+**Where's the tool?** Since v0.53.0 the binary ships *inside* the app bundle —
+on an installed Mac it is `/Applications/FerriScribe.app/Contents/MacOS/
+ferriscribe-backup`. On the target machine (or for local dev) build it with
+`cargo build --release -p medical-backup`. The easiest way to run the bundled
+copy: `alias ferriscribe-backup="/Applications/FerriScribe.app/Contents/MacOS/ferriscribe-backup"`.
 
 ### Setup (one time)
 
+The guided path is **Settings → Backup** in the app: it generates the escrow
+artifacts, verifies them, installs the daily schedule, and offers "Back up now".
+The equivalent CLI flow, including the target machine which has no app:
+
 ```bash
 # 1. On the clinical machine: create the wrapping key + escrow artifacts.
+#    (Or use Settings → Backup → Recovery key escrow.)
 ferriscribe-backup escrow init --out-dir ~/Desktop
 #    PRINT the recovery sheet → safe. Copy the .escrow file → offline USB.
 #    Verify each: ferriscribe-backup escrow verify --file <path>
 
-# 2. On the target machine (cortex-home, over Tailscale):
+# 2. On the target machine (e.g. cortex-home, over Tailscale):
 export FERRISCRIBE_BACKUP_APPEND_TOKEN=<random>
 export FERRISCRIBE_BACKUP_ADMIN_TOKEN=<different random>
 ferriscribe-backup serve --root /srv/ferriscribe-backups --bind 100.64.0.2:8741
-#    (run it under launchd/systemd; the admin token never leaves this machine)
+#    (run under launchd/systemd; the admin token never leaves this machine)
 
 # 3. On the clinical machine: schedule the daily 03:30 backup + push + drill.
+#    (Or use Settings → Backup → Daily schedule.)
 ferriscribe-backup install-schedule --hour 3 --minute 30 \
   --url http://100.64.0.2:8741 --token <the append token>
 ```
 
-### Disaster recovery (clean machine)
+The schedule runs **outside the app** (a launchd LaunchAgent pointing at a stable
+copy of the tool in the app-data `bin/` directory), so backups continue even if
+FerriScribe is closed, crashed, or trashed. On Linux, point a systemd timer
+(`OnCalendar=daily`) at the same `backup-and-push` command. If you change the
+recordings storage folder later, re-run install-schedule — the resolved path is
+baked into the schedule.
+
+### Recovering a backup (disaster recovery)
+
+First: **deleted one recording by mistake?** Check FerriScribe's in-app trash
+first (30-day soft-delete with undo) — that's the fast path, not the backup.
+
+For a dead or replaced machine, you need three things: the **recovery sheet**
+(printed, in the safe) or the **USB escrow file** — either alone is enough —
+plus the **backup target** running on your network, plus its **append token**
+(it lives in the target's `FERRISCRIBE_BACKUP_APPEND_TOKEN` service config).
 
 ```bash
+# 0. Install FerriScribe from the DMG (this also gives you the tool),
+#    then make it convenient:
+alias ferriscribe-backup="/Applications/FerriScribe.app/Contents/MacOS/ferriscribe-backup"
+
+# 1. Pull the newest snapshot from the target. This VERIFIES it first —
+#    HMAC + per-file hashes against the escrow key — before writing
+#    anything; a corrupted or tampered snapshot fails closed.
 ferriscribe-backup pull --url http://100.64.0.2:8741 --token <append> \
-  --out ~/restored --escrow-file /path/to/recovery-sheet.txt
-ferriscribe-backup restore --snapshot-dir ~/restored/<snap-id> \
-  --dest "~/Library/Application Support/rust-medical-assistant" \
-  --escrow-file /path/to/recovery-sheet.txt
+  --out ~/restored --escrow-file ~/Desktop/ferriscribe-backup-recovery-sheet.txt
+#    (For the USB escrow instead: --escrow-file /Volumes/STICK/ferriscribe-backup-key.escrow)
+
+# 2. Restore into the app's data dir. This ALSO installs the snapshot's
+#    database key into this machine's keychain, so the app can open
+#    everything. Note: ~ must be OUTSIDE the quotes to expand.
+ferriscribe-backup restore \
+  --snapshot-dir ~/restored/<snap-id> \
+  --dest ~/"Library/Application Support/rust-medical-assistant" \
+  --escrow-file ~/Desktop/ferriscribe-backup-recovery-sheet.txt
+
+# 3. Prove it before trusting it: re-pull from the target, restore to a
+#    scratch dir, open the DB with the recovered key, decrypt a sample
+#    recording, diff record counts. Prints DRILL PASSED or fails loudly.
 ferriscribe-backup drill --url http://100.64.0.2:8741 --token <append> \
-  --escrow-file /path/to/recovery-sheet.txt
+  --escrow-file ~/Desktop/ferriscribe-backup-recovery-sheet.txt
 ```
 
-The schedule runs **outside the app** (a launchd LaunchAgent), so backups continue
-even if FerriScribe is closed or crashed. On Linux, point a systemd timer
-(`OnCalendar=daily`) at the same `backup-and-push` command. If you configured a
-custom recordings storage path, pass `--recordings-dir` to the backup commands.
+Launch FerriScribe — transcripts, notes, and encrypted recordings are all back.
+Data loss is bounded by the snapshot interval (worst case ~24h on the default
+schedule).
 
-**Operational notes.** `serve` refuses to start without an explicit `--bind` — never
-expose it to `0.0.0.0`. The target bounds growth with disk-measured caps (default
-1 TiB / 1,000 snapshots; override with `FERRISCRIBE_BACKUP_MAX_BYTES` /
+**Safety details worth knowing:**
+
+- `restore` is guarded: it refuses to overwrite a *different* existing database
+  key in the keychain unless you pass `--force` — restoring an old snapshot onto
+  a working machine can never silently lock you out of your current data.
+- Escrow artifacts self-verify (embedded check code), so a transcription error
+  in the sheet is rejected at step 1, not discovered mid-restore.
+- `drill` never touches live data or the keychain — it only ever restores into
+  a scratch directory. Run it any time you're nervous.
+- Provider API keys (`config/keys.json`) restore as bytes but their keystore is
+  machine-bound — re-enter API keys in Settings if you use them. All clinical
+  data fully recovers.
+- If the target machine is gone but you kept local staging copies (app-data
+  `backups/`, newest 14), `restore` works directly on those snapshot dirs with
+  no `pull` needed.
+
+**Operational notes.** `serve` refuses to start without an explicit `--bind` —
+never expose it to `0.0.0.0`. The target bounds growth with disk-measured caps
+(default 1 TiB / 1,000 snapshots; override with `FERRISCRIBE_BACKUP_MAX_BYTES` /
 `FERRISCRIBE_BACKUP_MAX_SNAPSHOTS`) and sweeps crashed in-flight uploads after 7
 days; the daily job verifies the *target's* copy by re-pulling and drilling it,
-then trims local staging copies to the newest 14 (`--keep-local N`). One known
+then trims local staging copies to the newest 14 (`--keep-local N`). Scheduled
+backups are macOS-only (launchd); "Back up now" works everywhere. One known
 limitation: files are hashed and transferred whole in memory — for recording
 libraries in the tens of GB, run the backup on a machine with ample RAM until a
 streaming refactor lands.
