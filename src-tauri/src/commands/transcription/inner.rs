@@ -418,16 +418,14 @@ pub async fn transcribe_recording_inner(
         if entries.is_empty() {
             return Ok((display_text, transcript));
         }
-        // Correct each segment's text, then rebuild the display text from
-        // the corrected segments so the speaker-labeled editor view (which
-        // reads transcript_segments from metadata) always matches the flat
-        // transcript — previously only the flat text was corrected.
-        let mut total_replacements: u32 = 0;
-        for seg in transcript.segments.iter_mut() {
-            let result = vocabulary_corrector::apply_corrections(&seg.text, &entries);
-            total_replacements += result.total_replacements;
-            seg.text = result.corrected_text;
-        }
+        // Correct BOTH representations: each segment's text (the
+        // speaker-labeled editor view reads transcript_segments from
+        // metadata) AND the flat text — format_transcript_with_speakers
+        // falls back to the FLAT text whenever no segment carries a
+        // speaker label (diarization off / no speakers detected), and
+        // corrections applied to segments alone were silently discarded
+        // on that path.
+        let total_replacements = vocabulary_corrector::apply_to_transcript(&mut transcript, &entries);
         if total_replacements > 0 {
             tracing::info!(
                 replacements = total_replacements,
