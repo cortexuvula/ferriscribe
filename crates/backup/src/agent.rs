@@ -58,6 +58,12 @@ pub struct AgentConfig {
     /// Cap on the number of COMMITTED snapshots; the (N+1)-th commit is
     /// rejected with 507.
     pub max_snapshots: usize,
+    /// Automatic retention: when set, the agent prunes to the newest N
+    /// COMMITTED snapshots after every successful commit, using its OWN
+    /// authority — the append credential has no say in deletion (the
+    /// append-only property is untouched; a compromised source still
+    /// cannot delete anything). `FERRISCRIBE_BACKUP_KEEP_N`.
+    pub keep_n: Option<usize>,
 }
 
 impl AgentConfig {
@@ -82,12 +88,14 @@ impl AgentConfig {
                 .map_err(|_| "FERRISCRIBE_BACKUP_MAX_SNAPSHOTS must be a usize".to_string())?,
             Err(_) => DEFAULT_MAX_SNAPSHOTS,
         };
+        let keep_n = parse_keep_n(std::env::var("FERRISCRIBE_BACKUP_KEEP_N").ok().as_deref())?;
         Ok(Self {
             root,
             append_token,
             admin_token,
             max_bytes,
             max_snapshots,
+            keep_n,
         })
     }
 }
@@ -247,6 +255,22 @@ impl AgentState {
         }
         lock
     }
+}
+
+/// Parse `FERRISCRIBE_BACKUP_KEEP_N`: absent → `None` (keep everything,
+/// manual pruning only); `0` is rejected (it would delete all history
+/// after every commit); any other usize → `Some(n)`.
+fn parse_keep_n(raw: Option<&str>) -> Result<Option<usize>, String> {
+    let Some(v) = raw else { return Ok(None) };
+    let n: usize = v
+        .parse()
+        .map_err(|_| "FERRISCRIBE_BACKUP_KEEP_N must be a usize".to_string())?;
+    if n == 0 {
+        return Err(
+            "FERRISCRIBE_BACKUP_KEEP_N must be >= 1 (0 would delete all history)".to_string(),
+        );
+    }
+    Ok(Some(n))
 }
 
 /// Build the agent router (public so tests can drive it in-process).
@@ -436,6 +460,22 @@ async fn commit_snapshot(
     set_readonly_file(&snap_dir.join(".committed"));
     set_readonly_dir(&snap_dir);
     info!(snapshot_id = %id, "snapshot committed (append-only)");
+
+    // Automatic retention (target-side authority): when KEEP_N is set,
+    // trim history to the newest N after every successful commit. The
+    // snapshot just committed is already durable — a prune failure here
+    // is logged, never fatal to the commit.
+    if let Some(keep) = cfg.keep_n {
+        match prune_to(&cfg.root, keep) {
+            Ok(pruned) if !pruned.is_empty() => {
+                info!(count = pruned.len(), keep, "auto-pruned old snapshots");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, keep, "auto-prune after commit failed (snapshot is safe)");
+            }
+        }
+    }
     Ok((StatusCode::CREATED, format!("committed {id}")))
 }
 
@@ -500,37 +540,43 @@ async fn prune(
     if scope != Scope::Admin {
         return Err(forbidden("prune requires the target-side admin token"));
     }
+    let pruned = prune_to(&cfg.root, q.keep).map_err(internal)?;
+    info!(count = pruned.len(), keep = q.keep, "pruned old snapshots");
+    Ok((
+        StatusCode::OK,
+        format!("pruned {} snapshot(s)", pruned.len()),
+    ))
+}
+
+/// Keep the newest `keep` COMMITTED snapshots under `root`, delete older
+/// ones. Shared by the admin prune endpoint (explicit) and the automatic
+/// post-commit retention (the agent's own authority — never reachable
+/// with the append credential). Returns the pruned snapshot ids.
+fn prune_to(root: &Path, keep: usize) -> std::io::Result<Vec<String>> {
     let mut committed: Vec<(chrono::DateTime<chrono::Utc>, PathBuf)> = Vec::new();
-    let mut rd = tokio::fs::read_dir(&cfg.root).await.map_err(internal)?;
-    while let Ok(Some(entry)) = rd.next_entry().await {
+    for entry in std::fs::read_dir(root)?.flatten() {
         let dir = entry.path();
-        if !is_committed(&dir) {
+        if !dir.is_dir() || !is_committed(&dir) {
             continue;
         }
-        match tokio::fs::read(dir.join(RECEIPT_FILE)).await {
-            Ok(bytes) => {
-                if let Ok(receipt) = serde_json::from_slice::<SnapshotReceipt>(&bytes) {
-                    committed.push((receipt.created_at, dir));
-                }
-            }
-            Err(_) => continue,
+        let Ok(bytes) = std::fs::read(dir.join(RECEIPT_FILE)) else {
+            continue;
+        };
+        if let Ok(receipt) = serde_json::from_slice::<SnapshotReceipt>(&bytes) {
+            committed.push((receipt.created_at, dir));
         }
     }
     committed.sort_by_key(|a| std::cmp::Reverse(a.0)); // newest first
     let mut pruned = Vec::new();
-    for (_, dir) in committed.iter().skip(q.keep) {
-        unfreeze_and_remove(dir).map_err(internal)?;
+    for (_, dir) in committed.iter().skip(keep) {
+        unfreeze_and_remove(dir)?;
         pruned.push(
             dir.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         );
     }
-    info!(count = pruned.len(), keep = q.keep, "pruned old snapshots");
-    Ok((
-        StatusCode::OK,
-        format!("pruned {} snapshot(s)", pruned.len()),
-    ))
+    Ok(pruned)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -740,5 +786,16 @@ mod tests {
         // ownership, not fd access mode; the test owns everything).
         let f = std::fs::File::open(path).unwrap();
         f.set_modified(t).unwrap();
+    }
+    #[test]
+    fn keep_n_parsing() {
+        // Absent → keep everything (manual pruning only).
+        assert_eq!(parse_keep_n(None).unwrap(), None);
+        // Normal value.
+        assert_eq!(parse_keep_n(Some("90")).unwrap(), Some(90));
+        // Zero would delete ALL history after every commit — rejected.
+        assert!(parse_keep_n(Some("0")).is_err());
+        // Non-numeric junk — rejected with a clear message.
+        assert!(parse_keep_n(Some("many")).is_err());
     }
 }

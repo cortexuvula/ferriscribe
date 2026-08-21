@@ -377,8 +377,13 @@ schedule).
 never expose it to `0.0.0.0`. The target bounds growth with disk-measured caps
 (default 1 TiB / 1,000 snapshots; override with `FERRISCRIBE_BACKUP_MAX_BYTES` /
 `FERRISCRIBE_BACKUP_MAX_SNAPSHOTS`) and sweeps crashed in-flight uploads after 7
-days; the daily job verifies the *target's* copy by re-pulling and drilling it,
-then trims local staging copies to the newest 14 (`--keep-local N`). Scheduled
+days. Retention: set `FERRISCRIBE_BACKUP_KEEP_N` on the target (e.g. `90` for
+~3 months of dailies) and it automatically prunes to the newest N snapshots
+after every successful commit, using the target's own authority — the append
+token still cannot delete anything. Without it, history is kept up to the caps
+and pruning is a manual admin action (`POST /v1/admin/prune?keep=N`). Locally,
+the daily job verifies the *target's* copy by re-pulling and drilling it, then
+trims local staging copies to the newest 14 (`--keep-local N`). Scheduled
 backups are macOS-only (launchd); "Back up now" works everywhere. One known
 limitation: files are hashed and transferred whole in memory — for recording
 libraries in the tens of GB, run the backup on a machine with ample RAM until a
