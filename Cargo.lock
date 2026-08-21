@@ -5210,7 +5210,7 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.53.0"
+version = "0.53.1"
 dependencies = [
  "async-stream",
  "async-trait",
