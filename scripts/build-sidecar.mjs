@@ -12,6 +12,11 @@
 // cargo build is incremental — after the first build this is ~seconds.
 
 import { execSync } from 'node:child_process';
+// --debug builds the default (dev) profile and stages from there. CI's
+// lint/test jobs use it: tauri-build validates externalBin EXISTENCE at
+// compile time, those jobs never bundle, and the dev profile reuses the
+// artifacts they already compiled for the workspace — near-zero cost.
+const debug = process.argv.includes('--debug');
 import { copyFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,13 +41,13 @@ const target =
       })();
 
 console.log(`building ferriscribe-backup for ${target}…`);
-execSync(`cargo build -p medical-backup --release --target ${target}`, {
+execSync(`cargo build -p medical-backup ${debug ? '' : '--release'} --target ${target}`, {
   cwd: root,
   stdio: 'inherit',
 });
 
 const bin = process.platform === 'win32' ? 'ferriscribe-backup.exe' : 'ferriscribe-backup';
-const src = join(root, 'target', target, 'release', bin);
+const src = join(root, 'target', target, debug ? 'debug' : 'release', bin);
 const destDir = join(root, 'src-tauri', 'binaries');
 // Tauri resolves externalBin entries as <name>-<triple>.exe on Windows —
 // without the extension the Windows bundle/dev build cannot find the sidecar.
