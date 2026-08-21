@@ -338,9 +338,7 @@ mod tests {
         // <db>-wal — a plain fs::copy of the main file would miss it.
         let writer = Connection::open(&path).unwrap();
         writer
-            .execute_batch(
-                "PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES (42);",
-            )
+            .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES (42);")
             .unwrap();
         assert!(
             path.with_file_name("plain.db-wal").exists(),
@@ -359,7 +357,9 @@ mod tests {
         // The WAL-committed row made it into the encrypted DB.
         let reader = Connection::open(&path).unwrap();
         apply_pragma_key(&reader, &key).unwrap();
-        let x: i64 = reader.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
+        let x: i64 = reader
+            .query_row("SELECT x FROM t", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(x, 42);
     }
 }

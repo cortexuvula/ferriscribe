@@ -311,7 +311,7 @@ fn build_snapshot_into(
     // 7. Receipt with the HMAC over receipt fields + every payload hash.
     let tag = compute_tag(
         &opts.wrapping_key,
-        &snapshot_id,
+        snapshot_id,
         SNAPSHOT_VERSION,
         &created_at,
         recording_count,

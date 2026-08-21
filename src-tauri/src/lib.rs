@@ -256,12 +256,22 @@ pub fn run() {
             // Auto-stop sharing when the main window closes, so the
             // whisper-server child process is killed instead of becoming an
             // orphan zombie on app quit. Best-effort: failures are logged.
+            //
+            // The close is PREVENTED and re-issued after the stop finishes:
+            // the spawned task races the run loop otherwise, and the window
+            // can be torn down before the whisper-server child is killed —
+            // the exact orphan this handler exists to prevent. destroy()
+            // (not close()) closes without re-firing CloseRequested, so
+            // this cannot re-enter.
             use tauri::Manager;
             let close_handle = app.handle().clone();
             if let Some(window) = app.get_webview_window("main") {
+                let close_window = window.clone();
                 window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
                         let handle = close_handle.clone();
+                        let window = close_window.clone();
                         tauri::async_runtime::spawn(async move {
                             let state = handle.state::<crate::state::AppState>();
                             if let Err(e) =
@@ -269,6 +279,7 @@ pub fn run() {
                             {
                                 tracing::warn!(error = %e, "auto-stop sharing on close failed");
                             }
+                            let _ = window.destroy();
                         });
                     }
                 });

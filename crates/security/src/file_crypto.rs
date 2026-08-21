@@ -461,10 +461,7 @@ mod tests {
         // Both encrypt in place without interfering.
         encrypt_file_in_place_with(&with_ext, &cipher).expect("encrypt with ext");
         encrypt_file_in_place_with(&no_ext, &cipher).expect("encrypt no ext");
-        assert_eq!(
-            decrypt_file_with(&with_ext, &cipher).unwrap(),
-            b"RIFF one"
-        );
+        assert_eq!(decrypt_file_with(&with_ext, &cipher).unwrap(), b"RIFF one");
         assert_eq!(decrypt_file_with(&no_ext, &cipher).unwrap(), b"RIFF two");
     }
 }
