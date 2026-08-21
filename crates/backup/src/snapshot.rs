@@ -412,21 +412,29 @@ pub fn restore_snapshot(
 
     // R6: persist the recovered key so the restored DB opens on this
     // machine. Guarded — never clobber a differing live key without force.
-    let key_install_outcome = match db_key {
-        None => KeyInstallOutcome::Skipped,
-        Some(recovered) => {
-            let existing = medical_security::keychain::get_secret(
-                medical_security::keychain::KEYCHAIN_DB_KEY_ACCOUNT,
-            )?;
-            match key_install_decision(existing, recovered, key_install) {
-                KeyInstallOutcome::Installed => {
-                    medical_security::keychain::set_secret(
-                        medical_security::keychain::KEYCHAIN_DB_KEY_ACCOUNT,
-                        recovered,
-                    )?;
-                    KeyInstallOutcome::Installed
+    // Skip exits BEFORE any keychain access: on machines with no OS
+    // secret store (headless Linux without Secret Service), the query
+    // itself fails — and drills (the Skip caller) must both leave the
+    // operator's keychain untouched and work on such machines.
+    let key_install_outcome = if key_install == KeyInstall::Skip {
+        KeyInstallOutcome::Skipped
+    } else {
+        match db_key {
+            None => KeyInstallOutcome::Skipped,
+            Some(recovered) => {
+                let existing = medical_security::keychain::get_secret(
+                    medical_security::keychain::KEYCHAIN_DB_KEY_ACCOUNT,
+                )?;
+                match key_install_decision(existing, recovered, key_install) {
+                    KeyInstallOutcome::Installed => {
+                        medical_security::keychain::set_secret(
+                            medical_security::keychain::KEYCHAIN_DB_KEY_ACCOUNT,
+                            recovered,
+                        )?;
+                        KeyInstallOutcome::Installed
+                    }
+                    other => other,
                 }
-                other => other,
             }
         }
     };
