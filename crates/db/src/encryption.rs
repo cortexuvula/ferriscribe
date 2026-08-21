@@ -100,6 +100,14 @@ pub fn migrate_plaintext_to_encrypted(
     let backup_path = backup_path_for(db_path);
     let encrypting_path = encrypting_path_for(db_path);
 
+    // Step 0: fold any WAL frames into the main file and drop the
+    // sidecars. A crashed plaintext session can leave committed
+    // transactions living only in `<db>-wal`; the plain file copy below
+    // would silently miss them. This is also why the sidecars must not
+    // survive next to the file once it becomes a SQLCipher DB: SQLite
+    // would try to replay plaintext frames against encrypted pages.
+    checkpoint_and_clear_wal(db_path)?;
+
     // Step 1: backup (must succeed before we touch anything else).
     std::fs::copy(db_path, &backup_path).map_err(|e| {
         crate::DbError::Io(std::io::Error::new(
@@ -149,6 +157,10 @@ pub fn migrate_plaintext_to_encrypted(
         std::fs::rename(&encrypting_path, db_path).map_err(|e| {
             crate::DbError::Io(std::io::Error::new(e.kind(), format!("rename failed: {e}")))
         })?;
+        // verify_row_counts re-opened the plaintext DB, which can recreate
+        // sidecars — clear them so nothing plaintext survives next to the
+        // now-encrypted file.
+        remove_wal_sidecars(db_path);
         Ok(())
     })();
 
@@ -165,9 +177,42 @@ pub fn migrate_plaintext_to_encrypted(
             // Restore from backup; clean up partial encrypted file.
             let _ = std::fs::rename(&backup_path, db_path);
             let _ = std::fs::remove_file(&encrypting_path);
+            // The stale sidecars belong to the pre-migration state that no
+            // longer matches the restored file's history — drop them too.
+            remove_wal_sidecars(db_path);
             Err(e)
         }
     }
+}
+
+/// Checkpoint the DB's WAL into the main file, then remove `-wal`/`-shm`.
+///
+/// Harmless on non-WAL databases (`PRAGMA wal_checkpoint` no-ops, the
+/// sidecars don't exist). Best-effort on the removals — after a TRUNCATE
+/// checkpoint the WAL is zero-length, so failing to delete it loses
+/// nothing.
+fn checkpoint_and_clear_wal(db_path: &Path) -> DbResult<()> {
+    let conn = Connection::open(db_path)
+        .map_err(|e| crate::DbError::Other(format!("wal checkpoint open: {e}")))?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(|e| crate::DbError::Other(format!("wal checkpoint: {e}")))?;
+    drop(conn);
+    remove_wal_sidecars(db_path);
+    Ok(())
+}
+
+fn remove_wal_sidecars(db_path: &Path) {
+    for sidecar in wal_sidecar_paths(db_path) {
+        let _ = std::fs::remove_file(sidecar);
+    }
+}
+
+fn wal_sidecar_paths(db_path: &Path) -> [std::path::PathBuf; 2] {
+    let mut wal = db_path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = db_path.as_os_str().to_os_string();
+    shm.push("-shm");
+    [std::path::PathBuf::from(wal), std::path::PathBuf::from(shm)]
 }
 
 /// Compare row counts table-by-table between the plaintext and encrypted DBs.
@@ -280,5 +325,41 @@ mod tests {
         conn.execute_batch("CREATE TABLE t(x);").unwrap();
         drop(conn);
         assert!(is_plaintext_db(&path).unwrap());
+    }
+
+    #[test]
+    fn migration_folds_wal_frames_and_clears_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.db");
+
+        // Simulate a crashed plaintext session: WAL mode, a committed
+        // transaction, and the connection still open so SQLite never got
+        // its clean-close checkpoint. The committed row lives ONLY in
+        // <db>-wal — a plain fs::copy of the main file would miss it.
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES (42);",
+            )
+            .unwrap();
+        assert!(
+            path.with_file_name("plain.db-wal").exists(),
+            "fixture must leave committed frames in the WAL"
+        );
+
+        let key = [0xCDu8; 32];
+        let outcome = migrate_plaintext_to_encrypted(&path, &key).expect("migrate");
+        assert!(outcome.backup_deleted);
+
+        // No plaintext sidecars next to the encrypted DB.
+        for sidecar in wal_sidecar_paths(&path) {
+            assert!(!sidecar.exists(), "{} must not survive", sidecar.display());
+        }
+
+        // The WAL-committed row made it into the encrypted DB.
+        let reader = Connection::open(&path).unwrap();
+        apply_pragma_key(&reader, &key).unwrap();
+        let x: i64 = reader.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(x, 42);
     }
 }
