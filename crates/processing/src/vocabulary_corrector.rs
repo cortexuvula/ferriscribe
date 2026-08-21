@@ -22,6 +22,7 @@ use std::sync::{LazyLock, Mutex};
 use regex::Regex;
 use tracing::{debug, info};
 
+use medical_core::types::stt::Transcript;
 use medical_core::types::vocabulary::{AppliedCorrection, CorrectionResult, VocabularyEntry};
 
 /// Persistent process-wide regex cache keyed by `(find_text, case_sensitive)`.
@@ -129,6 +130,31 @@ pub fn apply_corrections(text: &str, entries: &[VocabularyEntry]) -> CorrectionR
         corrections_applied: applied,
         total_replacements: total,
     }
+}
+
+/// Apply corrections to BOTH representations of a transcript: every
+/// segment's text AND the flat `text` field.
+///
+/// The stored/displayed transcript is rebuilt from segments when any
+/// speaker label exists, and from the flat `text` otherwise — so
+/// correcting only one representation silently discards every correction
+/// whenever the other is the one stored (the no-speaker case: diarization
+/// off, or it detected no speakers). Returns total replacements across
+/// both representations (informational only — they cover the same audio,
+/// so a word corrected in both counts twice).
+pub fn apply_to_transcript(transcript: &mut Transcript, entries: &[VocabularyEntry]) -> u32 {
+    let mut total: u32 = 0;
+    for seg in transcript.segments.iter_mut() {
+        let result = apply_corrections(&seg.text, entries);
+        total += result.total_replacements;
+        seg.text = result.corrected_text;
+    }
+    if !transcript.text.is_empty() {
+        let result = apply_corrections(&transcript.text, entries);
+        total += result.total_replacements;
+        transcript.text = result.corrected_text;
+    }
+    total
 }
 
 #[cfg(test)]
@@ -277,5 +303,77 @@ mod tests {
         let result = apply_corrections("patient has htn", &entries);
         assert_eq!(result.original_text, "patient has htn");
         assert_eq!(result.corrected_text, "patient has hypertension");
+    }
+
+    fn segment(text: &str, speaker: Option<&str>) -> medical_core::types::stt::TranscriptSegment {
+        medical_core::types::stt::TranscriptSegment {
+            start: 0.0,
+            end: 1.0,
+            text: text.to_string(),
+            speaker: speaker.map(str::to_string),
+            confidence: None,
+        }
+    }
+
+    fn transcript_with(
+        flat: &str,
+        segs: Vec<medical_core::types::stt::TranscriptSegment>,
+    ) -> Transcript {
+        Transcript {
+            text: flat.to_string(),
+            segments: segs,
+            language: None,
+            duration_seconds: None,
+            provider: "test".to_string(),
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    /// Regression (real-world report): a recording with diarization OFF
+    /// produced no speaker labels, so the stored transcript was built from
+    /// the FLAT text — which was never corrected — and every vocabulary
+    /// correction (e.g. SAS → MOA) silently vanished from the transcript
+    /// and the SOAP note generated from it.
+    #[test]
+    fn flat_text_corrected_when_no_speaker_labels() {
+        let entries = vec![entry("SAS", "MOA")];
+        let mut t = transcript_with(
+            "I will do that and call SAS on Monday. I'll book an appointment with SAS.",
+            vec![
+                segment("I will do that and call SAS on Monday.", None),
+                segment("I'll book an appointment with SAS.", None),
+            ],
+        );
+        let total = apply_to_transcript(&mut t, &entries);
+        assert_eq!(total, 4, "two occurrences in each representation");
+        assert_eq!(
+            t.text,
+            "I will do that and call MOA on Monday. I'll book an appointment with MOA."
+        );
+        assert_eq!(t.segments[0].text, "I will do that and call MOA on Monday.");
+        assert_eq!(t.segments[1].text, "I'll book an appointment with MOA.");
+    }
+
+    #[test]
+    fn both_representations_corrected_when_speakers_present() {
+        let entries = vec![entry("htn", "hypertension")];
+        let mut t = transcript_with(
+            "patient has htn",
+            vec![segment("patient has htn", Some("Speaker 1"))],
+        );
+        apply_to_transcript(&mut t, &entries);
+        assert_eq!(t.text, "patient has hypertension");
+        assert_eq!(t.segments[0].text, "patient has hypertension");
+    }
+
+    #[test]
+    fn flat_corrected_even_with_no_segments() {
+        // Some STT paths return flat text only — the segment loop is a
+        // no-op and the flat correction is the only one that matters.
+        let entries = vec![entry("htn", "hypertension")];
+        let mut t = transcript_with("patient has htn", vec![]);
+        let total = apply_to_transcript(&mut t, &entries);
+        assert_eq!(total, 1);
+        assert_eq!(t.text, "patient has hypertension");
     }
 }
