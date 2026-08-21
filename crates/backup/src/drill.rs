@@ -183,7 +183,7 @@ fn drill_scratch_dir(snapshot_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::{BuildOptions, build_snapshot};
+    use crate::snapshot::{BuildOptions, StagingMode, build_snapshot};
     use medical_core::types::recording::Recording;
     use medical_db::recordings::RecordingsRepo;
 
@@ -227,6 +227,7 @@ mod tests {
             dest_dir: dest.path().to_path_buf(),
             db_key,
             wrapping_key: wrapping,
+            staging: StagingMode::Hardlink,
         })
         .expect("build");
 
@@ -252,11 +253,19 @@ mod tests {
             dest_dir: dest.path().to_path_buf(),
             db_key,
             wrapping_key: wrapping,
+            staging: StagingMode::Hardlink,
         })
         .expect("build");
         let dir = dest.path().join(&receipt.snapshot_id);
 
-        let payload = dir.join("payload").join("f000000.bin");
+        let payload = {
+            let mut names: Vec<_> = std::fs::read_dir(dir.join("payload"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            names.sort();
+            names[0].clone()
+        };
         let mut bytes = std::fs::read(&payload).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;

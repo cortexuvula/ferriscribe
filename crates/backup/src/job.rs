@@ -154,7 +154,9 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
         std::fs::create_dir_all(&out_dir)
             .map_err(|e| JobFail::early(format!("staging dir: {e}")))?;
 
-        // 1. Build.
+        // 1. Build. Staging by mode: a target push streams recordings from
+        // their source (nothing large is staged locally); a local-only
+        // run hardlinks them in so the snapshot is self-contained.
         events.push(step("building snapshot…"));
         let receipt = snapshot::build_snapshot(&BuildOptions {
             db_path: cfg.db_path.clone(),
@@ -163,6 +165,11 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
             dest_dir: out_dir.clone(),
             db_key,
             wrapping_key,
+            staging: if cfg.target.is_some() {
+                snapshot::StagingMode::Stream
+            } else {
+                snapshot::StagingMode::Hardlink
+            },
         })
         .map_err(|e| JobFail::early(format!("snapshot build failed: {e}")))?;
         events.push(ok(&format!(

@@ -161,6 +161,7 @@ mod transport_tests {
             dest_dir: dest.to_path_buf(),
             db_key,
             wrapping_key: wrapping,
+            staging: snapshot::StagingMode::Hardlink,
         })
         .expect("build snapshot")
     }
@@ -388,7 +389,15 @@ mod transport_tests {
         let http = reqwest::Client::new();
 
         // Upload only SOME of the real files (the fixture has more)…
-        for rel in ["manifest.json.enc", "payload/f000000.bin"] {
+        let first_payload = {
+            let mut names: Vec<String> = std::fs::read_dir(dir.join("payload"))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names[0].clone()
+        };
+        for rel in ["manifest.json.enc", &format!("payload/{first_payload}")] {
             let bytes = std::fs::read(dir.join(rel)).expect("file");
             let resp = http
                 .put(format!(

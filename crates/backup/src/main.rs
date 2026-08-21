@@ -11,7 +11,7 @@ use medical_backup::agent;
 use medical_backup::client::BackupClient;
 use medical_backup::escrow;
 use medical_backup::keys;
-use medical_backup::snapshot::{self, BuildOptions};
+use medical_backup::snapshot::{self, BuildOptions, StagingMode};
 use medical_backup::{drill, schedule};
 
 fn main() -> ExitCode {
@@ -227,6 +227,10 @@ fn build_options_from(flags: &Flags) -> medical_backup::BackupResult<BuildOption
         dest_dir: out,
         db_key: medical_security::keychain::get_or_create_db_key()?,
         wrapping_key: keys::load_or_create_wrapping_key()?,
+        // Local `backup` produces a self-contained tree (Hardlink); the
+        // streaming mode belongs to `backup-and-push`, which stages per
+        // its JobConfig.
+        staging: StagingMode::Hardlink,
     })
 }
 
