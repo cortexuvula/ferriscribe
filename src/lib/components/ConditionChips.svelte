@@ -119,10 +119,16 @@
   }
 
   onDestroy(() => {
+    disposed = true;
     if (pollHandle) clearInterval(pollHandle);
     if (dirtyTimer) clearTimeout(dirtyTimer);
     if (unlistenSSE) unlistenSSE();
   });
+
+  // Race guard: this component mounts on the Record/Generate tabs — a fast
+  // tab switch can unmount it before the async onMount's listen() resolves.
+  // A late resolution unregisters itself instead of leaking.
+  let disposed = false;
 
   onMount(async () => {
     await refreshChips();
@@ -132,9 +138,11 @@
     // `condition-chips-changed` and we refresh immediately instead of waiting
     // for the 30s poll.
     try {
-      unlistenSSE = await listen('condition-chips-changed', () => {
+      const un = await listen('condition-chips-changed', () => {
         refreshChips();
       });
+      if (disposed) un();
+      else unlistenSSE = un;
       // Start the SSE subscription on the backend (long-lived task). Safe to
       // call when not paired — the command returns immediately in that case.
       await invoke('subscribe_condition_chips');

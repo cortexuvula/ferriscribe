@@ -13,6 +13,10 @@
   let downloadingModel = $state<string | null>(null);
   let downloadProgress = $state<Record<string, { downloaded: number; total: number }>>({});
   let progressUnlisten: (() => void) | undefined;
+  // Race guard: the Skip button can unmount this step before the async
+  // onMount's listen() resolves — a late resolution unregisters itself
+  // instead of leaking (see settings/Audio.svelte for the full rationale).
+  let disposed = false;
 
   onMount(async () => {
     try {
@@ -24,7 +28,7 @@
     } catch (e) {
       console.error('Failed to list whisper models', e);
     }
-    progressUnlisten = await listen<{ model_id: string; downloaded_bytes: number; total_bytes: number }>(
+    const un = await listen<{ model_id: string; downloaded_bytes: number; total_bytes: number }>(
       'model-download-progress',
       (event) => {
         downloadProgress = {
@@ -36,9 +40,14 @@
         };
       },
     );
+    if (disposed) un();
+    else progressUnlisten = un;
   });
 
-  onDestroy(() => { progressUnlisten?.(); });
+  onDestroy(() => {
+    disposed = true;
+    progressUnlisten?.();
+  });
 
   async function handleDownload(modelId: string) {
     downloadingModel = modelId;

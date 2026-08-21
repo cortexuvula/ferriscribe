@@ -45,15 +45,19 @@ class RecordingsStore {
   /// Load the first page, replacing the list. Called on mount and after
   /// mutations that change ordering (new recording, generation, etc.).
   async load(limit = PAGE_SIZE, offset = 0): Promise<void> {
+    // Request token: overlapping load/search calls must not resolve out of
+    // order — a stale response landing last would clobber the fresh list.
+    const token = ++this.listRequestId;
     this.loading = true;
     try {
       const items = await listRecordings(limit, offset);
+      if (token !== this.listRequestId) return;
       this.list = items;
       this.hasMore = items.length >= limit;
     } catch (err) {
       console.error('Failed to load recordings:', err);
     } finally {
-      this.loading = false;
+      if (token === this.listRequestId) this.loading = false;
     }
   }
 
@@ -80,14 +84,20 @@ class RecordingsStore {
 
   async search(query: string): Promise<void> {
     this.searchQuery = query;
+    // Same request-token discipline as load(): the SearchBar debounce means
+    // overlapping queries resolve in arbitrary order — only the latest
+    // issued request may write the list.
+    const token = ++this.listRequestId;
     this.loading = true;
     try {
       if (query.trim() === '') {
         const items = await listRecordings();
+        if (token !== this.listRequestId) return;
         this.list = items;
         this.hasMore = items.length >= PAGE_SIZE;
       } else {
         const results = await searchRecordings(query);
+        if (token !== this.listRequestId) return;
         // Map full Recording to RecordingSummary shape
         const summaries: RecordingSummary[] = results.map((r) => ({
           id: r.id,
@@ -113,9 +123,12 @@ class RecordingsStore {
     } catch (err) {
       console.error('Failed to search recordings:', err);
     } finally {
-      this.loading = false;
+      if (token === this.listRequestId) this.loading = false;
     }
   }
+
+  /// Monotonic request id guarding list writes (see load/search).
+  listRequestId = 0;
 
   /** The most recently deleted summary, for undo. Cleared after restore or on next delete. */
   lastDeleted = $state<RecordingSummary | null>(null);
