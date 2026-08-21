@@ -51,6 +51,8 @@ const defaults: AppConfig = {
   rsvp_remembered_sections: [],
   capture_for_training: false,
   allow_public_endpoint: false,
+  backup_target_url: null,
+  backup_append_token: null,
   onboarding_completed: false,
   auto_update_check: true,
   custom_conditions: [],

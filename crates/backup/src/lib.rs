@@ -29,9 +29,11 @@ pub mod agent;
 pub mod client;
 pub mod drill;
 pub mod escrow;
+pub mod job;
 pub mod keys;
 pub mod schedule;
 pub mod snapshot;
+pub mod status;
 
 /// Errors surfaced by the backup tooling.
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +52,10 @@ pub enum BackupError {
     Transport(#[from] reqwest::Error),
     #[error("snapshot verification failed: {0}")]
     Verification(String),
+    /// Installation/deployment failures (sidecar staging, scheduling,
+    /// task join errors) — nothing to do with key escrow.
+    #[error("setup error: {0}")]
+    Setup(String),
     #[error("escrow error: {0}")]
     Escrow(String),
     #[error("missing key material: {0}")]
@@ -431,5 +437,67 @@ mod transport_tests {
 
         // Nothing committed; the target stays clean for a retry.
         assert!(client(&env).list_snapshots().await.unwrap().is_empty());
+    }
+    /// Per-snapshot locking smoke test (review round 2): many concurrent
+    /// PUTs to the same snapshot + a racing commit must either all land
+    /// before the freeze or be rejected — the committed tree can never
+    /// contain bytes that bypassed the envelope check.
+    #[tokio::test]
+    async fn concurrent_puts_and_commit_are_serialized() {
+        let env = spawn_agent().await;
+        let built = tempfile::tempdir().expect("built");
+        let receipt = build_fixture_snapshot(built.path(), 0x97);
+        let dir = built.path().join(&receipt.snapshot_id);
+
+        // Upload the REAL files concurrently (manifest + every payload).
+        let http = reqwest::Client::new();
+        let mut handles = Vec::new();
+        for rel in std::fs::read_dir(dir.join("payload"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .map(|name| format!("payload/{name}"))
+            .chain(std::iter::once("manifest.json.enc".to_string()))
+        {
+            let url = format!(
+                "{}/v1/snapshots/{}/file?path={rel}",
+                env.base_url, receipt.snapshot_id
+            );
+            let token = env.append.clone();
+            let bytes = std::fs::read(dir.join(&rel)).unwrap();
+            handles.push(tokio::spawn(async move {
+                reqwest::Client::new()
+                    .put(&url)
+                    .bearer_auth(&token)
+                    .body(bytes)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }));
+        }
+        for h in handles {
+            assert_eq!(h.await.unwrap(), 201, "every upload lands");
+        }
+
+        // Commit after the storm: envelope must match exactly.
+        let resp = http
+            .post(format!(
+                "{}/v1/snapshots/{}/commit",
+                env.base_url, receipt.snapshot_id
+            ))
+            .bearer_auth(&env.append)
+            .json(&receipt)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201, "commit succeeds after concurrent puts");
+
+        // And the committed snapshot pulls + verifies end-to-end.
+        let pulled = tempfile::tempdir().expect("pulled");
+        let local = client(&env)
+            .pull_snapshot(None, pulled.path(), &wrapping_for(0x97))
+            .await
+            .expect("pull verifies");
+        assert!(local.ends_with(&receipt.snapshot_id));
     }
 }

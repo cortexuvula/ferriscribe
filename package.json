@@ -1,6 +1,6 @@
 {
   "name": "rust-medical-assistant",
-  "version": "0.52.0",
+  "version": "0.53.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,8 @@
     "format": "prettier --write \"src/**/*.{ts,svelte,js}\" \"*.{ts,js,json}\"",
     "format:check": "prettier --check \"src/**/*.{ts,svelte,js}\" \"*.{ts,js,json}\"",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "build:sidecar": "node scripts/build-sidecar.mjs"
   },
   "dependencies": {
     "@sereneinserenade/tiptap-search-and-replace": "^0.1.1",

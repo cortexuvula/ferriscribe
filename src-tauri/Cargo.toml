@@ -1,6 +1,6 @@
 [package]
 name = "rust-medical-assistant"
-version = "0.52.0"
+version = "0.53.0"
 description = "FerriScribe"
 authors = []
 edition = "2024"
@@ -37,6 +37,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 
 rusqlite = { workspace = true }
+medical-backup = { path = "../crates/backup" }
 medical-core = { path = "../crates/core" }
 medical-db = { path = "../crates/db" }
 medical-security = { path = "../crates/security" }

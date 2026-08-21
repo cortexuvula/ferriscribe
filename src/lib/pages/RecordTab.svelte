@@ -28,6 +28,8 @@
   import { latestTokensPerSecond } from '../utils/generationStats';
   import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
   import { useOcr } from '../composables/useOcr.svelte';
+  import { getBackupStatus } from '../api/backup';
+  import { settingsNav } from '../stores/settingsNav.svelte';
 
   type Props = {
     onopenSettings?: (target: 'models' | 'audio') => void;
@@ -130,14 +132,46 @@
   onMount(() => {
     contextTemplates.load();
     window.addEventListener('keydown', handleGlobalKeydown);
+    // Best-effort off-machine-backup nudge for EXISTING users (the
+    // onboarding wizard only reaches new installs). Hidden on any status
+    // error — never nag based on a failed fetch.
+    if (!localStorage.getItem('ferriscribe-backup-nudge-dismissed')) {
+      getBackupStatus()
+        .then((s) => {
+          if (backupNudgeAlive && !s.wrappingKeyPresent) backupNudgeVisible = true;
+        })
+        .catch(() => {});
+    }
   });
 
   onDestroy(() => {
+    backupNudgeAlive = false;
     window.removeEventListener('keydown', handleGlobalKeydown);
   });
 
   // Import flow state
   let importedRecordingId = $state<string | null>(null);
+  // Off-machine-backup nudge (existing users; dismissed is sticky via localStorage)
+  let backupNudgeVisible = $state(false);
+  // Guards the async status fetch against component teardown.
+  let backupNudgeAlive = true;
+
+  /** ✕ — permanent dismissal. The "Set up backup" action does NOT use
+   *  this: navigating to the pane isn't completing setup, and a sticky
+   *  dismissal there would kill the only existing-user reminder while
+   *  backup is still unconfigured. */
+  function dismissBackupNudge() {
+    backupNudgeVisible = false;
+    localStorage.setItem('ferriscribe-backup-nudge-dismissed', '1');
+  }
+
+  /** "Set up backup" — hide for this session only; the banner returns on
+   *  the next launch until backup is genuinely configured. */
+  function openBackupSettings() {
+    backupNudgeVisible = false;
+    settingsNav.navigateTo('backup');
+  }
+
   let importedFilename = $state<string | null>(null);
   let importing = $state(false);
   let importError = $state<string | null>(null);
@@ -462,6 +496,24 @@
 </script>
 
 <div class="record-tab">
+  {#if backupNudgeVisible}
+    <div class="backup-nudge" role="status">
+      <span>
+        Your recordings and notes currently exist only on this machine.
+        Set up encrypted off-machine backup to survive a disk failure.
+      </span>
+      <button
+        class="nudge-action"
+        onclick={openBackupSettings}
+      >
+        Set up backup
+      </button>
+      <button class="nudge-dismiss" onclick={dismissBackupNudge} title="Dismiss" aria-label="Dismiss backup reminder">
+        ✕
+      </button>
+    </div>
+  {/if}
+
   <RecordingHeader
     {onopenSettings}
     onStart={handleStartRecording}
@@ -529,6 +581,39 @@
 />
 
 <style>
+  .backup-nudge {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+    border: 1px solid var(--warning, #d97706);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
+    font-size: 13px;
+    color: var(--text-primary);
+  }
+  .backup-nudge span { flex: 1; }
+  .nudge-action {
+    flex-shrink: 0;
+    padding: 6px 14px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .nudge-dismiss {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 6px;
+  }
   .record-tab {
     flex: 1;
     display: flex;

@@ -205,6 +205,50 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         == 0
 }
 
+/// Router state: config plus per-snapshot in-process locks. The lock
+/// serializes PUTs against the commit's validate→freeze window — without
+/// it, a racing upload could slip unlisted bytes past the envelope check
+/// into a just-committed snapshot (verify still fails closed on restore,
+/// but a compromised source could weaponize the race to make snapshots
+/// unverifiable). One agent process ⇒ an in-process mutex suffices.
+#[derive(Clone)]
+pub struct AgentState {
+    pub cfg: AgentConfig,
+    locks: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    >,
+}
+
+impl AgentState {
+    fn new(cfg: AgentConfig) -> Self {
+        Self {
+            cfg,
+            locks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// Acquire this snapshot's lock. Blocks until any concurrent PUT or
+    /// commit for the SAME id finishes; never touches other snapshots.
+    /// tokio::sync::Mutex so the guard may be held across the handler's
+    /// filesystem awaits (a std guard would make the handler !Send).
+    fn lock_snapshot(&self, id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let lock = {
+            let mut map = self.locks.lock().expect("lock map not poisoned");
+            map.entry(id.to_string()).or_default().clone()
+        };
+        // Guard against unbounded growth: prune lock entries when the map
+        // grows past a generous bound (entries are only needed during
+        // active uploads to one id).
+        {
+            let mut map = self.locks.lock().expect("lock map not poisoned");
+            if map.len() > 10_000 {
+                map.clear();
+            }
+        }
+        lock
+    }
+}
+
 /// Build the agent router (public so tests can drive it in-process).
 pub fn router(cfg: AgentConfig) -> Router {
     Router::new()
@@ -212,7 +256,7 @@ pub fn router(cfg: AgentConfig) -> Router {
         .route("/v1/snapshots/{id}/file", get(get_file).put(put_file))
         .route("/v1/snapshots/{id}/commit", post(commit_snapshot))
         .route("/v1/admin/prune", post(prune))
-        .with_state(cfg)
+        .with_state(AgentState::new(cfg))
 }
 
 /// Serve until the process is stopped. Binds `addr` (typically a
@@ -244,16 +288,22 @@ struct FilePathQuery {
 }
 
 async fn put_file(
-    State(cfg): State<AgentConfig>,
+    State(state): State<AgentState>,
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     Query(q): Query<FilePathQuery>,
     body: axum::body::Bytes,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let scope = auth_scope(&headers, &cfg, "put_file").ok_or(unauthorized())?;
+    let cfg = &state.cfg;
+    let scope = auth_scope(&headers, cfg, "put_file").ok_or(unauthorized())?;
     let _ = scope; // both scopes may upload
     validate_snapshot_id(&id)?;
     let rel = validate_rel_path(&q.path)?;
+
+    // Serialize against a concurrent commit of the SAME id: hold the
+    // per-snapshot lock across the committed-check and the write.
+    let snapshot_lock = state.lock_snapshot(&id);
+    let _guard = snapshot_lock.lock().await;
 
     let snap_dir = cfg.root.join(&id);
     if is_committed(&snap_dir) {
@@ -286,16 +336,24 @@ async fn put_file(
 }
 
 async fn commit_snapshot(
-    State(cfg): State<AgentConfig>,
+    State(state): State<AgentState>,
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(receipt): Json<SnapshotReceipt>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    auth_scope(&headers, &cfg, "commit_snapshot").ok_or(unauthorized())?;
+    let cfg = &state.cfg;
+    auth_scope(&headers, cfg, "commit_snapshot").ok_or(unauthorized())?;
     validate_snapshot_id(&id)?;
     if receipt.snapshot_id != id {
         return Err(bad_request("receipt id does not match URL id"));
     }
+
+    // Hold the SAME per-snapshot lock as put_file across the entire
+    // validate→freeze window — no upload can slip past the envelope
+    // check into the committed tree.
+    let snapshot_lock = state.lock_snapshot(&id);
+    let _guard = snapshot_lock.lock().await;
+
     let snap_dir = cfg.root.join(&id);
     if is_committed(&snap_dir) {
         return Err(conflict("snapshot already committed — append-only"));
@@ -382,10 +440,11 @@ async fn commit_snapshot(
 }
 
 async fn list_snapshots(
-    State(cfg): State<AgentConfig>,
+    State(state): State<AgentState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<SnapshotReceipt>>, (StatusCode, String)> {
-    auth_scope(&headers, &cfg, "list_snapshots").ok_or(unauthorized())?;
+    let cfg = &state.cfg;
+    auth_scope(&headers, cfg, "list_snapshots").ok_or(unauthorized())?;
     let mut receipts = Vec::new();
     let mut rd = tokio::fs::read_dir(&cfg.root).await.map_err(internal)?;
     while let Ok(Some(entry)) = rd.next_entry().await {
@@ -404,12 +463,13 @@ async fn list_snapshots(
 }
 
 async fn get_file(
-    State(cfg): State<AgentConfig>,
+    State(state): State<AgentState>,
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     Query(q): Query<FilePathQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    auth_scope(&headers, &cfg, "get_file").ok_or(unauthorized())?;
+    let cfg = &state.cfg;
+    auth_scope(&headers, cfg, "get_file").ok_or(unauthorized())?;
     validate_snapshot_id(&id)?;
     let rel = validate_rel_path_read(&q.path)?;
     let snap_dir = cfg.root.join(&id);
@@ -431,11 +491,12 @@ struct PruneQuery {
 /// delete older ones. This is the ONLY deletion path in the entire
 /// system, and it is unreachable with the append token.
 async fn prune(
-    State(cfg): State<AgentConfig>,
+    State(state): State<AgentState>,
     headers: HeaderMap,
     Query(q): Query<PruneQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let scope = auth_scope(&headers, &cfg, "prune").ok_or(unauthorized())?;
+    let cfg = &state.cfg;
+    let scope = auth_scope(&headers, cfg, "prune").ok_or(unauthorized())?;
     if scope != Scope::Admin {
         return Err(forbidden("prune requires the target-side admin token"));
     }

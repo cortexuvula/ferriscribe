@@ -300,6 +300,26 @@ fn default_rsvp_remembered_sections() -> Vec<String> {
     Vec::new()
 }
 
+/// Credential wrapper whose `Debug` redacts the value — the `RemoteEndpoint`
+/// precedent ("bearer tokens must not leak to logs"). Serializes as a plain
+/// string, so the wire format and TS types are unchanged.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretString(#[serde(default)] pub String);
+
+// Manual Debug — the derived one would print the credential verbatim
+// into any {:?}/tracing/panic sink.
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretString(<redacted>)")
+    }
+}
+
+impl SecretString {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AppConfig
 // ---------------------------------------------------------------------------
@@ -494,6 +514,18 @@ pub struct AppConfig {
     /// See `crates/core/src/endpoint_policy.rs`.
     #[serde(default)]
     pub allow_public_endpoint: bool,
+
+    // Off-machine backup (configured by Settings → Backup; the schedule
+    // itself is a launchd agent invoking the bundled sidecar, NOT the app)
+    /// Backup target agent URL (e.g. http://100.64.0.2:8741). None until
+    /// the user configures the target.
+    #[serde(default)]
+    pub backup_target_url: Option<String>,
+    /// Append token for the backup target. Stored here (encrypted DB) so
+    /// the in-app "Back up now" reuses the scheduled job's credentials.
+    /// The admin/prune token NEVER lives on this machine.
+    #[serde(default)]
+    pub backup_append_token: Option<SecretString>,
 
     // Onboarding
     /// `true` once the user has completed (or skipped through) the first-run
