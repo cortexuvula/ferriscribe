@@ -540,6 +540,14 @@ async fn prune(
     if scope != Scope::Admin {
         return Err(forbidden("prune requires the target-side admin token"));
     }
+    // Same rule as parse_keep_n for the env var: 0 would delete ALL
+    // committed history — including the snapshot just pushed — so a
+    // fat-fingered ?keep=0 must be rejected, not obeyed.
+    if q.keep == 0 {
+        return Err(bad_request(
+            "keep must be >= 1 (keep=0 would delete ALL committed snapshots)",
+        ));
+    }
     let pruned = prune_to(&cfg.root, q.keep).map_err(internal)?;
     info!(count = pruned.len(), keep = q.keep, "pruned old snapshots");
     Ok((

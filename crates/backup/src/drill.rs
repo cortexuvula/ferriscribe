@@ -62,6 +62,10 @@ pub fn run_drill(snapshot_dir: &Path, wrapping_key: &[u8; 32]) -> DrillOutcome {
         wrapping_key,
         &scratch,
         snapshot::KeyInstall::Skip,
+        // The scratch dir is freshly made — the non-empty guard is a
+        // no-op here, but keep it enforced: a scratch dir with leftovers
+        // would mean a drill bug worth failing on.
+        false,
     ) {
         Ok(r) => r,
         Err(e) => {

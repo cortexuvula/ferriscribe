@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { settings } from '../../stores/settings.svelte';
   import { getDefaultPrompt, type DocType } from '../../api/prompts';
 
@@ -76,7 +76,13 @@
     promptSaveStatus = 'idle';
     try {
       const info = PROMPT_TYPES.find((p) => p.key === docType)!;
-      const customValue = settings.state?.[info.configField] as string | null | undefined;
+      // untrack: the reload effect must depend on activePromptKey ONLY.
+      // settings.updateField replaces settings.state wholesale, so a
+      // tracked read here re-ran the effect on EVERY settings save —
+      // discarding in-progress prompt edits from any other pane.
+      const customValue = untrack(
+        () => settings.state?.[info.configField],
+      ) as string | null | undefined;
       if (customValue && customValue.length > 0) {
         promptEditorText = customValue;
         promptIsCustom = true;

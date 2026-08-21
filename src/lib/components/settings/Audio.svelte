@@ -91,6 +91,12 @@
     await settings.updateField('whisper_model', modelId);
   }
 
+  // Race guard: settings panes mount/unmount on every dialog open. If the
+  // component unmounts before the async onMount's listen() resolves,
+  // onDestroy runs with progressUnlisten still null and the listener leaks
+  // (writing to dead state forever). A late resolution unregisters itself.
+  let disposed = false;
+
   onMount(async () => {
     const results = await Promise.allSettled([
       fetchAudioDevices(),
@@ -105,7 +111,7 @@
     }
 
     // Listen for model download progress events
-    progressUnlisten = await listen<{ model_id: string; downloaded_bytes: number; total_bytes: number }>(
+    const un = await listen<{ model_id: string; downloaded_bytes: number; total_bytes: number }>(
       'model-download-progress',
       (event) => {
         downloadProgress = {
@@ -117,9 +123,12 @@
         };
       }
     );
+    if (disposed) un();
+    else progressUnlisten = un;
   });
 
   onDestroy(() => {
+    disposed = true;
     progressUnlisten?.();
   });
 

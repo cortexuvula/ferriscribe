@@ -680,7 +680,23 @@ async fn run_sync(
                             tracing::debug!(error = %e, "sync: audio upload failed");
                         }
                     }
-                    Ok(Err(_)) | Err(_) => { /* no local audio — skip */ }
+                    Ok(Err(e)) => {
+                        // At-rest corruption or a keychain failure — the
+                        // audio silently never reaches the partner, so make
+                        // it diagnosable (ids/errors only, no PHI).
+                        tracing::warn!(
+                            error = %e,
+                            recording_id = %rec_id,
+                            "sync: audio upload skipped — local audio unreadable"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            recording_id = %rec_id,
+                            "sync: audio upload skipped — read task failed"
+                        );
+                    }
                 }
             }
         } else if let Some(ts) = skip_cursor {

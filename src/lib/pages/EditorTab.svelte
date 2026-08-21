@@ -88,6 +88,7 @@
     // dropped. The optimistic store update already made it look saved, so
     // skipping this is invisible data loss.
     flushPendingEdit();
+    disposed = true;
     if (saveTimer) clearTimeout(saveTimer);
     if (clearBadgeTimer) clearTimeout(clearBadgeTimer);
     if (copyBadgeTimer) clearTimeout(copyBadgeTimer);
@@ -96,15 +97,22 @@
 
   // Listener for remote `recording-updated` events (content sync merge). When
   // the currently-open recording is updated on the server and the user is NOT
-  // actively editing it (no pending debounced save / save in flight), reload it
-  // so the editor reflects the merged content and surface a subtle toast.
-  // Actively-edited recordings are left alone to avoid clobbering the user's
-  // in-progress edits — the next manual save round-trips their version.
+  // actively editing it (no pending debounced save / save in flight / failed
+  // save still showing), reload it so the editor reflects the merged content
+  // and surface a subtle toast. Actively-edited recordings are left alone to
+  // avoid clobbering the user's in-progress edits — the next manual save
+  // round-trips their version. A FAILED save also counts as dirty: the store
+  // still holds the optimistic value, so a remote reload would silently
+  // discard an edit that never persisted.
   let unlistenUpdate: (() => void) | null = null;
+
+  // Race guard: tab switches unmount this component constantly; a listen()
+  // resolving after unmount must unregister itself instead of leaking.
+  let disposed = false;
 
   onMount(async () => {
     try {
-      unlistenUpdate = await listen('recording-updated', (e) => {
+      const un = await listen('recording-updated', (e) => {
         const payload = e.payload as { id: string };
         // Read the underlying $state fields live inside the callback rather
         // than capturing the $derived values (isDirty / currentRecordingId),
@@ -112,7 +120,8 @@
         // the $state fields here gives the current values each invocation
         // (Bug C5).
         const recId = recordings.selectedRecording?.id ?? null;
-        const dirty = pendingValue !== null || saveStatus === 'saving';
+        const dirty =
+          pendingValue !== null || saveStatus === 'saving' || saveStatus === 'error';
         if (payload.id === recId && !dirty) {
           // Reload the recording to show the updated content. Voided — we
           // don't await here to avoid blocking the event loop.
@@ -124,6 +133,8 @@
           });
         }
       });
+      if (disposed) un();
+      else unlistenUpdate = un;
     } catch (err) {
       console.error('Failed to listen for recording-updated events:', err);
     }
@@ -219,6 +230,33 @@
     }, 1000); // 1 s debounce
   }
 
+  // Retry a failed save. The optimistic store still holds the value (the
+  // backend never received it), so re-send the current editor content —
+  // without this there was no path back from saveStatus === 'error' short
+  // of editing again.
+  async function retrySave() {
+    if (!recordings.selectedRecording) return;
+    const value = content;
+    if (value === null) return;
+    saveStatus = 'saving';
+    saveError = null;
+    try {
+      await invoke('save_recording_field', {
+        recordingId: recordings.selectedRecording.id,
+        field: String(config.field),
+        value,
+      });
+      saveStatus = 'saved';
+      clearBadgeTimer = setTimeout(() => {
+        clearBadgeTimer = null;
+        if (saveStatus === 'saved') saveStatus = 'idle';
+      }, 1500);
+    } catch (e) {
+      saveStatus = 'error';
+      saveError = formatError(e);
+    }
+  }
+
   async function handleCopy() {
     if (copyStatus !== 'idle') return;
     if (!content) return;
@@ -307,6 +345,7 @@
         <span class="save-status saved">Saved</span>
       {:else if saveStatus === 'error'}
         <span class="save-status error" title={saveError ?? undefined}>Save failed</span>
+        <button class="btn-copy" onclick={() => void retrySave()}>Retry save</button>
       {/if}
       {#if content}
         <button class="btn-copy" onclick={handleSpeedRead} title="Speed Read (Cmd/Ctrl+Shift+R)">

@@ -22,7 +22,7 @@
 //! are the only on-disk artifacts. Decryption is in-memory and the plaintext
 //! is never logged.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::consts::U12;
 use aes_gcm::aead::{Aead, KeyInit};
@@ -146,15 +146,45 @@ fn encrypt_file_with(
     let out = encrypt_with_key(cipher, plaintext)?;
     // Write to a temp sibling, fsync, then atomic rename. This avoids the
     // truncate-then-write race that could destroy the original on crash.
-    let tmp_path = path.with_extension("enc.tmp");
-    {
+    // The temp name carries the pid + a per-process counter: deriving it
+    // from the extension alone made `x.wav` and a sibling literally named
+    // `x` collide on the same `x.enc.tmp`.
+    let tmp_path = tmp_sibling(path);
+    let write = (|| -> Result<(), FileCryptoError> {
         let mut file = std::fs::File::create(&tmp_path)?;
         use std::io::Write;
         file.write_all(&out)?;
         file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
     }
-    std::fs::rename(&tmp_path, path)?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+    // Durability of the rename itself: without a parent-dir fsync a crash
+    // can lose the rename (the old plaintext file reappears) even though
+    // the data blocks hit disk. Best-effort — not all platforms/filesystems
+    // allow opening a directory.
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
     Ok(())
+}
+
+/// Unique temp sibling of `path` (see `encrypt_file_with`).
+fn tmp_sibling(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{}.{}.enc.tmp", std::process::id(), n));
+    PathBuf::from(name)
 }
 
 /// Read the plaintext file at `path`, encrypt it in place (atomic temp +
@@ -397,10 +427,41 @@ mod tests {
             result.is_err(),
             "encrypting a nonexistent file should error"
         );
-        // No temp file should be left behind.
+        // No temp file should be left behind (name-agnostic: the temp
+        // name embeds the pid + a counter).
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| e.file_name().to_string_lossy().contains("enc.tmp"))
+                    .unwrap_or(false)
+            })
+            .collect();
         assert!(
-            !dir.path().join("nonexistent.wav.enc.tmp").exists(),
-            "temp file should be cleaned up on failure"
+            leftovers.is_empty(),
+            "temp files should be cleaned up on failure"
         );
+    }
+
+    #[test]
+    fn temp_sibling_names_never_collide() {
+        let cipher = fixed_test_cipher();
+        let dir = TempDir::new().unwrap();
+        // Old naming derived the temp from the extension: both `x.wav`
+        // and a sibling literally named `x` mapped to `x.enc.tmp`, so
+        // concurrent in-place encryptions in one directory clobbered each
+        // other's temp file.
+        let with_ext = dir.path().join("rec.wav");
+        let no_ext = dir.path().join("rec");
+        std::fs::write(&with_ext, b"RIFF one").unwrap();
+        std::fs::write(&no_ext, b"RIFF two").unwrap();
+        assert_ne!(tmp_sibling(&with_ext), tmp_sibling(&no_ext));
+        assert_ne!(tmp_sibling(&with_ext), tmp_sibling(&with_ext));
+
+        // Both encrypt in place without interfering.
+        encrypt_file_in_place_with(&with_ext, &cipher).expect("encrypt with ext");
+        encrypt_file_in_place_with(&no_ext, &cipher).expect("encrypt no ext");
+        assert_eq!(decrypt_file_with(&with_ext, &cipher).unwrap(), b"RIFF one");
+        assert_eq!(decrypt_file_with(&no_ext, &cipher).unwrap(), b"RIFF two");
     }
 }

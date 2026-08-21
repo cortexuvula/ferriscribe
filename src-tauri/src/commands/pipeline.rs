@@ -60,13 +60,23 @@ pub async fn process_recording(
     let rid = recording_id.clone();
 
     // Register a cancel token so the frontend can ask us to bail between
-    // stages and interrupt in-flight provider work.
+    // stages and interrupt in-flight provider work. Insert-only: a second
+    // pipeline for the same recording must be rejected, not silently
+    // replace the first's token — replacing it arms the first pipeline's
+    // CancelGuard::drop to remove the SECOND's entry, leaving the running
+    // pipeline uncancellable (and both interleave status writes on the
+    // same row).
     let cancel = CancellationToken::new();
     {
         let mut guard = state
             .pipeline_cancels
             .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("pipeline_cancels: {e}")))?;
+        if guard.contains_key(&recording_id) {
+            return Err(AppError::Other(
+                "a pipeline is already running for this recording".to_string(),
+            ));
+        }
         guard.insert(recording_id.clone(), cancel.clone());
     }
     // Ensure the flag is removed on every exit path.

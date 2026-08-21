@@ -235,17 +235,18 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
             });
         }
 
-        // 4. Local retention (push path only — local-only runs keep the
-        // only copy there is; skipped on drill failure so the suspect
-        // copy survives for forensics).
-        if cfg.target.is_some() {
-            let removed = snapshot::prune_local_snapshots(&out_dir, cfg.keep_local);
-            if !removed.is_empty() {
-                events.push(step(&format!(
-                    "local retention: removed {} old snapshot(s)",
-                    removed.len()
-                )));
-            }
+        // 4. Local retention. Runs on EVERY successful run — without it a
+        // nightly local-only job (a supported configuration) accumulates
+        // full copies forever. The keep count floors at 1: never delete the
+        // newest local snapshot. (Skipped on drill failure so the suspect
+        // copy survives for forensics.)
+        let keep = cfg.keep_local.max(1);
+        let removed = snapshot::prune_local_snapshots(&out_dir, keep);
+        if !removed.is_empty() {
+            events.push(step(&format!(
+                "local retention: removed {} old snapshot(s)",
+                removed.len()
+            )));
         }
 
         Ok(BackupRunStatus {
@@ -374,6 +375,42 @@ mod tests {
         assert!(
             !data.path().join(LOCK_FILE).exists(),
             "lock must be released"
+        );
+    }
+
+    #[test]
+    fn local_only_runs_prune_to_keep_local() {
+        let data = tempfile::tempdir().unwrap();
+        let db_key = [0x91u8; 32];
+        let (db_path, recordings) = fixture_db(data.path(), db_key);
+
+        // Two consecutive local-only runs with keep_local = 1: the second
+        // run's retention must remove the first snapshot — otherwise a
+        // nightly local-only job accumulates full copies forever.
+        for _ in 0..2 {
+            let cfg = JobConfig {
+                data_dir: data.path().to_path_buf(),
+                db_path: db_path.clone(),
+                recordings_dir: recordings.clone(),
+                keystore_path: None,
+                target: None,
+                keep_local: 1,
+            };
+            let outcome = run_backup_job(&cfg, db_key, [0xA2u8; 32]);
+            assert!(outcome.success(), "events: {:?}", outcome.events);
+        }
+
+        let backups = data.path().join("backups");
+        let dirs: Vec<String> = std::fs::read_dir(&backups)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            dirs.len(),
+            1,
+            "local-only retention must keep exactly 1 snapshot: {dirs:?}"
         );
     }
 

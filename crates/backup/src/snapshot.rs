@@ -186,10 +186,59 @@ fn key_install_decision(
 }
 
 /// Build a new snapshot under `opts.dest_dir` and return its receipt.
+///
+/// Builds into a `.tmp-<id>` sibling and renames it into place only after
+/// the receipt is written: a mid-build crash (disk full, IO error, kill)
+/// must never leave a receipt-less partial dir, because local retention
+/// deliberately refuses to delete dirs it can't date.
 pub fn build_snapshot(opts: &BuildOptions) -> BackupResult<SnapshotReceipt> {
-    let aes_key = keys::snapshot_aes_key(&opts.wrapping_key);
     let snapshot_id = new_snapshot_id();
+    sweep_stale_temp_dirs(&opts.dest_dir);
     let snap_dir = opts.dest_dir.join(&snapshot_id);
+    let tmp_dir = opts.dest_dir.join(format!(".tmp-{snapshot_id}"));
+    let receipt = match build_snapshot_into(&tmp_dir, &snapshot_id, opts) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&tmp_dir);
+            return Err(e);
+        }
+    };
+    if let Err(e) = fs::rename(&tmp_dir, &snap_dir) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e.into());
+    }
+    Ok(receipt)
+}
+
+/// Remove `.tmp-*` build dirs older than a day. The error path above
+/// removes them already; this sweeps the ones a hard crash left behind.
+fn sweep_stale_temp_dirs(dest_dir: &Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    let Ok(rd) = fs::read_dir(dest_dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(".tmp-") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > MAX_AGE);
+        if stale {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+fn build_snapshot_into(
+    snap_dir: &Path,
+    snapshot_id: &str,
+    opts: &BuildOptions,
+) -> BackupResult<SnapshotReceipt> {
+    let aes_key = keys::snapshot_aes_key(&opts.wrapping_key);
     let payload_dir = snap_dir.join(PAYLOAD_DIR);
     fs::create_dir_all(&payload_dir)?;
 
@@ -241,13 +290,17 @@ pub fn build_snapshot(opts: &BuildOptions) -> BackupResult<SnapshotReceipt> {
     fs::write(&key_dest, &wrapped)?;
     total_bytes += push_entry(&mut entries, &key_dest, DB_KEY_ENTRY_PATH, true)?;
 
-    // 5. Record count from the live DB (the drill diffs against this).
-    let recording_count = count_recordings(&opts.db_path, opts.db_key)?;
+    // 5. Record count — from the FROZEN COPY, not the live DB. Counting
+    // the live DB after a copy that takes minutes on real libraries lets
+    // concurrent inserts/deletes desynchronize the receipt from the
+    // snapshot, which the drill reads as a count mismatch and fails the
+    // whole run over nothing.
+    let recording_count = count_recordings(&db_copy, opts.db_key)?;
 
     // 6. Encrypted manifest (holds the PHI-sensitive relative paths).
     let created_at = Utc::now();
     let manifest = SnapshotManifest {
-        snapshot_id: snapshot_id.clone(),
+        snapshot_id: snapshot_id.to_string(),
         created_at,
         entries: entries.clone(),
     };
@@ -258,14 +311,14 @@ pub fn build_snapshot(opts: &BuildOptions) -> BackupResult<SnapshotReceipt> {
     // 7. Receipt with the HMAC over receipt fields + every payload hash.
     let tag = compute_tag(
         &opts.wrapping_key,
-        &snapshot_id,
+        snapshot_id,
         SNAPSHOT_VERSION,
         &created_at,
         recording_count,
         &entries,
     );
     let receipt = SnapshotReceipt {
-        snapshot_id,
+        snapshot_id: snapshot_id.to_string(),
         version: SNAPSHOT_VERSION,
         created_at,
         file_count: entries.len() as u64,
@@ -373,15 +426,28 @@ pub fn verify_snapshot(dir: &Path, wrapping_key: &[u8; 32]) -> BackupResult<Snap
 /// original layout (medical.db, recordings/, config/) and recovering the
 /// DB key. Depending on `key_install`, the recovered key is written to
 /// this machine's keychain so the restored database actually opens (R6).
+///
+/// Refuses a non-empty `dest_data_dir` unless `force_non_empty_dest`:
+/// the file copy overwrites same-named files but leaves unrelated newer
+/// ones, silently mixing an old snapshot with newer data — exactly the
+/// panic-recovery scenario this tool gets used in.
 /// Returns the report; logs counts only (no PHI, no key material).
 pub fn restore_snapshot(
     dir: &Path,
     wrapping_key: &[u8; 32],
     dest_data_dir: &Path,
     key_install: KeyInstall,
+    force_non_empty_dest: bool,
 ) -> BackupResult<RestoreReport> {
     // Fail closed: never write anything from an unverified snapshot.
     let _summary = verify_snapshot(dir, wrapping_key)?;
+    if !force_non_empty_dest && dir_has_entries(dest_data_dir)? {
+        return Err(BackupError::Format(
+            "destination is not empty — restoring would mix old and new data \
+             (use an empty dir, or pass --force to override)"
+                .into(),
+        ));
+    }
     let manifest = load_manifest(dir, wrapping_key)?;
     let aes_key = keys::snapshot_aes_key(wrapping_key);
     let payload_dir = dir.join(PAYLOAD_DIR);
@@ -603,6 +669,16 @@ fn count_recordings(db_path: &Path, db_key: [u8; 32]) -> BackupResult<u64> {
     Ok(count as u64)
 }
 
+/// True when `dir` exists and contains at least one entry. A missing dir
+/// counts as empty (restore creates it).
+fn dir_has_entries(dir: &Path) -> BackupResult<bool> {
+    match fs::read_dir(dir) {
+        Ok(mut rd) => Ok(rd.next().is_some()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> BackupResult<T> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
 }
@@ -672,6 +748,57 @@ mod tests {
     }
 
     #[test]
+    fn failed_build_leaves_no_partial_dir() {
+        let src = tempfile::tempdir().expect("src");
+        let dest = tempfile::tempdir().expect("dest");
+        let (_, recordings) = fixture_source(src.path(), [0xC1u8; 32]);
+        let opts = BuildOptions {
+            // Nonexistent DB: the VACUUM INTO at step 1 fails.
+            db_path: src.path().join("missing.db"),
+            recordings_dir: recordings,
+            keystore_path: None,
+            dest_dir: dest.path().to_path_buf(),
+            db_key: [0xC1u8; 32],
+            wrapping_key: [0xD2u8; 32],
+        };
+        assert!(build_snapshot(&opts).is_err());
+        let mut left: Vec<String> = fs::read_dir(dest.path())
+            .expect("read dest")
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert!(
+            left.is_empty(),
+            "no partial snapshot or temp dir may survive a failed build: {left:?}"
+        );
+    }
+
+    #[test]
+    fn restore_refuses_non_empty_dest_without_force() {
+        let src = tempfile::tempdir().expect("src");
+        let db_key = [0xE1u8; 32];
+        let wrapping = [0xF2u8; 32];
+        let (dest, opts) = fixture_opts(src.path(), db_key, wrapping);
+        let receipt = build_snapshot(&opts).expect("build");
+        let snap = snapshot_dir(dest.path(), &receipt);
+
+        let used_dest = tempfile::tempdir().expect("used dest");
+        fs::write(used_dest.path().join("medical.db"), b"newer live data").expect("write");
+
+        let refused = restore_snapshot(&snap, &wrapping, used_dest.path(), KeyInstall::Skip, false);
+        assert!(refused.is_err(), "non-empty dest must be refused");
+        // The pre-existing file is untouched by the refusal.
+        assert_eq!(
+            fs::read(used_dest.path().join("medical.db")).unwrap(),
+            b"newer live data"
+        );
+
+        // Force overrides the guard.
+        let forced = restore_snapshot(&snap, &wrapping, used_dest.path(), KeyInstall::Skip, true);
+        assert!(forced.is_ok(), "force must override: {:?}", forced.err());
+    }
+
+    #[test]
     fn build_verify_restore_roundtrip() {
         let src = tempfile::tempdir().expect("src");
         let db_key = [0xA1u8; 32];
@@ -699,6 +826,7 @@ mod tests {
             // Keychain-free test context: skip the install, prove the key
             // still reaches the caller via the report.
             KeyInstall::Skip,
+            false,
         )
         .expect("restore");
         assert!(report.db_key_recovered);
@@ -773,6 +901,7 @@ mod tests {
             &wrapping,
             restore_dest.path(),
             KeyInstall::IfAbsentOrEqual,
+            false,
         )
         .expect("restore");
         assert_eq!(report.key_install, KeyInstallOutcome::Installed);
