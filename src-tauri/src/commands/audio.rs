@@ -241,7 +241,9 @@ async fn take_capture_handle_for_stop(state: &AppState) -> AppResult<Option<Send
             return Ok(None);
         }
         if Instant::now() >= deadline {
-            warn!("stop/cancel waited out the startup window with no capture handle; clearing the flag");
+            warn!(
+                "stop/cancel waited out the startup window with no capture handle; clearing the flag"
+            );
             *state.recording_active.lock().await = false;
             return Err(AppError::audio(
                 "Recording startup is taking unusually long; try stopping again".to_string(),

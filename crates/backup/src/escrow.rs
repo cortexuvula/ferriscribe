@@ -250,7 +250,12 @@ mod tests {
         write_usb_file(&usb, &[0x22u8; 32]).expect("write usb");
         for p in [&sheet, &usb] {
             let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "{} must not be group/other readable", p.display());
+            assert_eq!(
+                mode,
+                0o600,
+                "{} must not be group/other readable",
+                p.display()
+            );
         }
     }
 

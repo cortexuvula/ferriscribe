@@ -78,10 +78,7 @@ pub async fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppRes
 /// unless `allow_public_endpoint` is explicitly enabled. Rejects public hosts
 /// like `api.openai.com` to enforce the local-only PHI constraint.
 #[tauri::command]
-pub async fn save_settings(
-    state: tauri::State<'_, AppState>,
-    config: AppConfig,
-) -> AppResult<()> {
+pub async fn save_settings(state: tauri::State<'_, AppState>, config: AppConfig) -> AppResult<()> {
     let db = state.db.clone();
     // Host validation may resolve DNS — blocking — so it rides along in the
     // same spawn_blocking as the save.

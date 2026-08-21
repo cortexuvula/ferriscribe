@@ -34,10 +34,7 @@ pub async fn list_recordings(
 ///
 /// Returns the full `Recording` including transcript, SOAP note, and metadata.
 #[tauri::command]
-pub async fn get_recording(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> AppResult<Recording> {
+pub async fn get_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<Recording> {
     let uuid =
         Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
     let db = state.db.clone();
@@ -77,10 +74,7 @@ pub async fn search_recordings(
 ///
 /// The frontend shows an Undo toast for 8 seconds after this succeeds.
 #[tauri::command]
-pub async fn delete_recording(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> AppResult<()> {
+pub async fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
     let uuid =
         Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
     let db = state.db.clone();
@@ -158,10 +152,7 @@ pub async fn delete_recording(
 /// Restore a soft-deleted recording (undo). Clears `deleted_at` and
 /// re-inserts the FTS row so search finds it again.
 #[tauri::command]
-pub async fn restore_recording(
-    state: tauri::State<'_, AppState>,
-    id: String,
-) -> AppResult<()> {
+pub async fn restore_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
     let uuid =
         Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
     let db = state.db.clone();
