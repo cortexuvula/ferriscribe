@@ -98,7 +98,7 @@ mod transport_tests {
         _root: tempfile::TempDir,
     }
 
-    async fn spawn_agent_with(max_bytes: u64, max_snapshots: usize) -> Env {
+    async fn spawn_agent_with(max_bytes: u64, max_snapshots: usize, keep_n: Option<usize>) -> Env {
         let root = tempfile::tempdir().expect("root");
         std::fs::create_dir_all(root.path()).unwrap();
         let append = format!("append-{}", Uuid::new_v4());
@@ -109,6 +109,7 @@ mod transport_tests {
             admin_token: admin.clone(),
             max_bytes,
             max_snapshots,
+            keep_n,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -122,7 +123,7 @@ mod transport_tests {
     }
 
     async fn spawn_agent() -> Env {
-        spawn_agent_with(agent::DEFAULT_MAX_BYTES, agent::DEFAULT_MAX_SNAPSHOTS).await
+        spawn_agent_with(agent::DEFAULT_MAX_BYTES, agent::DEFAULT_MAX_SNAPSHOTS, None).await
     }
 
     fn build_fixture_snapshot(dest: &Path, salt: u8) -> SnapshotReceipt {
@@ -318,7 +319,7 @@ mod transport_tests {
     /// with 507 while already-committed snapshots survive.
     #[tokio::test]
     async fn quota_rejects_uploads_over_byte_cap() {
-        let env = spawn_agent_with(1024 * 1024, agent::DEFAULT_MAX_SNAPSHOTS).await;
+        let env = spawn_agent_with(1024 * 1024, agent::DEFAULT_MAX_SNAPSHOTS, None).await;
         let c = client(&env);
 
         // A normal (small) fixture snapshot fits under the 1 MiB cap.
@@ -354,7 +355,7 @@ mod transport_tests {
     /// cap is reached; existing history survives.
     #[tokio::test]
     async fn quota_rejects_commit_over_count_cap() {
-        let env = spawn_agent_with(agent::DEFAULT_MAX_BYTES, 1).await;
+        let env = spawn_agent_with(agent::DEFAULT_MAX_BYTES, 1, None).await;
         let c = client(&env);
         let built = tempfile::tempdir().expect("built");
         let r1 = build_fixture_snapshot(built.path(), 0x55);
@@ -499,5 +500,43 @@ mod transport_tests {
             .await
             .expect("pull verifies");
         assert!(local.ends_with(&receipt.snapshot_id));
+    }
+    /// Automatic retention: with KEEP_N=2, committing a 3rd snapshot
+    /// prunes the oldest — deletion happens with the TARGET's authority
+    /// right after commit; the append credential never deletes anything.
+    #[tokio::test]
+    async fn auto_prune_keeps_newest_n_after_commit() {
+        let env = spawn_agent_with(
+            agent::DEFAULT_MAX_BYTES,
+            agent::DEFAULT_MAX_SNAPSHOTS,
+            Some(2),
+        )
+        .await;
+        let c = client(&env);
+        let built = tempfile::tempdir().expect("built");
+
+        let r1 = build_fixture_snapshot(built.path(), 0xA1);
+        c.push_snapshot(&built.path().join(&r1.snapshot_id))
+            .await
+            .expect("push 1");
+        let r2 = build_fixture_snapshot(built.path(), 0xA1);
+        c.push_snapshot(&built.path().join(&r2.snapshot_id))
+            .await
+            .expect("push 2");
+        // Distinct wrapping keys per snapshot would fail verify — same key
+        // (0xA1 salt) keeps artifacts coherent; ids differ per build.
+        assert_eq!(c.list_snapshots().await.unwrap().len(), 2);
+
+        // Third commit trips auto-prune: oldest (r1) is deleted, newest 2 stay.
+        let r3 = build_fixture_snapshot(built.path(), 0xA1);
+        c.push_snapshot(&built.path().join(&r3.snapshot_id))
+            .await
+            .expect("push 3");
+        let listed = c.list_snapshots().await.unwrap();
+        assert_eq!(listed.len(), 2, "auto-prune trimmed to newest 2");
+        let ids: Vec<&str> = listed.iter().map(|r| r.snapshot_id.as_str()).collect();
+        assert!(!ids.contains(&r1.snapshot_id.as_str()), "oldest pruned");
+        assert!(ids.contains(&r2.snapshot_id.as_str()));
+        assert!(ids.contains(&r3.snapshot_id.as_str()));
     }
 }
