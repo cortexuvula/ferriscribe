@@ -955,4 +955,78 @@ mod transport_tests {
         // Old recording: skipped.
         assert_eq!(stats2.skipped, 1);
     }
+
+    /// The full scheduled unit over CAS, exactly as launchd / the app's
+    /// "Back up now" run it: build (Stream) -> push missing blobs ->
+    /// commit -> re-pull -> drill -> status. Two consecutive runs — the
+    /// second exercises the incremental path end-to-end.
+    #[tokio::test]
+    async fn job_with_target_runs_end_to_end_over_cas() {
+        use job::{BackupTarget, JobConfig};
+
+        let env = spawn_agent().await;
+        let data = tempfile::tempdir().expect("data");
+        let db_key = [0xC4u8; 32];
+        let wrapping = [0xC5u8; 32];
+
+        // Fixture DB + one encrypted recording (mirrors job.rs's fixture).
+        let db_path = data.path().join("medical.db");
+        {
+            let database = medical_db::Database::open(&db_path, Some(db_key)).unwrap();
+            let conn = database.conn().unwrap();
+            medical_db::recordings::RecordingsRepo::insert(
+                &conn,
+                &Recording::new("a.enc".to_string(), data.path().join("a.enc")),
+            )
+            .unwrap();
+        }
+        let recordings = data.path().join("recordings");
+        std::fs::create_dir_all(&recordings).unwrap();
+        let wav_key = medical_security::file_crypto::derive_file_key(&db_key);
+        std::fs::write(
+            recordings.join("a.enc"),
+            medical_security::file_crypto::encrypt_bytes_with_key(&wav_key, b"RIFF audio").unwrap(),
+        )
+        .unwrap();
+
+        for run in 1..=2 {
+            let cfg = JobConfig {
+                data_dir: data.path().to_path_buf(),
+                db_path: db_path.clone(),
+                recordings_dir: recordings.clone(),
+                keystore_path: None,
+                target: Some(BackupTarget {
+                    url: env.base_url.clone(),
+                    token: env.append.clone(),
+                }),
+                keep_local: 1,
+            };
+            let outcome =
+                tokio::task::spawn_blocking(move || job::run_backup_job(&cfg, db_key, wrapping))
+                    .await
+                    .expect("job task");
+            assert!(
+                outcome.success(),
+                "run {run} failed: {:?} - {:?}",
+                outcome.status.failure,
+                outcome.events
+            );
+            assert!(outcome.status.drill_passed, "run {run} drilled");
+            assert_eq!(
+                outcome.status.pushed_to.as_deref(),
+                Some(env.base_url.as_str())
+            );
+        }
+
+        // Both runs succeeded; local retention kept exactly one snapshot
+        // and the target holds both committed snapshots.
+        let backups = data.path().join("backups");
+        let dirs: Vec<_> = std::fs::read_dir(&backups)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(dirs.len(), 1, "keep_local=1: exactly one local snapshot");
+        assert_eq!(client(&env).list_snapshots().await.unwrap().len(), 2);
+    }
 }

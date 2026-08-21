@@ -206,22 +206,51 @@ fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Default recordings dir from the APP CONFIG (`storage_path`), falling
+/// back to `<data-dir>/recordings` — the same resolution the app itself
+/// uses (`resolve_recordings_dir`). A hardcoded path here would silently
+/// back up the wrong directory on any install that configured a custom
+/// location. Best-effort: a missing/unreadable DB falls back to the
+/// default.
+fn resolve_recordings_dir(db_path: &Path, data_dir: &Path) -> PathBuf {
+    let db_key = medical_security::keychain::get_or_create_db_key().ok();
+    let configured = db_key.and_then(|key| {
+        medical_db::Database::open(db_path, Some(key))
+            .ok()
+            .and_then(|db| db.conn().ok())
+            .and_then(|conn| {
+                medical_db::settings::SettingsRepo::load_config(&conn)
+                    .ok()
+                    .map(|mut c| {
+                        c.migrate();
+                        c
+                    })
+                    .and_then(|cfg| cfg.storage_path.filter(|s| !s.is_empty()))
+            })
+            .map(PathBuf::from)
+    });
+    let dir = configured.unwrap_or_else(|| data_dir.join("recordings"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn build_options_from(flags: &Flags) -> medical_backup::BackupResult<BuildOptions> {
     let data_dir = flags
         .get("data-dir")
         .map(PathBuf::from)
         .unwrap_or_else(default_data_dir);
+    let db_path = data_dir.join("medical.db");
     let recordings_dir = flags
         .get("recordings-dir")
         .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.join("recordings"));
+        .unwrap_or_else(|| resolve_recordings_dir(&db_path, &data_dir));
     let out = flags
         .get("out")
         .map(PathBuf::from)
         .unwrap_or_else(|| data_dir.join("backups"));
     std::fs::create_dir_all(&out)?;
     Ok(BuildOptions {
-        db_path: data_dir.join("medical.db"),
+        db_path,
         recordings_dir,
         keystore_path: Some(data_dir.join("config").join("keys.json")),
         dest_dir: out,
@@ -258,12 +287,13 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
         .get("data-dir")
         .map(PathBuf::from)
         .unwrap_or_else(default_data_dir);
+    let db_path = data_dir.join("medical.db");
     let cfg = medical_backup::job::JobConfig {
         recordings_dir: flags
             .get("recordings-dir")
             .map(PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("recordings")),
-        db_path: data_dir.join("medical.db"),
+            .unwrap_or_else(|| resolve_recordings_dir(&db_path, &data_dir)),
+        db_path,
         keystore_path: Some(data_dir.join("config").join("keys.json")),
         data_dir,
         target: match flags.get("url") {

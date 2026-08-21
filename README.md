@@ -277,6 +277,28 @@ pull-based, append-only design:
   restored SQLCipher DB with the escrow-recovered key, decrypts a sample
   recording, and diffs record counts. Any mismatch fails the job loudly.
   Settings → Backup shows the verdict and turns red on failure or >48h staleness.
+- **Incremental (content-addressed)**: recordings are immutable ciphertext, so
+  each one is stored on the target exactly once, keyed by the SHA-256 of its
+  encrypted bytes. After the initial full push, a nightly backup transfers only
+  what is new — typically ~30 MB (fresh DB snapshot + wrapped key) plus any new
+  recordings. Local-only snapshots are hardlink-staged: self-contained against
+  file loss, but not a substitute for the off-machine copy (they share fate
+  with the source disk).
+
+**Storage model (why the target stays bounded):**
+
+- Initial full backup ≈ the size of your recording library, once
+  (e.g. ~33 GB for 294 recordings).
+- Each daily backup adds one fresh DB snapshot + wrapped key (~30 MB for a
+  29 MB database — `VACUUM INTO` re-encrypts with a new salt every run, so
+  the DB never dedups) **plus only recordings that are new since the last
+  backup**.
+- Retention prunes old snapshots (keep newest N); blobs that no retained
+  snapshot references are garbage-collected automatically, with the target's
+  admin authority only.
+- Steady state ≈ recording library + N × ~30 MB. With retention applied the
+  total stays well under the cap (default 1 TiB) as long as the recording
+  library itself is bounded.
 
 **Where's the tool?** Since v0.53.0 the binary ships *inside* the app bundle —
 on an installed Mac it is `/Applications/FerriScribe.app/Contents/MacOS/
