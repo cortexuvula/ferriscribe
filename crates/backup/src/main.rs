@@ -213,22 +213,30 @@ fn default_data_dir() -> PathBuf {
 /// location. Best-effort: a missing/unreadable DB falls back to the
 /// default.
 fn resolve_recordings_dir(db_path: &Path, data_dir: &Path) -> PathBuf {
-    let db_key = medical_security::keychain::get_or_create_db_key().ok();
-    let configured = db_key.and_then(|key| {
-        medical_db::Database::open(db_path, Some(key))
+    // Guard: `Database::open` CREATES and migrates the file when missing —
+    // path resolution must never conjure a stray encrypted medical.db on a
+    // machine that has none (e.g. the target box).
+    let configured = if db_path.is_file() {
+        medical_security::keychain::get_or_create_db_key()
             .ok()
-            .and_then(|db| db.conn().ok())
-            .and_then(|conn| {
-                medical_db::settings::SettingsRepo::load_config(&conn)
+            .and_then(|key| {
+                medical_db::Database::open(db_path, Some(key))
                     .ok()
-                    .map(|mut c| {
-                        c.migrate();
-                        c
+                    .and_then(|db| db.conn().ok())
+                    .and_then(|conn| {
+                        medical_db::settings::SettingsRepo::load_config(&conn)
+                            .ok()
+                            .map(|mut c| {
+                                c.migrate();
+                                c
+                            })
+                            .and_then(|cfg| cfg.storage_path.filter(|s| !s.is_empty()))
                     })
-                    .and_then(|cfg| cfg.storage_path.filter(|s| !s.is_empty()))
+                    .map(PathBuf::from)
             })
-            .map(PathBuf::from)
-    });
+    } else {
+        None
+    };
     let dir = configured.unwrap_or_else(|| data_dir.join("recordings"));
     let _ = std::fs::create_dir_all(&dir);
     dir
@@ -515,7 +523,13 @@ fn cmd_install_schedule(flags: &Flags) -> CmdResult {
         recordings_dir: flags
             .get("recordings-dir")
             .map(PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("recordings")),
+            .unwrap_or_else(|| {
+                // Same config-aware default as `backup`/`backup-and-push`: the
+                // schedule is the PRIMARY backup path — baking the fallback
+                // path here would silently back up the wrong directory every
+                // night on installs with a custom storage_path.
+                resolve_recordings_dir(&data_dir.join("medical.db"), &data_dir)
+            }),
         log_dir: data_dir.join("logs"),
     };
     let path = schedule::install(&cfg)?;

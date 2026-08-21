@@ -33,10 +33,11 @@ impl BackupClient {
     pub fn new(base_url: impl Into<String>, append_token: impl Into<String>) -> Self {
         // NO total request timeout: a single blob PUT can legitimately run
         // for hours on a relayed Tailscale link (the initial full push is
-        // ~33 GB). Stalls are still caught by the connect timeout and the
-        // idle read/write timeout — a SLOW transfer survives, a DEAD one
-        // fails. (The old blanket 300 s timeout aborted any blob larger
-        // than the link could carry in five minutes.)
+        // ~33 GB). Stalled DOWNLOADS/reads are bounded by the connect +
+        // read timeouts; a SLOW upload survives, and a fully dead upload
+        // peer is bounded only by the server closing the request — the
+        // old blanket 300 s timeout aborted any blob larger than the link
+        // could carry in five minutes, which was strictly worse.
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
             .read_timeout(std::time::Duration::from_secs(120))
@@ -192,8 +193,12 @@ impl BackupClient {
             {
                 let p = dir.join(name);
                 if !p.is_file() {
+                    // PHI rule: the recording filename may embed a patient
+                    // name and lives only inside the ENCRYPTED manifest —
+                    // errors carry the blob hash prefix, never the name.
                     return Err(crate::BackupError::Verification(format!(
-                        "stream-staged blob source missing: recordings/{name}"
+                        "stream-staged blob source missing for blob {}",
+                        &entry.sha256[..8.min(entry.sha256.len())]
                     )));
                 }
                 p
@@ -337,12 +342,16 @@ impl BackupClient {
 
         let mut fetched = std::collections::HashSet::new();
         for entry in &manifest.entries {
-            if !fetched.insert(entry.sha256.clone()) {
-                continue; // shared blob — already pulled
-            }
             let dest = local_dir.join(PAYLOAD_DIR).join(&entry.opaque_name);
             if receipt.version >= 3 {
-                // CAS: fetch from the shared blob store, streamed to disk.
+                // CAS: one shared blob on the target serves every entry
+                // referencing it (opaque_name == hash). Dedup by hash only
+                // in this branch — a v2 snapshot may hold two entries with
+                // identical bytes under DIFFERENT opaque names, and each
+                // private copy must still be fetched.
+                if !fetched.insert(entry.sha256.clone()) {
+                    continue;
+                }
                 self.get_blob(&entry.sha256, &dest).await?;
             } else {
                 let bytes = self

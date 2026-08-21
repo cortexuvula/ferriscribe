@@ -829,8 +829,28 @@ mod transport_tests {
         let new_receipt = cas_receipt("snap-new", &[shared.clone(), new_private.clone()]);
         assert_eq!(commit_cas(&env, &new_receipt).await, 201);
 
-        // Admin prune to the newest 1 → oldest snapshot + its orphan blob
-        // go; the shared blob stays.
+        // Age the to-be-orphaned blob past the GC grace window (fresh
+        // orphans are in-flight-push protection).
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p = env
+                ._root
+                .path()
+                .join(agent::BLOBS_DIR)
+                .join(&old_private[..2])
+                .join(&old_private);
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let f = std::fs::File::open(&p).unwrap();
+            f.set_modified(
+                std::time::SystemTime::now()
+                    - agent::BLOB_GC_GRACE
+                    - std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        }
+
+        // Admin prune to the newest 1 → oldest snapshot + its (aged)
+        // orphan blob go; the shared blob stays.
         let status = reqwest::Client::new()
             .post(format!("{}/v1/admin/prune?keep=1", env.base_url))
             .bearer_auth(&env.admin)
@@ -954,6 +974,51 @@ mod transport_tests {
         assert_eq!(stats2.uploaded, 3, "one new recording blob + DB + key");
         // Old recording: skipped.
         assert_eq!(stats2.skipped, 1);
+    }
+
+    /// Regression: legacy v2 snapshots must still pull — including a
+    /// snapshot whose two recordings are byte-identical under DIFFERENT
+    /// opaque names. The sha-keyed dedup used to skip the second entry's
+    /// fetch, making every pull of such a snapshot fail.
+    #[tokio::test]
+    async fn legacy_v2_snapshot_with_identical_files_pulls_and_restores() {
+        let env = spawn_agent().await;
+        let c = client(&env);
+        let built = tempfile::tempdir().expect("built");
+
+        let receipt =
+            snapshot::tests::build_v2_layout_snapshot(built.path(), [0xD1u8; 32], [0xD2u8; 32]);
+        let (pushed, stats) = c
+            .push_snapshot(
+                &built.path().join(&receipt.snapshot_id),
+                None,
+                &[0xD2u8; 32],
+            )
+            .await
+            .expect("legacy push");
+        assert_eq!(pushed.version, 2);
+        assert_eq!(stats.uploaded, 4, "db + two recording copies + wrapped key");
+
+        // THE regression: pull must fetch EVERY opaque file, not dedup by
+        // content hash.
+        let pulled = tempfile::tempdir().expect("pulled");
+        let local = c
+            .pull_snapshot(Some(&receipt.snapshot_id), pulled.path(), &[0xD2u8; 32])
+            .await
+            .expect("v2 pull with identical-byte entries");
+        assert!(local.ends_with(&receipt.snapshot_id));
+
+        // And it restores both recording paths.
+        let restore_dest = tempfile::tempdir().expect("restore");
+        let report = snapshot::restore_snapshot(
+            &local,
+            &[0xD2u8; 32],
+            restore_dest.path(),
+            snapshot::KeyInstall::Skip,
+            false,
+        )
+        .expect("v2 restore");
+        assert_eq!(report.recording_files, 2);
     }
 
     /// The full scheduled unit over CAS, exactly as launchd / the app's

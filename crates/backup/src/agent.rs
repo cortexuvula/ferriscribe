@@ -352,6 +352,16 @@ pub async fn serve(cfg: AgentConfig, addr: SocketAddr) -> Result<(), std::io::Er
     if swept_temps > 0 {
         info!(count = swept_temps, "swept stale blob upload temps");
     }
+    // Orphaned-blob collection (aged past the grace window, unreferenced
+    // by any committed snapshot): with KEEP_N unset there is no prune to
+    // trigger GC, so failed pushes would otherwise leak blobs into the
+    // byte cap forever. Startup-only, same as the other sweeps — a push
+    // in flight across an agent restart keeps its blobs (grace window).
+    match gc_blobs(&cfg.root) {
+        Ok(n) if n > 0 => info!(count = n, "collected aged orphaned blobs"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "startup blob GC failed"),
+    }
     std::fs::create_dir_all(&cfg.root)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, max_bytes = cfg.max_bytes, max_snapshots = cfg.max_snapshots, "ferriscribe-backup agent listening");
@@ -855,10 +865,19 @@ fn prune_to(root: &Path, keep: usize) -> std::io::Result<Vec<String>> {
     Ok(pruned)
 }
 
+/// Blobs younger than this are never GC'd, even when unreferenced: an
+/// in-flight push (blobs uploaded, commit pending — possibly for hours on
+/// the initial full push) must survive another client's commit firing the
+/// auto-prune GC, and a failed-then-retried push re-uses its already-
+/// uploaded blobs via HEAD-skip.
+pub const BLOB_GC_GRACE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 /// Mark-and-sweep the blob store: a blob survives iff some committed
-/// snapshot's `blobs.idx` references it. Legacy (v2) snapshots hold
-/// private payload copies and contribute no marks. This runs ONLY inside
-/// [`prune_to`] — the single admin-authority deletion path.
+/// snapshot's `blobs.idx` references it, OR it is younger than
+/// [`BLOB_GC_GRACE`] (in-flight push protection). Legacy (v2) snapshots
+/// hold private payload copies and contribute no marks. This runs ONLY
+/// inside [`prune_to`] and at startup — the admin-authority deletion
+/// paths.
 fn gc_blobs(root: &Path) -> std::io::Result<usize> {
     let blobs_root = root.join(BLOBS_DIR);
     if !blobs_root.is_dir() {
@@ -876,6 +895,9 @@ fn gc_blobs(root: &Path) -> std::io::Result<usize> {
             referenced.extend(hashes);
         }
     }
+    let grace_cutoff = std::time::SystemTime::now()
+        .checked_sub(BLOB_GC_GRACE)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
     let mut removed = 0usize;
     for shard in std::fs::read_dir(&blobs_root)?.flatten() {
         let shard_dir = shard.path();
@@ -886,6 +908,17 @@ fn gc_blobs(root: &Path) -> std::io::Result<usize> {
             let path = blob.path();
             let name = blob.file_name().to_string_lossy().into_owned();
             if name.starts_with(".tmp-") || referenced.contains(&name) {
+                continue;
+            }
+            // In-flight-push protection: only collect aged orphans. (chmod
+            // does not touch mtime, so a frozen blob keeps its upload
+            // time.)
+            let aged = blob
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .is_some_and(|t| t < grace_cutoff);
+            if !aged {
                 continue;
             }
             // Blobs are chmod'd read-only; make writable before unlink so
@@ -910,7 +943,12 @@ fn validate_snapshot_id(id: &str) -> Result<(), (StatusCode, String)> {
         && id.len() <= 64
         && id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        // The shared blob store lives at <root>/blobs — a snapshot with
+        // this id would alias it: put_file could write unvalidated bytes
+        // straight into blob paths, and a "commit" would freeze the whole
+        // store read-only. Reserved, period.
+        && id != BLOBS_DIR;
     if ok {
         Ok(())
     } else {
@@ -939,9 +977,13 @@ fn validate_rel_path_impl(rel: &str, allow_receipt: bool) -> Result<PathBuf, (St
         && rel
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+        // No multi-dot traversals the charset would otherwise allow.
         && !path.components().any(|c| c.as_os_str() == "..")
         && (allow_receipt || rel != RECEIPT_FILE)
-        && rel != ".committed";
+        && rel != ".committed"
+        // The GC reference index is commit-owned: a client-written
+        // blobs.idx could pin arbitrary hashes against pruning.
+        && rel != BLOBS_IDX_FILE;
     if ok {
         Ok(path.to_path_buf())
     } else {
@@ -971,6 +1013,10 @@ fn unfreeze_and_remove(dir: &Path) -> std::io::Result<()> {
             if path.is_dir() {
                 unfreeze(&path)?;
                 let _ = std::fs::set_permissions(&path, writable_dir(&path)?);
+            } else {
+                // Frozen files are 0444 — on Windows readonly blocks
+                // unlink, so clear the bit on files too, not just dirs.
+                make_writable_file(&path);
             }
         }
         let _ = std::fs::set_permissions(d, writable_dir(d)?);
@@ -1124,6 +1170,66 @@ mod tests {
         let f = std::fs::File::open(path).unwrap();
         f.set_modified(t).unwrap();
     }
+    #[test]
+    fn reserved_names_are_rejected() {
+        // The blob store must not be addressable as a snapshot id…
+        assert!(
+            validate_snapshot_id(BLOBS_DIR).is_err(),
+            "'blobs' aliases the blob store"
+        );
+        assert!(validate_snapshot_id("snap-ok-1").is_ok());
+        // …and the GC reference index is commit-owned.
+        assert!(
+            validate_rel_path(BLOBS_IDX_FILE).is_err(),
+            "blobs.idx is commit-owned"
+        );
+        assert!(validate_rel_path_read(BLOBS_IDX_FILE).is_err());
+    }
+
+    #[test]
+    fn gc_respects_grace_window_and_references() {
+        let root = tempfile::TempDir::new().unwrap();
+        let mk_blob = |hash: &str| {
+            let p = root.path().join(BLOBS_DIR).join(&hash[..2]).join(hash);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"blob").unwrap();
+            set_readonly_file(&p);
+            p
+        };
+        let referenced = mk_blob(&"a".repeat(64));
+        let fresh_orphan = mk_blob(&"b".repeat(64));
+        let aged_orphan = mk_blob(&"c".repeat(64));
+        // A committed snapshot referencing the first blob.
+        let snap = root.path().join("snap-ref");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join(".committed"), b"1").unwrap();
+        std::fs::write(
+            snap.join(BLOBS_IDX_FILE),
+            serde_json::to_vec(&vec!["a".repeat(64)]).unwrap(),
+        )
+        .unwrap();
+        // Age the third blob past the grace window (clear readonly first;
+        // futimens needs ownership only, but be tidy).
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&aged_orphan, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let f = std::fs::File::open(&aged_orphan).unwrap();
+            f.set_modified(
+                std::time::SystemTime::now() - BLOB_GC_GRACE - std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        }
+
+        let removed = gc_blobs(root.path()).unwrap();
+        assert_eq!(removed, 1, "only the aged orphan is collected");
+        assert!(referenced.is_file(), "referenced blob survives");
+        assert!(
+            fresh_orphan.is_file(),
+            "fresh orphan survives (in-flight push protection)"
+        );
+        assert!(!aged_orphan.exists(), "aged orphan collected");
+    }
+
     #[test]
     fn keep_n_parsing() {
         // Absent → keep everything (manual pruning only).

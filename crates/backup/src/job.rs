@@ -285,7 +285,9 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
             }
         }
     };
-    // Staging cleanup happens pass OR fail (the forensics copy is out_dir's).
+    // Staging cleanup happens pass OR fail (for target runs the durable,
+    // restorable copy lives on the TARGET — the local Stream-staged dir
+    // holds only the manifest + small always-new blobs by design).
     let _ = std::fs::remove_dir_all(&staging);
 
     // Status is written even on failure — a red pane beats a stale pane.

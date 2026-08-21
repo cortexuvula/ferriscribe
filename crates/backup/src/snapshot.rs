@@ -784,13 +784,128 @@ fn safe_join(dest: &Path, relative: &str) -> BackupResult<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use medical_core::types::recording::Recording;
     use medical_db::recordings::RecordingsRepo;
 
     /// Build a realistic source: SQLCipher DB with N recording rows plus a
     /// recordings dir holding an FE1-encrypted fake WAV.
+    /// Build a GENUINE legacy v2-layout snapshot: opaque `fNNNNNN.bin`
+    /// payload names, private full copies, receipt tagged with version 2.
+    /// Two recordings hold IDENTICAL bytes under different names — the
+    /// exact shape that regressed pull (sha-keyed dedup skipping the
+    /// second entry's fetch). `pub(crate)` so the transport tests can
+    /// push/pull a real v2 snapshot through the agent.
+    pub(crate) fn build_v2_layout_snapshot(
+        dest: &Path,
+        db_key: [u8; 32],
+        wrapping: [u8; 32],
+    ) -> SnapshotReceipt {
+        let src = tempfile::tempdir().expect("src");
+        let (db_path, recordings) = fixture_source(src.path(), db_key);
+        // A second recording with identical bytes under a different name.
+        fs::copy(
+            recordings.join("visit-0.enc"),
+            recordings.join("visit-0-copy.enc"),
+        )
+        .expect("duplicate recording");
+
+        let snapshot_id = new_snapshot_id();
+        let snap_dir = dest.join(&snapshot_id);
+        let payload_dir = snap_dir.join(PAYLOAD_DIR);
+        fs::create_dir_all(&payload_dir).expect("payload dir");
+
+        let aes_key = keys::snapshot_aes_key(&wrapping);
+        let mut entries: Vec<ManifestEntry> = Vec::new();
+        let mut total_bytes: u64 = 0;
+        let next_name = |entries: &[ManifestEntry]| format!("f{:06}.bin", entries.len());
+
+        // DB copy (f000000.bin).
+        let db_copy = payload_dir.join(next_name(&entries));
+        medical_db::snapshot_db_to(&db_path, db_key, &db_copy).expect("vacuum into");
+        let db_bytes = fs::read(&db_copy).expect("read db copy");
+        total_bytes += db_bytes.len() as u64;
+        entries.push(ManifestEntry {
+            opaque_name: "f000000.bin".into(),
+            relative_path: "medical.db".into(),
+            sha256: sha256_hex(&db_bytes),
+            encrypted: false,
+        });
+
+        // Recordings as private copies (f000001…), identical bytes → same
+        // sha256 under different names.
+        for name in ["visit-0.enc", "visit-0-copy.enc", "unused.enc"] {
+            let source = recordings.join(name);
+            if !source.is_file() {
+                continue;
+            }
+            let opaque = next_name(&entries);
+            let dest_file = payload_dir.join(&opaque);
+            fs::copy(&source, &dest_file).expect("copy recording");
+            let bytes = fs::read(&dest_file).expect("read recording");
+            total_bytes += bytes.len() as u64;
+            entries.push(ManifestEntry {
+                opaque_name: opaque,
+                relative_path: format!("recordings/{name}"),
+                sha256: sha256_hex(&bytes),
+                encrypted: false,
+            });
+        }
+
+        // Wrapped DB key (last f-name).
+        let wrapped = file_crypto::encrypt_bytes_with_key(&aes_key, &db_key).expect("wrap key");
+        let opaque = next_name(&entries);
+        fs::write(payload_dir.join(&opaque), &wrapped).expect("write key blob");
+        total_bytes += wrapped.len() as u64;
+        entries.push(ManifestEntry {
+            opaque_name: opaque,
+            relative_path: DB_KEY_ENTRY_PATH.into(),
+            sha256: sha256_hex(&wrapped),
+            encrypted: true,
+        });
+
+        // Manifest + receipt exactly as v2 built them.
+        let created_at = Utc::now();
+        let manifest = SnapshotManifest {
+            snapshot_id: snapshot_id.clone(),
+            created_at,
+            entries: entries.clone(),
+        };
+        let manifest_enc = file_crypto::encrypt_bytes_with_key(
+            &aes_key,
+            &serde_json::to_vec(&manifest).expect("manifest json"),
+        )
+        .expect("encrypt manifest");
+        fs::write(snap_dir.join(MANIFEST_FILE), &manifest_enc).expect("write manifest");
+
+        let recording_count =
+            count_recordings(&payload_dir.join("f000000.bin"), db_key).expect("count");
+        let tag = compute_tag(
+            &wrapping,
+            &snapshot_id,
+            LEGACY_SNAPSHOT_VERSION,
+            &created_at,
+            recording_count,
+            &entries,
+        );
+        let receipt = SnapshotReceipt {
+            snapshot_id: snapshot_id.clone(),
+            version: LEGACY_SNAPSHOT_VERSION,
+            created_at,
+            file_count: entries.len() as u64,
+            total_bytes,
+            recording_count,
+            hmac_tag: tag,
+        };
+        fs::write(
+            snap_dir.join(RECEIPT_FILE),
+            serde_json::to_vec_pretty(&receipt).expect("receipt json"),
+        )
+        .expect("write receipt");
+        receipt
+    }
+
     fn fixture_source(dir: &Path, db_key: [u8; 32]) -> (PathBuf, PathBuf) {
         let db_path = dir.join("medical.db");
         let database = medical_db::Database::open(&db_path, Some(db_key)).expect("open db");
@@ -843,6 +958,58 @@ mod tests {
 
     fn snapshot_dir(dest: &Path, receipt: &SnapshotReceipt) -> PathBuf {
         dest.join(&receipt.snapshot_id)
+    }
+
+    #[test]
+    fn v3_snapshot_with_duplicate_recordings_builds_verifies_restores() {
+        // Two identical recordings in ONE v3 snapshot: two manifest
+        // entries (distinct relative paths), one shared on-disk blob.
+        // Exercises the Hardlink staging dedup, verify's listed-dedup,
+        // and restore of both paths from one blob.
+        let src = tempfile::tempdir().expect("src");
+        let (dest, opts) = fixture_opts(src.path(), [0xF1u8; 32], [0xF2u8; 32]);
+        fs::copy(
+            opts.recordings_dir.join("visit-0.enc"),
+            opts.recordings_dir.join("visit-0-copy.enc"),
+        )
+        .expect("duplicate recording");
+
+        let receipt = build_snapshot(&opts).expect("build");
+        let dir = snapshot_dir(dest.path(), &receipt);
+        verify_snapshot(&dir, &[0xF2u8; 32]).expect("verify with shared blob");
+
+        let manifest = load_manifest(&dir, &[0xF2u8; 32]).expect("manifest");
+        let rec_entries: Vec<&ManifestEntry> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.relative_path.starts_with("recordings/"))
+            .collect();
+        assert_eq!(rec_entries.len(), 2, "both recordings referenced");
+        assert_eq!(
+            rec_entries[0].sha256, rec_entries[1].sha256,
+            "identical bytes, same blob hash"
+        );
+        // One shared payload file on disk (the no-unlisted check with
+        // dedup passed inside verify, this asserts the actual layout).
+        assert!(dir.join(PAYLOAD_DIR).join(&rec_entries[0].sha256).is_file());
+
+        let restore_dest = tempfile::tempdir().expect("restore");
+        let report = restore_snapshot(
+            &dir,
+            &[0xF2u8; 32],
+            restore_dest.path(),
+            KeyInstall::Skip,
+            false,
+        )
+        .expect("restore");
+        assert_eq!(report.recording_files, 2, "both paths restored");
+        assert!(restore_dest.path().join("recordings/visit-0.enc").is_file());
+        assert!(
+            restore_dest
+                .path()
+                .join("recordings/visit-0-copy.enc")
+                .is_file()
+        );
     }
 
     #[test]
