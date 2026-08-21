@@ -11,7 +11,7 @@ use medical_backup::agent;
 use medical_backup::client::BackupClient;
 use medical_backup::escrow;
 use medical_backup::keys;
-use medical_backup::snapshot::{self, BuildOptions};
+use medical_backup::snapshot::{self, BuildOptions, StagingMode};
 use medical_backup::{drill, schedule};
 
 fn main() -> ExitCode {
@@ -206,27 +206,68 @@ fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Default recordings dir from the APP CONFIG (`storage_path`), falling
+/// back to `<data-dir>/recordings` — the same resolution the app itself
+/// uses (`resolve_recordings_dir`). A hardcoded path here would silently
+/// back up the wrong directory on any install that configured a custom
+/// location. Best-effort: a missing/unreadable DB falls back to the
+/// default.
+fn resolve_recordings_dir(db_path: &Path, data_dir: &Path) -> PathBuf {
+    // Guard: `Database::open` CREATES and migrates the file when missing —
+    // path resolution must never conjure a stray encrypted medical.db on a
+    // machine that has none (e.g. the target box).
+    let configured = if db_path.is_file() {
+        medical_security::keychain::get_or_create_db_key()
+            .ok()
+            .and_then(|key| {
+                medical_db::Database::open(db_path, Some(key))
+                    .ok()
+                    .and_then(|db| db.conn().ok())
+                    .and_then(|conn| {
+                        medical_db::settings::SettingsRepo::load_config(&conn)
+                            .ok()
+                            .map(|mut c| {
+                                c.migrate();
+                                c
+                            })
+                            .and_then(|cfg| cfg.storage_path.filter(|s| !s.is_empty()))
+                    })
+                    .map(PathBuf::from)
+            })
+    } else {
+        None
+    };
+    let dir = configured.unwrap_or_else(|| data_dir.join("recordings"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 fn build_options_from(flags: &Flags) -> medical_backup::BackupResult<BuildOptions> {
     let data_dir = flags
         .get("data-dir")
         .map(PathBuf::from)
         .unwrap_or_else(default_data_dir);
+    let db_path = data_dir.join("medical.db");
     let recordings_dir = flags
         .get("recordings-dir")
         .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.join("recordings"));
+        .unwrap_or_else(|| resolve_recordings_dir(&db_path, &data_dir));
     let out = flags
         .get("out")
         .map(PathBuf::from)
         .unwrap_or_else(|| data_dir.join("backups"));
     std::fs::create_dir_all(&out)?;
     Ok(BuildOptions {
-        db_path: data_dir.join("medical.db"),
+        db_path,
         recordings_dir,
         keystore_path: Some(data_dir.join("config").join("keys.json")),
         dest_dir: out,
         db_key: medical_security::keychain::get_or_create_db_key()?,
         wrapping_key: keys::load_or_create_wrapping_key()?,
+        // Local `backup` produces a self-contained tree (Hardlink); the
+        // streaming mode belongs to `backup-and-push`, which stages per
+        // its JobConfig.
+        staging: StagingMode::Hardlink,
     })
 }
 
@@ -254,12 +295,13 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
         .get("data-dir")
         .map(PathBuf::from)
         .unwrap_or_else(default_data_dir);
+    let db_path = data_dir.join("medical.db");
     let cfg = medical_backup::job::JobConfig {
         recordings_dir: flags
             .get("recordings-dir")
             .map(PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("recordings")),
-        db_path: data_dir.join("medical.db"),
+            .unwrap_or_else(|| resolve_recordings_dir(&db_path, &data_dir)),
+        db_path,
         keystore_path: Some(data_dir.join("config").join("keys.json")),
         data_dir,
         target: match flags.get("url") {
@@ -311,10 +353,15 @@ async fn cmd_push(flags: &Flags) -> CmdResult {
     let url = flags.req("url")?;
     let token = flags.req("token")?;
     let dir = flags.req("snapshot-dir")?;
-    let receipt = BackupClient::new(url, token)
-        .push_snapshot(Path::new(&dir))
+    let wrapping = resolve_wrapping_key(flags)?;
+    let recordings = flags.get("recordings-dir").map(PathBuf::from);
+    let (receipt, stats) = BackupClient::new(url, token)
+        .push_snapshot(Path::new(&dir), recordings.as_deref(), &wrapping)
         .await?;
-    println!("pushed {}", receipt.snapshot_id);
+    println!(
+        "pushed {} ({} new blob(s), {} already on target)",
+        receipt.snapshot_id, stats.uploaded, stats.skipped
+    );
     Ok(())
 }
 
@@ -476,7 +523,13 @@ fn cmd_install_schedule(flags: &Flags) -> CmdResult {
         recordings_dir: flags
             .get("recordings-dir")
             .map(PathBuf::from)
-            .unwrap_or_else(|| data_dir.join("recordings")),
+            .unwrap_or_else(|| {
+                // Same config-aware default as `backup`/`backup-and-push`: the
+                // schedule is the PRIMARY backup path — baking the fallback
+                // path here would silently back up the wrong directory every
+                // night on installs with a custom storage_path.
+                resolve_recordings_dir(&data_dir.join("medical.db"), &data_dir)
+            }),
         log_dir: data_dir.join("logs"),
     };
     let path = schedule::install(&cfg)?;

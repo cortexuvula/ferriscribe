@@ -1,6 +1,6 @@
 //! Snapshot construction, verification (R5), and restore (R6).
 //!
-//! Layout of a snapshot directory:
+//! Layout of a snapshot directory (v3, content-addressed):
 //!
 //! ```text
 //! snap-<UTC timestamp>-<6 hex rand>/
@@ -8,16 +8,20 @@
 //!                         counts, byte totals, HMAC tag
 //!   manifest.json.enc   — FE1-encrypted manifest (paths + hashes)
 //!   payload/
-//!     f000000.bin       — VACUUM INTO copy of medical.db (SQLCipher)
-//!     f000001.bin …     — recording ciphertext files (copied verbatim;
-//!                         already FE1-encrypted under the DB-derived key)
-//!     fDBKEY00.bin      — the DB key, FE1-encrypted under the snapshot
-//!                         key (R1: escrow + snapshot = recoverable)
+//!     <sha256>          — each payload file is named by the SHA-256 of
+//!                         its ciphertext: the VACUUM INTO DB copy, the
+//!                         wrapped DB key, the keystore, and (Hardlink
+//!                         staging only) the recordings. Stream-staged
+//!                         snapshots omit recording payload files — the
+//!                         push uploads them from their source locations
+//!                         and the drill verifies the re-pulled copy.
 //! ```
 //!
-//! Integrity model: the receipt's HMAC tag covers the receipt's own
-//! canonical fields plus every payload hash in manifest order. Any byte
-//! changed anywhere (payload, manifest, or receipt) fails verification.
+//! v2 snapshots (payload files under opaque `f000000.bin` names, private
+//! full copies) still verify and restore unchanged. Integrity model: the
+//! receipt's HMAC tag covers the receipt's own canonical fields plus
+//! every payload hash in manifest order. Any byte changed anywhere
+//! (payload, manifest, or receipt) fails verification.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,11 +36,18 @@ use medical_security::file_crypto;
 use crate::keys;
 use crate::{BackupError, BackupResult};
 
-/// Snapshot format version (bump on breaking layout changes). v2: the
-/// receipt HMAC now covers `relative_path` + `encrypted` per manifest
-/// entry (v1 covered only name+hash) — v1 snapshots are refused with an
-/// explicit "unsupported version" error rather than an HMAC mismatch.
-pub const SNAPSHOT_VERSION: u32 = 2;
+/// Snapshot format version (bump on breaking layout changes).
+///
+/// v3 (CAS): payload files are named by their content hash and are
+/// references into a shared content-addressed blob store on the target;
+/// streaming-mode local dirs omit recording payload files entirely.
+/// v2: full-copy payload layout with opaque `f000000.bin`-style names —
+/// still fully readable (`LEGACY_SNAPSHOT_VERSION`); v1 is refused with
+/// an explicit "unsupported version" error.
+pub const SNAPSHOT_VERSION: u32 = 3;
+/// The pre-CAS layout. Receipts with this version verify and restore
+/// exactly as they always did — no migration of existing snapshots.
+pub const LEGACY_SNAPSHOT_VERSION: u32 = 2;
 /// Plaintext receipt filename (the only file without the payload naming).
 pub const RECEIPT_FILE: &str = "receipt.json";
 /// Encrypted manifest filename.
@@ -92,6 +103,29 @@ pub struct BuildOptions {
     pub db_key: [u8; 32],
     /// The escrowed backup wrapping key.
     pub wrapping_key: [u8; 32],
+    /// How recording blobs land in the local snapshot dir (see
+    /// [`StagingMode`]).
+    pub staging: StagingMode,
+}
+
+/// How [`build_snapshot`] stages recording blobs locally. Both modes hash
+/// every recording from its source location and name the manifest entry
+/// by that hash (content-addressing) — they differ only in whether a
+/// local `payload/` copy exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagingMode {
+    /// Hardlink (copy fallback) every recording into `payload/` so the
+    /// local snapshot is self-contained: the hardlink of an immutable
+    /// file survives source deletion, and the drill has a materialized
+    /// tree to verify. Used for local-only jobs — it is NOT a substitute
+    /// for an off-machine copy (it shares fate with the source disk).
+    Hardlink,
+    /// Recordings are hashed in place and NOT staged locally; the push
+    /// streams them from their source locations. The DB copy, wrapped
+    /// key, and keystore ARE staged (small and always-new). A local dir
+    /// built this way cannot be verified or restored in place — the
+    /// drill runs on the re-pulled copy.
+    Stream,
 }
 
 /// What [`verify_snapshot`] checked, for drill reports and UI.
@@ -238,6 +272,8 @@ fn build_snapshot_into(
     snapshot_id: &str,
     opts: &BuildOptions,
 ) -> BackupResult<SnapshotReceipt> {
+    use std::io::Read;
+
     let aes_key = keys::snapshot_aes_key(&opts.wrapping_key);
     let payload_dir = snap_dir.join(PAYLOAD_DIR);
     fs::create_dir_all(&payload_dir)?;
@@ -245,12 +281,58 @@ fn build_snapshot_into(
     let mut entries: Vec<ManifestEntry> = Vec::new();
     let mut total_bytes: u64 = 0;
 
-    // 1. Consistent DB copy (VACUUM INTO — safe while the app is open).
-    let db_copy = payload_dir.join("f000000.bin");
-    medical_db::snapshot_db_to(&opts.db_path, opts.db_key, &db_copy)?;
-    total_bytes += push_entry(&mut entries, &db_copy, "medical.db", false)?;
+    // Streaming hash + size: build must never buffer a whole recording in
+    // RAM just to hash it (verification still reads whole files by the
+    // documented model — that is unchanged).
+    fn sha256_file(path: &Path) -> BackupResult<(String, u64)> {
+        let mut file = fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut total = 0u64;
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            total += n as u64;
+        }
+        Ok((hex::encode(hasher.finalize()), total))
+    }
 
-    // 2. Recording files (already encrypted at rest; copied verbatim).
+    // Record an entry for an already-staged payload file (v3: the payload
+    // file is named by its hash, so `opaque_name == sha256`).
+    fn push_staged(
+        entries: &mut Vec<ManifestEntry>,
+        hash: &str,
+        relative_path: &str,
+        len: u64,
+        encrypted: bool,
+    ) -> u64 {
+        entries.push(ManifestEntry {
+            opaque_name: hash.to_string(),
+            relative_path: relative_path.to_string(),
+            sha256: hash.to_string(),
+            encrypted,
+        });
+        len
+    }
+
+    // 1. Consistent DB copy (VACUUM INTO — safe while the app is open),
+    //    promoted to its content-addressed name. Always staged: it is the
+    //    one genuinely-new large-ish blob each run and cannot be re-derived
+    //    (a second VACUUM INTO re-encrypts with a fresh salt).
+    let db_staged = payload_dir.join("db-copy.tmp");
+    medical_db::snapshot_db_to(&opts.db_path, opts.db_key, &db_staged)?;
+    let (db_hash, db_len) = sha256_file(&db_staged)?;
+    let db_copy = payload_dir.join(&db_hash);
+    fs::rename(&db_staged, &db_copy)?;
+    total_bytes += push_staged(&mut entries, &db_hash, "medical.db", db_len, false);
+
+    // 2. Recordings (already encrypted at rest): hash from the source,
+    //    name the entry by it, and — in Hardlink mode only — link the
+    //    source into payload/. Two identical files yield two entries and
+    //    one blob; the receipt's total counts REFERENCED bytes.
     let mut recording_files: u64 = 0;
     if opts.recordings_dir.is_dir() {
         let mut paths: Vec<PathBuf> = fs::read_dir(&opts.recordings_dir)?
@@ -259,36 +341,53 @@ fn build_snapshot_into(
             .collect();
         paths.sort();
         for path in paths {
-            let name = format!("f{:06}.bin", entries.len() + 1);
-            let dest = payload_dir.join(&name);
-            fs::copy(&path, &dest)?;
+            let (hash, len) = sha256_file(&path)?;
             let rel = format!(
                 "recordings/{}",
                 path.file_name()
                     .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| name.clone())
+                    .unwrap_or_else(|| hash.clone())
             );
-            total_bytes += push_entry(&mut entries, &dest, &rel, false)?;
+            if opts.staging == StagingMode::Hardlink && !payload_dir.join(&hash).exists() {
+                let dest = payload_dir.join(&hash);
+                // Hardlink keeps the local snapshot free of real bytes on
+                // the same volume; cross-volume links fail — copy instead
+                // (recordings are immutable, so either way the blob never
+                // diverges from its hash).
+                if fs::hard_link(&path, &dest).is_err() {
+                    fs::copy(&path, &dest)?;
+                }
+            }
+            total_bytes += push_staged(&mut entries, &hash, &rel, len, false);
             recording_files += 1;
         }
     }
 
-    // 3. Keystore (optional) — copied verbatim (encrypted at rest already).
+    // 3. Keystore (optional) — copied verbatim (encrypted at rest already,
+    //    and tiny). Always staged for both modes.
     if let Some(ks) = &opts.keystore_path
         && ks.is_file()
     {
-        let name = format!("f{:06}.bin", entries.len() + 1);
-        let dest = payload_dir.join(&name);
-        fs::copy(ks, &dest)?;
-        total_bytes += push_entry(&mut entries, &dest, "config/keys.json", false)?;
+        let (hash, len) = sha256_file(ks)?;
+        let dest = payload_dir.join(&hash);
+        if !dest.exists() {
+            fs::copy(ks, &dest)?;
+        }
+        total_bytes += push_staged(&mut entries, &hash, "config/keys.json", len, false);
     }
 
-    // 4. Wrap the DB key under the snapshot key (R1).
+    // 4. Wrap the DB key under the snapshot key (R1). Bytes are in hand —
+    //    hash directly and write the blob.
     let wrapped = file_crypto::encrypt_bytes_with_key(&aes_key, &opts.db_key)?;
-    let key_name = format!("f{:06}.bin", entries.len() + 1);
-    let key_dest = payload_dir.join(&key_name);
-    fs::write(&key_dest, &wrapped)?;
-    total_bytes += push_entry(&mut entries, &key_dest, DB_KEY_ENTRY_PATH, true)?;
+    let key_hash = sha256_hex(&wrapped);
+    fs::write(payload_dir.join(&key_hash), &wrapped)?;
+    total_bytes += push_staged(
+        &mut entries,
+        &key_hash,
+        DB_KEY_ENTRY_PATH,
+        wrapped.len() as u64,
+        true,
+    );
 
     // 5. Record count — from the FROZEN COPY, not the live DB. Counting
     // the live DB after a copy that takes minutes on real libraries lets
@@ -348,9 +447,9 @@ fn build_snapshot_into(
 /// reproduces. Fails closed on any mismatch (R5).
 pub fn verify_snapshot(dir: &Path, wrapping_key: &[u8; 32]) -> BackupResult<SnapshotSummary> {
     let receipt: SnapshotReceipt = read_json(&dir.join(RECEIPT_FILE))?;
-    if receipt.version != SNAPSHOT_VERSION {
+    if receipt.version != SNAPSHOT_VERSION && receipt.version != LEGACY_SNAPSHOT_VERSION {
         return Err(BackupError::Format(format!(
-            "unsupported snapshot version {} (expected {SNAPSHOT_VERSION})",
+            "unsupported snapshot version {} (expected {SNAPSHOT_VERSION} or {LEGACY_SNAPSHOT_VERSION})",
             receipt.version
         )));
     }
@@ -382,12 +481,18 @@ pub fn verify_snapshot(dir: &Path, wrapping_key: &[u8; 32]) -> BackupResult<Snap
 
     // No unlisted payload files (an attacker must not be able to smuggle
     // content past the manifest).
+    // No unlisted payload files (an attacker must not be able to smuggle
+    // content past the manifest). Dedupe `listed`: in v3 two manifest
+    // entries may legitimately share one blob (identical files), which is
+    // one on-disk payload file.
     let mut on_disk: Vec<String> = fs::read_dir(&payload_dir)?
         .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect();
     on_disk.sort();
+    on_disk.dedup();
     let mut listed_sorted = listed.clone();
     listed_sorted.sort();
+    listed_sorted.dedup();
     if on_disk != listed_sorted {
         return Err(BackupError::Verification(
             "payload directory contains unlisted files".into(),
@@ -632,29 +737,12 @@ fn new_snapshot_id() -> String {
     )
 }
 
-/// NOTE (finding 7): whole files are read into memory to hash them. For
-/// very large recording libraries (tens of GB) run the backup on a
-/// machine with ample RAM; a streaming hash/transfer refactor must
-/// preserve the HMAC-over-full-bytes model — do not half-fix it.
-fn push_entry(
-    entries: &mut Vec<ManifestEntry>,
-    path: &Path,
-    relative_path: &str,
-    encrypted: bool,
-) -> BackupResult<u64> {
-    let bytes = fs::read(path)?;
-    let len = bytes.len() as u64;
-    entries.push(ManifestEntry {
-        opaque_name: path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        relative_path: relative_path.to_string(),
-        sha256: sha256_hex(&bytes),
-        encrypted,
-    });
-    Ok(len)
-}
+// NOTE (finding 7, updated for v3): verification still reads whole files
+// into memory to hash them — the HMAC-over-full-bytes model is intact.
+// Build no longer buffers recordings (it streams `sha256_file` over the
+// source), but for very large recording libraries run RESTORE/verify on
+// a machine with ample RAM; a streaming-verify refactor must preserve
+// the full-bytes model — do not half-fix it.
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -696,13 +784,128 @@ fn safe_join(dest: &Path, relative: &str) -> BackupResult<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use medical_core::types::recording::Recording;
     use medical_db::recordings::RecordingsRepo;
 
     /// Build a realistic source: SQLCipher DB with N recording rows plus a
     /// recordings dir holding an FE1-encrypted fake WAV.
+    /// Build a GENUINE legacy v2-layout snapshot: opaque `fNNNNNN.bin`
+    /// payload names, private full copies, receipt tagged with version 2.
+    /// Two recordings hold IDENTICAL bytes under different names — the
+    /// exact shape that regressed pull (sha-keyed dedup skipping the
+    /// second entry's fetch). `pub(crate)` so the transport tests can
+    /// push/pull a real v2 snapshot through the agent.
+    pub(crate) fn build_v2_layout_snapshot(
+        dest: &Path,
+        db_key: [u8; 32],
+        wrapping: [u8; 32],
+    ) -> SnapshotReceipt {
+        let src = tempfile::tempdir().expect("src");
+        let (db_path, recordings) = fixture_source(src.path(), db_key);
+        // A second recording with identical bytes under a different name.
+        fs::copy(
+            recordings.join("visit-0.enc"),
+            recordings.join("visit-0-copy.enc"),
+        )
+        .expect("duplicate recording");
+
+        let snapshot_id = new_snapshot_id();
+        let snap_dir = dest.join(&snapshot_id);
+        let payload_dir = snap_dir.join(PAYLOAD_DIR);
+        fs::create_dir_all(&payload_dir).expect("payload dir");
+
+        let aes_key = keys::snapshot_aes_key(&wrapping);
+        let mut entries: Vec<ManifestEntry> = Vec::new();
+        let mut total_bytes: u64 = 0;
+        let next_name = |entries: &[ManifestEntry]| format!("f{:06}.bin", entries.len());
+
+        // DB copy (f000000.bin).
+        let db_copy = payload_dir.join(next_name(&entries));
+        medical_db::snapshot_db_to(&db_path, db_key, &db_copy).expect("vacuum into");
+        let db_bytes = fs::read(&db_copy).expect("read db copy");
+        total_bytes += db_bytes.len() as u64;
+        entries.push(ManifestEntry {
+            opaque_name: "f000000.bin".into(),
+            relative_path: "medical.db".into(),
+            sha256: sha256_hex(&db_bytes),
+            encrypted: false,
+        });
+
+        // Recordings as private copies (f000001…), identical bytes → same
+        // sha256 under different names.
+        for name in ["visit-0.enc", "visit-0-copy.enc", "unused.enc"] {
+            let source = recordings.join(name);
+            if !source.is_file() {
+                continue;
+            }
+            let opaque = next_name(&entries);
+            let dest_file = payload_dir.join(&opaque);
+            fs::copy(&source, &dest_file).expect("copy recording");
+            let bytes = fs::read(&dest_file).expect("read recording");
+            total_bytes += bytes.len() as u64;
+            entries.push(ManifestEntry {
+                opaque_name: opaque,
+                relative_path: format!("recordings/{name}"),
+                sha256: sha256_hex(&bytes),
+                encrypted: false,
+            });
+        }
+
+        // Wrapped DB key (last f-name).
+        let wrapped = file_crypto::encrypt_bytes_with_key(&aes_key, &db_key).expect("wrap key");
+        let opaque = next_name(&entries);
+        fs::write(payload_dir.join(&opaque), &wrapped).expect("write key blob");
+        total_bytes += wrapped.len() as u64;
+        entries.push(ManifestEntry {
+            opaque_name: opaque,
+            relative_path: DB_KEY_ENTRY_PATH.into(),
+            sha256: sha256_hex(&wrapped),
+            encrypted: true,
+        });
+
+        // Manifest + receipt exactly as v2 built them.
+        let created_at = Utc::now();
+        let manifest = SnapshotManifest {
+            snapshot_id: snapshot_id.clone(),
+            created_at,
+            entries: entries.clone(),
+        };
+        let manifest_enc = file_crypto::encrypt_bytes_with_key(
+            &aes_key,
+            &serde_json::to_vec(&manifest).expect("manifest json"),
+        )
+        .expect("encrypt manifest");
+        fs::write(snap_dir.join(MANIFEST_FILE), &manifest_enc).expect("write manifest");
+
+        let recording_count =
+            count_recordings(&payload_dir.join("f000000.bin"), db_key).expect("count");
+        let tag = compute_tag(
+            &wrapping,
+            &snapshot_id,
+            LEGACY_SNAPSHOT_VERSION,
+            &created_at,
+            recording_count,
+            &entries,
+        );
+        let receipt = SnapshotReceipt {
+            snapshot_id: snapshot_id.clone(),
+            version: LEGACY_SNAPSHOT_VERSION,
+            created_at,
+            file_count: entries.len() as u64,
+            total_bytes,
+            recording_count,
+            hmac_tag: tag,
+        };
+        fs::write(
+            snap_dir.join(RECEIPT_FILE),
+            serde_json::to_vec_pretty(&receipt).expect("receipt json"),
+        )
+        .expect("write receipt");
+        receipt
+    }
+
     fn fixture_source(dir: &Path, db_key: [u8; 32]) -> (PathBuf, PathBuf) {
         let db_path = dir.join("medical.db");
         let database = medical_db::Database::open(&db_path, Some(db_key)).expect("open db");
@@ -730,6 +933,15 @@ mod tests {
         db_key: [u8; 32],
         wrapping: [u8; 32],
     ) -> (tempfile::TempDir, BuildOptions) {
+        fixture_opts_staged(src, db_key, wrapping, StagingMode::Hardlink)
+    }
+
+    fn fixture_opts_staged(
+        src: &Path,
+        db_key: [u8; 32],
+        wrapping: [u8; 32],
+        staging: StagingMode,
+    ) -> (tempfile::TempDir, BuildOptions) {
         let dest = tempfile::tempdir().expect("dest");
         let (db_path, recordings) = fixture_source(src, db_key);
         let opts = BuildOptions {
@@ -739,12 +951,195 @@ mod tests {
             dest_dir: dest.path().to_path_buf(),
             db_key,
             wrapping_key: wrapping,
+            staging,
         };
         (dest, opts)
     }
 
     fn snapshot_dir(dest: &Path, receipt: &SnapshotReceipt) -> PathBuf {
         dest.join(&receipt.snapshot_id)
+    }
+
+    #[test]
+    fn v3_snapshot_with_duplicate_recordings_builds_verifies_restores() {
+        // Two identical recordings in ONE v3 snapshot: two manifest
+        // entries (distinct relative paths), one shared on-disk blob.
+        // Exercises the Hardlink staging dedup, verify's listed-dedup,
+        // and restore of both paths from one blob.
+        let src = tempfile::tempdir().expect("src");
+        let (dest, opts) = fixture_opts(src.path(), [0xF1u8; 32], [0xF2u8; 32]);
+        fs::copy(
+            opts.recordings_dir.join("visit-0.enc"),
+            opts.recordings_dir.join("visit-0-copy.enc"),
+        )
+        .expect("duplicate recording");
+
+        let receipt = build_snapshot(&opts).expect("build");
+        let dir = snapshot_dir(dest.path(), &receipt);
+        verify_snapshot(&dir, &[0xF2u8; 32]).expect("verify with shared blob");
+
+        let manifest = load_manifest(&dir, &[0xF2u8; 32]).expect("manifest");
+        let rec_entries: Vec<&ManifestEntry> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.relative_path.starts_with("recordings/"))
+            .collect();
+        assert_eq!(rec_entries.len(), 2, "both recordings referenced");
+        assert_eq!(
+            rec_entries[0].sha256, rec_entries[1].sha256,
+            "identical bytes, same blob hash"
+        );
+        // One shared payload file on disk (the no-unlisted check with
+        // dedup passed inside verify, this asserts the actual layout).
+        assert!(dir.join(PAYLOAD_DIR).join(&rec_entries[0].sha256).is_file());
+
+        let restore_dest = tempfile::tempdir().expect("restore");
+        let report = restore_snapshot(
+            &dir,
+            &[0xF2u8; 32],
+            restore_dest.path(),
+            KeyInstall::Skip,
+            false,
+        )
+        .expect("restore");
+        assert_eq!(report.recording_files, 2, "both paths restored");
+        assert!(restore_dest.path().join("recordings/visit-0.enc").is_file());
+        assert!(
+            restore_dest
+                .path()
+                .join("recordings/visit-0-copy.enc")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn stream_mode_stages_only_small_blobs() {
+        let src = tempfile::tempdir().expect("src");
+        let (dest, opts) =
+            fixture_opts_staged(src.path(), [0xE1u8; 32], [0xE2u8; 32], StagingMode::Stream);
+        let receipt = build_snapshot(&opts).expect("build");
+        let dir = snapshot_dir(dest.path(), &receipt);
+
+        // Payload holds only the DB copy + wrapped key (keystore absent in
+        // the fixture): the recordings are hashed in place, NOT staged.
+        let payload: Vec<String> = fs::read_dir(dir.join(PAYLOAD_DIR))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            payload.len(),
+            2,
+            "stream mode stages only DB + wrapped key: {payload:?}"
+        );
+        // Entries still describe every recording, named by content hash.
+        let manifest = load_manifest(&dir, &[0xE2u8; 32]).expect("manifest");
+        assert!(
+            manifest
+                .entries
+                .iter()
+                .any(|e| e.relative_path.starts_with("recordings/"))
+        );
+        assert!(manifest.entries.iter().all(|e| e.opaque_name == e.sha256));
+        // And the receipt counts the REFERENCED totals (3 rows' DB + key +
+        // recording), not the staged bytes.
+        assert!(
+            receipt.total_bytes
+                > payload
+                    .iter()
+                    .map(|n| fs::metadata(dir.join(PAYLOAD_DIR).join(n)).unwrap().len())
+                    .sum::<u64>()
+        );
+    }
+
+    #[test]
+    fn hardlink_snapshot_is_self_contained_after_source_deletion() {
+        // Acceptance: a local-only (Hardlink) snapshot survives deletion of
+        // the source recording — the hardlink of an immutable file keeps
+        // the bytes and their hash.
+        let src = tempfile::tempdir().expect("src");
+        let (dest, opts) = fixture_opts(src.path(), [0xE3u8; 32], [0xE4u8; 32]);
+        let receipt = build_snapshot(&opts).expect("build");
+        let dir = snapshot_dir(dest.path(), &receipt);
+
+        fs::remove_file(opts.recordings_dir.join("visit-0.enc")).expect("delete source");
+        verify_snapshot(&dir, &[0xE4u8; 32]).expect("hardlinked snapshot still verifies");
+        // Restore works from the snapshot alone.
+        let restore_dest = tempfile::tempdir().expect("restore");
+        let report = restore_snapshot(
+            &dir,
+            &[0xE4u8; 32],
+            restore_dest.path(),
+            KeyInstall::Skip,
+            false,
+        )
+        .expect("restore");
+        assert_eq!(report.recording_files, 1);
+    }
+
+    #[test]
+    fn identical_recordings_share_one_blob_across_snapshots() {
+        // The dedup foundation: the same immutable recording produces the
+        // same content-addressed blob name in every snapshot that
+        // references it.
+        let src = tempfile::tempdir().expect("src");
+        let (dest1, opts1) = fixture_opts(src.path(), [0xE5u8; 32], [0xE6u8; 32]);
+        let r1 = build_snapshot(&opts1).expect("build 1");
+        // A second build re-reads the same sources (db differs — fresh
+        // salt — but the recording blob must be identical).
+        let dest2 = tempfile::tempdir().expect("dest2");
+        let opts2 = BuildOptions {
+            dest_dir: dest2.path().to_path_buf(),
+            ..opts1
+        };
+        let r2 = build_snapshot(&opts2).expect("build 2");
+
+        let recording_blob = |d: &Path, r: &SnapshotReceipt| -> String {
+            let m = load_manifest(&d.join(&r.snapshot_id), &[0xE6u8; 32]).unwrap();
+            m.entries
+                .iter()
+                .find(|e| e.relative_path.starts_with("recordings/"))
+                .unwrap()
+                .sha256
+                .clone()
+        };
+        assert_eq!(
+            recording_blob(dest1.path(), &r1),
+            recording_blob(dest2.path(), &r2),
+            "same source recording ⇒ same blob hash across snapshots"
+        );
+    }
+
+    #[test]
+    fn legacy_v2_receipts_still_verify() {
+        // Back-compat: a v2 receipt over the same payload (recomputed tag)
+        // verifies — existing on-disk snapshots must keep working without
+        // migration.
+        let src = tempfile::tempdir().expect("src");
+        let (dest, opts) = fixture_opts(src.path(), [0xE7u8; 32], [0xE8u8; 32]);
+        let receipt = build_snapshot(&opts).expect("build");
+        let dir = snapshot_dir(dest.path(), &receipt);
+
+        let manifest = load_manifest(&dir, &[0xE8u8; 32]).expect("manifest");
+        let tag = compute_tag(
+            &[0xE8u8; 32],
+            &receipt.snapshot_id,
+            LEGACY_SNAPSHOT_VERSION,
+            &receipt.created_at,
+            receipt.recording_count,
+            &manifest.entries,
+        );
+        let legacy = SnapshotReceipt {
+            version: LEGACY_SNAPSHOT_VERSION,
+            hmac_tag: tag,
+            ..receipt.clone()
+        };
+        fs::write(
+            dir.join(RECEIPT_FILE),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let summary = verify_snapshot(&dir, &[0xE8u8; 32]).expect("v2 verifies");
+        assert_eq!(summary.receipt.version, LEGACY_SNAPSHOT_VERSION);
     }
 
     #[test]
@@ -760,6 +1155,7 @@ mod tests {
             dest_dir: dest.path().to_path_buf(),
             db_key: [0xC1u8; 32],
             wrapping_key: [0xD2u8; 32],
+            staging: StagingMode::Hardlink,
         };
         assert!(build_snapshot(&opts).is_err());
         let mut left: Vec<String> = fs::read_dir(dest.path())
@@ -934,7 +1330,14 @@ mod tests {
         let dir = snapshot_dir(dest.path(), &receipt);
 
         // Flip one byte in the first payload file.
-        let payload = dir.join(PAYLOAD_DIR).join("f000000.bin");
+        let payload = {
+            let mut names: Vec<_> = fs::read_dir(dir.join(PAYLOAD_DIR))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            names.sort();
+            names[0].clone()
+        };
         let mut bytes = fs::read(&payload).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;

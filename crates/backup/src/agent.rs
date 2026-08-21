@@ -31,9 +31,10 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tracing::info;
 
-use crate::snapshot::{PAYLOAD_DIR, RECEIPT_FILE, SnapshotReceipt};
+use crate::snapshot::{MANIFEST_FILE, PAYLOAD_DIR, RECEIPT_FILE, SnapshotReceipt};
 
 /// Default total-bytes cap (1 TiB) — bounded growth for the append-only
 /// store. Override via `FERRISCRIBE_BACKUP_MAX_BYTES`.
@@ -45,6 +46,15 @@ pub const DEFAULT_MAX_SNAPSHOTS: usize = 1000;
 /// agent startup — a crashed push must not leak disk forever.
 pub const STALE_INCOMING_AFTER: std::time::Duration =
     std::time::Duration::from_secs(7 * 24 * 60 * 60);
+/// Shared content-addressed blob store directory (under the agent root).
+/// Blobs live at `blobs/<first2>/<hash>` and are counted by the byte cap
+/// like everything else under the root.
+pub const BLOBS_DIR: &str = "blobs";
+/// Plaintext reference index written at commit time inside each CAS (v3)
+/// snapshot dir: the list of blob hashes the encrypted manifest refers
+/// to. Hashes only — no PHI, and the agent never needs the wrapping key
+/// to compute GC reachability.
+pub const BLOBS_IDX_FILE: &str = "blobs.idx";
 
 /// Agent configuration: storage root + the two credentials + growth caps.
 #[derive(Clone)]
@@ -148,6 +158,11 @@ pub fn sweep_stale_incoming(root: &Path, cutoff: std::time::SystemTime) -> Vec<S
     };
     for entry in rd.flatten() {
         let path = entry.path();
+        // The blob store is NOT an in-flight snapshot dir — sweeping it
+        // here would delete deduplicated history wholesale.
+        if path.file_name().is_some_and(|n| n == BLOBS_DIR) {
+            continue;
+        }
         if !path.is_dir() || is_committed(&path) {
             continue;
         }
@@ -159,6 +174,34 @@ pub fn sweep_stale_incoming(root: &Path, cutoff: std::time::SystemTime) -> Vec<S
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default(),
             );
+        }
+    }
+    swept
+}
+
+/// Remove `.tmp-*` leftovers from crashed blob PUTs older than `cutoff`.
+/// Same startup-only discipline as [`sweep_stale_incoming`].
+pub fn sweep_stale_blob_temps(root: &Path, cutoff: std::time::SystemTime) -> usize {
+    let blobs = root.join(BLOBS_DIR);
+    let Ok(shards) = std::fs::read_dir(&blobs) else {
+        return 0;
+    };
+    let mut swept = 0usize;
+    for shard in shards.flatten() {
+        let Ok(files) = std::fs::read_dir(shard.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            let stale = file.file_name().to_string_lossy().starts_with(".tmp-")
+                && file
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .is_some_and(|t| t < cutoff);
+            if stale && std::fs::remove_file(&path).is_ok() {
+                swept += 1;
+            }
         }
     }
     swept
@@ -279,6 +322,10 @@ pub fn router(cfg: AgentConfig) -> Router {
         .route("/v1/snapshots", get(list_snapshots))
         .route("/v1/snapshots/{id}/file", get(get_file).put(put_file))
         .route("/v1/snapshots/{id}/commit", post(commit_snapshot))
+        .route(
+            "/v1/blobs/{hash}",
+            get(get_blob).put(put_blob).head(head_blob),
+        )
         .route("/v1/admin/prune", post(prune))
         .with_state(AgentState::new(cfg))
 }
@@ -297,6 +344,23 @@ pub async fn serve(cfg: AgentConfig, addr: SocketAddr) -> Result<(), std::io::Er
     );
     if !swept.is_empty() {
         info!(count = swept.len(), "swept stale in-flight snapshot dirs");
+    }
+    let temp_cutoff = std::time::SystemTime::now()
+        .checked_sub(STALE_INCOMING_AFTER)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let swept_temps = sweep_stale_blob_temps(&cfg.root, temp_cutoff);
+    if swept_temps > 0 {
+        info!(count = swept_temps, "swept stale blob upload temps");
+    }
+    // Orphaned-blob collection (aged past the grace window, unreferenced
+    // by any committed snapshot): with KEEP_N unset there is no prune to
+    // trigger GC, so failed pushes would otherwise leak blobs into the
+    // byte cap forever. Startup-only, same as the other sweeps — a push
+    // in flight across an agent restart keeps its blobs (grace window).
+    match gc_blobs(&cfg.root) {
+        Ok(n) if n > 0 => info!(count = n, "collected aged orphaned blobs"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "startup blob GC failed"),
     }
     std::fs::create_dir_all(&cfg.root)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -359,17 +423,45 @@ async fn put_file(
     Ok(StatusCode::CREATED)
 }
 
+/// Commit body. Legacy (v2) clients send a bare `SnapshotReceipt` JSON —
+/// `serde(flatten)` + `#[serde(default)]` keeps that wire shape working
+/// while CAS (v3) clients additionally send the plaintext blob-hash list.
+#[derive(Deserialize)]
+struct CommitBody {
+    #[serde(flatten)]
+    receipt: SnapshotReceipt,
+    /// CAS (v3): the blob hashes referenced by the encrypted manifest.
+    /// Written verbatim to `blobs.idx` as the GC reference index. The
+    /// agent is key-free — this list is the ONLY way it can ever know
+    /// reachability; hashes are opaque and PHI-free.
+    #[serde(default)]
+    blobs: Vec<String>,
+}
+
 async fn commit_snapshot(
     State(state): State<AgentState>,
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
-    Json(receipt): Json<SnapshotReceipt>,
+    Json(body): Json<CommitBody>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let receipt = body.receipt;
     let cfg = &state.cfg;
     auth_scope(&headers, cfg, "commit_snapshot").ok_or(unauthorized())?;
     validate_snapshot_id(&id)?;
     if receipt.snapshot_id != id {
         return Err(bad_request("receipt id does not match URL id"));
+    }
+    // Format/transport agreement: a v3 (CAS) receipt MUST commit with the
+    // blob list — otherwise the target would hold a snapshot that CAS
+    // pulls (version-gated) can never fetch. Fail loudly at commit rather
+    // than represent the mixed state.
+    if receipt.version >= 3 && body.blobs.is_empty() {
+        return Err(bad_request(
+            "v3 snapshots must commit with their blob reference list",
+        ));
+    }
+    if receipt.version < 3 && !body.blobs.is_empty() {
+        return Err(bad_request("legacy v2 commits do not carry a blob list"));
     }
 
     // Hold the SAME per-snapshot lock as put_file across the entire
@@ -388,6 +480,8 @@ async fn commit_snapshot(
 
     // Bounded growth (R3): re-check both caps against actual disk usage
     // at commit time — the moment the snapshot becomes immutable history.
+    // (The blob store lives under the root, so deduplicated blobs count
+    // toward the cap once each, which is exactly the growth we cap.)
     let (used_bytes, committed_count) = disk_usage(&cfg.root);
     if used_bytes > cfg.max_bytes {
         tracing::warn!(
@@ -408,42 +502,68 @@ async fn commit_snapshot(
         ));
     }
 
-    // Envelope validation (finding 3a): the receipt must describe exactly
-    // the files the target actually holds. The target is key-free — it
-    // cannot (and must not) verify the HMAC — but count/size agreement
-    // catches truncated or corrupt pushes here, and closes the
-    // lying-receipt bypass against the byte cap. Receipt totals count
-    // PAYLOAD files only (manifest.json.enc is not a manifest entry).
-    let payload_dir = snap_dir.join(PAYLOAD_DIR);
-    let mut uploaded_count: u64 = 0;
-    let mut uploaded_bytes: u64 = 0;
-    match std::fs::read_dir(&payload_dir) {
-        Ok(rd) => {
-            for entry in rd.flatten() {
-                if let Ok(meta) = entry.metadata()
-                    && meta.is_file()
-                {
-                    uploaded_count += 1;
-                    uploaded_bytes += meta.len();
+    let cas_blobs: Option<Vec<String>> = if body.blobs.is_empty() {
+        // Legacy (v2) push: envelope validation against the private
+        // payload directory (finding 3a) — the receipt must describe
+        // exactly the files the target actually holds. The target is
+        // key-free — it cannot (and must not) verify the HMAC — but
+        // count/size agreement catches truncated or corrupt pushes here,
+        // and closes the lying-receipt bypass against the byte cap.
+        // Receipt totals count PAYLOAD files only (manifest.json.enc is
+        // not a manifest entry).
+        let payload_dir = snap_dir.join(PAYLOAD_DIR);
+        let mut uploaded_count: u64 = 0;
+        let mut uploaded_bytes: u64 = 0;
+        match std::fs::read_dir(&payload_dir) {
+            Ok(rd) => {
+                for entry in rd.flatten() {
+                    if let Ok(meta) = entry.metadata()
+                        && meta.is_file()
+                    {
+                        uploaded_count += 1;
+                        uploaded_bytes += meta.len();
+                    }
                 }
             }
+            Err(_) => {
+                return Err(bad_request("no payload files uploaded for this snapshot"));
+            }
         }
-        Err(_) => {
-            return Err(bad_request("no payload files uploaded for this snapshot"));
+        if uploaded_count != receipt.file_count || uploaded_bytes != receipt.total_bytes {
+            tracing::warn!(
+                uploaded_count,
+                receipt_file_count = receipt.file_count,
+                uploaded_bytes,
+                receipt_total_bytes = receipt.total_bytes,
+                "commit rejected: receipt does not match received files"
+            );
+            return Err(bad_request(
+                "receipt file_count/total_bytes do not match the uploaded payload files",
+            ));
         }
-    }
-    if uploaded_count != receipt.file_count || uploaded_bytes != receipt.total_bytes {
-        tracing::warn!(
-            uploaded_count,
-            receipt_file_count = receipt.file_count,
-            uploaded_bytes,
-            receipt_total_bytes = receipt.total_bytes,
-            "commit rejected: receipt does not match received files"
-        );
-        return Err(bad_request(
-            "receipt file_count/total_bytes do not match the uploaded payload files",
-        ));
-    }
+        None
+    } else {
+        // CAS (v3) push: the target holds the manifest in the snapshot
+        // dir and the referenced bytes in the shared blob store, so the
+        // payload-dir count check does not apply. Envelope validation:
+        // the manifest must be present and EVERY referenced blob must
+        // already exist (hash-validated at PUT time). The byte cap stays
+        // honest because it measures disk, not receipt numbers.
+        for hash in &body.blobs {
+            validate_blob_hash(hash)?;
+            if !blob_path(&cfg.root, hash).is_file() {
+                return Err(bad_request(
+                    "commit references a blob the target does not hold",
+                ));
+            }
+        }
+        if !snap_dir.join(MANIFEST_FILE).is_file() {
+            return Err(bad_request(
+                "CAS commit requires the encrypted manifest to be uploaded",
+            ));
+        }
+        Some(body.blobs)
+    };
 
     // Write the receipt, then freeze: mark everything read-only and lay
     // down the commit marker. Readers only ever list marker-bearing dirs.
@@ -453,13 +573,20 @@ async fn commit_snapshot(
     tokio::fs::write(&receipt_path, bytes)
         .await
         .map_err(internal)?;
+    if let Some(blobs) = &cas_blobs {
+        let idx =
+            serde_json::to_vec_pretty(blobs).map_err(|e| internal(std::io::Error::other(e)))?;
+        tokio::fs::write(snap_dir.join(BLOBS_IDX_FILE), idx)
+            .await
+            .map_err(internal)?;
+    }
     freeze_tree(&snap_dir).map_err(internal)?;
     tokio::fs::write(snap_dir.join(".committed"), b"1")
         .await
         .map_err(internal)?;
     set_readonly_file(&snap_dir.join(".committed"));
     set_readonly_dir(&snap_dir);
-    info!(snapshot_id = %id, "snapshot committed (append-only)");
+    info!(snapshot_id = %id, cas = cas_blobs.is_some(), "snapshot committed (append-only)");
 
     // Automatic retention (target-side authority): when KEEP_N is set,
     // trim history to the newest N after every successful commit. The
@@ -527,6 +654,151 @@ struct PruneQuery {
     keep: usize,
 }
 
+// ── content-addressed blob store (CAS, snapshot format v3) ───────────────
+//
+// Blobs are shared across snapshots, keyed by the SHA-256 of their
+// ciphertext bytes. Write-once: PUT on an existing hash is a no-op; no
+// route reachable by the append token deletes or overwrites a blob.
+
+/// Exactly 64 lowercase hex chars — also the only characters that can
+/// appear in a blob path segment, so a validated hash can never traverse.
+fn validate_blob_hash(hash: &str) -> Result<(), (StatusCode, String)> {
+    let ok = hash.len() == 64
+        && hash
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+    if ok {
+        Ok(())
+    } else {
+        Err(bad_request(
+            "blob key must be exactly 64 lowercase hex chars",
+        ))
+    }
+}
+
+fn blob_path(root: &Path, hash: &str) -> PathBuf {
+    root.join(BLOBS_DIR).join(&hash[..2]).join(hash)
+}
+
+/// Idempotent blob upload. The body is STREAMED to a temp sibling and
+/// renamed into place only after the received bytes hash to the claimed
+/// key — a PUT that dies mid-body leaves a temp file (swept at startup),
+/// never a truncated blob that later HEADs would report as present.
+async fn put_blob(
+    State(state): State<AgentState>,
+    headers: HeaderMap,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+    body: axum::body::Body,
+) -> Result<StatusCode, (StatusCode, String)> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let cfg = &state.cfg;
+    auth_scope(&headers, cfg, "put_blob").ok_or(unauthorized())?;
+    validate_blob_hash(&hash)?;
+
+    let final_path = blob_path(&cfg.root, &hash);
+    if final_path.is_file() {
+        // Write-once (R3): an existing blob is never rewritten.
+        return Ok(StatusCode::OK);
+    }
+    let shard = final_path.parent().expect("blob path always has a shard");
+    tokio::fs::create_dir_all(shard).await.map_err(internal)?;
+    let tmp = shard.join(format!(".tmp-{hash}-{}", uuid::Uuid::new_v4().simple()));
+
+    let result = async {
+        let mut file = tokio::fs::File::create(&tmp).await.map_err(internal)?;
+        let mut hasher = Sha256::new();
+        let mut stream = body.into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| internal(std::io::Error::other(e)))?;
+            hasher.update(&chunk);
+            file.write_all(&chunk).await.map_err(internal)?;
+        }
+        file.sync_all().await.map_err(internal)?;
+        drop(file);
+        let written = hex::encode(hasher.finalize());
+        if written != hash {
+            return Err(bad_request(
+                "blob bytes do not hash to the claimed key — refusing to store",
+            ));
+        }
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // Byte cap (R3): measured from the filesystem — the temp file lives
+    // under the root, so it is already counted.
+    let (used_bytes, _) = disk_usage(&cfg.root);
+    if used_bytes > cfg.max_bytes {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::warn!(
+            used_bytes,
+            max_bytes = cfg.max_bytes,
+            "blob rejected: byte cap exceeded"
+        );
+        return Err(insufficient_storage("byte cap would be exceeded"));
+    }
+
+    // A racing PUT of the same blob may have completed meanwhile. Both
+    // writers validated identical content by hash, so preferring the
+    // no-op (drop our temp) is always safe — and never an overwrite.
+    if final_path.is_file() {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(StatusCode::OK);
+    }
+    tokio::fs::rename(&tmp, &final_path)
+        .await
+        .map_err(internal)?;
+    set_readonly_file(&final_path);
+    Ok(StatusCode::CREATED)
+}
+
+async fn head_blob(
+    State(state): State<AgentState>,
+    headers: HeaderMap,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let cfg = &state.cfg;
+    auth_scope(&headers, cfg, "head_blob").ok_or(unauthorized())?;
+    validate_blob_hash(&hash)?;
+    if blob_path(&cfg.root, &hash).is_file() {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(not_found("blob not found"))
+    }
+}
+
+/// Stream a blob back. Never buffered whole — a blob can be ~1 GB.
+async fn get_blob(
+    State(state): State<AgentState>,
+    headers: HeaderMap,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let cfg = &state.cfg;
+    auth_scope(&headers, cfg, "get_blob").ok_or(unauthorized())?;
+    validate_blob_hash(&hash)?;
+    let path = blob_path(&cfg.root, &hash);
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| not_found("blob not found"))?;
+    let stream = tokio_util::io::ReaderStream::with_capacity(file, 256 * 1024);
+    let body = axum::body::Body::from_stream(stream);
+    Ok((
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/octet-stream"),
+        )],
+        body,
+    ))
+}
+
 /// Admin-only retention: keep the newest `keep` committed snapshots,
 /// delete older ones. This is the ONLY deletion path in the entire
 /// system, and it is unreachable with the append token.
@@ -557,7 +829,9 @@ async fn prune(
 }
 
 /// Keep the newest `keep` COMMITTED snapshots under `root`, delete older
-/// ones. Shared by the admin prune endpoint (explicit) and the automatic
+/// ones, then garbage-collect blobs no longer referenced by ANY retained
+/// snapshot (mark-and-sweep over the `blobs.idx` reference indexes).
+/// Shared by the admin prune endpoint (explicit) and the automatic
 /// post-commit retention (the agent's own authority — never reachable
 /// with the append credential). Returns the pruned snapshot ids.
 fn prune_to(root: &Path, keep: usize) -> std::io::Result<Vec<String>> {
@@ -584,7 +858,78 @@ fn prune_to(root: &Path, keep: usize) -> std::io::Result<Vec<String>> {
                 .unwrap_or_default(),
         );
     }
+    let swept = gc_blobs(root)?;
+    if swept > 0 {
+        info!(count = swept, "blob GC removed unreferenced blobs");
+    }
     Ok(pruned)
+}
+
+/// Blobs younger than this are never GC'd, even when unreferenced: an
+/// in-flight push (blobs uploaded, commit pending — possibly for hours on
+/// the initial full push) must survive another client's commit firing the
+/// auto-prune GC, and a failed-then-retried push re-uses its already-
+/// uploaded blobs via HEAD-skip.
+pub const BLOB_GC_GRACE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Mark-and-sweep the blob store: a blob survives iff some committed
+/// snapshot's `blobs.idx` references it, OR it is younger than
+/// [`BLOB_GC_GRACE`] (in-flight push protection). Legacy (v2) snapshots
+/// hold private payload copies and contribute no marks. This runs ONLY
+/// inside [`prune_to`] and at startup — the admin-authority deletion
+/// paths.
+fn gc_blobs(root: &Path) -> std::io::Result<usize> {
+    let blobs_root = root.join(BLOBS_DIR);
+    if !blobs_root.is_dir() {
+        return Ok(0);
+    }
+    let mut referenced = std::collections::HashSet::new();
+    for entry in std::fs::read_dir(root)?.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() || !is_committed(&dir) {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(dir.join(BLOBS_IDX_FILE))
+            && let Ok(hashes) = serde_json::from_slice::<Vec<String>>(&bytes)
+        {
+            referenced.extend(hashes);
+        }
+    }
+    let grace_cutoff = std::time::SystemTime::now()
+        .checked_sub(BLOB_GC_GRACE)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let mut removed = 0usize;
+    for shard in std::fs::read_dir(&blobs_root)?.flatten() {
+        let shard_dir = shard.path();
+        if !shard_dir.is_dir() {
+            continue;
+        }
+        for blob in std::fs::read_dir(&shard_dir)?.flatten() {
+            let path = blob.path();
+            let name = blob.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".tmp-") || referenced.contains(&name) {
+                continue;
+            }
+            // In-flight-push protection: only collect aged orphans. (chmod
+            // does not touch mtime, so a frozen blob keeps its upload
+            // time.)
+            let aged = blob
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .is_some_and(|t| t < grace_cutoff);
+            if !aged {
+                continue;
+            }
+            // Blobs are chmod'd read-only; make writable before unlink so
+            // Windows (where readonly blocks deletion) can remove it too.
+            make_writable_file(&path);
+            if std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -598,7 +943,12 @@ fn validate_snapshot_id(id: &str) -> Result<(), (StatusCode, String)> {
         && id.len() <= 64
         && id
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        // The shared blob store lives at <root>/blobs — a snapshot with
+        // this id would alias it: put_file could write unvalidated bytes
+        // straight into blob paths, and a "commit" would freeze the whole
+        // store read-only. Reserved, period.
+        && id != BLOBS_DIR;
     if ok {
         Ok(())
     } else {
@@ -627,9 +977,13 @@ fn validate_rel_path_impl(rel: &str, allow_receipt: bool) -> Result<PathBuf, (St
         && rel
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+        // No multi-dot traversals the charset would otherwise allow.
         && !path.components().any(|c| c.as_os_str() == "..")
         && (allow_receipt || rel != RECEIPT_FILE)
-        && rel != ".committed";
+        && rel != ".committed"
+        // The GC reference index is commit-owned: a client-written
+        // blobs.idx could pin arbitrary hashes against pruning.
+        && rel != BLOBS_IDX_FILE;
     if ok {
         Ok(path.to_path_buf())
     } else {
@@ -659,6 +1013,10 @@ fn unfreeze_and_remove(dir: &Path) -> std::io::Result<()> {
             if path.is_dir() {
                 unfreeze(&path)?;
                 let _ = std::fs::set_permissions(&path, writable_dir(&path)?);
+            } else {
+                // Frozen files are 0444 — on Windows readonly blocks
+                // unlink, so clear the bit on files too, not just dirs.
+                make_writable_file(&path);
             }
         }
         let _ = std::fs::set_permissions(d, writable_dir(d)?);
@@ -686,10 +1044,27 @@ fn writable_dir(_path: &Path) -> std::io::Result<std::fs::Permissions> {
     Ok(std::fs::Permissions::from_mode(0o755))
 }
 
+/// Clear the read-only bit so a frozen file can be unlinked (GC). The
+/// blob shard directories are never frozen, so directory writability is
+/// not a concern here.
+#[cfg(unix)]
+fn make_writable_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+}
+
 #[cfg(not(unix))]
 fn set_readonly_file(_path: &Path) {}
 #[cfg(not(unix))]
 fn set_readonly_dir(_path: &Path) {}
+#[cfg(not(unix))]
+fn make_writable_file(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+}
 // Windows Permissions only exposes the readonly bit — clone the
 // directory's current permissions with readonly cleared. (Permissions
 // has no portable constructor; that was the Windows build failure.)
@@ -795,6 +1170,66 @@ mod tests {
         let f = std::fs::File::open(path).unwrap();
         f.set_modified(t).unwrap();
     }
+    #[test]
+    fn reserved_names_are_rejected() {
+        // The blob store must not be addressable as a snapshot id…
+        assert!(
+            validate_snapshot_id(BLOBS_DIR).is_err(),
+            "'blobs' aliases the blob store"
+        );
+        assert!(validate_snapshot_id("snap-ok-1").is_ok());
+        // …and the GC reference index is commit-owned.
+        assert!(
+            validate_rel_path(BLOBS_IDX_FILE).is_err(),
+            "blobs.idx is commit-owned"
+        );
+        assert!(validate_rel_path_read(BLOBS_IDX_FILE).is_err());
+    }
+
+    #[test]
+    fn gc_respects_grace_window_and_references() {
+        let root = tempfile::TempDir::new().unwrap();
+        let mk_blob = |hash: &str| {
+            let p = root.path().join(BLOBS_DIR).join(&hash[..2]).join(hash);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"blob").unwrap();
+            set_readonly_file(&p);
+            p
+        };
+        let referenced = mk_blob(&"a".repeat(64));
+        let fresh_orphan = mk_blob(&"b".repeat(64));
+        let aged_orphan = mk_blob(&"c".repeat(64));
+        // A committed snapshot referencing the first blob.
+        let snap = root.path().join("snap-ref");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join(".committed"), b"1").unwrap();
+        std::fs::write(
+            snap.join(BLOBS_IDX_FILE),
+            serde_json::to_vec(&vec!["a".repeat(64)]).unwrap(),
+        )
+        .unwrap();
+        // Age the third blob past the grace window (clear readonly first;
+        // futimens needs ownership only, but be tidy).
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&aged_orphan, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let f = std::fs::File::open(&aged_orphan).unwrap();
+            f.set_modified(
+                std::time::SystemTime::now() - BLOB_GC_GRACE - std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        }
+
+        let removed = gc_blobs(root.path()).unwrap();
+        assert_eq!(removed, 1, "only the aged orphan is collected");
+        assert!(referenced.is_file(), "referenced blob survives");
+        assert!(
+            fresh_orphan.is_file(),
+            "fresh orphan survives (in-flight push protection)"
+        );
+        assert!(!aged_orphan.exists(), "aged orphan collected");
+    }
+
     #[test]
     fn keep_n_parsing() {
         // Absent → keep everything (manual pruning only).

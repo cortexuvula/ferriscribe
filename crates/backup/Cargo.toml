@@ -30,6 +30,8 @@ uuid = { workspace = true }
 rusqlite = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
+futures-util = { workspace = true }
 reqwest = { workspace = true }
 dirs = { workspace = true }
 

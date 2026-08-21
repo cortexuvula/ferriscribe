@@ -154,7 +154,9 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
         std::fs::create_dir_all(&out_dir)
             .map_err(|e| JobFail::early(format!("staging dir: {e}")))?;
 
-        // 1. Build.
+        // 1. Build. Staging by mode: a target push streams recordings from
+        // their source (nothing large is staged locally); a local-only
+        // run hardlinks them in so the snapshot is self-contained.
         events.push(step("building snapshot…"));
         let receipt = snapshot::build_snapshot(&BuildOptions {
             db_path: cfg.db_path.clone(),
@@ -163,6 +165,11 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
             dest_dir: out_dir.clone(),
             db_key,
             wrapping_key,
+            staging: if cfg.target.is_some() {
+                snapshot::StagingMode::Stream
+            } else {
+                snapshot::StagingMode::Hardlink
+            },
         })
         .map_err(|e| JobFail::early(format!("snapshot build failed: {e}")))?;
         events.push(ok(&format!(
@@ -182,11 +189,18 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
                     snapshot_id: Some(built.clone()),
                     pushed_to: None,
                 };
-                let pushed = block_on(client.push_snapshot(&local_dir))
-                    .map_err(&push)?
-                    .map_err(|e| push(e.to_string()))?;
+                let (pushed, push_stats) = block_on(client.push_snapshot(
+                    &local_dir,
+                    Some(&cfg.recordings_dir),
+                    &wrapping_key,
+                ))
+                .map_err(&push)?
+                .map_err(|e| push(e.to_string()))?;
                 debug_assert_eq!(pushed.snapshot_id, receipt.snapshot_id);
-                events.push(ok(&format!("pushed to {}", target.url)));
+                events.push(ok(&format!(
+                    "pushed to {} ({} new blob(s), {} already on target)",
+                    target.url, push_stats.uploaded, push_stats.skipped
+                )));
                 pushed_to = Some(target.url.clone());
 
                 std::fs::create_dir_all(staging).map_err(|e| JobFail {
@@ -271,7 +285,9 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
             }
         }
     };
-    // Staging cleanup happens pass OR fail (the forensics copy is out_dir's).
+    // Staging cleanup happens pass OR fail (for target runs the durable,
+    // restorable copy lives on the TARGET — the local Stream-staged dir
+    // holds only the manifest + small always-new blobs by design).
     let _ = std::fs::remove_dir_all(&staging);
 
     // Status is written even on failure — a red pane beats a stale pane.
