@@ -37,18 +37,23 @@ pub fn load_config_sync(
 /// flipped `config_existed=true`, silently marking an interrupted wizard as
 /// complete on the next launch.
 #[tauri::command]
-pub fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
-    let conn = state.db.conn()?;
-    let onboarding_started = SettingsRepo::exists(&conn, "onboarding_started")?;
-    let config_existed = SettingsRepo::exists(&conn, "app_config")?;
-    let mut config = SettingsRepo::load_config(&conn)?;
-    config.migrate();
-    if !config.onboarding_completed && config_existed && !onboarding_started {
-        // Pre-wizard existing install: mark onboarded, never show the wizard.
-        config.onboarding_completed = true;
-        SettingsRepo::save_config(&conn, &config)?;
-    }
-    Ok(config)
+pub async fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        let onboarding_started = SettingsRepo::exists(&conn, "onboarding_started")?;
+        let config_existed = SettingsRepo::exists(&conn, "app_config")?;
+        let mut config = SettingsRepo::load_config(&conn)?;
+        config.migrate();
+        if !config.onboarding_completed && config_existed && !onboarding_started {
+            // Pre-wizard existing install: mark onboarded, never show the wizard.
+            config.onboarding_completed = true;
+            SettingsRepo::save_config(&conn, &config)?;
+        }
+        Ok(config)
+    })
+    .await
+    .map_err(super::join_err)?
 }
 
 /// Mark onboarding as started. The onboarding wizard calls this the first time
@@ -56,10 +61,15 @@ pub fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppConfig> {
 /// marked complete on the next launch (see `get_settings`). The sentinel is
 /// idempotent — setting it again is a no-op.
 #[tauri::command]
-pub fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppResult<()> {
-    let conn = state.db.conn()?;
-    SettingsRepo::set(&conn, "onboarding_started", "1")?;
-    Ok(())
+pub async fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppResult<()> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
+        let conn = db.conn()?;
+        SettingsRepo::set(&conn, "onboarding_started", "1")?;
+        Ok(())
+    })
+    .await
+    .map_err(super::join_err)?
 }
 
 /// Persist updated application settings to the database.
@@ -68,24 +78,37 @@ pub fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppResult<()
 /// unless `allow_public_endpoint` is explicitly enabled. Rejects public hosts
 /// like `api.openai.com` to enforce the local-only PHI constraint.
 #[tauri::command]
-pub fn save_settings(state: tauri::State<'_, AppState>, config: AppConfig) -> AppResult<()> {
-    // Reject public/unknown hosts unless the user has explicitly opted in.
-    for (field, host) in [
-        ("ollama_host", config.ollama_host.as_str()),
-        ("lmstudio_host", config.lmstudio_host.as_str()),
-        ("stt_remote_host", config.stt_remote_host.as_str()),
-    ] {
-        // Empty host means "use default" — defer enforcement until the user
-        // actually fills it in.
-        if host.is_empty() {
-            continue;
-        }
-        medical_core::endpoint_policy::validate_local_endpoint(host, config.allow_public_endpoint)
+pub async fn save_settings(
+    state: tauri::State<'_, AppState>,
+    config: AppConfig,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    // Host validation may resolve DNS — blocking — so it rides along in the
+    // same spawn_blocking as the save.
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
+        // Reject public/unknown hosts unless the user has explicitly opted in.
+        for (field, host) in [
+            ("ollama_host", config.ollama_host.as_str()),
+            ("lmstudio_host", config.lmstudio_host.as_str()),
+            ("stt_remote_host", config.stt_remote_host.as_str()),
+        ] {
+            // Empty host means "use default" — defer enforcement until the user
+            // actually fills it in.
+            if host.is_empty() {
+                continue;
+            }
+            medical_core::endpoint_policy::validate_local_endpoint(
+                host,
+                config.allow_public_endpoint,
+            )
             .map_err(|e| AppError::invalid_endpoint_for(e, field))?;
-    }
+        }
 
-    let conn = state.db.conn()?;
-    SettingsRepo::save_config(&conn, &config).map_err(AppError::from)
+        let conn = db.conn()?;
+        SettingsRepo::save_config(&conn, &config).map_err(AppError::from)
+    })
+    .await
+    .map_err(super::join_err)?
 }
 
 #[cfg(test)]

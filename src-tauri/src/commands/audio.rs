@@ -24,8 +24,14 @@ use crate::state::{AppState, CurrentRecording, SendCaptureHandle};
 /// Returns device metadata (name, channels, sample rate) for the audio
 /// device picker in the settings UI.
 #[tauri::command]
-pub fn list_audio_devices() -> AppResult<Vec<AudioDevice>> {
-    list_input_devices().map_err(|e| AppError::audio_with_source(e.to_string(), e))
+pub async fn list_audio_devices() -> AppResult<Vec<AudioDevice>> {
+    // cpal enumeration can block on busy/virtual hardware (the same reason
+    // the audio device tests are env-gated) — never run it on the main
+    // thread or an async worker.
+    tokio::task::spawn_blocking(list_input_devices)
+        .await
+        .map_err(super::join_err)?
+        .map_err(|e| AppError::audio_with_source(e.to_string(), e))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
