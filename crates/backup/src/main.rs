@@ -357,7 +357,15 @@ async fn cmd_restore(flags: &Flags) -> CmdResult {
     } else {
         snapshot::KeyInstall::IfAbsentOrEqual
     };
-    let report = snapshot::restore_snapshot(Path::new(&dir), &wrapping, Path::new(&dest), mode)?;
+    // --force doubles as the non-empty-destination override: restoring
+    // into a used dir mixes old snapshot data with newer files.
+    let report = snapshot::restore_snapshot(
+        Path::new(&dir),
+        &wrapping,
+        Path::new(&dest),
+        mode,
+        flags.has("force"),
+    )?;
     println!(
         "restored {} → {} ({} files, db key recovered: {})",
         report.snapshot_id, dest, report.files_restored, report.db_key_recovered
