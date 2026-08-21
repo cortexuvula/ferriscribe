@@ -604,10 +604,10 @@ fn unfreeze_and_remove(dir: &Path) -> std::io::Result<()> {
             let path = entry.path();
             if path.is_dir() {
                 unfreeze(&path)?;
-                let _ = std::fs::set_permissions(&path, writable_dir());
+                let _ = std::fs::set_permissions(&path, writable_dir(&path)?);
             }
         }
-        let _ = std::fs::set_permissions(d, writable_dir());
+        let _ = std::fs::set_permissions(d, writable_dir(d)?);
         Ok(())
     }
     unfreeze(dir)?;
@@ -627,18 +627,23 @@ fn set_readonly_dir(path: &Path) {
 }
 
 #[cfg(unix)]
-fn writable_dir() -> std::fs::Permissions {
+fn writable_dir(_path: &Path) -> std::io::Result<std::fs::Permissions> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::Permissions::from_mode(0o755)
+    Ok(std::fs::Permissions::from_mode(0o755))
 }
 
 #[cfg(not(unix))]
 fn set_readonly_file(_path: &Path) {}
 #[cfg(not(unix))]
 fn set_readonly_dir(_path: &Path) {}
+// Windows Permissions only exposes the readonly bit — clone the
+// directory's current permissions with readonly cleared. (Permissions
+// has no portable constructor; that was the Windows build failure.)
 #[cfg(not(unix))]
-fn writable_dir() -> std::fs::Permissions {
-    std::fs::Permissions::new()
+fn writable_dir(path: &Path) -> std::io::Result<std::fs::Permissions> {
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_readonly(false);
+    Ok(perms)
 }
 
 fn unauthorized() -> (StatusCode, String) {
