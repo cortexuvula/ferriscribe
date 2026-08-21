@@ -127,9 +127,23 @@ mod transport_tests {
     }
 
     fn build_fixture_snapshot(dest: &Path, salt: u8) -> SnapshotReceipt {
+        build_fixture_snapshot_staged(dest, salt, snapshot::StagingMode::Hardlink, None).0
+    }
+
+    /// Stream-staged fixture build that also returns the recordings dir
+    /// (kept alive via a leaked TempDir — test-scoped, disposable) so
+    /// incremental tests can add recordings between builds and pass the
+    /// dir to push for source streaming.
+    fn build_fixture_snapshot_staged(
+        dest: &Path,
+        salt: u8,
+        staging: snapshot::StagingMode,
+        existing_recordings: Option<&Path>,
+    ) -> (SnapshotReceipt, std::path::PathBuf) {
         let db_key = [salt; 32];
         let wrapping = [salt ^ 0xFF; 32];
-        let src = tempfile::tempdir().expect("src");
+        let src: &'static tempfile::TempDir =
+            Box::leak(Box::new(tempfile::tempdir().expect("src")));
         let db_path = src.path().join("medical.db");
         let database = medical_db::Database::open(&db_path, Some(db_key)).expect("db");
         {
@@ -144,26 +158,38 @@ mod transport_tests {
             .expect("insert");
         }
         drop(database);
-        let recordings = src.path().join("recordings");
-        std::fs::create_dir_all(&recordings).unwrap();
-        let wav_key = medical_security::file_crypto::derive_file_key(&db_key);
-        let blob = medical_security::file_crypto::encrypt_bytes_with_key(
-            &wav_key,
-            format!("RIFF patient audio {salt}").as_bytes(),
-        )
-        .unwrap();
-        std::fs::write(recordings.join("r0.enc"), blob).unwrap();
+        // Real incremental semantics need the recordings dir to be STABLE
+        // across builds (immutable ciphertext ⇒ stable hash). A fresh
+        // GCM nonce per call would otherwise make every build look like a
+        // new recording.
+        let recordings: std::path::PathBuf = match existing_recordings {
+            Some(dir) => dir.to_path_buf(),
+            None => {
+                let recordings = src.path().join("recordings");
+                std::fs::create_dir_all(&recordings).unwrap();
+                let wav_key = medical_security::file_crypto::derive_file_key(&db_key);
+                let blob = medical_security::file_crypto::encrypt_bytes_with_key(
+                    &wav_key,
+                    format!("RIFF patient audio {salt}").as_bytes(),
+                )
+                .unwrap();
+                std::fs::write(recordings.join("r0.enc"), blob).unwrap();
+                recordings
+            }
+        };
 
-        build_snapshot(&BuildOptions {
+        let recordings = recordings.clone();
+        let receipt = build_snapshot(&BuildOptions {
             db_path,
-            recordings_dir: recordings,
+            recordings_dir: recordings.clone(),
             keystore_path: None,
             dest_dir: dest.to_path_buf(),
             db_key,
             wrapping_key: wrapping,
-            staging: snapshot::StagingMode::Hardlink,
+            staging,
         })
-        .expect("build snapshot")
+        .expect("build snapshot");
+        (receipt, recordings)
     }
 
     fn client(env: &Env) -> BackupClient {
@@ -180,8 +206,12 @@ mod transport_tests {
         let built = tempfile::tempdir().expect("built");
         let receipt = build_fixture_snapshot(built.path(), 0x11);
 
-        let pushed = client(&env)
-            .push_snapshot(&built.path().join(&receipt.snapshot_id))
+        let (pushed, _stats) = client(&env)
+            .push_snapshot(
+                &built.path().join(&receipt.snapshot_id),
+                None,
+                &wrapping_for(0x11),
+            )
             .await
             .expect("push");
         assert_eq!(pushed.snapshot_id, receipt.snapshot_id);
@@ -212,17 +242,29 @@ mod transport_tests {
         // Push two snapshots (same salt is fine — separate builds).
         let built = tempfile::tempdir().expect("built");
         let r1 = build_fixture_snapshot(built.path(), 0x22);
-        c.push_snapshot(&built.path().join(&r1.snapshot_id))
-            .await
-            .expect("push 1");
+        c.push_snapshot(
+            &built.path().join(&r1.snapshot_id),
+            None,
+            &wrapping_for(0x22),
+        )
+        .await
+        .expect("push 1");
 
         let id = r1.snapshot_id.clone();
 
-        // 1. Re-committing an existing id → 409.
+        // 1. Re-committing an existing id → 409 (replaying the original
+        // CAS commit body, blobs and all).
+        let mut replay = serde_json::to_value(&r1).unwrap();
+        let mut blobs: Vec<String> = std::fs::read_dir(built.path().join(&id).join("payload"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        blobs.sort();
+        replay["blobs"] = serde_json::json!(blobs);
         let resp = reqwest::Client::new()
             .post(format!("{}/v1/snapshots/{id}/commit", env.base_url))
             .bearer_auth(&env.append)
-            .json(&r1)
+            .json(&replay)
             .send()
             .await
             .unwrap();
@@ -293,14 +335,22 @@ mod transport_tests {
         let c = client(&env);
         let built = tempfile::tempdir().expect("built");
         let r1 = build_fixture_snapshot(built.path(), 0x33);
-        c.push_snapshot(&built.path().join(&r1.snapshot_id))
-            .await
-            .unwrap();
+        c.push_snapshot(
+            &built.path().join(&r1.snapshot_id),
+            None,
+            &wrapping_for(0x33),
+        )
+        .await
+        .unwrap();
         // Second snapshot with a distinct id (new timestamp/rand suffix).
         let r2 = build_fixture_snapshot(built.path(), 0x33);
-        c.push_snapshot(&built.path().join(&r2.snapshot_id))
-            .await
-            .unwrap();
+        c.push_snapshot(
+            &built.path().join(&r2.snapshot_id),
+            None,
+            &wrapping_for(0x33),
+        )
+        .await
+        .unwrap();
         assert_eq!(c.list_snapshots().await.unwrap().len(), 2);
 
         let resp = reqwest::Client::new()
@@ -326,9 +376,13 @@ mod transport_tests {
         // A normal (small) fixture snapshot fits under the 1 MiB cap.
         let built = tempfile::tempdir().expect("built");
         let r1 = build_fixture_snapshot(built.path(), 0x44);
-        c.push_snapshot(&built.path().join(&r1.snapshot_id))
-            .await
-            .expect("first push fits");
+        c.push_snapshot(
+            &built.path().join(&r1.snapshot_id),
+            None,
+            &wrapping_for(0x44),
+        )
+        .await
+        .expect("first push fits");
         assert_eq!(c.list_snapshots().await.unwrap().len(), 1);
 
         // A 2 MiB upload must be rejected at PUT time (507), even though
@@ -360,14 +414,22 @@ mod transport_tests {
         let c = client(&env);
         let built = tempfile::tempdir().expect("built");
         let r1 = build_fixture_snapshot(built.path(), 0x55);
-        c.push_snapshot(&built.path().join(&r1.snapshot_id))
-            .await
-            .expect("first push commits");
+        c.push_snapshot(
+            &built.path().join(&r1.snapshot_id),
+            None,
+            &wrapping_for(0x55),
+        )
+        .await
+        .expect("first push commits");
 
         // Second snapshot: uploads fine, commit must fail with 507.
         let r2 = build_fixture_snapshot(built.path(), 0x55);
         let err = c
-            .push_snapshot(&built.path().join(&r2.snapshot_id))
+            .push_snapshot(
+                &built.path().join(&r2.snapshot_id),
+                None,
+                &wrapping_for(0x55),
+            )
             .await
             .expect_err("count cap must reject the second commit");
         assert!(
@@ -459,21 +521,38 @@ mod transport_tests {
         let receipt = build_fixture_snapshot(built.path(), 0x97);
         let dir = built.path().join(&receipt.snapshot_id);
 
-        // Upload the REAL files concurrently (manifest + every payload).
+        // Upload the CAS pieces concurrently: the manifest via the
+        // per-snapshot file route, every payload file as a blob (payload
+        // files are hash-named in v3, so the name IS the blob key).
         let http = reqwest::Client::new();
         let mut handles = Vec::new();
-        for rel in std::fs::read_dir(dir.join("payload"))
+        let mut blob_hashes = Vec::new();
+        for name in std::fs::read_dir(dir.join("payload"))
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .map(|name| format!("payload/{name}"))
-            .chain(std::iter::once("manifest.json.enc".to_string()))
+        {
+            blob_hashes.push(name.clone());
+            let url = format!("{}/v1/blobs/{name}", env.base_url);
+            let token = env.append.clone();
+            let bytes = std::fs::read(dir.join("payload").join(&name)).unwrap();
+            handles.push(tokio::spawn(async move {
+                reqwest::Client::new()
+                    .put(&url)
+                    .bearer_auth(&token)
+                    .body(bytes)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            }));
+        }
         {
             let url = format!(
-                "{}/v1/snapshots/{}/file?path={rel}",
+                "{}/v1/snapshots/{}/file?path=manifest.json.enc",
                 env.base_url, receipt.snapshot_id
             );
             let token = env.append.clone();
-            let bytes = std::fs::read(dir.join(&rel)).unwrap();
+            let bytes = std::fs::read(dir.join("manifest.json.enc")).unwrap();
             handles.push(tokio::spawn(async move {
                 reqwest::Client::new()
                     .put(&url)
@@ -489,14 +568,17 @@ mod transport_tests {
             assert_eq!(h.await.unwrap(), 201, "every upload lands");
         }
 
-        // Commit after the storm: envelope must match exactly.
+        // Commit after the storm: CAS envelope must be complete.
+        let mut body = serde_json::to_value(&receipt).unwrap();
+        blob_hashes.sort();
+        body["blobs"] = serde_json::json!(blob_hashes);
         let resp = http
             .post(format!(
                 "{}/v1/snapshots/{}/commit",
                 env.base_url, receipt.snapshot_id
             ))
             .bearer_auth(&env.append)
-            .json(&receipt)
+            .json(&body)
             .send()
             .await
             .unwrap();
@@ -525,22 +607,34 @@ mod transport_tests {
         let built = tempfile::tempdir().expect("built");
 
         let r1 = build_fixture_snapshot(built.path(), 0xA1);
-        c.push_snapshot(&built.path().join(&r1.snapshot_id))
-            .await
-            .expect("push 1");
+        c.push_snapshot(
+            &built.path().join(&r1.snapshot_id),
+            None,
+            &wrapping_for(0xA1),
+        )
+        .await
+        .expect("push 1");
         let r2 = build_fixture_snapshot(built.path(), 0xA1);
-        c.push_snapshot(&built.path().join(&r2.snapshot_id))
-            .await
-            .expect("push 2");
+        c.push_snapshot(
+            &built.path().join(&r2.snapshot_id),
+            None,
+            &wrapping_for(0xA1),
+        )
+        .await
+        .expect("push 2");
         // Distinct wrapping keys per snapshot would fail verify — same key
         // (0xA1 salt) keeps artifacts coherent; ids differ per build.
         assert_eq!(c.list_snapshots().await.unwrap().len(), 2);
 
         // Third commit trips auto-prune: oldest (r1) is deleted, newest 2 stay.
         let r3 = build_fixture_snapshot(built.path(), 0xA1);
-        c.push_snapshot(&built.path().join(&r3.snapshot_id))
-            .await
-            .expect("push 3");
+        c.push_snapshot(
+            &built.path().join(&r3.snapshot_id),
+            None,
+            &wrapping_for(0xA1),
+        )
+        .await
+        .expect("push 3");
         let listed = c.list_snapshots().await.unwrap();
         assert_eq!(listed.len(), 2, "auto-prune trimmed to newest 2");
         let ids: Vec<&str> = listed.iter().map(|r| r.snapshot_id.as_str()).collect();
@@ -755,5 +849,110 @@ mod transport_tests {
             "orphaned blob removed by GC"
         );
         assert!(blob_on_disk(&env, &new_private));
+    }
+
+    /// Acceptance criterion 2: a second backup with no new recordings
+    /// re-uploads ZERO recording blobs — every recording HEAD says
+    /// present; only the always-new DB + wrapped-key blobs transfer.
+    #[tokio::test]
+    async fn second_cas_push_uploads_no_recording_blobs() {
+        let env = spawn_agent().await;
+        let c = client(&env);
+        let built = tempfile::tempdir().expect("built");
+
+        let (r1, recordings) =
+            build_fixture_snapshot_staged(built.path(), 0xB1, snapshot::StagingMode::Stream, None);
+        let (s1, stats1) = c
+            .push_snapshot(
+                &built.path().join(&r1.snapshot_id),
+                Some(&recordings),
+                &wrapping_for(0xB1),
+            )
+            .await
+            .expect("push 1");
+        assert_eq!(s1.snapshot_id, r1.snapshot_id);
+        // First push carries everything: recording blob + DB + wrapped key.
+        assert_eq!(stats1.uploaded, 3, "initial full: all blobs new");
+        assert_eq!(stats1.skipped, 0);
+
+        // Same sources, second build: the recording blob is byte-identical
+        // (immutable ciphertext) so its hash — and the HEAD — match.
+        let (r2, _) = build_fixture_snapshot_staged(
+            built.path(),
+            0xB1,
+            snapshot::StagingMode::Stream,
+            Some(&recordings),
+        );
+        let (_, stats2) = c
+            .push_snapshot(
+                &built.path().join(&r2.snapshot_id),
+                Some(&recordings),
+                &wrapping_for(0xB1),
+            )
+            .await
+            .expect("push 2");
+        assert_eq!(
+            stats2.skipped, 1,
+            "the recording blob is already on the target"
+        );
+        assert_eq!(
+            stats2.uploaded, 2,
+            "only the always-new DB + wrapped-key blobs transfer"
+        );
+
+        // And the pulled copy verifies end-to-end (R5).
+        let pulled = tempfile::tempdir().expect("pulled");
+        let local = c
+            .pull_snapshot(Some(&r2.snapshot_id), pulled.path(), &wrapping_for(0xB1))
+            .await
+            .expect("pull verifies");
+        assert!(local.ends_with(&r2.snapshot_id));
+    }
+
+    /// Acceptance criterion 3: one new recording → exactly that
+    /// recording's blob uploads, plus the always-new small blobs.
+    #[tokio::test]
+    async fn cas_push_with_one_new_recording_uploads_only_its_blob() {
+        let env = spawn_agent().await;
+        let c = client(&env);
+        let built = tempfile::tempdir().expect("built");
+
+        let (r1, recordings) =
+            build_fixture_snapshot_staged(built.path(), 0xB2, snapshot::StagingMode::Stream, None);
+        c.push_snapshot(
+            &built.path().join(&r1.snapshot_id),
+            Some(&recordings),
+            &wrapping_for(0xB2),
+        )
+        .await
+        .expect("push 1");
+
+        // A new recording lands between backups.
+        let wav_key = medical_security::file_crypto::derive_file_key(&[0xB2u8; 32]);
+        let blob = medical_security::file_crypto::encrypt_bytes_with_key(
+            &wav_key,
+            b"RIFF a brand new patient recording",
+        )
+        .unwrap();
+        std::fs::write(recordings.join("r1.enc"), blob).unwrap();
+
+        let (r2, _) = build_fixture_snapshot_staged(
+            built.path(),
+            0xB2,
+            snapshot::StagingMode::Stream,
+            Some(&recordings),
+        );
+        let (_, stats2) = c
+            .push_snapshot(
+                &built.path().join(&r2.snapshot_id),
+                Some(&recordings),
+                &wrapping_for(0xB2),
+            )
+            .await
+            .expect("push 2");
+        // New: the new recording + fresh DB + fresh wrapped key.
+        assert_eq!(stats2.uploaded, 3, "one new recording blob + DB + key");
+        // Old recording: skipped.
+        assert_eq!(stats2.skipped, 1);
     }
 }

@@ -189,11 +189,18 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
                     snapshot_id: Some(built.clone()),
                     pushed_to: None,
                 };
-                let pushed = block_on(client.push_snapshot(&local_dir))
-                    .map_err(&push)?
-                    .map_err(|e| push(e.to_string()))?;
+                let (pushed, push_stats) = block_on(client.push_snapshot(
+                    &local_dir,
+                    Some(&cfg.recordings_dir),
+                    &wrapping_key,
+                ))
+                .map_err(&push)?
+                .map_err(|e| push(e.to_string()))?;
                 debug_assert_eq!(pushed.snapshot_id, receipt.snapshot_id);
-                events.push(ok(&format!("pushed to {}", target.url)));
+                events.push(ok(&format!(
+                    "pushed to {} ({} new blob(s), {} already on target)",
+                    target.url, push_stats.uploaded, push_stats.skipped
+                )));
                 pushed_to = Some(target.url.clone());
 
                 std::fs::create_dir_all(staging).map_err(|e| JobFail {

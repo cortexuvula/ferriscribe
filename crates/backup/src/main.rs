@@ -315,10 +315,15 @@ async fn cmd_push(flags: &Flags) -> CmdResult {
     let url = flags.req("url")?;
     let token = flags.req("token")?;
     let dir = flags.req("snapshot-dir")?;
-    let receipt = BackupClient::new(url, token)
-        .push_snapshot(Path::new(&dir))
+    let wrapping = resolve_wrapping_key(flags)?;
+    let recordings = flags.get("recordings-dir").map(PathBuf::from);
+    let (receipt, stats) = BackupClient::new(url, token)
+        .push_snapshot(Path::new(&dir), recordings.as_deref(), &wrapping)
         .await?;
-    println!("pushed {}", receipt.snapshot_id);
+    println!(
+        "pushed {} ({} new blob(s), {} already on target)",
+        receipt.snapshot_id, stats.uploaded, stats.skipped
+    );
     Ok(())
 }
 

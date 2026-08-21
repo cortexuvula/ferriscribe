@@ -441,6 +441,18 @@ async fn commit_snapshot(
     if receipt.snapshot_id != id {
         return Err(bad_request("receipt id does not match URL id"));
     }
+    // Format/transport agreement: a v3 (CAS) receipt MUST commit with the
+    // blob list — otherwise the target would hold a snapshot that CAS
+    // pulls (version-gated) can never fetch. Fail loudly at commit rather
+    // than represent the mixed state.
+    if receipt.version >= 3 && body.blobs.is_empty() {
+        return Err(bad_request(
+            "v3 snapshots must commit with their blob reference list",
+        ));
+    }
+    if receipt.version < 3 && !body.blobs.is_empty() {
+        return Err(bad_request("legacy v2 commits do not carry a blob list"));
+    }
 
     // Hold the SAME per-snapshot lock as put_file across the entire
     // validate→freeze window — no upload can slip past the envelope
