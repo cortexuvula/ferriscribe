@@ -76,7 +76,7 @@ bytemuck = { version = "1", features = ["derive"] }
 # sharing; hoisted here so the platform backends cannot drift between them.
 rand = "0.9"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.10"
 hmac = "0.12"
 axum = "0.8"

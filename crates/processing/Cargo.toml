@@ -16,7 +16,7 @@ chrono = { workspace = true }
 async-trait = { workspace = true }
 regex = { workspace = true }
 pdf-extract = "0.7"
-base64 = "0.22"
+base64 = "0.23"
 zip = "2.4"
 quick-xml = "0.36"
 calamine = "0.26"
