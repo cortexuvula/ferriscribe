@@ -539,4 +539,212 @@ mod transport_tests {
         assert!(ids.contains(&r2.snapshot_id.as_str()));
         assert!(ids.contains(&r3.snapshot_id.as_str()));
     }
+
+    // ── content-addressed blob store (CAS / snapshot format v3) ──────────
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(bytes);
+        hex::encode(h.finalize())
+    }
+
+    async fn put_blob(env: &Env, hash: &str, body: Vec<u8>) -> reqwest::StatusCode {
+        reqwest::Client::new()
+            .put(format!("{}/v1/blobs/{hash}", env.base_url))
+            .bearer_auth(&env.append)
+            .body(body)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn head_blob(env: &Env, hash: &str) -> reqwest::StatusCode {
+        reqwest::Client::new()
+            .head(format!("{}/v1/blobs/{hash}", env.base_url))
+            .bearer_auth(&env.append)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
+    fn blob_on_disk(env: &Env, hash: &str) -> bool {
+        env._root
+            .path()
+            .join(agent::BLOBS_DIR)
+            .join(&hash[..2])
+            .join(hash)
+            .is_file()
+    }
+
+    /// A fabricated v3 receipt for CAS commit tests — the agent validates
+    /// id match + caps only (it is key-free by design).
+    fn cas_receipt(id: &str, blobs: &[String]) -> serde_json::Value {
+        serde_json::json!({
+            "snapshot_id": id,
+            "version": 3,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "file_count": blobs.len() as u64,
+            "total_bytes": 42u64 * blobs.len() as u64,
+            "recording_count": 0u64,
+            "hmac_tag": "00".repeat(32),
+            "blobs": blobs,
+        })
+    }
+
+    async fn put_manifest_file(env: &Env, id: &str) {
+        let status = reqwest::Client::new()
+            .put(format!(
+                "{}/v1/snapshots/{id}/file?path=manifest.json.enc",
+                env.base_url
+            ))
+            .bearer_auth(&env.append)
+            .body(b"opaque-encrypted-manifest-bytes".to_vec())
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, 201, "manifest upload");
+    }
+
+    async fn commit_cas(env: &Env, body: &serde_json::Value) -> reqwest::StatusCode {
+        reqwest::Client::new()
+            .post(format!(
+                "{}/v1/snapshots/{}/commit",
+                env.base_url,
+                body["snapshot_id"].as_str().unwrap()
+            ))
+            .bearer_auth(&env.append)
+            .json(body)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn blob_put_head_get_roundtrip_is_write_once() {
+        let env = spawn_agent().await;
+        let content = b"ciphertext-bytes-of-a-recording".to_vec();
+        let hash = sha256_hex(&content);
+
+        // Unknown before upload.
+        assert_eq!(head_blob(&env, &hash).await, 404);
+        // Upload: streamed, hash-validated, created.
+        assert_eq!(put_blob(&env, &hash, content.clone()).await, 201);
+        assert_eq!(head_blob(&env, &hash).await, 204);
+        // Write-once: the same blob PUTs as a no-op (200), never a rewrite.
+        assert_eq!(put_blob(&env, &hash, content.clone()).await, 200);
+        // "Overwriting" an existing blob with DIFFERENT bytes is a no-op
+        // too — the stored bytes win, the body is never even hashed.
+        assert_eq!(
+            put_blob(&env, &hash, b"tampered-different-bytes".to_vec()).await,
+            200,
+            "existing blob is never rewritten"
+        );
+        // The anti-poisoning guard applies to NEW keys: bytes that don't
+        // hash to the claimed key are rejected and nothing is stored.
+        let fresh = sha256_hex(b"a-fresh-blob-key");
+        assert_eq!(
+            put_blob(&env, &fresh, b"bytes-that-do-not-match".to_vec()).await,
+            400,
+            "hash mismatch must be rejected for a new blob"
+        );
+        assert!(!blob_on_disk(&env, &fresh), "rejected blob leaves no file");
+        // GET returns exactly the stored bytes.
+        let bytes = reqwest::Client::new()
+            .get(format!("{}/v1/blobs/{hash}", env.base_url))
+            .bearer_auth(&env.append)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], &content[..]);
+        // A malformed key is rejected outright.
+        assert_eq!(put_blob(&env, "not-a-hash", content.clone()).await, 400);
+    }
+
+    #[tokio::test]
+    async fn cas_commit_requires_every_referenced_blob() {
+        let env = spawn_agent().await;
+        let content = b"some-blob".to_vec();
+        let present = sha256_hex(&content);
+        let missing = sha256_hex(b"never-uploaded");
+        assert_eq!(put_blob(&env, &present, content).await, 201);
+        put_manifest_file(&env, "snap-cas-1").await;
+
+        // A referenced-but-absent blob fails the commit; nothing lands.
+        let body = cas_receipt("snap-cas-1", &[present.clone(), missing.clone()]);
+        assert_eq!(commit_cas(&env, &body).await, 400);
+        assert!(!env._root.path().join("snap-cas-1/.committed").exists());
+
+        // With every blob present the commit succeeds and lays down the
+        // plaintext reference index.
+        let body = cas_receipt("snap-cas-1", std::slice::from_ref(&present));
+        assert_eq!(commit_cas(&env, &body).await, 201);
+        let idx: Vec<String> = serde_json::from_str(
+            &std::fs::read_to_string(
+                env._root
+                    .path()
+                    .join("snap-cas-1")
+                    .join(agent::BLOBS_IDX_FILE),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(idx, vec![present]);
+    }
+
+    #[tokio::test]
+    async fn blob_gc_keeps_referenced_blobs_and_removes_orphans() {
+        // Two CAS snapshots sharing one blob; prune to the newest — the
+        // shared blob survives (still referenced), the oldest snapshot's
+        // private blob is garbage-collected.
+        let env = spawn_agent().await;
+        let shared = sha256_hex(b"shared-blob");
+        let old_private = sha256_hex(b"old-private-blob");
+        let new_private = sha256_hex(b"new-private-blob");
+        for (hash, body) in [
+            (&shared, b"shared-blob".to_vec()),
+            (&old_private, b"old-private-blob".to_vec()),
+            (&new_private, b"new-private-blob".to_vec()),
+        ] {
+            assert_eq!(put_blob(&env, hash, body).await, 201);
+        }
+
+        put_manifest_file(&env, "snap-old").await;
+        let old_receipt = cas_receipt("snap-old", &[shared.clone(), old_private.clone()]);
+        assert_eq!(commit_cas(&env, &old_receipt).await, 201);
+        // Age the first snapshot so prune's newest-first ordering is
+        // unambiguous even within the same second.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        put_manifest_file(&env, "snap-new").await;
+        let new_receipt = cas_receipt("snap-new", &[shared.clone(), new_private.clone()]);
+        assert_eq!(commit_cas(&env, &new_receipt).await, 201);
+
+        // Admin prune to the newest 1 → oldest snapshot + its orphan blob
+        // go; the shared blob stays.
+        let status = reqwest::Client::new()
+            .post(format!("{}/v1/admin/prune?keep=1", env.base_url))
+            .bearer_auth(&env.admin)
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, 200);
+        assert!(
+            !env._root.path().join("snap-old").exists(),
+            "old snapshot pruned"
+        );
+        assert!(blob_on_disk(&env, &shared), "shared blob survives GC");
+        assert!(
+            !blob_on_disk(&env, &old_private),
+            "orphaned blob removed by GC"
+        );
+        assert!(blob_on_disk(&env, &new_private));
+    }
 }
