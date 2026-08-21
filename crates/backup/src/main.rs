@@ -465,6 +465,10 @@ fn cmd_install_schedule(flags: &Flags) -> CmdResult {
         url: flags.get("url").unwrap_or("").to_string(),
         token: flags.get("token").unwrap_or("").to_string(),
         snapshots_dir: data_dir.join("backups"),
+        recordings_dir: flags
+            .get("recordings-dir")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("recordings")),
         log_dir: data_dir.join("logs"),
     };
     let path = schedule::install(&cfg)?;

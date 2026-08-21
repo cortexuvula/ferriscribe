@@ -29,6 +29,12 @@ pub struct ScheduleConfig {
     pub token: String,
     /// Where snapshot staging dirs are written.
     pub snapshots_dir: PathBuf,
+    /// Recordings directory resolved AT INSTALL TIME from the app's
+    /// configured storage path. Baked into the plist because the
+    /// scheduled CLI run must not need to open the (encrypted) DB to
+    /// discover it — without this, custom-folder installs silently
+    /// backed up an empty default recordings dir.
+    pub recordings_dir: PathBuf,
     /// Log files for launchd to capture stdout/stderr into.
     pub log_dir: PathBuf,
 }
@@ -85,6 +91,8 @@ pub fn schedule_args(cfg: &ScheduleConfig) -> Vec<String> {
         "backup-and-push".to_string(),
         "--out".to_string(),
         cfg.snapshots_dir.to_string_lossy().into_owned(),
+        "--recordings-dir".to_string(),
+        cfg.recordings_dir.to_string_lossy().into_owned(),
     ];
     if !cfg.url.is_empty() {
         args.push("--url".into());
@@ -245,6 +253,7 @@ mod tests {
             url: "http://100.64.0.2:8741".into(),
             token: "tok&<xml>".into(),
             snapshots_dir: PathBuf::from("/tmp/snaps"),
+            recordings_dir: PathBuf::from("/Volumes/Audio/recordings"),
             log_dir: PathBuf::from("/tmp/logs"),
         }
     }
@@ -266,6 +275,10 @@ mod tests {
         let args = schedule_args(&cfg());
         assert_eq!(args[1], "backup-and-push");
         assert!(args.contains(&"--url".to_string()));
+        // The resolved recordings dir is ALWAYS baked in — the scheduled
+        // run must not guess (custom storage-path installs).
+        let idx = args.iter().position(|a| a == "--recordings-dir").unwrap();
+        assert_eq!(args[idx + 1], "/Volumes/Audio/recordings");
         // Local-only config drops url/token args.
         let mut local = cfg();
         local.url = String::new();

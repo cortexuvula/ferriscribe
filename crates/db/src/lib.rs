@@ -173,6 +173,10 @@ impl From<DbError> for medical_core::error::AppError {
 /// Returns [`DbError::Sqlite`] on open, key, or VACUUM failure.
 pub fn snapshot_db_to(db_path: &Path, db_key: [u8; 32], dest: &Path) -> DbResult<()> {
     let conn = rusqlite::Connection::open(db_path)?;
+    // Match the app pool's busy_timeout: the backup runs while the app may
+    // be writing, and VACUUM INTO against a busy DB should WAIT, not fail
+    // the whole nightly job with an immediate SQLITE_BUSY.
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
     encryption::apply_pragma_key(&conn, &db_key)?;
     // Pre-flight: with a wrong key this fails (or returns garbage rows)
     // before we spend time on the VACUUM.

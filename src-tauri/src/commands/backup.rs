@@ -264,6 +264,13 @@ pub async fn backup_install_schedule(
         .map_err(|e| AppError::Config(format!("config task: {e}")))??
     };
 
+    // Resolve the recordings dir from AppConfig (storage path when set)
+    // and BAKE it into the schedule: the nightly CLI run must not need to
+    // open the encrypted DB to discover it — without this, custom-folder
+    // installs would silently back up an empty default recordings dir.
+    let config = load_config(&state).await?;
+    let recordings_dir = recordings_dir_for(&config, &state.data_dir);
+
     let data_dir = state.data_dir.clone();
     let (binary_path, plist_name) =
         tokio::task::spawn_blocking(move || -> AppResult<(PathBuf, String)> {
@@ -275,6 +282,7 @@ pub async fn backup_install_schedule(
                 url: effective_url,
                 token: effective_token,
                 snapshots_dir: data_dir.join("backups"),
+                recordings_dir,
                 log_dir: data_dir.join("logs"),
             };
             let plist = schedule::install(&cfg).map_err(backup_err)?;
