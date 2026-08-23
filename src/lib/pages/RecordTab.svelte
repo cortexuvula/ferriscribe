@@ -28,7 +28,7 @@
   import { latestTokensPerSecond } from '../utils/generationStats';
   import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
   import { useOcr } from '../composables/useOcr.svelte';
-  import { getBackupStatus } from '../api/backup';
+  import { getBackupStatus, isProtected } from '../api/backup';
   import { settingsNav } from '../stores/settingsNav.svelte';
 
   type Props = {
@@ -138,7 +138,7 @@
     if (!localStorage.getItem('ferriscribe-backup-nudge-dismissed')) {
       getBackupStatus()
         .then((s) => {
-          if (backupNudgeAlive && !s.wrappingKeyPresent) backupNudgeVisible = true;
+          if (backupNudgeAlive && !isProtected(s)) backupNudgeVisible = true;
         })
         .catch(() => {});
     }
@@ -500,7 +500,7 @@
     <div class="backup-nudge" role="status">
       <span>
         Your recordings and notes currently exist only on this machine.
-        Set up encrypted off-machine backup to survive a disk failure.
+        Set up an encrypted backup to a drive or server to survive a disk failure.
       </span>
       <button
         class="nudge-action"
