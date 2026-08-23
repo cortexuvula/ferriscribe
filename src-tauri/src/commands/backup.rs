@@ -85,7 +85,11 @@ pub async fn backup_status(state: tauri::State<'_, AppState>) -> AppResult<Backu
         && config.backup_append_token.is_some();
     let destination_kind = if has_agent {
         "agent"
-    } else if config.backup_dest_path.as_deref().is_some_and(|p| !p.is_empty()) {
+    } else if config
+        .backup_dest_path
+        .as_deref()
+        .is_some_and(|p| !p.is_empty())
+    {
         "folder"
     } else {
         "local-only"
@@ -243,8 +247,7 @@ fn merge_destination(
 ) -> AppResult<EffectiveDestination> {
     if url.is_some() && dest.is_some() {
         return Err(AppError::InvalidInput(
-            "choose one destination: the backup server (URL + token) or a folder — not both"
-                .into(),
+            "choose one destination: the backup server (URL + token) or a folder — not both".into(),
         ));
     }
     // An actively-passed choice wins over a stale stored one of the other
@@ -273,8 +276,7 @@ fn merge_destination(
         // Only reachable when BOTH kinds linger in stored config and the
         // call passed neither — an ambiguous state no UI flow creates.
         return Err(AppError::InvalidInput(
-            "choose one destination: the backup server (URL + token) or a folder — not both"
-                .into(),
+            "choose one destination: the backup server (URL + token) or a folder — not both".into(),
         ));
     }
     if !eff_url.is_empty() && eff_token.is_empty() {
@@ -508,15 +510,17 @@ pub async fn backup_test_destination(dest_path: String) -> AppResult<Destination
         }
         let free_bytes = fs2::available_space(&path).ok();
         let probe = path.join(".ferriscribe-probe");
-        let writable = std::fs::write(&probe, b"probe").is_ok()
-            && std::fs::remove_file(&probe).is_ok();
+        let writable =
+            std::fs::write(&probe, b"probe").is_ok() && std::fs::remove_file(&probe).is_ok();
         DestinationProbe {
             writable,
             free_bytes,
             problem: if writable {
                 None
             } else {
-                Some("FerriScribe can't write to this folder — check the drive's permissions".into())
+                Some(
+                    "FerriScribe can't write to this folder — check the drive's permissions".into(),
+                )
             },
         }
     })
@@ -629,9 +633,7 @@ mod tests {
         // Also when a token was never stored and only the URL is re-sent.
         config.backup_target_url = Some("http://t:8741".into());
         config.backup_append_token = None;
-        assert!(
-            merge_destination(&mut config, Some("http://t:8741".into()), None, None).is_err()
-        );
+        assert!(merge_destination(&mut config, Some("http://t:8741".into()), None, None).is_err());
 
         // A stored token satisfies the requirement.
         config.backup_append_token = Some(SecretString("kept".into()));
@@ -660,8 +662,8 @@ mod tests {
         let mut config = AppConfig::default();
         config.backup_target_url = Some("http://t:8741".into());
         config.backup_append_token = Some(SecretString("tok".into()));
-        let d = merge_destination(&mut config, None, None, Some("/Volumes/BK".into()))
-            .expect("switch");
+        let d =
+            merge_destination(&mut config, None, None, Some("/Volumes/BK".into())).expect("switch");
         assert_eq!(
             d,
             EffectiveDestination::Folder {
@@ -696,13 +698,15 @@ mod tests {
     #[test]
     fn merge_destination_rejects_both_passed_in_one_call() {
         let mut config = AppConfig::default();
-        assert!(merge_destination(
-            &mut config,
-            Some("http://t:8741".into()),
-            None,
-            Some("/Volumes/BK".into())
-        )
-        .is_err());
+        assert!(
+            merge_destination(
+                &mut config,
+                Some("http://t:8741".into()),
+                None,
+                Some("/Volumes/BK".into())
+            )
+            .is_err()
+        );
     }
 
     #[test]

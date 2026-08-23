@@ -90,7 +90,10 @@ pub fn push_to_folder(
     std::fs::write(tmp.join(MANIFEST_FILE), &manifest_bytes)?;
     let mut hashes: Vec<&String> = seen.iter().collect();
     hashes.sort();
-    std::fs::write(tmp.join(BLOBS_IDX_FILE), serde_json::to_vec_pretty(&hashes)?)?;
+    std::fs::write(
+        tmp.join(BLOBS_IDX_FILE),
+        serde_json::to_vec_pretty(&hashes)?,
+    )?;
     std::fs::write(tmp.join(COMMITTED_MARKER), b"1")?;
     set_readonly_tree_files(&tmp);
     std::fs::rename(&tmp, &snap_dir)?;
@@ -198,9 +201,8 @@ pub fn prune_folder_store(store_root: &Path, keep: usize) -> Vec<String> {
 
 fn decrypt_manifest(bytes: &[u8], wrapping_key: &[u8; 32]) -> BackupResult<SnapshotManifest> {
     let aes_key = crate::keys::snapshot_aes_key(wrapping_key);
-    let plain = medical_security::file_crypto::decrypt_bytes_with_key(&aes_key, bytes).map_err(
-        |e| crate::BackupError::Verification(format!("manifest decrypt failed: {e}")),
-    )?;
+    let plain = medical_security::file_crypto::decrypt_bytes_with_key(&aes_key, bytes)
+        .map_err(|e| crate::BackupError::Verification(format!("manifest decrypt failed: {e}")))?;
     serde_json::from_slice(&plain)
         .map_err(|e| crate::BackupError::Format(format!("manifest parse: {e}")))
 }
@@ -396,9 +398,13 @@ mod tests {
         let store = tempfile::tempdir().unwrap();
         let (r1, wrapping, recordings) = fixture_snapshot(built.path(), 0x11, None);
 
-        let (pushed, stats1) =
-            push_to_folder(&built.path().join(&r1.snapshot_id), store.path(), None, &wrapping)
-                .unwrap();
+        let (pushed, stats1) = push_to_folder(
+            &built.path().join(&r1.snapshot_id),
+            store.path(),
+            None,
+            &wrapping,
+        )
+        .unwrap();
         assert_eq!(pushed.snapshot_id, r1.snapshot_id);
         assert_eq!(stats1.uploaded, 3, "db + wrapped key + recording");
         assert_eq!(stats1.skipped, 0);
@@ -412,16 +418,23 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(snap.join(BLOBS_IDX_FILE)).unwrap())
                 .unwrap();
         for hash in &idx {
-            assert!(agent::blob_path(store.path(), hash).is_file(), "blob {hash}");
+            assert!(
+                agent::blob_path(store.path(), hash).is_file(),
+                "blob {hash}"
+            );
         }
 
         // Second build over the SAME recordings dir → the recording blob
         // is byte-identical (immutable ciphertext) so it is skipped; only
         // the always-fresh DB + wrapped-key blobs transfer.
         let (r2, _, _) = fixture_snapshot(built.path(), 0x11, Some(&recordings));
-        let (_, stats2) =
-            push_to_folder(&built.path().join(&r2.snapshot_id), store.path(), None, &wrapping)
-                .unwrap();
+        let (_, stats2) = push_to_folder(
+            &built.path().join(&r2.snapshot_id),
+            store.path(),
+            None,
+            &wrapping,
+        )
+        .unwrap();
         assert_eq!(stats2.skipped, 1, "the recording blob is already stored");
         assert_eq!(
             stats2.uploaded, 2,
@@ -434,8 +447,13 @@ mod tests {
         let built = tempfile::tempdir().unwrap();
         let store = tempfile::tempdir().unwrap();
         let (r1, wrapping, _) = fixture_snapshot(built.path(), 0x22, None);
-        push_to_folder(&built.path().join(&r1.snapshot_id), store.path(), None, &wrapping)
-            .unwrap();
+        push_to_folder(
+            &built.path().join(&r1.snapshot_id),
+            store.path(),
+            None,
+            &wrapping,
+        )
+        .unwrap();
 
         // Clean assemble verifies end-to-end.
         let out = tempfile::tempdir().unwrap();
@@ -496,12 +514,22 @@ mod tests {
         let built = tempfile::tempdir().unwrap();
         let store = tempfile::tempdir().unwrap();
         let (r1, wrapping, recordings) = fixture_snapshot(built.path(), 0x44, None);
-        push_to_folder(&built.path().join(&r1.snapshot_id), store.path(), None, &wrapping)
-            .unwrap();
+        push_to_folder(
+            &built.path().join(&r1.snapshot_id),
+            store.path(),
+            None,
+            &wrapping,
+        )
+        .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let (r2, _, _) = fixture_snapshot(built.path(), 0x44, Some(&recordings));
-        push_to_folder(&built.path().join(&r2.snapshot_id), store.path(), None, &wrapping)
-            .unwrap();
+        push_to_folder(
+            &built.path().join(&r2.snapshot_id),
+            store.path(),
+            None,
+            &wrapping,
+        )
+        .unwrap();
 
         // Age every blob past the GC grace window so the orphan sweep can
         // actually collect (fresh orphans are in-flight-push protection).
@@ -522,8 +550,14 @@ mod tests {
 
         let pruned = prune_folder_store(store.path(), 1);
         assert_eq!(pruned, vec![r1.snapshot_id.clone()]);
-        assert!(!store.path().join(&r1.snapshot_id).exists(), "oldest pruned");
-        assert!(store.path().join(&r2.snapshot_id).exists(), "newest survives");
+        assert!(
+            !store.path().join(&r1.snapshot_id).exists(),
+            "oldest pruned"
+        );
+        assert!(
+            store.path().join(&r2.snapshot_id).exists(),
+            "newest survives"
+        );
         // The surviving snapshot still assembles (its blobs were kept).
         let out = tempfile::tempdir().unwrap();
         assert!(assemble_from_folder(store.path(), None, out.path(), &wrapping).is_ok());

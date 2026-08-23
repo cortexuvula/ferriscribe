@@ -308,8 +308,25 @@ copy: `alias ferriscribe-backup="/Applications/FerriScribe.app/Contents/MacOS/fe
 
 ### Setup (one time)
 
-The guided path is **Settings → Backup** in the app: it generates the escrow
-artifacts, verifies them, installs the daily schedule, and offers "Back up now".
+The guided path is **Settings → Backup** in the app (or the final onboarding
+step): a wizard walks through picking a destination, printing the recovery
+sheet, choosing a backup time, and running a first backup + restore test.
+Destination options, easiest first:
+
+- **USB / external drive, or any folder** (including one that syncs to
+  iCloud Drive or Dropbox): pick it with the folder picker; the wizard
+  checks it's writable and shows free space. The store layout is
+  identical to what `serve` writes, content-addressed so recordings
+  transfer once; retention keeps the newest 30 snapshots. A `/Volumes`
+  destination also gets a launchd `StartOnMount` trigger — plugging the
+  drive in fires a catch-up backup. **Trade-off:** this machine can
+  rewrite the folder, so it lacks the append-only ransomware protection
+  of the server target — unplug USB drives between backups.
+- **Backup server** (advanced, append-only): run `ferriscribe-backup
+  serve` on a second machine as below — the strongest model, and the
+  wizard's "Test connection" probe validates reachability + token at
+  setup time.
+
 The equivalent CLI flow, including the target machine which has no app:
 
 ```bash
@@ -329,6 +346,10 @@ ferriscribe-backup serve --root /srv/ferriscribe-backups --bind 100.64.0.2:8741
 #    (Or use Settings → Backup → Daily schedule.)
 ferriscribe-backup install-schedule --hour 3 --minute 30 \
   --url http://100.64.0.2:8741 --token <the append token>
+
+#    Folder destination instead of a server (USB drive, NAS share, or a
+#    cloud-synced folder — no second machine needed):
+ferriscribe-backup install-schedule --hour 3 --minute 30 --dest /Volumes/BackupDrive
 ```
 
 The schedule runs **outside the app** (a launchd LaunchAgent pointing at a stable
@@ -359,6 +380,10 @@ alias ferriscribe-backup="/Applications/FerriScribe.app/Contents/MacOS/ferriscri
 ferriscribe-backup pull --url http://100.64.0.2:8741 --token <append> \
   --out ~/restored --escrow-file ~/Desktop/ferriscribe-backup-recovery-sheet.txt
 #    (For the USB escrow instead: --escrow-file /Volumes/STICK/ferriscribe-backup-key.escrow)
+#
+#    Folder destination? Skip the pull — restore straight from the drive's
+#    store (same verification, assembling + HMAC-checking every blob):
+#    ferriscribe-backup restore --store-dir /Volumes/BackupDrive --dest ...
 
 # 2. Restore into the app's data dir. This ALSO installs the snapshot's
 #    database key into this machine's keychain, so the app can open

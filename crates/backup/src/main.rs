@@ -428,13 +428,8 @@ async fn cmd_restore(flags: &Flags) -> CmdResult {
     };
     // --force doubles as the non-empty-destination override: restoring
     // into a used dir mixes old snapshot data with newer files.
-    let report = snapshot::restore_snapshot(
-        &dir,
-        &wrapping,
-        Path::new(&dest),
-        mode,
-        flags.has("force"),
-    )?;
+    let report =
+        snapshot::restore_snapshot(&dir, &wrapping, Path::new(&dest), mode, flags.has("force"))?;
     println!(
         "restored {} → {} ({} files, db key recovered: {})",
         report.snapshot_id, dest, report.files_restored, report.db_key_recovered
@@ -454,7 +449,10 @@ async fn cmd_restore(flags: &Flags) -> CmdResult {
         "db key: {:?} — the restored database will open on this machine",
         report.key_install
     );
-    println!("verify with: ferriscribe-backup drill --snapshot-dir {}", dir.display());
+    println!(
+        "verify with: ferriscribe-backup drill --snapshot-dir {}",
+        dir.display()
+    );
     Ok(())
 }
 

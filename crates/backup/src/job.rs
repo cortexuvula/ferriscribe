@@ -616,11 +616,13 @@ mod tests {
         let outcome = run_backup_job(&cfg, db_key, [0x62u8; 32]);
         assert!(!outcome.success());
         assert!(outcome.status.destination_missing);
-        assert!(outcome
-            .status
-            .failure
-            .as_deref()
-            .is_some_and(|f| f.contains("not available")));
+        assert!(
+            outcome
+                .status
+                .failure
+                .as_deref()
+                .is_some_and(|f| f.contains("not available"))
+        );
         // The status file records it for the pane.
         let persisted = status::read_status(data.path()).unwrap();
         assert!(persisted.destination_missing);
