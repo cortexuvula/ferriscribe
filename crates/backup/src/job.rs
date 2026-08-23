@@ -166,6 +166,20 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
         std::fs::create_dir_all(&out_dir)
             .map_err(|e| JobFail::early(format!("staging dir: {e}")))?;
 
+        // 0. Fail fast on a missing folder destination — BEFORE building.
+        // An unplugged USB drive must not trigger a full VACUUM INTO plus
+        // a hash of the entire recordings library every night, only to
+        // leave a partial Stream-staged snapshot behind (retention only
+        // runs on success, so those would accumulate forever).
+        if let Some(BackupTarget::Folder { path }) = &cfg.target
+            && !path.is_dir()
+        {
+            return Err(JobFail::early_missing(format!(
+                "backup destination not available: {}",
+                path.display()
+            )));
+        }
+
         // 1. Build. Staging by mode: a target push streams recordings from
         // their source (nothing large is staged locally); a local-only
         // run hardlinks them in so the snapshot is self-contained.
@@ -626,6 +640,14 @@ mod tests {
         // The status file records it for the pane.
         let persisted = status::read_status(data.path()).unwrap();
         assert!(persisted.destination_missing);
+        // Fail-fast happens BEFORE building: no partial Stream-staged
+        // snapshot is left in backups/ (retention only runs on success,
+        // so those would otherwise accumulate every night the drive is
+        // unplugged).
+        let leftovers: Vec<_> = std::fs::read_dir(data.path().join("backups"))
+            .map(|rd| rd.flatten().collect())
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "no partial snapshots: {leftovers:?}");
     }
 
     #[test]

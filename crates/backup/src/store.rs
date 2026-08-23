@@ -46,6 +46,17 @@ pub fn push_to_folder(
     let manifest_bytes = std::fs::read(snapshot_dir.join(MANIFEST_FILE))?;
     let manifest = decrypt_manifest(&manifest_bytes, wrapping_key)?;
 
+    // The store root must already exist: never CREATE the destination
+    // itself. If the drive was unplugged between the job's pre-flight
+    // check and here, a blind create_dir_all would silently re-create
+    // the (now empty) mount point on the PARENT volume and write backups
+    // to the wrong disk.
+    if !store_root.is_dir() {
+        return Err(crate::BackupError::Setup(format!(
+            "backup destination not available: {}",
+            store_root.display()
+        )));
+    }
     std::fs::create_dir_all(store_root.join(BLOBS_DIR))?;
     let payload_dir = snapshot_dir.join(PAYLOAD_DIR);
     let mut stats = PushStats::default();

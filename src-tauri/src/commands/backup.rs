@@ -326,15 +326,25 @@ pub async fn backup_install_schedule(
             "time must be a valid 24h hour/minute".into(),
         ));
     }
-    // A folder destination must be attached at install time — a typo'd or
-    // unplugged path must fail HERE, not at 3am (or worse, silently).
-    if let Some(d) = &dest_path
-        && !d.trim().is_empty()
-        && !PathBuf::from(d.trim()).is_dir()
+    // A folder destination must be absolute AND attached at install time —
+    // a typo'd, relative, or unplugged path must fail HERE, not at 3am (or
+    // worse, silently). A relative path is rejected outright: launchd
+    // resolves it against ITS working directory, not the user's.
+    if let Some(d) = dest_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
     {
-        return Err(AppError::InvalidInput(
-            "backup folder not found — connect the drive and pick it again".into(),
-        ));
+        // validate_user_path enforces absolute + canonical + no system
+        // dirs; a relative path would otherwise be resolved by launchd
+        // against ITS working directory, not the user's.
+        let expanded = expand_tilde(d);
+        let path = crate::commands::validate_user_path(&expanded.to_string_lossy())?;
+        if !path.is_dir() {
+            return Err(AppError::InvalidInput(
+                "backup folder not found — connect the drive and pick it again".into(),
+            ));
+        }
     }
 
     // Persist the destination FIRST so the schedule and the in-app

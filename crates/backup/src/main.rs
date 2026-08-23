@@ -345,7 +345,13 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
             medical_backup::job::JobEventKind::Step => println!("{}", event.line),
         }
     }
-    if outcome.success() {
+    if outcome.skipped {
+        // Another job (e.g. the daily timer vs a StartOnMount catch-up)
+        // is already running — not a failure. Exit 0 so launchd doesn't
+        // log spurious nightly errors; the running job owns the status.
+        println!("skipped: another backup job is already running");
+        Ok(())
+    } else if outcome.success() {
         println!("backup job passed");
         Ok(())
     } else {
