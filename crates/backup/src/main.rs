@@ -66,18 +66,19 @@ fn print_usage() {
   escrow verify --file PATH                verify an escrow artifact (sheet or USB)
   backup [--data-dir DIR] [--recordings-dir DIR] [--out DIR]
                                             build an encrypted snapshot locally
-  backup-and-push ... --url URL --token T  build + push to the agent + run a local drill
+  backup-and-push ... (--url URL --token T | --dest DIR)
+                                            build + push (agent or folder) + drill
   push --url URL --token T --snapshot-dir DIR
   pull --url URL --token T [--id ID] --out DIR (--escrow-file F | --key-hex H)
   verify --snapshot-dir DIR (--escrow-file F | --key-hex H)
-  restore --snapshot-dir DIR --dest DIR (--escrow-file F | --key-hex H)
-  drill --snapshot-dir DIR ... | --url URL --token T ...
+  restore (--snapshot-dir DIR | --store-dir DIR) --dest DIR (--escrow-file F | --key-hex H)
+  drill --snapshot-dir DIR | --store-dir DIR | --url URL --token T ...
                                             restore to a temp dir and verify; exits 1
                                             loudly on any failure
   serve --root DIR --bind IP:PORT           run the append-only target agent (tokens via
                                             FERRISCRIBE_BACKUP_APPEND_TOKEN /
                                             FERRISCRIBE_BACKUP_ADMIN_TOKEN)
-  install-schedule --hour H --minute M [--url URL --token T]
+  install-schedule --hour H --minute M [--url URL --token T | --dest DIR]
                                             install the launchd daily backup agent
   uninstall-schedule                       remove the launchd agent"
     );
@@ -304,12 +305,22 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
         db_path,
         keystore_path: Some(data_dir.join("config").join("keys.json")),
         data_dir,
-        target: match flags.get("url") {
-            Some(url) => Some(medical_backup::job::BackupTarget {
+        target: if let Some(dest) = flags.get("dest") {
+            if flags.get("url").is_some() {
+                return Err(medical_backup::BackupError::Setup(
+                    "choose one destination: --url or --dest, not both".into(),
+                ));
+            }
+            Some(medical_backup::job::BackupTarget::Folder {
+                path: PathBuf::from(dest),
+            })
+        } else if let Some(url) = flags.get("url") {
+            Some(medical_backup::job::BackupTarget::Agent {
                 url: url.to_string(),
                 token: flags.req("token")?,
-            }),
-            None => None,
+            })
+        } else {
+            None
         },
         keep_local: flags
             .get("keep-local")
@@ -393,9 +404,20 @@ async fn cmd_verify(flags: &Flags) -> CmdResult {
 }
 
 async fn cmd_restore(flags: &Flags) -> CmdResult {
-    let dir = flags.req("snapshot-dir")?;
-    let dest = flags.req("dest")?;
     let wrapping = resolve_wrapping_key(flags)?;
+    let dir = if let Some(store) = flags.get("store-dir") {
+        // Assemble (with verification) from a folder store instead of a
+        // plain snapshot dir.
+        let staging = std::env::temp_dir().join(format!(
+            "ferriscribe-restore-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&staging)?;
+        medical_backup::store::assemble_from_folder(Path::new(store), None, &staging, &wrapping)?
+    } else {
+        PathBuf::from(flags.req("snapshot-dir")?)
+    };
+    let dest = flags.req("dest")?;
     // R6: install the recovered DB key so the restored database actually
     // opens on this machine. Refuse to clobber a differing live key
     // unless --force (which locks out the CURRENT database).
@@ -407,7 +429,7 @@ async fn cmd_restore(flags: &Flags) -> CmdResult {
     // --force doubles as the non-empty-destination override: restoring
     // into a used dir mixes old snapshot data with newer files.
     let report = snapshot::restore_snapshot(
-        Path::new(&dir),
+        &dir,
         &wrapping,
         Path::new(&dest),
         mode,
@@ -432,7 +454,7 @@ async fn cmd_restore(flags: &Flags) -> CmdResult {
         "db key: {:?} — the restored database will open on this machine",
         report.key_install
     );
-    println!("verify with: ferriscribe-backup drill --snapshot-dir {dir}");
+    println!("verify with: ferriscribe-backup drill --snapshot-dir {}", dir.display());
     Ok(())
 }
 
@@ -441,6 +463,13 @@ async fn cmd_drill(flags: &Flags) -> CmdResult {
 
     let snapshot_dir = if let Some(dir) = flags.get("snapshot-dir") {
         PathBuf::from(dir)
+    } else if let Some(store) = flags.get("store-dir") {
+        let staging = std::env::temp_dir().join(format!(
+            "ferriscribe-drill-store-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&staging)?;
+        medical_backup::store::assemble_from_folder(Path::new(store), None, &staging, &wrapping)?
     } else if let Some(url) = flags.get("url") {
         // Drill the FULL path: pull the latest from the target, then drill.
         let token = flags.req("token")?;
@@ -459,7 +488,7 @@ async fn cmd_drill(flags: &Flags) -> CmdResult {
         local
     } else {
         return Err(medical_backup::BackupError::Escrow(
-            "drill needs --snapshot-dir or --url/--token".into(),
+            "drill needs --snapshot-dir, --store-dir, or --url/--token".into(),
         ));
     };
 
@@ -512,6 +541,11 @@ fn cmd_install_schedule(flags: &Flags) -> CmdResult {
         .req("minute")?
         .parse()
         .map_err(|_| medical_backup::BackupError::Escrow("--minute must be 0-59".into()))?;
+    if flags.get("dest").is_some() && flags.get("url").is_some() {
+        return Err(medical_backup::BackupError::Setup(
+            "choose one destination: --url or --dest, not both".into(),
+        ));
+    }
     let data_dir = default_data_dir();
     let cfg = schedule::ScheduleConfig {
         binary_path: std::env::current_exe()?,
@@ -519,6 +553,7 @@ fn cmd_install_schedule(flags: &Flags) -> CmdResult {
         minute,
         url: flags.get("url").unwrap_or("").to_string(),
         token: flags.get("token").unwrap_or("").to_string(),
+        dest_dir: flags.get("dest").map(PathBuf::from),
         snapshots_dir: data_dir.join("backups"),
         recordings_dir: flags
             .get("recordings-dir")
