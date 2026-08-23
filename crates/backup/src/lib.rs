@@ -34,6 +34,7 @@ pub mod keys;
 pub mod schedule;
 pub mod snapshot;
 pub mod status;
+pub mod store;
 
 /// Errors surfaced by the backup tooling.
 #[derive(Debug, thiserror::Error)]
