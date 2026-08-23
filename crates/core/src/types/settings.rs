@@ -526,6 +526,11 @@ pub struct AppConfig {
     /// The admin/prune token NEVER lives on this machine.
     #[serde(default)]
     pub backup_append_token: Option<SecretString>,
+    /// Folder destination for backups (USB / network / cloud-synced
+    /// folder), alternative to `backup_target_url`. Mutually exclusive
+    /// with it; configuring one clears the other. Absolute path.
+    #[serde(default)]
+    pub backup_dest_path: Option<String>,
 
     // Onboarding
     /// `true` once the user has completed (or skipped through) the first-run
