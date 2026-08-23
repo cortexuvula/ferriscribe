@@ -11,12 +11,13 @@ use crate::drill;
 use crate::snapshot::{self, BuildOptions};
 use crate::status::{self, BackupRunStatus};
 
-/// The backup target agent: URL + append credential. A named struct so a
-/// `(token, url)` transposition cannot compile silently.
+/// Where off-machine copies go. The HTTP agent is append-only (a
+/// compromised source cannot erase history); a folder store is writable
+/// by this machine — easiest to set up, weaker under ransomware.
 #[derive(Debug, Clone)]
-pub struct BackupTarget {
-    pub url: String,
-    pub token: String,
+pub enum BackupTarget {
+    Agent { url: String, token: String },
+    Folder { path: PathBuf },
 }
 
 /// Where the job reads/writes everything. `data_dir` is the app data root
@@ -67,6 +68,7 @@ struct JobFail {
     msg: String,
     snapshot_id: Option<String>,
     pushed_to: Option<String>,
+    destination_missing: bool,
 }
 
 impl JobFail {
@@ -75,6 +77,15 @@ impl JobFail {
             msg: msg.into(),
             snapshot_id: None,
             pushed_to: None,
+            destination_missing: false,
+        }
+    }
+
+    /// Pre-build failure: the destination folder is not attached.
+    fn early_missing(msg: impl Into<String>) -> Self {
+        Self {
+            destination_missing: true,
+            ..Self::early(msg)
         }
     }
 }
@@ -135,6 +146,7 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
                 drill_passed: false,
                 pushed_to: None,
                 failure: Some("skipped: concurrent run".into()),
+                destination_missing: false,
             },
             events,
             skipped: true,
@@ -182,12 +194,13 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
         // 2. Push + drill the TARGET's copy.
         let mut pushed_to: Option<String> = None;
         let drill_dir: PathBuf = match &cfg.target {
-            Some(target) => {
-                let client = BackupClient::new(&target.url, &target.token);
+            Some(BackupTarget::Agent { url, token }) => {
+                let client = BackupClient::new(url, token);
                 let push = |e: String| JobFail {
                     msg: format!("push failed: {e}"),
                     snapshot_id: Some(built.clone()),
                     pushed_to: None,
+                    destination_missing: false,
                 };
                 let (pushed, push_stats) = block_on(client.push_snapshot(
                     &local_dir,
@@ -199,19 +212,21 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
                 debug_assert_eq!(pushed.snapshot_id, receipt.snapshot_id);
                 events.push(ok(&format!(
                     "pushed to {} ({} new blob(s), {} already on target)",
-                    target.url, push_stats.uploaded, push_stats.skipped
+                    url, push_stats.uploaded, push_stats.skipped
                 )));
-                pushed_to = Some(target.url.clone());
+                pushed_to = Some(url.clone());
 
                 std::fs::create_dir_all(staging).map_err(|e| JobFail {
                     msg: format!("drill staging: {e}"),
                     snapshot_id: Some(built),
                     pushed_to: pushed_to.clone(),
+                    destination_missing: false,
                 })?;
                 let pull = |e: String| JobFail {
                     msg: format!("re-pull failed: {e}"),
                     snapshot_id: Some(receipt.snapshot_id.clone()),
                     pushed_to: pushed_to.clone(),
+                    destination_missing: false,
                 };
                 let pulled = block_on(client.pull_snapshot(
                     Some(&receipt.snapshot_id),
@@ -222,6 +237,55 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
                 .map_err(|e| pull(e.to_string()))?;
                 events.push(step("drilling the target's copy (re-pulled + verified)"));
                 pulled
+            }
+            Some(BackupTarget::Folder { path }) => {
+                if !path.is_dir() {
+                    return Err(JobFail::early_missing(format!(
+                        "backup destination not available: {}",
+                        path.display()
+                    )));
+                }
+                let (pushed, push_stats) = crate::store::push_to_folder(
+                    &local_dir,
+                    path,
+                    Some(&cfg.recordings_dir),
+                    &wrapping_key,
+                )
+                .map_err(|e| JobFail {
+                    msg: format!("push failed: {e}"),
+                    snapshot_id: Some(built.clone()),
+                    pushed_to: None,
+                    destination_missing: false,
+                })?;
+                debug_assert_eq!(pushed.snapshot_id, receipt.snapshot_id);
+                events.push(ok(&format!(
+                    "pushed to {} ({} new blob(s), {} already present)",
+                    path.display(),
+                    push_stats.uploaded,
+                    push_stats.skipped
+                )));
+                pushed_to = Some(path.display().to_string());
+
+                std::fs::create_dir_all(staging).map_err(|e| JobFail {
+                    msg: format!("drill staging: {e}"),
+                    snapshot_id: Some(built),
+                    pushed_to: pushed_to.clone(),
+                    destination_missing: false,
+                })?;
+                let assembled = crate::store::assemble_from_folder(
+                    path,
+                    Some(&receipt.snapshot_id),
+                    staging,
+                    &wrapping_key,
+                )
+                .map_err(|e| JobFail {
+                    msg: format!("re-assemble failed: {e}"),
+                    snapshot_id: Some(receipt.snapshot_id.clone()),
+                    pushed_to: pushed_to.clone(),
+                    destination_missing: false,
+                })?;
+                events.push(step("drilling the folder copy (re-assembled + verified)"));
+                assembled
             }
             None => {
                 events.push(step("drilling the local snapshot"));
@@ -246,6 +310,7 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
                     .unwrap_or_else(|| "drill failed".into()),
                 snapshot_id: Some(receipt.snapshot_id),
                 pushed_to,
+                destination_missing: false,
             });
         }
 
@@ -263,12 +328,26 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
             )));
         }
 
+        // Folder destinations are writable by this machine, so retention
+        // there is the writer's job (the agent prunes with its own
+        // authority instead).
+        if let Some(BackupTarget::Folder { path }) = &cfg.target {
+            let pruned = crate::store::prune_folder_store(path, crate::store::DEFAULT_FOLDER_KEEP);
+            if !pruned.is_empty() {
+                events.push(step(&format!(
+                    "folder retention: removed {} old snapshot(s)",
+                    pruned.len()
+                )));
+            }
+        }
+
         Ok(BackupRunStatus {
             last_run_at: chrono::Utc::now(),
             snapshot_id: Some(receipt.snapshot_id),
             drill_passed: true,
             pushed_to,
             failure: None,
+            destination_missing: false,
         })
     };
 
@@ -282,6 +361,7 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
                 drill_passed: false,
                 pushed_to: f.pushed_to,
                 failure: Some(f.msg),
+                destination_missing: f.destination_missing,
             }
         }
     };
@@ -459,6 +539,7 @@ mod tests {
             drill_passed: true,
             pushed_to: None,
             failure: None,
+            destination_missing: false,
         };
         status::write_status(data.path(), &prior).unwrap();
         // Simulate a live holder: fresh lock file.
@@ -481,6 +562,68 @@ mod tests {
         let persisted = status::read_status(data.path()).unwrap();
         assert_eq!(persisted.snapshot_id.as_deref(), Some("snap-prior"));
         assert!(persisted.drill_passed);
+    }
+
+    #[test]
+    fn job_with_folder_target_pushes_and_drills_end_to_end() {
+        let data = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let db_key = [0x31u8; 32];
+        let wrapping = [0x42u8; 32];
+        let (db_path, recordings) = fixture_db(data.path(), db_key);
+
+        let cfg = JobConfig {
+            data_dir: data.path().to_path_buf(),
+            db_path,
+            recordings_dir: recordings,
+            keystore_path: None,
+            target: Some(BackupTarget::Folder {
+                path: store.path().to_path_buf(),
+            }),
+            keep_local: 14,
+        };
+        let outcome = run_backup_job(&cfg, db_key, wrapping);
+        assert!(outcome.success(), "events: {:?}", outcome.events);
+        assert_eq!(
+            outcome.status.pushed_to.as_deref(),
+            Some(store.path().to_string_lossy().as_ref())
+        );
+        assert!(!outcome.status.destination_missing);
+        // The store holds exactly one committed snapshot.
+        assert_eq!(
+            crate::store::list_folder_snapshots(store.path())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn job_with_missing_folder_destination_reports_destination_missing() {
+        let data = tempfile::tempdir().unwrap();
+        let db_key = [0x51u8; 32];
+        let (db_path, recordings) = fixture_db(data.path(), db_key);
+        let missing = data.path().join("no-such-drive");
+
+        let cfg = JobConfig {
+            data_dir: data.path().to_path_buf(),
+            db_path,
+            recordings_dir: recordings,
+            keystore_path: None,
+            target: Some(BackupTarget::Folder { path: missing }),
+            keep_local: 14,
+        };
+        let outcome = run_backup_job(&cfg, db_key, [0x62u8; 32]);
+        assert!(!outcome.success());
+        assert!(outcome.status.destination_missing);
+        assert!(outcome
+            .status
+            .failure
+            .as_deref()
+            .is_some_and(|f| f.contains("not available")));
+        // The status file records it for the pane.
+        let persisted = status::read_status(data.path()).unwrap();
+        assert!(persisted.destination_missing);
     }
 
     #[test]

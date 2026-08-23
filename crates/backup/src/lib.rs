@@ -1061,7 +1061,7 @@ mod transport_tests {
                 db_path: db_path.clone(),
                 recordings_dir: recordings.clone(),
                 keystore_path: None,
-                target: Some(BackupTarget {
+                target: Some(BackupTarget::Agent {
                     url: env.base_url.clone(),
                     token: env.append.clone(),
                 }),
