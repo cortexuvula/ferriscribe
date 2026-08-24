@@ -10,14 +10,16 @@ import { toasts } from './toasts.svelte';
  *
  * State lives here (not in the component) because the tab is conditionally
  * rendered with `{#if activeTab === 'letter_writer'}`, which unmounts the
- * component on every tab switch. Keeping the OCR'd source text, the structured
- * fields, the writer's instructions, and the generated letter here means a user
- * can OCR a document, pop into another tab, and come back without losing their
- * work. The single `useOcr()` instance is owned here too, so its batch token
- * and any in-flight OCR (or generation) survive the round trip.
+ * component on every tab switch. Keeping the OCR'd source text, pasted text,
+ * the structured fields, the writer's instructions, and the generated letter
+ * here means a user can OCR a document, pop into another tab, and come back
+ * without losing their work. The single `useOcr()` instance is owned here
+ * too, so its batch token and any in-flight OCR (or generation) survive the
+ * round trip.
  */
 class LetterWriterStore {
   // Source document inputs + structured fields (persisted across tab switches).
+  pastedText = $state('');
   recipient = $state('');
   letterType = $state('');
   tone = $state('Formal');
@@ -37,7 +39,13 @@ class LetterWriterStore {
   // text and the batch token survive tab switches.
   readonly ocr = useOcr();
 
-  canGenerate = $derived(this.ocr.ocrTextDisplay.trim().length > 0 && !this.generating);
+  // The source document sent to the backend: OCR'd text and pasted text are
+  // both optional; when both are present they are joined into one document.
+  documentText = $derived(
+    [this.ocr.ocrTextDisplay.trim(), this.pastedText.trim()].filter(Boolean).join('\n\n'),
+  );
+
+  canGenerate = $derived(this.documentText.length > 0 && !this.generating);
 
   async handleGenerate(): Promise<void> {
     if (!this.canGenerate) return;
@@ -48,7 +56,7 @@ class LetterWriterStore {
     // destroyed the user's letter (including manual edits) when the
     // request was cancelled (offline dialog) without producing anything.
     try {
-      const letter = await generateLetterFromDocument(this.ocr.ocrTextDisplay.trim(), {
+      const letter = await generateLetterFromDocument(this.documentText, {
         recipient: this.recipient.trim() || undefined,
         letterType: this.letterType || undefined,
         tone: this.tone || undefined,
@@ -78,6 +86,7 @@ class LetterWriterStore {
 
   handleClearAll(): void {
     this.ocr.clearOcr();
+    this.pastedText = '';
     this.recipient = '';
     this.letterType = '';
     this.tone = 'Formal';
