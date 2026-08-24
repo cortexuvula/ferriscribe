@@ -12,7 +12,7 @@
     <div class="lw-header">
       <div>
         <h2>Letter Writer</h2>
-        <p class="hint">OCR a document, then draft a letter from it.</p>
+        <p class="hint">OCR a document or paste text, then draft a letter from it.</p>
       </div>
       <button
         class="btn-secondary"
@@ -34,6 +34,15 @@
         onOcrTextChange={letterWriter.ocr.handleOcrTextChange}
         onRemoveOcrFile={letterWriter.ocr.handleRemoveOcrFile}
       />
+
+      <div class="paste-divider" role="separator">Or paste text</div>
+      <textarea
+        class="paste-textarea"
+        placeholder="Paste copied text here — chart notes, an email, a previous letter…"
+        rows="6"
+        bind:value={letterWriter.pastedText}
+        disabled={letterWriter.generating}
+      ></textarea>
     </section>
 
     <!-- Step 2: letter details + instructions -->
@@ -197,6 +206,23 @@
   .field-label {
     font-size: 12px;
     color: var(--text-muted);
+  }
+
+  .paste-divider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .paste-divider::before,
+  .paste-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background-color: var(--border);
   }
 
   input,
