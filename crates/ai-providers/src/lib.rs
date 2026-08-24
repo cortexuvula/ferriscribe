@@ -38,6 +38,10 @@ pub mod ollama;
 pub mod openai_compat;
 pub mod sse;
 
+// Re-exported so non-streaming consumers outside this crate (e.g. the
+// src-tauri generation stream driver) share ONE think-strip implementation.
+pub use openai_compat::strip_leading_think_block;
+
 use medical_core::traits::AiProvider;
 use std::collections::HashMap;
 use std::sync::Arc;

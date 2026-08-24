@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use medical_ai_providers::strip_leading_think_block;
 use medical_core::error::{AppError, AppResult};
 use medical_core::traits::AiProvider;
 use medical_core::types::{CompletionRequest, CompletionResponse, StreamChunk, UsageInfo};
@@ -109,25 +110,14 @@ async fn stream_with_idle_timeout(
     }
 
     Ok(CompletionResponse {
+        // The provider layer already strips an inlined leading `<think>`
+        // block (see ai-providers openai_compat::think); this second strip
+        // keeps the driver correct for any provider that does not.
         content: strip_leading_think_block(&content).to_string(),
         model,
         usage,
         tool_calls: vec![],
     })
-}
-
-/// Strip a leading `<think>…</think>` block (some providers, notably Ollama
-/// with reasoning models, inline reasoning into content). If the block is
-/// never closed, everything is reasoning — return the empty remainder.
-pub(super) fn strip_leading_think_block(content: &str) -> &str {
-    let trimmed = content.trim_start();
-    let Some(rest) = trimmed.strip_prefix("<think>") else {
-        return content;
-    };
-    match rest.find("</think>") {
-        Some(end) => rest[end + "</think>".len()..].trim_start(),
-        None => "",
-    }
 }
 
 #[cfg(test)]
@@ -228,18 +218,6 @@ mod tests {
             .await
             .expect("completes");
         assert_eq!(resp.content, "SOAP");
-    }
-
-    #[test]
-    fn think_block_edge_cases() {
-        assert_eq!(strip_leading_think_block("  <think> forever"), "");
-        assert_eq!(strip_leading_think_block("no tags"), "no tags");
-        assert_eq!(strip_leading_think_block("<think>x</think>  body"), "body");
-        // Mid-text think blocks are left alone (only a LEADING block is stripped).
-        assert_eq!(
-            strip_leading_think_block("SOAP <think>late</think>"),
-            "SOAP <think>late</think>"
-        );
     }
 
     #[tokio::test]
