@@ -42,6 +42,12 @@ pub struct BackupStatus {
     pub tool_copy_ok: bool,
     /// Scheduling is macOS-only in this build (launchd).
     pub schedule_supported: bool,
+    /// "agent" | "folder" | "local-only"
+    pub destination_kind: String,
+    /// For folder destinations: is the folder attached right now?
+    pub destination_present: bool,
+    /// The last run failed because the destination folder was missing.
+    pub destination_missing: bool,
 }
 
 /// Load the persisted AppConfig (migrated) off the async worker.
@@ -71,11 +77,30 @@ fn recordings_dir_for(
 
 #[tauri::command]
 pub async fn backup_status(state: tauri::State<'_, AppState>) -> AppResult<BackupStatus> {
+    let config = load_config(&state).await?;
+    let has_agent = config
+        .backup_target_url
+        .as_deref()
+        .is_some_and(|u| !u.is_empty())
+        && config.backup_append_token.is_some();
+    let destination_kind = if has_agent {
+        "agent"
+    } else if config
+        .backup_dest_path
+        .as_deref()
+        .is_some_and(|p| !p.is_empty())
+    {
+        "folder"
+    } else {
+        "local-only"
+    }
+    .to_string();
+    let dest_path = config.backup_dest_path.filter(|p| !p.is_empty());
     let data_dir = state.data_dir.clone();
     // Everything below touches the keychain (which can prompt) and the
     // filesystem (tens-of-MB sidecar) — one blocking thread, not the
     // async worker (review: runtime starvation on every pane refresh).
-    let (run, wrapping_key_present, schedule_installed, tool_copy_ok) =
+    let (run, wrapping_key_present, schedule_installed, tool_copy_ok, destination_present) =
         tokio::task::spawn_blocking(move || {
             let run = status::read_status(&data_dir);
             let wrapping_key_present = keychain::get_secret(keychain::KEYCHAIN_BACKUP_KEY_ACCOUNT)
@@ -98,7 +123,16 @@ pub async fn backup_status(state: tauri::State<'_, AppState>) -> AppResult<Backu
                 }
                 None => stable.is_file(),
             };
-            (run, wrapping_key_present, schedule_installed, tool_copy_ok)
+            let destination_present = dest_path
+                .as_deref()
+                .is_some_and(|p| std::path::Path::new(p).is_dir());
+            (
+                run,
+                wrapping_key_present,
+                schedule_installed,
+                tool_copy_ok,
+                destination_present,
+            )
         })
         .await
         .map_err(|e| AppError::Config(format!("status task: {e}")))?;
@@ -115,6 +149,9 @@ pub async fn backup_status(state: tauri::State<'_, AppState>) -> AppResult<Backu
         schedule_installed,
         tool_copy_ok,
         schedule_supported: cfg!(target_os = "macos"),
+        destination_kind,
+        destination_present,
+        destination_missing: run.as_ref().is_some_and(|r| r.destination_missing),
     })
 }
 
@@ -187,21 +224,53 @@ fn metadata_of(path: &std::path::Path) -> Option<std::fs::Metadata> {
     std::fs::metadata(path).ok()
 }
 
-/// Merge install-time target args into the persisted config and validate.
-/// `None` KEEPS the stored value (the UI never re-populates the token
-/// field, so a time-only reinstall must not erase the credential); a URL
-/// without any token (passed or stored) is rejected — the scheduled job
-/// would otherwise push with an empty credential, failing unattended.
-fn merge_target(
+/// The persisted, effective backup destination.
+#[derive(Debug, Clone, PartialEq)]
+enum EffectiveDestination {
+    LocalOnly,
+    Agent { url: String, token: String },
+    Folder { path: String },
+}
+
+/// Merge install-time destination args into the persisted config and
+/// validate. `None` KEEPS the stored value (the UI never re-populates
+/// the token field, so a time-only reinstall must not erase the
+/// credential); a URL without any token (passed or stored) is rejected —
+/// the scheduled job would otherwise push with an empty credential,
+/// failing unattended. Exactly one destination shape may be configured;
+/// choosing the other side clears the stale one (last choice wins).
+fn merge_destination(
     config: &mut medical_core::types::settings::AppConfig,
     url: Option<String>,
     token: Option<String>,
-) -> AppResult<(String, String)> {
+    dest: Option<String>,
+) -> AppResult<EffectiveDestination> {
+    if url.is_some() && dest.is_some() {
+        return Err(AppError::InvalidInput(
+            "choose one destination: the backup server (URL + token) or a folder — not both".into(),
+        ));
+    }
+    // An actively-passed choice wins over a stale stored one of the other
+    // kind (last choice wins); the loser's fields are cleared so the
+    // persisted config can never hold both.
     if url.is_some() {
+        config.backup_dest_path = None;
         config.backup_target_url = url;
     }
     if token.is_some() {
         config.backup_append_token = token.map(SecretString);
+    }
+    if let Some(d) = dest {
+        let trimmed = d.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::InvalidInput(
+                "the backup folder cannot be blank".into(),
+            ));
+        }
+        // Actively choosing a folder: stale agent credentials lose.
+        config.backup_target_url = None;
+        config.backup_append_token = None;
+        config.backup_dest_path = Some(trimmed.to_string());
     }
     let eff_url = config.backup_target_url.clone().unwrap_or_default();
     let eff_token = config
@@ -209,6 +278,14 @@ fn merge_target(
         .as_ref()
         .map(|t| t.0.clone())
         .unwrap_or_default();
+    let eff_dest = config.backup_dest_path.clone().unwrap_or_default();
+    if !eff_url.is_empty() && !eff_token.is_empty() && !eff_dest.is_empty() {
+        // Only reachable when BOTH kinds linger in stored config and the
+        // call passed neither — an ambiguous state no UI flow creates.
+        return Err(AppError::InvalidInput(
+            "choose one destination: the backup server (URL + token) or a folder — not both".into(),
+        ));
+    }
     if !eff_url.is_empty() && eff_token.is_empty() {
         return Err(AppError::InvalidInput(
             "a target URL needs an append token — paste the target's \
@@ -216,7 +293,21 @@ fn merge_target(
                 .into(),
         ));
     }
-    Ok((eff_url, eff_token))
+    if !eff_url.is_empty() {
+        // Switching to the agent clears a stale folder destination.
+        config.backup_dest_path = None;
+        Ok(EffectiveDestination::Agent {
+            url: eff_url,
+            token: eff_token,
+        })
+    } else if !eff_dest.is_empty() {
+        // Switching to a folder clears stale agent credentials.
+        config.backup_target_url = None;
+        config.backup_append_token = None;
+        Ok(EffectiveDestination::Folder { path: eff_dest })
+    } else {
+        Ok(EffectiveDestination::LocalOnly)
+    }
 }
 
 /// Install the daily launchd agent (macOS only). Stages the bundled
@@ -230,6 +321,7 @@ pub async fn backup_install_schedule(
     minute: u32,
     url: Option<String>,
     token: Option<String>,
+    dest_path: Option<String>,
 ) -> AppResult<String> {
     if !cfg!(target_os = "macos") {
         return Err(AppError::Config(
@@ -241,22 +333,48 @@ pub async fn backup_install_schedule(
             "time must be a valid 24h hour/minute".into(),
         ));
     }
+    // A folder destination must be absolute AND attached at install time —
+    // a typo'd, relative, or unplugged path must fail HERE, not at 3am (or
+    // worse, silently). A relative path is rejected outright: launchd
+    // resolves it against ITS working directory, not the user's.
+    // validate_user_path enforces absolute + canonical + no system dirs
+    // (a relative path would be resolved by launchd against ITS working
+    // directory, not the user's), and the NORMALIZED path is what gets
+    // persisted and baked into the plist — not the raw input.
+    let dest_path = match dest_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        Some(d) => {
+            let expanded = expand_tilde(d);
+            let path = crate::commands::validate_user_path(&expanded.to_string_lossy())?;
+            if !path.is_dir() {
+                return Err(AppError::InvalidInput(
+                    "backup folder not found — connect the drive and pick it again".into(),
+                ));
+            }
+            Some(path.to_string_lossy().into_owned())
+        }
+        None => None,
+    };
 
-    // Persist target + token FIRST so the schedule and the in-app
+    // Persist the destination FIRST so the schedule and the in-app
     // "Back up now" share one source of truth. MERGE semantics: the UI
     // never re-populates the token field ("never shown again after
     // saving"), so a `None` argument must NOT erase a stored credential —
     // a time-only reinstall would otherwise wipe the token and the new
     // plist would push with an empty token, failing unattended.
-    let (effective_url, effective_token) = {
+    let destination = {
         let db = std::sync::Arc::clone(&state.db);
         let url = url.clone();
         let token = token.clone();
-        tokio::task::spawn_blocking(move || -> AppResult<(String, String)> {
+        let dest_path = dest_path.clone();
+        tokio::task::spawn_blocking(move || -> AppResult<EffectiveDestination> {
             let conn = db.conn()?;
             let mut config = SettingsRepo::load_config(&conn)?;
             config.migrate();
-            let merged = merge_target(&mut config, url, token)?;
+            let merged = merge_destination(&mut config, url, token, dest_path)?;
             SettingsRepo::save_config(&conn, &config)?;
             Ok(merged)
         })
@@ -279,8 +397,18 @@ pub async fn backup_install_schedule(
                 binary_path: binary.clone(),
                 hour,
                 minute,
-                url: effective_url,
-                token: effective_token,
+                url: match &destination {
+                    EffectiveDestination::Agent { url, .. } => url.clone(),
+                    _ => String::new(),
+                },
+                token: match &destination {
+                    EffectiveDestination::Agent { token, .. } => token.clone(),
+                    _ => String::new(),
+                },
+                dest_dir: match &destination {
+                    EffectiveDestination::Folder { path } => Some(PathBuf::from(path)),
+                    _ => None,
+                },
                 snapshots_dir: data_dir.join("backups"),
                 recordings_dir,
                 log_dir: data_dir.join("logs"),
@@ -328,18 +456,13 @@ pub async fn backup_run_now(
         line: String,
     }
 
-    let config = load_config(&state).await?;
-    let target = match (
-        config.backup_target_url.clone(),
-        config.backup_append_token.clone(),
-    ) {
-        (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => {
-            Some(job::BackupTarget {
-                url,
-                token: token.0,
-            })
-        }
-        _ => None,
+    let mut config = load_config(&state).await?;
+    let target = match merge_destination(&mut config, None, None, None)? {
+        EffectiveDestination::Agent { url, token } => Some(job::BackupTarget::Agent { url, token }),
+        EffectiveDestination::Folder { path } => Some(job::BackupTarget::Folder {
+            path: PathBuf::from(path),
+        }),
+        EffectiveDestination::LocalOnly => None,
     };
 
     let db_key = tokio::task::spawn_blocking(keychain::get_or_create_db_key)
@@ -385,6 +508,94 @@ pub async fn backup_run_now(
     Ok(outcome.success())
 }
 
+/// Wizard-time destination probe: does the folder exist, can we write
+/// to it, and how much space is free. PHI-free by construction.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationProbe {
+    pub writable: bool,
+    pub free_bytes: Option<u64>,
+    pub problem: Option<String>,
+}
+
+#[tauri::command]
+pub async fn backup_test_destination(dest_path: String) -> AppResult<DestinationProbe> {
+    let expanded = expand_tilde(&dest_path);
+    let path = crate::commands::validate_user_path(&expanded.to_string_lossy())?;
+    tokio::task::spawn_blocking(move || {
+        if !path.is_dir() {
+            return DestinationProbe {
+                writable: false,
+                free_bytes: None,
+                problem: Some("folder not found — connect the drive and pick it again".into()),
+            };
+        }
+        let free_bytes = fs2::available_space(&path).ok();
+        let probe = path.join(".ferriscribe-probe");
+        let writable =
+            std::fs::write(&probe, b"probe").is_ok() && std::fs::remove_file(&probe).is_ok();
+        DestinationProbe {
+            writable,
+            free_bytes,
+            problem: if writable {
+                None
+            } else {
+                Some(
+                    "FerriScribe can't write to this folder — check the drive's permissions".into(),
+                )
+            },
+        }
+    })
+    .await
+    .map_err(|e| AppError::Config(format!("probe task: {e}")))
+}
+
+/// Wizard-time agent probe: can we reach the backup server, and does the
+/// append token work? A one-shot `list_snapshots` doubles as both — the
+/// list route requires valid append-token auth. PHI-free (errors carry
+/// HTTP codes / io kinds only).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProbe {
+    pub ok: bool,
+    pub problem: Option<String>,
+}
+
+#[tauri::command]
+pub async fn backup_test_agent(url: String, token: String) -> AppResult<AgentProbe> {
+    let url = url.trim().trim_end_matches('/').to_string();
+    let token = token.trim().to_string();
+    if url.is_empty() || token.is_empty() {
+        return Ok(AgentProbe {
+            ok: false,
+            problem: Some("Enter both the target URL and the append token.".into()),
+        });
+    }
+    tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| AppError::Config(format!("probe runtime: {e}")))?;
+        Ok(rt.block_on(async {
+            match medical_backup::client::BackupClient::new(&url, &token)
+                .list_snapshots()
+                .await
+            {
+                Ok(_) => AgentProbe {
+                    ok: true,
+                    problem: None,
+                },
+                Err(e) => AgentProbe {
+                    ok: false,
+                    problem: Some(format!("Can't reach the backup server: {e}")),
+                },
+            }
+        }))
+    })
+    .await
+    .map_err(|e| AppError::Config(format!("probe task: {e}")))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,14 +604,19 @@ mod tests {
     /// Ship-blocker regression: a time-only reinstall (None args) must
     /// never erase a stored target/token.
     #[test]
-    fn merge_target_preserves_stored_values_on_none_args() {
+    fn merge_destination_preserves_stored_values_on_none_args() {
         let mut config = AppConfig::default();
         config.backup_target_url = Some("http://t:8741".into());
         config.backup_append_token = Some(SecretString("secret".into()));
 
-        let (url, token) = merge_target(&mut config, None, None).expect("merge");
-        assert_eq!(url, "http://t:8741");
-        assert_eq!(token, "secret");
+        let d = merge_destination(&mut config, None, None, None).expect("merge");
+        assert_eq!(
+            d,
+            EffectiveDestination::Agent {
+                url: "http://t:8741".into(),
+                token: "secret".into()
+            }
+        );
         // And the config still holds them.
         assert_eq!(
             config.backup_append_token.as_ref().map(|t| t.0.as_str()),
@@ -409,41 +625,130 @@ mod tests {
     }
 
     #[test]
-    fn merge_target_updates_when_provided() {
+    fn merge_destination_updates_when_provided() {
         let mut config = AppConfig::default();
         config.backup_target_url = Some("http://old:1".into());
-        let (url, token) =
-            merge_target(&mut config, Some("http://new:2".into()), Some("tok".into()))
-                .expect("merge");
-        assert_eq!(url, "http://new:2");
-        assert_eq!(token, "tok");
+        let d = merge_destination(
+            &mut config,
+            Some("http://new:2".into()),
+            Some("tok".into()),
+            None,
+        )
+        .expect("merge");
+        assert_eq!(
+            d,
+            EffectiveDestination::Agent {
+                url: "http://new:2".into(),
+                token: "tok".into()
+            }
+        );
     }
 
     /// A URL with no token anywhere must be rejected AT INSTALL TIME —
     /// not discovered by a failing unattended 3am push.
     #[test]
-    fn merge_target_rejects_url_without_token() {
+    fn merge_destination_rejects_url_without_token() {
         let mut config = AppConfig::default();
-        let err = merge_target(&mut config, Some("http://t:8741".into()), None);
+        let err = merge_destination(&mut config, Some("http://t:8741".into()), None, None);
         assert!(err.is_err(), "fresh config + URL + no token must fail");
 
         // Also when a token was never stored and only the URL is re-sent.
         config.backup_target_url = Some("http://t:8741".into());
         config.backup_append_token = None;
-        assert!(merge_target(&mut config, Some("http://t:8741".into()), None).is_err());
+        assert!(merge_destination(&mut config, Some("http://t:8741".into()), None, None).is_err());
 
         // A stored token satisfies the requirement.
         config.backup_append_token = Some(SecretString("kept".into()));
-        let (_, token) = merge_target(&mut config, Some("http://t:8741".into()), None).unwrap();
-        assert_eq!(token, "kept");
+        let d = merge_destination(&mut config, Some("http://t:8741".into()), None, None).unwrap();
+        assert_eq!(
+            d,
+            EffectiveDestination::Agent {
+                url: "http://t:8741".into(),
+                token: "kept".into()
+            }
+        );
     }
 
     /// Local-only schedules (no URL, no token) are fine.
     #[test]
-    fn merge_target_allows_local_only() {
+    fn merge_destination_allows_local_only() {
         let mut config = AppConfig::default();
-        let (url, token) = merge_target(&mut config, None, None).unwrap();
-        assert_eq!(url, "");
-        assert_eq!(token, "");
+        assert_eq!(
+            merge_destination(&mut config, None, None, None).unwrap(),
+            EffectiveDestination::LocalOnly
+        );
+    }
+
+    #[test]
+    fn merge_destination_switching_to_folder_clears_agent() {
+        let mut config = AppConfig::default();
+        config.backup_target_url = Some("http://t:8741".into());
+        config.backup_append_token = Some(SecretString("tok".into()));
+        let d =
+            merge_destination(&mut config, None, None, Some("/Volumes/BK".into())).expect("switch");
+        assert_eq!(
+            d,
+            EffectiveDestination::Folder {
+                path: "/Volumes/BK".into()
+            }
+        );
+        assert_eq!(config.backup_target_url, None);
+        assert_eq!(config.backup_append_token, None);
+    }
+
+    #[test]
+    fn merge_destination_switching_to_agent_clears_folder() {
+        let mut config = AppConfig::default();
+        config.backup_dest_path = Some("/Volumes/BK".into());
+        let d = merge_destination(
+            &mut config,
+            Some("http://t:8741".into()),
+            Some("tok".into()),
+            None,
+        )
+        .expect("switch");
+        assert_eq!(
+            d,
+            EffectiveDestination::Agent {
+                url: "http://t:8741".into(),
+                token: "tok".into()
+            }
+        );
+        assert_eq!(config.backup_dest_path, None);
+    }
+
+    #[test]
+    fn merge_destination_rejects_blank_dest() {
+        let mut config = AppConfig::default();
+        config.backup_target_url = Some("http://t:8741".into());
+        config.backup_append_token = Some(SecretString("tok".into()));
+        // A whitespace-only dest must neither switch destinations nor
+        // clear the stored agent credentials.
+        assert!(merge_destination(&mut config, None, None, Some("   ".into())).is_err());
+        assert_eq!(config.backup_target_url.as_deref(), Some("http://t:8741"));
+        assert!(config.backup_append_token.is_some());
+    }
+
+    #[test]
+    fn merge_destination_rejects_both_passed_in_one_call() {
+        let mut config = AppConfig::default();
+        assert!(
+            merge_destination(
+                &mut config,
+                Some("http://t:8741".into()),
+                None,
+                Some("/Volumes/BK".into())
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn merge_destination_rejects_both_lingering_in_stored_config() {
+        let mut config = AppConfig::default();
+        config.backup_target_url = Some("http://t:8741".into());
+        config.backup_append_token = Some(SecretString("tok".into()));
+        config.backup_dest_path = Some("/Volumes/BK".into());
+        assert!(merge_destination(&mut config, None, None, None).is_err());
     }
 }

@@ -171,6 +171,10 @@ export interface AppConfig {
   /** Append token for the backup target (encrypted at rest in the DB).
    *  The target-side admin/prune token never lives on this machine. */
   backup_append_token: string | null;
+  /** Folder destination for backups (USB / network / cloud-synced
+   *  folder) — alternative to `backup_target_url`, mutually exclusive
+   *  with it. Mirrors `backup_dest_path` in crates/core settings.rs. */
+  backup_dest_path: string | null;
   // Onboarding
   onboarding_completed: boolean;
   // Updates

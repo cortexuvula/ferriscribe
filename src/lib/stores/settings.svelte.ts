@@ -53,6 +53,7 @@ const defaults: AppConfig = {
   allow_public_endpoint: false,
   backup_target_url: null,
   backup_append_token: null,
+  backup_dest_path: null,
   onboarding_completed: false,
   auto_update_check: true,
   custom_conditions: [],

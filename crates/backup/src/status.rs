@@ -27,6 +27,11 @@ pub struct BackupRunStatus {
     pub pushed_to: Option<String>,
     /// First failure line when anything failed (PHI-free).
     pub failure: Option<String>,
+    /// True when the run failed specifically because the destination
+    /// folder (USB/network drive) was not attached. `#[serde(default)]`
+    /// keeps older status files (pre-folder era) readable.
+    #[serde(default)]
+    pub destination_missing: bool,
 }
 
 impl BackupRunStatus {
@@ -78,6 +83,7 @@ mod tests {
             drill_passed: true,
             pushed_to: Some("http://t".into()),
             failure: None,
+            destination_missing: false,
         };
         write_status(dir.path(), &fresh).unwrap();
         let back = read_status(dir.path()).unwrap();
@@ -91,10 +97,25 @@ mod tests {
             drill_passed: false,
             pushed_to: None,
             failure: Some("verification failed: HMAC mismatch".into()),
+            destination_missing: true,
         };
         write_status(dir.path(), &old).unwrap();
         let back = read_status(dir.path()).unwrap();
         assert!(back.is_stale(), "49h old → stale");
         assert!(!back.drill_passed);
+        assert!(back.destination_missing, "roundtrips the flag");
+    }
+
+    #[test]
+    fn old_status_file_without_destination_missing_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = format!(
+            "{{\"last_run_at\":\"{}\",\"snapshot_id\":null,\"drill_passed\":false,\
+             \"pushed_to\":null,\"failure\":\"boom\"}}",
+            Utc::now().to_rfc3339()
+        );
+        std::fs::write(dir.path().join(STATUS_FILE), json).unwrap();
+        let back = read_status(dir.path()).expect("old format parses");
+        assert!(!back.destination_missing, "missing field defaults false");
     }
 }

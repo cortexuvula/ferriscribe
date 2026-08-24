@@ -581,10 +581,10 @@ async fn commit_snapshot(
             .map_err(internal)?;
     }
     freeze_tree(&snap_dir).map_err(internal)?;
-    tokio::fs::write(snap_dir.join(".committed"), b"1")
+    tokio::fs::write(snap_dir.join(COMMITTED_MARKER), b"1")
         .await
         .map_err(internal)?;
-    set_readonly_file(&snap_dir.join(".committed"));
+    set_readonly_file(&snap_dir.join(COMMITTED_MARKER));
     set_readonly_dir(&snap_dir);
     info!(snapshot_id = %id, cas = cas_blobs.is_some(), "snapshot committed (append-only)");
 
@@ -676,7 +676,7 @@ fn validate_blob_hash(hash: &str) -> Result<(), (StatusCode, String)> {
     }
 }
 
-fn blob_path(root: &Path, hash: &str) -> PathBuf {
+pub(crate) fn blob_path(root: &Path, hash: &str) -> PathBuf {
     root.join(BLOBS_DIR).join(&hash[..2]).join(hash)
 }
 
@@ -934,8 +934,11 @@ fn gc_blobs(root: &Path) -> std::io::Result<usize> {
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
+/// Commit marker shared with the folder store (`store.rs`) — layout parity.
+pub const COMMITTED_MARKER: &str = ".committed";
+
 fn is_committed(snap_dir: &Path) -> bool {
-    snap_dir.join(".committed").exists()
+    snap_dir.join(COMMITTED_MARKER).exists()
 }
 
 fn validate_snapshot_id(id: &str) -> Result<(), (StatusCode, String)> {
@@ -1005,7 +1008,7 @@ fn freeze_tree(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn unfreeze_and_remove(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn unfreeze_and_remove(dir: &Path) -> std::io::Result<()> {
     fn unfreeze(d: &Path) -> std::io::Result<()> {
         for entry in std::fs::read_dir(d)? {
             let entry = entry?;
@@ -1027,7 +1030,7 @@ fn unfreeze_and_remove(dir: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn set_readonly_file(path: &Path) {
+pub(crate) fn set_readonly_file(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444));
 }
@@ -1048,17 +1051,17 @@ fn writable_dir(_path: &Path) -> std::io::Result<std::fs::Permissions> {
 /// blob shard directories are never frozen, so directory writability is
 /// not a concern here.
 #[cfg(unix)]
-fn make_writable_file(path: &Path) {
+pub(crate) fn make_writable_file(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
 }
 
 #[cfg(not(unix))]
-fn set_readonly_file(_path: &Path) {}
+pub(crate) fn set_readonly_file(_path: &Path) {}
 #[cfg(not(unix))]
 fn set_readonly_dir(_path: &Path) {}
 #[cfg(not(unix))]
-fn make_writable_file(path: &Path) {
+pub(crate) fn make_writable_file(path: &Path) {
     if let Ok(meta) = std::fs::metadata(path) {
         let mut perms = meta.permissions();
         perms.set_readonly(false);

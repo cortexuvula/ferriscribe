@@ -27,6 +27,9 @@ pub struct ScheduleConfig {
     pub url: String,
     /// Append token for the target agent.
     pub token: String,
+    /// Folder destination (alternative to url/token): absolute path to a
+    /// folder store. When set, url/token are not passed to the job.
+    pub dest_dir: Option<PathBuf>,
     /// Where snapshot staging dirs are written.
     pub snapshots_dir: PathBuf,
     /// Recordings directory resolved AT INSTALL TIME from the app's
@@ -48,6 +51,17 @@ pub fn render_plist(cfg: &ScheduleConfig) -> String {
         }
         items
     };
+    // A USB-drive destination fires a catch-up run whenever the volume is
+    // plugged in, on top of the daily time (the job lock serializes them).
+    let on_mount = if cfg
+        .dest_dir
+        .as_ref()
+        .is_some_and(|d| d.starts_with("/Volumes"))
+    {
+        "    <key>StartOnMount</key>\n             <true/>\n"
+    } else {
+        ""
+    };
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -67,6 +81,7 @@ pub fn render_plist(cfg: &ScheduleConfig) -> String {
                  <key>Minute</key>\n\
                  <integer>{minute}</integer>\n\
              </dict>\n\
+         {on_mount}\
              <key>RunAtLoad</key>\n\
              <false/>\n\
              <key>StandardOutPath</key>\n\
@@ -78,6 +93,7 @@ pub fn render_plist(cfg: &ScheduleConfig) -> String {
         args = args,
         hour = cfg.hour,
         minute = cfg.minute,
+        on_mount = on_mount,
         stdout_log = xml_escape(cfg.log_dir.join("backup-out.log").to_string_lossy()),
         stderr_log = xml_escape(cfg.log_dir.join("backup-err.log").to_string_lossy()),
     )
@@ -94,7 +110,10 @@ pub fn schedule_args(cfg: &ScheduleConfig) -> Vec<String> {
         "--recordings-dir".to_string(),
         cfg.recordings_dir.to_string_lossy().into_owned(),
     ];
-    if !cfg.url.is_empty() {
+    if let Some(dest) = &cfg.dest_dir {
+        args.push("--dest".into());
+        args.push(dest.to_string_lossy().into_owned());
+    } else if !cfg.url.is_empty() {
         args.push("--url".into());
         args.push(cfg.url.clone());
         args.push("--token".into());
@@ -252,6 +271,7 @@ mod tests {
             minute: 30,
             url: "http://100.64.0.2:8741".into(),
             token: "tok&<xml>".into(),
+            dest_dir: None,
             snapshots_dir: PathBuf::from("/tmp/snaps"),
             recordings_dir: PathBuf::from("/Volumes/Audio/recordings"),
             log_dir: PathBuf::from("/tmp/logs"),
@@ -284,6 +304,37 @@ mod tests {
         local.url = String::new();
         let args = schedule_args(&local);
         assert!(!args.contains(&"--url".to_string()));
+    }
+
+    #[test]
+    fn schedule_args_use_dest_when_set_and_drop_url() {
+        let mut c = cfg();
+        c.dest_dir = Some(PathBuf::from("/Volumes/BackupDrive/ferriscribe"));
+        let args = schedule_args(&c);
+        let idx = args.iter().position(|a| a == "--dest").unwrap();
+        assert_eq!(args[idx + 1], "/Volumes/BackupDrive/ferriscribe");
+        assert!(!args.contains(&"--url".to_string()), "dest wins over url");
+        assert!(!args.contains(&"--token".to_string()));
+    }
+
+    #[test]
+    fn plist_adds_start_on_mount_for_volumes_dest_only() {
+        let mut c = cfg();
+        c.dest_dir = Some(PathBuf::from("/Volumes/BackupDrive/ferriscribe"));
+        let plist = render_plist(&c);
+        assert!(
+            plist.contains("<key>StartOnMount</key>"),
+            "USB dest mounts fire catch-up"
+        );
+
+        // A non-/Volumes folder (NAS mount point elsewhere, cloud folder):
+        // daily schedule only, no StartOnMount spam.
+        let mut c2 = cfg();
+        c2.dest_dir = Some(PathBuf::from("/Users/me/backup-folder"));
+        assert!(!render_plist(&c2).contains("<key>StartOnMount</key>"));
+
+        // Agent target: unchanged behavior.
+        assert!(!render_plist(&cfg()).contains("<key>StartOnMount</key>"));
     }
 
     #[test]

@@ -326,6 +326,8 @@ pub fn run() {
             commands::backup::backup_install_schedule,
             commands::backup::backup_uninstall_schedule,
             commands::backup::backup_run_now,
+            commands::backup::backup_test_destination,
+            commands::backup::backup_test_agent,
             commands::providers::reinit_providers,
             commands::providers::test_lmstudio_connection,
             commands::providers::test_stt_remote_connection,
