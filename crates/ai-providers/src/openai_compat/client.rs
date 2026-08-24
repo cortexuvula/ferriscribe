@@ -9,6 +9,7 @@ use medical_core::types::{
 
 use crate::http_client::RetryConfig;
 
+use super::think::strip_leading_think_block;
 use super::wire::{ApiFunction, ApiToolCall, ChatMessage, ChatRequest, ChatResponse};
 
 /// A client for any endpoint implementing the OpenAI chat-completions protocol.
@@ -237,6 +238,11 @@ impl OpenAiCompatibleClient {
             .and_then(|c| c.message.as_ref())
             .and_then(|m| m.content.clone())
             .unwrap_or_default();
+        // Reasoning models that inline their thinking into `content` (rather
+        // than the separate reasoning field) prefix the answer with a
+        // `<think>…</think>` block — strip it so every consumer of
+        // `complete` sees only the answer.
+        let content = strip_leading_think_block(&content).to_string();
 
         if content.is_empty() && num_choices > 0 {
             warn!(

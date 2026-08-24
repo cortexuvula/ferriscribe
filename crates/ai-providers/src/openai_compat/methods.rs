@@ -18,6 +18,7 @@ use medical_core::{
 use crate::sse::parse_sse_response;
 
 use super::client::OpenAiCompatibleClient;
+use super::think::{ThinkStripStream, strip_leading_think_block};
 use super::wire::{ApiTool, ApiToolDef, ChatResponse, ModelsListResponse, StreamOptions};
 
 /// Hard ceiling for a single streamed generation. Long enough for a
@@ -215,7 +216,10 @@ impl OpenAiCompatibleClient {
             })
             .flat_map(tokio_stream::iter);
 
-        Ok(Box::pin(mapped))
+        // Strip an inlined leading `<think>` block from the delta stream so
+        // reasoning text never crosses the provider boundary — covers chat
+        // streaming and every other `complete_stream` consumer.
+        Ok(Box::pin(ThinkStripStream::new(Box::pin(mapped))))
     }
 
     /// Send a chat completion request with tool definitions and return the response.
@@ -288,7 +292,10 @@ impl OpenAiCompatibleClient {
         let content = first_choice
             .as_ref()
             .and_then(|c| c.message.as_ref())
-            .and_then(|m| m.content.clone());
+            .and_then(|m| m.content.as_ref())
+            // Same leading-think-strip as `parse_response`: an agent's final
+            // answer (no tool calls) arrives through this path too.
+            .map(|c| strip_leading_think_block(c).to_string());
 
         let tool_calls = first_choice
             .as_ref()

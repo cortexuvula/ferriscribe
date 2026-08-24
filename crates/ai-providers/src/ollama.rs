@@ -344,10 +344,14 @@ impl AiProvider for OllamaProvider {
 
     async fn complete_with_tools(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
         tools: Vec<ToolDef>,
     ) -> AppResult<ToolCompletionResponse> {
         let client = self.sync_client_url().await?;
+        // Same thinking control as complete/complete_stream — the agent
+        // orchestrator's tool loop goes through this method, and a thinking
+        // model would burn minutes of reasoning on every iteration.
+        self.apply_thinking_control(&mut request);
         client.complete_with_tools(&request, tools).await
     }
 }
@@ -581,6 +585,54 @@ mod tests {
             .await
             .expect("complete should succeed against mock");
         assert_eq!(resp.content, "ok");
+        server.verify().await;
+    }
+
+    /// End-to-end over HTTP: the tool-calling path must carry the same
+    /// thinking control as complete/complete_stream (regression — the agent
+    /// orchestrator's tool loop used to bypass the disable).
+    #[tokio::test]
+    async fn complete_with_tools_wire_body_carries_reasoning_effort_off() {
+        use medical_core::types::ToolDef;
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "reasoning_effort": REASONING_EFFORT_DISABLE
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": "qwen3.8:27b",
+                "choices": [{
+                    "message": {"content": "ok", "tool_calls": []},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let policy = RetryConfig {
+            max_retries: 0,
+            ..RetryConfig::default()
+        };
+        let p = OllamaProvider::new(Some(&server.uri()), false, None, policy).expect("build");
+        p.set_thinking_disabled(true);
+
+        let resp = p
+            .complete_with_tools(
+                offline_tests::minimal_request("qwen3.8:27b"),
+                vec![ToolDef {
+                    name: "lookup".into(),
+                    description: "look something up".into(),
+                    parameters: serde_json::json!({"type": "object", "properties": {}}),
+                }],
+            )
+            .await
+            .expect("complete_with_tools should succeed against mock");
+        assert_eq!(resp.content.as_deref(), Some("ok"));
         server.verify().await;
     }
 }
