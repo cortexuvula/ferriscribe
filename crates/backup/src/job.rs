@@ -369,13 +369,32 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
         Ok(s) => s,
         Err(f) => {
             events.push(fail(&f.msg));
-            BackupRunStatus {
-                last_run_at: chrono::Utc::now(),
-                snapshot_id: f.snapshot_id,
-                drill_passed: false,
-                pushed_to: f.pushed_to,
-                failure: Some(f.msg),
-                destination_missing: f.destination_missing,
+            if f.destination_missing {
+                // A missing destination (USB drive unplugged) is a WAITING
+                // state, not a protection failure: the last successful
+                // snapshot is still on the drive and restorable. Preserve
+                // its facts instead of clobbering them with a red
+                // "drill failed" — the pane shows "waiting for drive".
+                let prior = status::read_status(&cfg.data_dir);
+                BackupRunStatus {
+                    last_run_at: chrono::Utc::now(),
+                    snapshot_id: f
+                        .snapshot_id
+                        .or(prior.as_ref().and_then(|p| p.snapshot_id.clone())),
+                    drill_passed: prior.as_ref().is_some_and(|p| p.drill_passed),
+                    pushed_to: prior.as_ref().and_then(|p| p.pushed_to.clone()),
+                    failure: Some(f.msg),
+                    destination_missing: true,
+                }
+            } else {
+                BackupRunStatus {
+                    last_run_at: chrono::Utc::now(),
+                    snapshot_id: f.snapshot_id,
+                    drill_passed: false,
+                    pushed_to: f.pushed_to,
+                    failure: Some(f.msg),
+                    destination_missing: f.destination_missing,
+                }
             }
         }
     };
@@ -648,6 +667,63 @@ mod tests {
             .map(|rd| rd.flatten().collect())
             .unwrap_or_default();
         assert!(leftovers.is_empty(), "no partial snapshots: {leftovers:?}");
+    }
+
+    #[test]
+    fn missing_destination_preserves_last_good_status() {
+        // The wizard tells USB users to unplug the drive between backups —
+        // so nightly runs WILL fire with the drive absent. Those runs must
+        // not clobber the last good snapshot facts with a fake
+        // "drill failed": the pane shows "waiting for drive", protection
+        // status stays truthful.
+        let data = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let db_key = [0x41u8; 32];
+        let wrapping = [0x42u8; 32];
+        let (db_path, recordings) = fixture_db(data.path(), db_key);
+
+        // 1. A healthy run with the drive connected.
+        let cfg = JobConfig {
+            data_dir: data.path().to_path_buf(),
+            db_path: db_path.clone(),
+            recordings_dir: recordings.clone(),
+            keystore_path: None,
+            target: Some(BackupTarget::Folder {
+                path: store.path().to_path_buf(),
+            }),
+            keep_local: 14,
+        };
+        let good = run_backup_job(&cfg, db_key, wrapping);
+        assert!(good.success(), "events: {:?}", good.events);
+        let good_snapshot = good.status.snapshot_id.clone().unwrap();
+
+        // 2. Same config, drive "unplugged" (path gone).
+        let unplugged = data.path().join("unplugged-store");
+        let cfg = JobConfig {
+            data_dir: data.path().to_path_buf(),
+            db_path,
+            recordings_dir: recordings,
+            keystore_path: None,
+            target: Some(BackupTarget::Folder { path: unplugged }),
+            keep_local: 14,
+        };
+        let miss = run_backup_job(&cfg, db_key, wrapping);
+        assert!(!miss.success());
+        let persisted = status::read_status(data.path()).unwrap();
+        assert!(persisted.destination_missing);
+        // The last good facts survive for the pane.
+        assert_eq!(
+            persisted.snapshot_id.as_deref(),
+            Some(good_snapshot.as_str())
+        );
+        assert!(
+            persisted.drill_passed,
+            "a waiting run is not a drill failure"
+        );
+        assert_eq!(
+            persisted.pushed_to.as_deref(),
+            Some(store.path().to_string_lossy().as_ref())
+        );
     }
 
     #[test]

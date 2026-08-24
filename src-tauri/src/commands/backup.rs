@@ -260,10 +260,17 @@ fn merge_destination(
     if token.is_some() {
         config.backup_append_token = token.map(SecretString);
     }
-    if dest.is_some() {
+    if let Some(d) = dest {
+        let trimmed = d.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::InvalidInput(
+                "the backup folder cannot be blank".into(),
+            ));
+        }
+        // Actively choosing a folder: stale agent credentials lose.
         config.backup_target_url = None;
         config.backup_append_token = None;
-        config.backup_dest_path = dest;
+        config.backup_dest_path = Some(trimmed.to_string());
     }
     let eff_url = config.backup_target_url.clone().unwrap_or_default();
     let eff_token = config
@@ -330,22 +337,27 @@ pub async fn backup_install_schedule(
     // a typo'd, relative, or unplugged path must fail HERE, not at 3am (or
     // worse, silently). A relative path is rejected outright: launchd
     // resolves it against ITS working directory, not the user's.
-    if let Some(d) = dest_path
+    // validate_user_path enforces absolute + canonical + no system dirs
+    // (a relative path would be resolved by launchd against ITS working
+    // directory, not the user's), and the NORMALIZED path is what gets
+    // persisted and baked into the plist — not the raw input.
+    let dest_path = match dest_path
         .as_deref()
         .map(str::trim)
         .filter(|d| !d.is_empty())
     {
-        // validate_user_path enforces absolute + canonical + no system
-        // dirs; a relative path would otherwise be resolved by launchd
-        // against ITS working directory, not the user's.
-        let expanded = expand_tilde(d);
-        let path = crate::commands::validate_user_path(&expanded.to_string_lossy())?;
-        if !path.is_dir() {
-            return Err(AppError::InvalidInput(
-                "backup folder not found — connect the drive and pick it again".into(),
-            ));
+        Some(d) => {
+            let expanded = expand_tilde(d);
+            let path = crate::commands::validate_user_path(&expanded.to_string_lossy())?;
+            if !path.is_dir() {
+                return Err(AppError::InvalidInput(
+                    "backup folder not found — connect the drive and pick it again".into(),
+                ));
+            }
+            Some(path.to_string_lossy().into_owned())
         }
-    }
+        None => None,
+    };
 
     // Persist the destination FIRST so the schedule and the in-app
     // "Back up now" share one source of truth. MERGE semantics: the UI
@@ -703,6 +715,18 @@ mod tests {
             }
         );
         assert_eq!(config.backup_dest_path, None);
+    }
+
+    #[test]
+    fn merge_destination_rejects_blank_dest() {
+        let mut config = AppConfig::default();
+        config.backup_target_url = Some("http://t:8741".into());
+        config.backup_append_token = Some(SecretString("tok".into()));
+        // A whitespace-only dest must neither switch destinations nor
+        // clear the stored agent credentials.
+        assert!(merge_destination(&mut config, None, None, Some("   ".into())).is_err());
+        assert_eq!(config.backup_target_url.as_deref(), Some("http://t:8741"));
+        assert!(config.backup_append_token.is_some());
     }
 
     #[test]

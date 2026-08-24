@@ -1030,7 +1030,7 @@ pub(crate) fn unfreeze_and_remove(dir: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn set_readonly_file(path: &Path) {
+pub(crate) fn set_readonly_file(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444));
 }
@@ -1057,7 +1057,7 @@ pub(crate) fn make_writable_file(path: &Path) {
 }
 
 #[cfg(not(unix))]
-fn set_readonly_file(_path: &Path) {}
+pub(crate) fn set_readonly_file(_path: &Path) {}
 #[cfg(not(unix))]
 fn set_readonly_dir(_path: &Path) {}
 #[cfg(not(unix))]

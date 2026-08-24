@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
+  import { settings } from '../../stores/settings.svelte';
   import {
+    getBackupStatus,
     escrowInit,
     escrowVerify,
     installBackupSchedule,
@@ -57,6 +60,33 @@
   let jobRunning = $state(false);
   let jobPassed = $state<boolean | null>(null);
 
+  // Reflected current configuration (Settings pane / onboarding both
+  // start the wizard fresh, but existing users shouldn't have to re-enter
+  // a token the app deliberately never shows again).
+  let schedSupported = $state(true);
+  let alreadyEscrowed = $state(false);
+  let skipEscrow = $state(true);
+  let hasStoredToken = $state(false);
+
+  onMount(() => {
+    void (async () => {
+      if (!settings.loaded) await settings.load();
+      try {
+        const status = await getBackupStatus();
+        schedSupported = status.scheduleSupported;
+        alreadyEscrowed = status.wrappingKeyPresent;
+        if (status.destinationKind === 'agent') {
+          kind = 'agent';
+          agentUrl = settings.state.backup_target_url ?? '';
+        }
+        hasStoredToken = settings.state.backup_append_token != null;
+      } catch {
+        // Status fetch failing must not block the wizard — the probes at
+        // each step surface real problems.
+      }
+    })();
+  });
+
   const stepIndex = $derived(STEPS.findIndex((s) => s.id === step));
 
   async function pickFolder(defaultPath?: string): Promise<string | null> {
@@ -98,7 +128,10 @@
 
   const destOk = $derived.by(() => {
     if (kind === 'folder') return probe?.writable === true;
-    if (kind === 'agent') return agentUrl.trim().length > 0 && agentToken.trim().length > 0;
+    // A stored token satisfies the agent destination: reinstalling to
+    // change the time must not force re-pasting a secret the app never
+    // shows again (merge_destination keeps it when the field is blank).
+    if (kind === 'agent') return agentUrl.trim().length > 0 && (agentToken.trim().length > 0 || hasStoredToken);
     return false;
   });
 
@@ -170,10 +203,15 @@
     void revealItemInDir(path);
   }
 
+  const escrowStepOk = $derived(
+    (escrowVerified && sheetConfirmed) || (alreadyEscrowed && skipEscrow),
+  );
+  const scheduleStepOk = $derived(scheduleInstalled || !schedSupported);
+
   function next() {
     if (step === 'destination' && destOk) step = 'escrow';
-    else if (step === 'escrow' && escrowVerified && sheetConfirmed) step = 'schedule';
-    else if (step === 'schedule' && scheduleInstalled) step = 'firstrun';
+    else if (step === 'escrow' && escrowStepOk) step = 'schedule';
+    else if (step === 'schedule' && scheduleStepOk) step = 'firstrun';
   }
   function back() {
     if (step === 'escrow') step = 'destination';
@@ -268,7 +306,17 @@
       This sheet is the only thing that can unlock your backups on a new machine. Print it and
       keep it somewhere safe away from this computer (a fire-safe is ideal).
     </p>
-    {#if !escrowResult}
+    {#if alreadyEscrowed && skipEscrow && !escrowResult}
+      <p class="ok">✓ A recovery key is already set up on this Mac.</p>
+      <label class="confirm">
+        <input type="checkbox" bind:checked={skipEscrow} />
+        I still have my printed recovery sheet
+      </label>
+      <p class="hint">
+        Lost the sheet? Uncheck to write replacement files — the key stays the same, so print
+        and replace the old sheet.
+      </p>
+    {:else if !escrowResult}
       <div class="form-group">
         <button class="btn-secondary" onclick={chooseEscrowDir}>
           {escrowDir ? 'Change folder…' : 'Choose where to save the recovery files…'}
@@ -309,21 +357,29 @@
     {/if}
   {:else if step === 'schedule'}
     <h4>When should backups run?</h4>
-    <p class="hint">
-      Daily, even when FerriScribe is closed. If the computer is asleep at that time, the backup
-      runs when it wakes. {kind === 'folder'
-        ? 'Connect your drive before then — or any time; plugging it in triggers a catch-up backup.'
-        : ''}
-    </p>
-    <div class="form-group">
-      <label for="wiz-time" class="form-label">Time</label>
-      <input id="wiz-time" class="text-input time" type="time" bind:value={time} />
-      <button class="btn-primary" onclick={installSchedule} disabled={scheduleBusy}>
-        {scheduleBusy ? 'Scheduling…' : scheduleInstalled ? 'Re-schedule' : 'Turn on daily backups'}
-      </button>
-      {#if scheduleInstalled}<p class="ok">✓ Daily backups scheduled.</p>{/if}
-      {#if scheduleError}<p class="err">{scheduleError}</p>{/if}
-    </div>
+    {#if schedSupported}
+      <p class="hint">
+        Daily, even when FerriScribe is closed. If the computer is asleep at that time, the backup
+        runs when it wakes. {kind === 'folder'
+          ? 'Connect your drive before then — or any time; plugging it in triggers a catch-up backup.'
+          : ''}
+      </p>
+      <div class="form-group">
+        <label for="wiz-time" class="form-label">Time</label>
+        <input id="wiz-time" class="text-input time" type="time" bind:value={time} />
+        <button class="btn-primary" onclick={installSchedule} disabled={scheduleBusy}>
+          {scheduleBusy ? 'Scheduling…' : scheduleInstalled ? 'Re-schedule' : 'Turn on daily backups'}
+        </button>
+        {#if scheduleInstalled}<p class="ok">✓ Daily backups scheduled.</p>{/if}
+        {#if scheduleError}<p class="err">{scheduleError}</p>{/if}
+      </div>
+    {:else}
+      <p class="hint">
+        Scheduled backups are macOS-only in this build. Your protection still works — run
+        "Back up now" on the next screen (and any time from Settings → Backup). For an
+        unattended schedule on Linux, see the README's systemd timer instructions.
+      </p>
+    {/if}
   {:else}
     <h4>First backup + safety test</h4>
     <p class="hint">
@@ -364,8 +420,8 @@
         class="btn-primary"
         onclick={next}
         disabled={(step === 'destination' && !destOk) ||
-          (step === 'escrow' && (!escrowVerified || !sheetConfirmed)) ||
-          (step === 'schedule' && !scheduleInstalled)}
+          (step === 'escrow' && !escrowStepOk) ||
+          (step === 'schedule' && !scheduleStepOk)}
       >
         Continue
       </button>

@@ -136,6 +136,15 @@ impl Flags {
 
 type CmdResult = Result<(), medical_backup::BackupError>;
 
+/// Best-effort temp-dir cleanup on scope exit — assembled snapshots can
+/// be hundreds of MB and the --store-dir staging must not leak.
+struct TempDirOnDrop(PathBuf);
+impl Drop for TempDirOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn run_blocking<F: std::future::Future<Output = CmdResult>>(fut: F) -> CmdResult {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -411,6 +420,7 @@ async fn cmd_verify(flags: &Flags) -> CmdResult {
 
 async fn cmd_restore(flags: &Flags) -> CmdResult {
     let wrapping = resolve_wrapping_key(flags)?;
+    let mut _staging_guard: Option<TempDirOnDrop> = None;
     let dir = if let Some(store) = flags.get("store-dir") {
         // Assemble (with verification) from a folder store instead of a
         // plain snapshot dir.
@@ -418,6 +428,7 @@ async fn cmd_restore(flags: &Flags) -> CmdResult {
             "ferriscribe-restore-{}",
             uuid::Uuid::new_v4().simple()
         ));
+        _staging_guard = Some(TempDirOnDrop(staging.clone()));
         std::fs::create_dir_all(&staging)?;
         medical_backup::store::assemble_from_folder(Path::new(store), None, &staging, &wrapping)?
     } else {
@@ -465,6 +476,7 @@ async fn cmd_restore(flags: &Flags) -> CmdResult {
 async fn cmd_drill(flags: &Flags) -> CmdResult {
     let wrapping = resolve_wrapping_key(flags)?;
 
+    let mut _staging_guard: Option<TempDirOnDrop> = None;
     let snapshot_dir = if let Some(dir) = flags.get("snapshot-dir") {
         PathBuf::from(dir)
     } else if let Some(store) = flags.get("store-dir") {
@@ -472,6 +484,7 @@ async fn cmd_drill(flags: &Flags) -> CmdResult {
             "ferriscribe-drill-store-{}",
             uuid::Uuid::new_v4().simple()
         ));
+        _staging_guard = Some(TempDirOnDrop(staging.clone()));
         std::fs::create_dir_all(&staging)?;
         medical_backup::store::assemble_from_folder(Path::new(store), None, &staging, &wrapping)?
     } else if let Some(url) = flags.get("url") {

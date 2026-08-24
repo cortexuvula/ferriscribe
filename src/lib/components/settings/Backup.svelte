@@ -87,6 +87,12 @@
     if (!status) return { label: 'Unknown', cls: 'unknown' };
     if (!status.everRan) return { label: 'Never ran', cls: 'bad' };
     if (!status.drillPassed) return { label: 'Last drill FAILED', cls: 'bad' };
+    // A drive that's simply unplugged is a WAITING state — the last good
+    // snapshot is still on it and restorable. (The job preserves the last
+    // good facts on these runs; see missing_destination_preserves… test.)
+    if (status.destinationMissing) {
+      return { label: `Waiting for backup drive · last good ${fmtWhen(status.lastRunAt)}`, cls: 'warn' };
+    }
     if (status.stale) return { label: `Stale (ran ${fmtWhen(status.lastRunAt)})`, cls: 'warn' };
     return { label: `Healthy · ran ${fmtWhen(status.lastRunAt)}`, cls: 'good' };
   });
@@ -140,9 +146,6 @@
         <li>destination: {destinationLabel}</li>
         {#if status.destinationKind === 'local-only'}
           <li class="fail-line">a disk failure still loses everything — pick a destination below</li>
-        {/if}
-        {#if status.destinationMissing}
-          <li class="fail-line">last run failed: backup drive wasn't connected</li>
         {/if}
         <li>escrow key: {status.wrappingKeyPresent ? 'initialized' : 'not set up'}</li>
         <li>schedule: {status.scheduleInstalled ? 'installed' : 'not installed'}</li>

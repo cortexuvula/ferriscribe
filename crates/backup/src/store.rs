@@ -79,7 +79,16 @@ pub fn push_to_folder(
         } else if let Some(dir) = recordings_dir
             && let Some(name) = entry.relative_path.strip_prefix("recordings/")
         {
-            dir.join(name)
+            let p = dir.join(name);
+            if !p.is_file() {
+                // PHI rule: the recording filename may embed a patient
+                // name — errors carry the blob hash prefix, never the name.
+                return Err(crate::BackupError::Verification(format!(
+                    "stream-staged blob source missing for blob {}",
+                    &entry.sha256[..8.min(entry.sha256.len())]
+                )));
+            }
+            p
         } else {
             return Err(crate::BackupError::Verification(format!(
                 "no local payload for blob {} and no recordings_dir to stream it from",
@@ -179,7 +188,12 @@ pub fn assemble_from_folder(
                 &entry.sha256[..8.min(entry.sha256.len())]
             )));
         }
-        std::fs::copy(&src, local_dir.join(PAYLOAD_DIR).join(&entry.opaque_name))?;
+        let dest = local_dir.join(PAYLOAD_DIR).join(&entry.opaque_name);
+        std::fs::copy(&src, &dest)?;
+        // Store blobs are 0444 (tamper-evidence) and fs::copy propagates
+        // the mode — but assembled copies are disposable working material,
+        // and the restored DB must be writable for SQLite to open it.
+        agent::make_writable_file(&dest);
     }
     // Fail closed: the assembled snapshot must verify before use.
     snapshot::verify_snapshot(&local_dir, wrapping_key)?;
@@ -205,7 +219,34 @@ pub fn prune_folder_store(store_root: &Path, keep: usize) -> Vec<String> {
         }
     }
     let _ = gc_blobs(store_root);
+    sweep_commit_temps(store_root);
     pruned
+}
+
+/// Remove root-level `.tmp-<id>-*` dirs from crashed snapshot commits,
+/// aged past the GC grace window (a live commit's temp is fresh).
+fn sweep_commit_temps(store_root: &Path) {
+    let grace_cutoff = std::time::SystemTime::now()
+        .checked_sub(crate::agent::BLOB_GC_GRACE)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let Ok(rd) = std::fs::read_dir(store_root) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let dir = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(".tmp-") || !dir.is_dir() {
+            continue;
+        }
+        let aged = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .is_some_and(|t| t < grace_cutoff);
+        if aged {
+            let _ = agent::unfreeze_and_remove(&dir);
+        }
+    }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────
@@ -264,6 +305,7 @@ fn copy_blob_hashchecked(source: &Path, dest: &Path) -> BackupResult<()> {
         )));
     }
     std::fs::rename(&tmp, dest)?;
+    agent::set_readonly_file(dest);
     Ok(())
 }
 
@@ -299,9 +341,11 @@ fn gc_blobs(store_root: &Path) -> std::io::Result<usize> {
         for blob in std::fs::read_dir(&shard_dir)?.flatten() {
             let path = blob.path();
             let name = blob.file_name().to_string_lossy().into_owned();
-            if name.starts_with(".tmp-") || referenced.contains(&name) {
+            if referenced.contains(&name) {
                 continue;
             }
+            // Includes .tmp-* copy residue: a LIVE push's temp is minutes
+            // old and survives the grace window; a crashed one is swept.
             let aged = blob
                 .metadata()
                 .and_then(|m| m.modified())
