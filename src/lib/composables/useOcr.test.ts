@@ -163,7 +163,7 @@ describe('useOcr', () => {
 
   it('an OfflineCancelled rejection is not logged as an error', async () => {
     const { OfflineCancelled } = await import('../api/invokeWithOfflineHandling');
-    mockOcrDocuments.mockRejectedValue(new OfflineCancelled('offline dialog dismissed'));
+    mockOcrDocuments.mockRejectedValue(new OfflineCancelled('cancel'));
     const ocr = useOcr();
 
     ocr.handleOcrFilesSelected(['/tmp/a.pdf']);
