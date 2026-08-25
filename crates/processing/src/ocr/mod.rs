@@ -248,7 +248,11 @@ fn extract_docx_text(path: &Path) -> Result<String, OcrError> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
     let mut reader = Reader::from_str(&document_xml);
-    reader.config_mut().trim_text(true);
+    // No trimming: since quick-xml 0.41, an entity reference splits the
+    // surrounding text into separate events, so trimming event edges would
+    // eat spaces adjacent to entities ("pain & pressure" → "pain&pressure").
+    // Whitespace between tags is skipped anyway by the `in_t` guard below.
+    reader.config_mut().trim_text(false);
     let mut text_parts = Vec::new();
     let mut buf = Vec::new();
     let mut in_paragraph = false;
@@ -274,8 +278,17 @@ fn extract_docx_text(path: &Path) -> Result<String, OcrError> {
                 }
             }
             Ok(Event::Text(e)) if in_t => {
-                if let Ok(text) = e.unescape() {
+                // Text arrives unescaped-adjacent: `&amp;` is NOT in Text
+                // events anymore — it comes as a GeneralRef event below.
+                if let Ok(text) = e.decode() {
                     text_parts.push(text.into_owned());
+                }
+            }
+            Ok(Event::GeneralRef(e)) if in_t => {
+                // quick-xml 0.41 emits entity references as their own event,
+                // carrying the content BETWEEN `&` and `;` ("amp", "#38").
+                if let Some(text) = resolve_xml_entity(&e) {
+                    text_parts.push(text);
                 }
             }
             Ok(Event::Eof) => break,
@@ -289,6 +302,31 @@ fn extract_docx_text(path: &Path) -> Result<String, OcrError> {
     }
 
     Ok(text_parts.join("").trim().to_string())
+}
+
+/// Resolve a quick-xml `GeneralRef` (the content between `&` and `;`) to its
+/// replacement text: the five predefined XML entities plus decimal (`#38`)
+/// and hex (`#x26`) character references. Unknown entities resolve to `None`
+/// and are skipped — partial extraction continues, matching the parse-error
+/// path's stance.
+fn resolve_xml_entity(content: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(content).ok()?;
+    Some(match s {
+        "amp" => "&".into(),
+        "lt" => "<".into(),
+        "gt" => ">".into(),
+        "quot" => "\"".into(),
+        "apos" => "'".into(),
+        _ if s.starts_with('#') => {
+            let code = if let Some(hex) = s.strip_prefix("#x").or_else(|| s.strip_prefix("#X")) {
+                u32::from_str_radix(hex, 16).ok()?
+            } else {
+                s[1..].parse::<u32>().ok()?
+            };
+            char::from_u32(code)?.to_string()
+        }
+        _ => return None,
+    })
 }
 
 /// Extract cell values from an .xlsx file using calamine.
@@ -1131,6 +1169,52 @@ mod tests {
     fn classify_docx_is_office() {
         let path = Path::new("doc.docx");
         assert_eq!(classify(path).unwrap(), OcrStrategy::Docx);
+    }
+
+    /// End-to-end over a real ZIP: pins the quick-xml 0.41 migration
+    /// (decode + escape::unescape) — entities must come out unescaped and
+    /// paragraph ends must become newlines.
+    #[test]
+    fn extract_docx_text_unescapes_entities_and_splits_paragraphs() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test.docx");
+        let file = std::fs::File::create(&path).expect("create docx");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file(
+            "word/document.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .expect("start entry");
+        zip.write_all(
+            b"<w:document><w:body>\
+              <w:p><w:r><w:t>Chest pain &amp; shortness of breath</w:t></w:r></w:p>\
+              <w:p><w:r><w:t>Second line</w:t></w:r></w:p>\
+              </w:body></w:document>",
+        )
+        .expect("write xml");
+        zip.finish().expect("finish zip");
+
+        let text = extract_docx_text(&path).expect("extract");
+        assert!(
+            text.contains("Chest pain & shortness of breath"),
+            "entity must be unescaped, got: {text:?}"
+        );
+        assert!(
+            text.contains('\n'),
+            "paragraph break must be a newline, got: {text:?}"
+        );
+        assert!(text.contains("Second line"), "got: {text:?}");
+    }
+
+    #[test]
+    fn resolves_xml_entities() {
+        assert_eq!(resolve_xml_entity(b"amp").as_deref(), Some("&"));
+        assert_eq!(resolve_xml_entity(b"#38").as_deref(), Some("&"));
+        assert_eq!(resolve_xml_entity(b"#x26").as_deref(), Some("&"));
+        assert_eq!(resolve_xml_entity(b"#x1F600").as_deref(), Some("😀"));
+        assert_eq!(resolve_xml_entity(b"nbsp"), None, "unknown entities skip");
     }
 
     #[test]

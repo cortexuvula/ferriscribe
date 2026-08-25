@@ -33,6 +33,10 @@ pub fn get_fatal_error(state: tauri::State<'_, Arc<FatalErrorState>>) -> Option<
 /// Restore from a user-picked plaintext backup. Copies the file into place,
 /// generates a new keychain key, and runs the encryption migration. The
 /// frontend should reload the window after this returns `Ok`.
+///
+/// Everything runs on the blocking pool: the backup copy can be hundreds of
+/// MB, the keychain round trips go through OS IPC, and the encryption
+/// migration rewrites the whole DB — none of that belongs on the runtime.
 #[tauri::command]
 pub async fn recover_database_from_path(backup_path: String) -> AppResult<()> {
     let backup = PathBuf::from(&backup_path);
@@ -41,57 +45,71 @@ pub async fn recover_database_from_path(backup_path: String) -> AppResult<()> {
             "backup file not found: {backup_path}"
         )));
     }
-    if !medical_db::encryption::is_plaintext_db(&backup)
-        .map_err(|e| AppError::Other(format!("inspect backup: {e}")))?
-    {
-        return Err(AppError::Other(
-            "Selected file is not a plaintext SQLite database. Encrypted backups \
-             cannot be restored without the original keychain entry."
-                .into(),
-        ));
-    }
 
-    let data_dir = data_dir()?;
-    std::fs::create_dir_all(&data_dir)
-        .map_err(|e| AppError::Other(format!("create data dir: {e}")))?;
-    let db_path = data_dir.join("medical.db");
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
+        if !medical_db::encryption::is_plaintext_db(&backup)
+            .map_err(|e| AppError::Other(format!("inspect backup: {e}")))?
+        {
+            return Err(AppError::Other(
+                "Selected file is not a plaintext SQLite database. Encrypted backups \
+                 cannot be restored without the original keychain entry."
+                    .into(),
+            ));
+        }
 
-    // Wipe stale state.
-    medical_security::keychain::wipe_db_key()
-        .map_err(|e| AppError::Other(format!("clear keychain: {e}")))?;
-    if db_path.exists() {
-        let _ = std::fs::remove_file(&db_path);
-    }
-    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
-    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let data_dir = data_dir()?;
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| AppError::Other(format!("create data dir: {e}")))?;
+        let db_path = data_dir.join("medical.db");
 
-    // Copy the picked backup into place.
-    std::fs::copy(&backup, &db_path).map_err(|e| AppError::Other(format!("copy backup: {e}")))?;
+        // Wipe stale state.
+        medical_security::keychain::wipe_db_key()
+            .map_err(|e| AppError::Other(format!("clear keychain: {e}")))?;
+        if db_path.exists() {
+            let _ = std::fs::remove_file(&db_path);
+        }
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
 
-    // Generate a fresh key and migrate.
-    let key = medical_security::keychain::get_or_create_db_key()
-        .map_err(|e| AppError::Other(format!("create key: {e}")))?;
-    medical_db::encryption::migrate_plaintext_to_encrypted(&db_path, &key)
-        .map_err(|e| AppError::Other(format!("migration: {e}")))?;
+        // Copy the picked backup into place.
+        std::fs::copy(&backup, &db_path)
+            .map_err(|e| AppError::Other(format!("copy backup: {e}")))?;
 
-    Ok(())
+        // Generate a fresh key and migrate.
+        let key = medical_security::keychain::get_or_create_db_key()
+            .map_err(|e| AppError::Other(format!("create key: {e}")))?;
+        medical_db::encryption::migrate_plaintext_to_encrypted(&db_path, &key)
+            .map_err(|e| AppError::Other(format!("migration: {e}")))?;
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("recovery task join: {e}")))?
 }
 
 /// Wipe the encrypted DB and the keychain entry. Frontend should reload.
+///
+/// Runs on the blocking pool (keychain OS IPC + file removal), matching
+/// [`recover_database_from_path`].
 #[tauri::command]
 pub async fn recover_database_wipe() -> AppResult<()> {
-    let data_dir = data_dir()?;
-    let db_path = data_dir.join("medical.db");
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
+        let data_dir = data_dir()?;
+        let db_path = data_dir.join("medical.db");
 
-    medical_security::keychain::wipe_db_key()
-        .map_err(|e| AppError::Other(format!("wipe keychain: {e}")))?;
-    if db_path.exists() {
-        std::fs::remove_file(&db_path).map_err(|e| AppError::Other(format!("remove db: {e}")))?;
-    }
-    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
-    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        medical_security::keychain::wipe_db_key()
+            .map_err(|e| AppError::Other(format!("wipe keychain: {e}")))?;
+        if db_path.exists() {
+            std::fs::remove_file(&db_path)
+                .map_err(|e| AppError::Other(format!("remove db: {e}")))?;
+        }
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
 
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("recovery task join: {e}")))?
 }
 
 /// Returns the current encryption state of the on-disk database.

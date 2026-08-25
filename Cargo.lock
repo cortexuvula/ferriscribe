@@ -3464,7 +3464,7 @@ dependencies = [
  "medical-db",
  "pdf-extract",
  "pdfium-render",
- "quick-xml 0.36.2",
+ "quick-xml 0.41.0",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -4804,15 +4804,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
 dependencies = [
  "encoding_rs",
- "memchr",
-]
-
-[[package]]
-name = "quick-xml"
-version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
-dependencies = [
  "memchr",
 ]
 

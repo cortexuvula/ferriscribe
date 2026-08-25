@@ -384,8 +384,15 @@ fn finalize_training_generation(
         return;
     }
     // Invariant: capture_generation_id is Some only when recording_uuid was
-    // Some (capture_training_generation returns None otherwise).
-    let rec_uuid = recording_uuid.expect("capture_generation_id Some implies recording_uuid Some");
+    // Some (capture_training_generation returns None otherwise). Distrust
+    // the invariant instead of panicking on it — this helper is best-effort
+    // ("Never errors"), and release builds abort the whole app on panic.
+    let Some(rec_uuid) = recording_uuid else {
+        tracing::warn!(
+            "training-corpus finalize: capture id present but recording id missing; skipping"
+        );
+        return;
+    };
     let conn = match db.conn() {
         Ok(conn) => conn,
         Err(e) => {
@@ -567,5 +574,16 @@ mod stats_tests {
             medical_core::types::recording::latest_tokens_per_second(&rec.metadata),
             Some(stat.tokens_per_second)
         );
+    }
+    /// The finalize helper is documented "Never errors" and must not panic
+    /// (release builds abort the whole app on panic) even if the
+    /// capture-id/recording-id invariant is ever broken by a caller change.
+    /// Previously this path hit `.expect(...)` — tech-debt review 2026-08-25.
+    #[test]
+    fn finalize_skips_gracefully_when_invariant_broken() {
+        let db = medical_db::Database::open_in_memory().expect("db");
+        // Capture id present but recording id missing — returns after the
+        // warn, without touching the DB.
+        finalize_training_generation(&Arc::new(db), Some(Uuid::new_v4()), None, "S: ok");
     }
 }
