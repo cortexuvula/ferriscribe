@@ -43,6 +43,12 @@ jobs:
         run: npm run lint
       - name: Frontend tests (vitest)
         run: npx vitest run
+      - name: Production bundle smoke-build
+        # The only other place `vite build` runs is inside release.yml's
+        # tauri build at tag-push — bundling-only failures (asset resolution,
+        # import conditions that differ between vitest and rollup) would
+        # otherwise surface after tagging.
+        run: npm run build
 
   lint:
     runs-on: ubuntu-24.04
@@ -146,11 +152,15 @@ jobs:
         #   runs locally, crash is non-exploitable (DoS only, no RCE), and
         #   the user explicitly dropped the file for OCR. TODO: migrate to
         #   a sandboxed PDF parser or lopdf >=0.42 by 2026-10-01.
-        # - quick-xml (RUSTSEC-2026-0194, 0195): XML parse DoS — only in
-        #   docx-rs (write) and plist/Tauri (internal config, not external).
+        # - quick-xml (RUSTSEC-2026-0194, 0195): XML parse DoS. Our direct
+        #   DOCX parsing (user-supplied files!) was on 0.36 — now bumped to
+        #   0.41, deduped with the docx-rs/plist copies. The remaining 0.31
+        #   copy comes via calamine, which parses user-supplied XLSX in OCR —
+        #   external input, but same accepted-risk profile: local, DoS-only,
+        #   no RCE, user explicitly dropped the file.
         # Tracked for dependency bumps (printpdf 0.7→0.9, pdf-extract→alt).
         # Expiry comments force a periodic revisit so ignores don't linger
         # after the upstream fix lands.
         # TODO(review-by 2026-10-01): lopdf — revisit when printpdf 0.9 migration is done
-        # TODO(review-by 2026-10-01): quick-xml — revisit when docx-rs is updated
+        # TODO(review-by 2026-10-01): quick-xml — revisit when calamine moves past 0.31
         run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
