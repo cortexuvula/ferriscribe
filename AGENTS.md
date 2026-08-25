@@ -28,6 +28,16 @@ FERRISCRIBE_AUDIO_TEST=1 cargo test -p medical-audio --lib
 # Frontend tests
 npx vitest run
 
+# Coverage — thresholds (floors calibrated 2026-08-25, ratchet up as gaps
+# close) live in vitest.config.ts and gate CI's frontend job.
+npm run test:coverage
+
+# Rust coverage — one-time setup:
+#   cargo install cargo-llvm-cov --locked && rustup component add llvm-tools-preview
+# Same scope as the lib-test gate above; CI enforces --fail-under-lines.
+cargo llvm-cov --workspace --lib --summary-only
+cargo llvm-cov --workspace --lib --html   # writes coverage/index.html
+
 # Type-check (runs svelte-check, NOT SvelteKit)
 npm run check
 

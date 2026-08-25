@@ -36,5 +36,20 @@ export default defineConfig({
         consumer: 'client',
       },
     },
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html', 'lcov'],
+      include: ['src/**/*.{ts,svelte}'],
+      exclude: ['src/**/*.test.ts', 'src/test-setup.*'],
+      // Floors, not targets — calibrated to just under the measured
+      // baseline (2026-08-25) so coverage drift fails CI instead of
+      // silently eroding. Ratchet up as the known gaps close.
+      thresholds: {
+        lines: 25,
+        statements: 25,
+        functions: 30,
+        branches: 20,
+      },
+    },
   },
 });
