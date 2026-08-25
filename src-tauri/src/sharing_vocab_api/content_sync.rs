@@ -265,8 +265,8 @@ fn load_sync_recordings(
 /// `limit` (default 200, max 500). Returns changed recordings ordered by
 /// `updated_at` ascending so the client can page through with the last
 /// item's `updated_at` as the next cursor.
-pub(super) async fn content_sync_pull_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn content_sync_pull_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Query(q): Query<SyncSinceQuery>,
 ) -> Result<Json<ContentPullResponse>, StatusCode> {
@@ -329,8 +329,8 @@ pub(super) async fn content_sync_pull_handler(
 /// where the server's local copy won (conflicts). After a successful merge
 /// the server broadcasts on `content_changed_tx` so other SSE-connected
 /// clients refresh.
-pub(super) async fn content_sync_push_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn content_sync_push_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Json(req): Json<ContentPushRequest>,
 ) -> Result<Json<ContentPushResponse>, StatusCode> {
@@ -395,8 +395,8 @@ pub(super) async fn content_sync_push_handler(
 /// Returns the current recording count (non-deleted), the latest
 /// `updated_at` watermark, and the server time. Clients use this to decide
 /// whether a full re-pull is warranted.
-pub(super) async fn content_sync_meta_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn content_sync_meta_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
 ) -> Result<Json<ContentMetaResponse>, StatusCode> {
     let _ = authorize(&state, &headers)?;
@@ -441,8 +441,8 @@ pub(super) async fn content_sync_meta_handler(
 /// Pushes `data: connected` on connect, then `data: changed` for each
 /// broadcast on `content_changed_tx` (triggered by a push merge). Mirrors
 /// the condition-chips events handler.
-pub(super) async fn content_events_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn content_events_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, StatusCode> {
     let _ = authorize(&state, &headers)?;

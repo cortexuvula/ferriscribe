@@ -30,8 +30,8 @@ use super::{ApiState, authorize};
 /// deleted (a response of active-only chips would leave stale clients free
 /// to resurrect deleted chips practice-wide). Clients filter locally via
 /// `merge_incoming`, whose return value is the active list.
-pub(super) async fn condition_chips_list_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn condition_chips_list_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<medical_core::types::condition_chip::ConditionChip>>, StatusCode> {
     let _ = authorize(&state, &headers)?;
@@ -61,8 +61,8 @@ pub(super) async fn condition_chips_list_handler(
 /// propagate to every client; each client merges the response locally via
 /// `merge_incoming`, which applies the tombstones and returns the active
 /// list for its UI.
-pub(super) async fn condition_chips_sync_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn condition_chips_sync_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Json(incoming): Json<Vec<medical_core::types::condition_chip::ConditionChip>>,
 ) -> Result<Json<Vec<medical_core::types::condition_chip::ConditionChip>>, StatusCode> {
@@ -130,8 +130,8 @@ pub(super) async fn condition_chips_sync_handler(
 /// server. Clients use this to refresh their local chip list in near-realtime
 /// instead of waiting for the 30s poll. The stream stays open until the client
 /// disconnects or the server shuts down.
-pub(super) async fn condition_chips_events_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn condition_chips_events_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, StatusCode> {
     let _ = authorize(&state, &headers)?;

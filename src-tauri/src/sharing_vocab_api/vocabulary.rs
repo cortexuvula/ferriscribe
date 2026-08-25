@@ -22,8 +22,8 @@ pub(super) struct ListQuery {
     pub(super) category: Option<String>,
 }
 
-pub(super) async fn list_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn list_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<VocabularyEntry>>, StatusCode> {
@@ -54,8 +54,8 @@ pub(super) async fn list_handler(
     Ok(Json(entries))
 }
 
-pub(super) async fn count_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn count_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
 ) -> Result<Json<(u32, u32)>, StatusCode> {
     let _ = authorize(&state, &headers)?;
@@ -86,8 +86,8 @@ pub(super) struct UpsertBody {
     enabled: Option<bool>,
 }
 
-pub(super) async fn insert_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn insert_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Json(body): Json<UpsertBody>,
 ) -> Result<Json<VocabularyEntry>, StatusCode> {
@@ -131,8 +131,8 @@ pub(super) async fn insert_handler(
     Ok(Json(entry))
 }
 
-pub(super) async fn update_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn update_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<UpsertBody>,
@@ -177,8 +177,8 @@ pub(super) async fn update_handler(
     Ok(Json(entry))
 }
 
-pub(super) async fn delete_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn delete_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
@@ -195,8 +195,8 @@ pub(super) async fn delete_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub(super) async fn delete_all_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn delete_all_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
 ) -> Result<Json<u32>, StatusCode> {
     let _ = authorize(&state, &headers)?;

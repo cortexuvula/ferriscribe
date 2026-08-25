@@ -25,7 +25,8 @@
 //!     POST   /sync-full              — full-fidelity merge (entries incl. tombstones)
 //!     GET    /events                 — SSE change notifications
 //!   /v1/condition-chips
-//!     GET    /                       — list active chips
+//!     GET    /                       — list ALL chips incl. tombstones
+//!                                     (clients merge via merge_incoming)
 //!     POST   /sync                   — two-way merge (client → server)
 //!
 //! Wire formats reuse the existing `VocabularyEntry` and `ContextTemplate`
@@ -60,11 +61,13 @@ pub(super) mod context_templates;
 pub(super) mod user_dictionary;
 pub(super) mod vocabulary;
 
+#[cfg(test)]
+mod route_tests;
+
 /// Internal Axum state shared across all vocab/template/dictionary route
 /// handlers. Holds the database and token store needed to validate bearer
 /// tokens and read/write data.
-#[derive(Clone)]
-pub(super) struct ApiState {
+pub(super) struct ApiState<R: tauri::Runtime> {
     pub(super) db: Arc<Database>,
     pub(super) tokens: Arc<TokenStore>,
     /// Broadcasts `()` whenever condition chips change on the server so SSE
@@ -85,12 +88,29 @@ pub(super) struct ApiState {
     /// (the SSE channel only notifies *other* clients). We emit a
     /// `recording-updated` Tauri event per changed ID so the server's own
     /// Recordings view reloads — mirroring what the client does on pull.
-    pub(super) app_handle: AppHandle,
+    pub(super) app_handle: tauri::AppHandle<R>,
     /// Serializes content-sync merges to prevent concurrent read-modify-write
     /// races when multiple clients push simultaneously. Held across the
     /// `spawn_blocking` merge call in the push handler. Wrapped in an `Arc`
     /// so the `Clone` derive can clone the same underlying lock.
     pub(super) merge_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+// Manual Clone: the derive would add a spurious `R: Clone` bound (Runtime
+// isn't Clone) and axum's Handler requires state: Clone for R: Runtime.
+impl<R: tauri::Runtime> Clone for ApiState<R> {
+    fn clone(&self) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+            tokens: Arc::clone(&self.tokens),
+            chips_changed_tx: self.chips_changed_tx.clone(),
+            dict_changed_tx: self.dict_changed_tx.clone(),
+            content_changed_tx: self.content_changed_tx.clone(),
+            data_dir: self.data_dir.clone(),
+            app_handle: self.app_handle.clone(),
+            merge_lock: Arc::clone(&self.merge_lock),
+        }
+    }
 }
 
 /// Spawn the vocab/templates/dictionary HTTP API server on `0.0.0.0:{port}`.
@@ -118,7 +138,27 @@ pub async fn spawn(
         app_handle,
         merge_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
-    let app = Router::new()
+    let app = build_router(state);
+
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
+        .parse()
+        .map_err(|e: std::net::AddrParseError| format!("vocab_api bind addr parse: {e}"))?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| format!("vocab_api bind {addr}: {e}"))?;
+    info!(port, "vocab API listening");
+    Ok(tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            warn!("vocab_api serve exited: {e}");
+        }
+    }))
+}
+
+/// Assemble the full vocab/templates/dictionary/chips/content router.
+/// Split from [`spawn`] so route-level tests can drive the router with an
+/// in-memory database and a mock app handle, without binding a port.
+pub(super) fn build_router<R: tauri::Runtime>(state: ApiState<R>) -> Router {
+    Router::new()
         .route(
             "/v1/vocabulary",
             get(vocabulary::list_handler)
@@ -201,20 +241,7 @@ pub async fn spawn(
         // arrived. The handler buffers the body in memory to encrypt it, so
         // the server needs roughly 2x the largest recording in free RAM.
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
-        .with_state(state);
-
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
-        .parse()
-        .map_err(|e: std::net::AddrParseError| format!("vocab_api bind addr parse: {e}"))?;
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| format!("vocab_api bind {addr}: {e}"))?;
-    info!(port, "vocab API listening");
-    Ok(tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            warn!("vocab_api serve exited: {e}");
-        }
-    }))
+        .with_state(state)
 }
 
 pub(super) fn extract_bearer(headers: &HeaderMap) -> Option<String> {
@@ -225,7 +252,10 @@ pub(super) fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     v.strip_prefix("Bearer ").map(|s| s.trim().to_string())
 }
 
-pub(super) fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<i64, StatusCode> {
+pub(super) fn authorize<R: tauri::Runtime>(
+    state: &ApiState<R>,
+    headers: &HeaderMap,
+) -> Result<i64, StatusCode> {
     let token = extract_bearer(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let row = state
         .tokens

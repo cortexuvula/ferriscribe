@@ -66,6 +66,10 @@ filetime = "0.2"
 wiremock = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
+# mock_app() for route tests (build_router needs an AppHandle)
+tauri = { version = "2", features = ["test"] }
+# ServiceExt::oneshot to drive the axum router without binding a port
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true
