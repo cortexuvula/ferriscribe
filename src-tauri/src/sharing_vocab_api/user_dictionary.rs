@@ -34,8 +34,8 @@ pub(super) struct DictAddBody {
     word: String,
 }
 
-pub(super) async fn dict_list_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn dict_list_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<String>>, StatusCode> {
     let _ = authorize(&state, &headers)?;
@@ -57,8 +57,8 @@ pub(super) async fn dict_list_handler(
     Ok(Json(words))
 }
 
-pub(super) async fn dict_add_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn dict_add_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Json(body): Json<DictAddBody>,
 ) -> Result<Json<bool>, StatusCode> {
@@ -85,8 +85,8 @@ pub(super) async fn dict_add_handler(
     Ok(Json(added))
 }
 
-pub(super) async fn dict_remove_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn dict_remove_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Path(word): Path<String>,
 ) -> Result<Json<bool>, StatusCode> {
@@ -125,8 +125,8 @@ pub(super) async fn dict_remove_handler(
 /// deletions only propagate server-side here; full-fidelity propagation
 /// (both directions) lives in [`dict_sync_full_handler`]. The legacy shape
 /// is kept so old clients keep working unchanged.
-pub(super) async fn dict_sync_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn dict_sync_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Json(incoming): Json<Vec<medical_core::types::user_dict_entry::UserDictEntry>>,
 ) -> Result<Json<Vec<String>>, StatusCode> {
@@ -191,8 +191,8 @@ pub(super) async fn dict_sync_handler(
 /// `UserDictRemote::sync_full`). Tombstones older than 365 days are pruned
 /// opportunistically (best-effort — a prune failure must not fail the
 /// sync). Fires `dict_changed_tx` so SSE subscribers refresh.
-pub(super) async fn dict_sync_full_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn dict_sync_full_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Json(incoming): Json<Vec<medical_core::types::user_dict_entry::UserDictEntry>>,
 ) -> Result<Json<Vec<medical_core::types::user_dict_entry::UserDictEntry>>, StatusCode> {
@@ -254,8 +254,8 @@ pub(super) async fn dict_sync_full_handler(
 /// completes on the server. Clients use this to refresh their local word
 /// list in near-realtime. The stream stays open until the client disconnects
 /// or the server shuts down.
-pub(super) async fn dict_events_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn dict_events_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, StatusCode> {
     let _ = authorize(&state, &headers)?;

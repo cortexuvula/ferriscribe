@@ -31,8 +31,8 @@ use super::{ApiState, authorize};
 /// file (falling back to plaintext read for legacy unencrypted files). The
 /// raw bytes are returned as the response body. Only the ID length and byte
 /// count are logged — never the content.
-pub(super) async fn content_audio_get_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn content_audio_get_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Path(recording_id): Path<String>,
 ) -> Result<Response, StatusCode> {
@@ -115,8 +115,8 @@ pub(super) async fn content_audio_get_handler(
 /// updates the recording's `audio_path`. If a file already exists for this
 /// recording, returns 409 Conflict (first-write-wins). Returns 201 Created
 /// on success. Only the ID length and byte count are logged.
-pub(super) async fn content_audio_put_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn content_audio_put_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Path(recording_id): Path<String>,
     body: Bytes,

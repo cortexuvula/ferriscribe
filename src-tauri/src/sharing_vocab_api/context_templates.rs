@@ -45,8 +45,8 @@ fn ctx_templates_load_sorted(
     Ok(t)
 }
 
-pub(super) async fn templates_list_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn templates_list_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ContextTemplate>>, StatusCode> {
     let _ = authorize(&state, &headers)?;
@@ -62,8 +62,8 @@ pub(super) async fn templates_list_handler(
     Ok(Json(list))
 }
 
-pub(super) async fn templates_upsert_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn templates_upsert_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Json(body): Json<TemplateUpsertBody>,
 ) -> Result<Json<ContextTemplate>, StatusCode> {
@@ -108,8 +108,8 @@ pub(super) async fn templates_upsert_handler(
     Ok(Json(entry))
 }
 
-pub(super) async fn templates_rename_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn templates_rename_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Json(body): Json<TemplateRenameBody>,
 ) -> Result<Json<ContextTemplate>, StatusCode> {
@@ -168,8 +168,8 @@ pub(super) async fn templates_rename_handler(
     Ok(Json(entry))
 }
 
-pub(super) async fn templates_delete_handler(
-    AxumState(state): AxumState<ApiState>,
+pub(super) async fn templates_delete_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
     Json(body): Json<TemplateDeleteBody>,
 ) -> Result<StatusCode, StatusCode> {
