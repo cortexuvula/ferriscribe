@@ -99,9 +99,7 @@
   async function handleCopy(type: string) {
     if (copyStatus[type] && copyStatus[type] !== 'idle') return;
     if (!recordings.selectedRecording) return;
-    const text = type === 'soap' ? recordings.selectedRecording.soap_note
-      : type === 'referral' ? recordings.selectedRecording.referral
-      : recordings.selectedRecording.letter;
+    const text = textForType(type);
     if (!text) return;
     await copyWithStatus({
       setStatus: (s) => (copyStatus = { ...copyStatus, [type]: s }),
@@ -111,15 +109,28 @@
 
   function handleSpeedRead(type: string) {
     if (!recordings.selectedRecording) return;
-    const text = type === 'soap' ? recordings.selectedRecording.soap_note
-      : type === 'referral' ? recordings.selectedRecording.referral
-      : recordings.selectedRecording.letter;
+    const text = textForType(type);
     if (!text) return;
     if (type === 'soap') {
       rsvp.openSoap(text);
     } else {
       rsvp.openGeneric(text, type as DocKind);
     }
+  }
+
+  /// Resolve the generated text for a doc type. Previously inline ternary
+  /// chains in handleCopy/handleSpeedRead with no `peer_discussion` branch —
+  /// the type fell through to `letter`, so copying a peer discussion with no
+  /// letter generated silently did nothing (button never showed "Copied"),
+  /// and with a letter present it copied/speed-read the LETTER instead.
+  function textForType(type: string): string | null | undefined {
+    const rec = recordings.selectedRecording;
+    if (!rec) return null;
+    return type === 'soap' ? rec.soap_note
+      : type === 'referral' ? rec.referral
+      : type === 'letter' ? rec.letter
+      : type === 'peer_discussion' ? rec.peer_discussion
+      : null;
   }
 
   /// Maximum context string length. Mirrors the backend MAX_CONTEXT_CHARS.
