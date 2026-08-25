@@ -26,5 +26,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: taiki-e/install-action@17dfa9a7aa66ae804b5cbd9f505a33815221f967 # cargo-audit
+        with:
+          tool: cargo-audit
       - name: Cargo audit
         run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
