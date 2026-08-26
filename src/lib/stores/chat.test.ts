@@ -27,6 +27,7 @@ vi.mock('../api/ocr', () => ({
 vi.mock('../api/chat', () => ({
   chatSend: vi.fn(),
   chatStream: vi.fn(),
+  chatClearDocuments: vi.fn().mockResolvedValue(undefined),
   chatWithAgent: vi.fn(),
   listAiProviders: vi.fn(),
   setActiveProvider: vi.fn(),
@@ -240,5 +241,29 @@ describe('ChatStore', () => {
     expect(chat.messages).toHaveLength(0);
     expect(chat.documents).toHaveLength(0);
     expect(chat.ocr.ocrFiles).toHaveLength(0);
+  });
+
+  it('chart-review mode flips when documents exceed the stuffing budget', async () => {
+    const { CHAT_DOC_BUDGET_TOKENS } = await import('./chat.svelte');
+    const { ocrDocuments } = await import('../api/ocr');
+    vi.mocked(ocrDocuments).mockResolvedValue([
+      // ~30k tokens of text — over the 24k budget.
+      { filename: 'chart.pdf', page_count: 300, text: 'x'.repeat(CHAT_DOC_BUDGET_TOKENS * 4 + 100) },
+    ]);
+    await chat.ocr.handleOcrFilesSelected(['/tmp/chart.pdf']);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(chat.chartReviewMode).toBe(true);
+    expect(chat.documents).toHaveLength(1);
+  });
+
+  it('chart-review mode stays off within the budget', async () => {
+    const { ocrDocuments } = await import('../api/ocr');
+    vi.mocked(ocrDocuments).mockResolvedValue([
+      { filename: 'note.pdf', page_count: 2, text: 'small note' },
+    ]);
+    await chat.ocr.handleOcrFilesSelected(['/tmp/note.pdf']);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(chat.chartReviewMode).toBe(false);
   });
 });

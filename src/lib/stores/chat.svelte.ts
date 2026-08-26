@@ -48,6 +48,13 @@ class ChatStore {
 
   documentsOverBudget = $derived(this.documentsTokenEstimate > CHAT_DOC_BUDGET_TOKENS);
 
+  /**
+   * Chart-review mode: the conversation's documents are too large to stuff
+   * whole, so the backend indexes them once and answers from retrieved,
+   * cited excerpts. See commands/chat_docs.rs.
+   */
+  chartReviewMode = $derived(this.documentsOverBudget);
+
   // Active stream cleanup handles — set during sendMessage, cleared by cancel/cleanup.
   private _tokenUnlisten: UnlistenFn | null = null;
   private _doneUnlisten: UnlistenFn | null = null;
@@ -206,6 +213,9 @@ class ChatStore {
     this.messages = [];
     this.ocr.clearOcr();
     isStreaming.value = false;
+    // Drop the backend's conversation index (chart-review mode). Best-effort
+    // — a dropped index only costs a rebuild on the next oversized send.
+    void chatApi.chatClearDocuments().catch(() => {});
   }
 }
 

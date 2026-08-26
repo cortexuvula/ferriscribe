@@ -23,6 +23,8 @@ use crate::state::AppState;
 /// memory. 200k chars is roughly 50k tokens — well above any sane
 /// per-conversation size and below the 128k/200k context windows of modern
 /// models.
+use super::chat_docs;
+
 const MAX_HISTORY_CHARS: usize = 200_000;
 
 /// Default system prompt for the chat tab, applied when the caller sends
@@ -301,14 +303,52 @@ pub async fn chat_stream(
     }
     .ok_or_else(|| AppError::ai_provider("No active AI provider configured".to_string()))?;
 
+    // Latest user question — needed by retrieval mode; extracted before
+    // `messages` is consumed by convert_messages.
+    let last_question = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
     let core_messages = convert_messages(messages);
+
+    // Document mode: stuff whole documents when they fit the context
+    // budget; retrieve cited excerpts when they don't (chart-review
+    // scale — 300-600 page drops). See commands/chat_docs.rs.
+    let doc_chars = documents
+        .as_deref()
+        .map(chat_docs::documents_total_chars)
+        .unwrap_or(0);
+    let resolved_system = if doc_chars > chat_docs::STUFFING_CHAR_LIMIT {
+        if doc_chars > chat_docs::MAX_RETRIEVAL_CHAR_LIMIT {
+            return Err(AppError::Other(format!(
+                "Chat documents too large: {doc_chars} chars, limit is {}. Split the chart into smaller drops.",
+                chat_docs::MAX_RETRIEVAL_CHAR_LIMIT
+            )));
+        }
+        let base = resolve_system_prompt(system_prompt).expect("resolver always returns Some");
+        let mut slot = state.chat_doc_index.lock().await;
+        let docs = documents.as_deref().expect("non-empty checked above");
+        if slot.as_ref().is_none_or(|i| !i.matches(docs)) {
+            let embeddings = chat_docs::embeddings_for_config(&cfg)?;
+            *slot = Some(chat_docs::ChatDocIndex::build(docs, embeddings).await?);
+        }
+        let index = slot.as_ref().expect("just built or reused");
+        let excerpts = index.retrieve(&last_question).await?;
+        let mut prompt = base;
+        prompt.push_str(&chat_docs::build_excerpt_section(&excerpts));
+        prompt
+    } else {
+        compose_system_prompt(system_prompt, documents.as_deref())?
+    };
 
     let request = CompletionRequest {
         model: model.unwrap_or(settings_model),
         messages: core_messages,
         temperature: Some(settings_temp),
         max_tokens: Some(4096),
-        system_prompt: Some(compose_system_prompt(system_prompt, documents.as_deref())?),
+        system_prompt: Some(resolved_system),
         reasoning_effort: None,
     };
 
@@ -714,6 +754,7 @@ mod preflight_tests {
             ai_providers: Arc::new(Mutex::new(registry)),
             stt_providers: Arc::new(Mutex::new(None)),
             orchestrator,
+            chat_doc_index: Arc::new(tokio::sync::Mutex::new(None)),
             capture_handle: Arc::new(std::sync::Mutex::new(crate::state::SendCaptureHandle(None))),
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

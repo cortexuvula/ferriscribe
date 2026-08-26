@@ -343,6 +343,7 @@ pub fn run() {
             commands::audio::get_recording_state,
             commands::chat::chat_send,
             commands::chat::chat_stream,
+            commands::chat_docs::chat_clear_documents,
             commands::chat::chat_with_agent,
             commands::chat::list_ai_providers,
             commands::chat::set_active_provider,

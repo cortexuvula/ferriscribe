@@ -44,6 +44,11 @@ export async function chatStream(
   });
 }
 
+/** Drop the backend's conversation document index (chart-review mode). */
+export async function chatClearDocuments(): Promise<void> {
+  return invoke('chat_clear_documents');
+}
+
 export async function chatWithAgent(
   message: string,
   agentName: string,

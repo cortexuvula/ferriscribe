@@ -232,6 +232,11 @@ pub struct AppState {
     /// Agent orchestrator for chat and agent-driven commands. Holds the
     /// tool registry (RAG search) and all agent definitions.
     pub orchestrator: Arc<AgentOrchestrator>,
+    /// Conversation-scoped document index for chat chart-review mode
+    /// (`commands/chat_docs.rs`). `None` until the first oversized send;
+    /// rebuilt when the document set changes; dropped by
+    /// `chat_clear_documents`. In-memory only — never persisted or synced.
+    pub chat_doc_index: Arc<tokio::sync::Mutex<Option<crate::commands::chat_docs::ChatDocIndex>>>,
     /// Active audio capture stream. Wrapped in `SendCaptureHandle` to satisfy
     /// `Send + Sync` bounds. Access serialized through the `std::sync::Mutex`.
     pub capture_handle: Arc<std::sync::Mutex<SendCaptureHandle>>,
@@ -739,6 +744,7 @@ impl AppState {
             ai_providers: Arc::new(Mutex::new(ai_handles.registry)),
             stt_providers: Arc::new(Mutex::new(stt_handles.provider)),
             orchestrator: Arc::new(orchestrator),
+            chat_doc_index: Arc::new(tokio::sync::Mutex::new(None)),
             capture_handle: Arc::new(std::sync::Mutex::new(SendCaptureHandle(None))),
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
