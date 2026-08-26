@@ -3,6 +3,7 @@
   import { chat, isStreaming, CHAT_DOC_BUDGET_TOKENS } from '../stores/chat.svelte';
   import ChatMessage from '../components/ChatMessage.svelte';
   import OcrDropZone from '../components/OcrDropZone.svelte';
+  import ConfirmDialog from '../components/ConfirmDialog.svelte';
 
   let input = $state('');
   let messagesEl: HTMLDivElement | undefined = $state();
@@ -48,9 +49,36 @@
       sendMessage();
     }
   }
+
+  let clearDialogOpen = $state(false);
+
+  /** Clear and start over. Documents make it destructive — a 600-page
+   *  chart's OCR time is lost — so confirm when any are attached. */
+  function requestClear() {
+    if (isStreaming.value) return;
+    if (chat.documents.length > 0) {
+      clearDialogOpen = true;
+    } else {
+      chat.clear();
+    }
+  }
 </script>
 
 <div class="chat-tab">
+  {#if chat.messages.length > 0 || chat.documents.length > 0}
+    <div class="chat-header">
+      <span class="chat-header-label">Chat</span>
+      <button
+        class="clear-btn"
+        onclick={requestClear}
+        disabled={isStreaming.value}
+        title={isStreaming.value ? 'Wait for the reply to finish' : 'Clear the conversation and attached documents'}
+      >
+        New chat
+      </button>
+    </div>
+  {/if}
+
   <div class="messages-area" bind:this={messagesEl} onscroll={onScroll}>
     {#if chat.messages.length === 0}
       <div class="welcome">
@@ -128,12 +156,60 @@
   </div>
 </div>
 
+<ConfirmDialog
+  open={clearDialogOpen}
+  title="Clear this chat?"
+  message="This removes the conversation and its attached documents. OCR'd
+    text cannot be recovered — you would have to drop and re-OCR the files."
+  confirmLabel="Clear chat"
+  cancelLabel="Keep"
+  danger
+  onConfirm={() => {
+    clearDialogOpen = false;
+    chat.clear();
+  }}
+  onCancel={() => (clearDialogOpen = false)}
+/>
+
 <style>
   .chat-tab {
     flex: 1;
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  .chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .chat-header-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .clear-btn {
+    font-size: 12px;
+    padding: 4px 12px;
+    color: var(--text-secondary);
+    background-color: var(--bg-hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+
+  .clear-btn:hover:not(:disabled) {
+    background-color: var(--bg-primary);
+  }
+
+  .clear-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .messages-area {
