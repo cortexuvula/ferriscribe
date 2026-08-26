@@ -50,10 +50,11 @@ impl Bm25Search {
                 };
 
                 let chunk_id = Uuid::parse_str(&fts.id).unwrap_or(Uuid::nil());
+                let document_id = Uuid::parse_str(&fts.document_id).unwrap_or(Uuid::nil());
 
                 RagResult {
                     chunk_id,
-                    document_id: Uuid::nil(), // Not available from FTS results
+                    document_id,
                     content: fts.content,
                     score,
                     source: SearchSource::Bm25,

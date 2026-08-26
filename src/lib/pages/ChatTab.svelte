@@ -36,7 +36,7 @@
 
   async function sendMessage() {
     const text = input.trim();
-    if (!text || isStreaming.value || chat.documentsOverBudget) return;
+    if (!text || isStreaming.value) return;
 
     input = '';
     await chat.sendMessage(text);
@@ -98,10 +98,11 @@
           {chat.documents.length === 1 ? 'document' : 'documents'} · ~{chat.documentsTokenEstimate.toLocaleString()}
           / {CHAT_DOC_BUDGET_TOKENS.toLocaleString()} tokens
         </span>
-        {#if chat.documentsOverBudget}
-          <span class="doc-warning" role="alert">
-            Over the ~{CHAT_DOC_BUDGET_TOKENS.toLocaleString()}-token budget — trim the
-            document text (edit the preview above) or remove files before sending.
+        {#if chat.chartReviewMode}
+          <span class="doc-mode" role="status">
+            Chart review mode — too large to include whole; answers draw on the
+            most relevant excerpts of your documents. The first question may
+            take a couple of minutes while the documents are indexed.
           </span>
         {/if}
       </div>
@@ -120,7 +121,7 @@
     <button
       class="send-btn"
       onclick={sendMessage}
-      disabled={!input.trim() || isStreaming.value || chat.documentsOverBudget}
+      disabled={!input.trim() || isStreaming.value}
     >
       {isStreaming.value ? '...' : 'Send'}
     </button>
@@ -166,9 +167,10 @@
     color: var(--text-secondary);
   }
 
-  .doc-warning {
+  .doc-mode {
     margin-top: 4px;
-    color: var(--danger, #ef4444);
+    color: var(--text-secondary);
+    font-style: italic;
   }
 
   .welcome {
