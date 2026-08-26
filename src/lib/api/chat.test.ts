@@ -42,11 +42,12 @@ describe('chat api', () => {
   });
 
   it('chatStream invokes chat_stream with the same shape and null-coalesces optionals', async () => {
-    await chatStream(msgs, 'm', 's');
+    await chatStream(msgs, { model: 'm', systemPrompt: 's' });
     expect(invokeMock).toHaveBeenCalledWith('chat_stream', {
       messages: msgs,
       model: 'm',
       systemPrompt: 's',
+      documents: null,
     });
     invokeMock.mockReset();
     await chatStream(msgs);
@@ -54,6 +55,26 @@ describe('chat api', () => {
       messages: msgs,
       model: null,
       systemPrompt: null,
+      documents: null,
+    });
+  });
+
+  it('chatStream forwards documents when present, null when the array is empty', async () => {
+    const docs = [{ name: 'consult.pdf', content: 'text' }];
+    await chatStream(msgs, { documents: docs });
+    expect(invokeMock).toHaveBeenCalledWith('chat_stream', {
+      messages: msgs,
+      model: null,
+      systemPrompt: null,
+      documents: docs,
+    });
+    invokeMock.mockReset();
+    await chatStream(msgs, { documents: [] });
+    expect(invokeMock).toHaveBeenCalledWith('chat_stream', {
+      messages: msgs,
+      model: null,
+      systemPrompt: null,
+      documents: null,
     });
   });
 

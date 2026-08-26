@@ -25,6 +25,89 @@ use crate::state::AppState;
 /// models.
 const MAX_HISTORY_CHARS: usize = 200_000;
 
+/// Default system prompt for the chat tab, applied when the caller sends
+/// none (the live UI path). Establishes the clinical-support role and the
+/// hardened anti-fabrication stance used across the app's generators —
+/// before this, chat ran the raw model with zero medical framing. Static
+/// text only, no patient content (PHI rule); a caller-provided prompt
+/// replaces it wholesale. The documents-drop feature (phase 1+) will append
+/// its grounding section on top of this.
+const DEFAULT_CHAT_SYSTEM_PROMPT: &str = "\
+You are a clinical documentation assistant inside a local, offline medical records \
+application used by healthcare professionals. The user may paste or drop patient \
+material into this conversation; treat everything as confidential clinical information.
+
+Rules:
+- Ground every answer in the information provided in this conversation. Never \
+fabricate facts, findings, values, dates, medications, or citations.
+- If the conversation's material does not contain the answer, say so plainly. You \
+may then offer well-established general medical knowledge, but clearly label it as \
+background rather than as coming from the user's material.
+- Keep what the user's material states and your own inferences visibly separate.
+- You are clinical decision support, not a substitute for professional judgment. \
+All outputs must be reviewed by a licensed healthcare provider before clinical use.";
+
+/// Caller prompt wins; otherwise the default grounding prompt applies.
+fn resolve_system_prompt(user: Option<String>) -> Option<String> {
+    Some(user.unwrap_or_else(|| DEFAULT_CHAT_SYSTEM_PROMPT.to_string()))
+}
+
+/// A document attached to the conversation by the chat UI (OCR'd on the
+/// frontend, passed verbatim). `name` is the source filename; `content` is
+/// the extracted text.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChatDocumentInput {
+    pub name: String,
+    pub content: String,
+}
+
+/// Hard ceiling on total document text per request — same value as the
+/// Letter Writer's source-document cap. The frontend additionally enforces
+/// a much tighter token budget for its context-stuffing mode; this is the
+/// backend's fail-safe against a misbehaving client.
+const MAX_CHAT_DOCUMENT_CHARS: usize = 500_000;
+
+/// Build the "Provided documents" prompt section. None when there are no
+/// documents. Content is embedded verbatim — it never appears in logs
+/// (PHI); only lengths are safe to log.
+fn build_document_section(docs: &[ChatDocumentInput]) -> Option<String> {
+    if docs.is_empty() {
+        return None;
+    }
+    let mut section = String::from(
+        "\n\n## Provided documents\n\n\
+         The user attached the following documents to this conversation. Ground \
+         answers in them, cite the document name when quoting or paraphrasing, and \
+         say plainly when they do not contain the answer.\n\n",
+    );
+    for d in docs {
+        section.push_str(&format!("--- Document: {} ---\n{}\n\n", d.name, d.content));
+    }
+    Some(section)
+}
+
+/// Resolve the final system prompt: caller prompt (or the default grounding
+/// prompt) plus the documents section when documents are attached. Enforces
+/// the total document size cap.
+fn compose_system_prompt(
+    user: Option<String>,
+    documents: Option<&[ChatDocumentInput]>,
+) -> AppResult<String> {
+    let mut prompt = resolve_system_prompt(user).expect("resolver always returns Some");
+    if let Some(docs) = documents {
+        let total: usize = docs.iter().map(|d| d.name.len() + d.content.len()).sum();
+        if total > MAX_CHAT_DOCUMENT_CHARS {
+            return Err(AppError::Other(format!(
+                "Chat documents too large: {total} chars, limit is {MAX_CHAT_DOCUMENT_CHARS}. Trim or remove documents."
+            )));
+        }
+        if let Some(section) = build_document_section(docs) {
+            prompt.push_str(&section);
+        }
+    }
+    Ok(prompt)
+}
+
 // ---------------------------------------------------------------------------
 // Input / output types
 // ---------------------------------------------------------------------------
@@ -147,7 +230,7 @@ async fn chat_send_inner(
         messages: core_messages,
         temperature: Some(settings_temp),
         max_tokens: Some(4096),
-        system_prompt,
+        system_prompt: resolve_system_prompt(system_prompt),
         reasoning_effort: None,
     };
 
@@ -194,6 +277,7 @@ pub async fn chat_stream(
     messages: Vec<ChatMessageInput>,
     model: Option<String>,
     system_prompt: Option<String>,
+    documents: Option<Vec<ChatDocumentInput>>,
 ) -> AppResult<()> {
     check_history_size(&messages)?;
 
@@ -224,7 +308,7 @@ pub async fn chat_stream(
         messages: core_messages,
         temperature: Some(settings_temp),
         max_tokens: Some(4096),
-        system_prompt,
+        system_prompt: Some(compose_system_prompt(system_prompt, documents.as_deref())?),
         reasoning_effort: None,
     };
 
@@ -487,6 +571,72 @@ pub async fn list_models(
     let provider = provider
         .ok_or_else(|| AppError::ai_provider("Provider not found or not configured".to_string()))?;
     provider.available_models().await
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn default_grounding_prompt_applies_when_caller_sends_none() {
+        let resolved = resolve_system_prompt(None).expect("always Some");
+        assert!(
+            resolved.contains("Never fabricate"),
+            "anti-fabrication rule"
+        );
+        assert!(
+            resolved.contains("licensed healthcare provider"),
+            "guardrail"
+        );
+        // No PHI-shaped content in the static prompt itself.
+        assert!(!resolved.contains("patient_name"));
+    }
+
+    #[test]
+    fn caller_prompt_replaces_default_wholesale() {
+        assert_eq!(
+            resolve_system_prompt(Some("custom".into())).as_deref(),
+            Some("custom")
+        );
+    }
+
+    fn doc(name: &str, content: &str) -> ChatDocumentInput {
+        ChatDocumentInput {
+            name: name.into(),
+            content: content.into(),
+        }
+    }
+
+    #[test]
+    fn documents_section_appended_after_grounding_prompt() {
+        let prompt = compose_system_prompt(None, Some(&[doc("consult.pdf", "Cardiology says hi")]))
+            .expect("compose");
+        assert!(
+            prompt.contains("Never fabricate"),
+            "grounding base retained"
+        );
+        assert!(prompt.contains("## Provided documents"));
+        assert!(prompt.contains("--- Document: consult.pdf ---"));
+        assert!(prompt.contains("Cardiology says hi"));
+        // Grounding text comes first, documents after.
+        assert!(prompt.find("Never fabricate") < prompt.find("consult.pdf"));
+    }
+
+    #[test]
+    fn no_documents_leaves_prompt_unchanged() {
+        let with_none = compose_system_prompt(None, None).expect("compose");
+        assert_eq!(with_none, DEFAULT_CHAT_SYSTEM_PROMPT);
+        let with_empty = compose_system_prompt(None, Some(&[])).expect("compose");
+        assert_eq!(with_empty, DEFAULT_CHAT_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn oversized_documents_are_rejected() {
+        let big = "x".repeat(MAX_CHAT_DOCUMENT_CHARS + 1);
+        let err =
+            compose_system_prompt(None, Some(&[doc("big.pdf", &big)])).expect_err("must reject");
+        assert!(err.to_string().contains("too large"));
+    }
 }
 
 #[cfg(test)]

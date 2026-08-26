@@ -35,3 +35,6 @@ dist/
 # Tauri sidecar staging (built by scripts/build-sidecar.mjs)
 /src-tauri/binaries/
 coverage/
+
+# Mimosa security-scan plugin session state (local only)
+.mimosa/

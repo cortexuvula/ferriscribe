@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
-  import { chat, isStreaming } from '../stores/chat.svelte';
+  import { chat, isStreaming, CHAT_DOC_BUDGET_TOKENS } from '../stores/chat.svelte';
   import ChatMessage from '../components/ChatMessage.svelte';
+  import OcrDropZone from '../components/OcrDropZone.svelte';
 
   let input = $state('');
   let messagesEl: HTMLDivElement | undefined = $state();
@@ -35,7 +36,7 @@
 
   async function sendMessage() {
     const text = input.trim();
-    if (!text || isStreaming.value) return;
+    if (!text || isStreaming.value || chat.documentsOverBudget) return;
 
     input = '';
     await chat.sendMessage(text);
@@ -55,7 +56,11 @@
       <div class="welcome">
         <div class="welcome-icon">💬</div>
         <h2>Medical AI Chat</h2>
-        <p>Ask questions about your recordings, get medical information, or discuss clinical cases.</p>
+        <p>
+          Drop or attach documents (PDF, DOCX, scans) to ask questions about
+          them, or just chat. Nothing is saved — conversations and documents
+          are cleared when you leave or clear the chat.
+        </p>
       </div>
     {:else}
       {#each chat.messages as msg (msg.id)}
@@ -72,6 +77,37 @@
     {/if}
   </div>
 
+  <div class="documents-area">
+    <OcrDropZone
+      ocrFiles={chat.ocr.ocrFiles}
+      ocrText={chat.ocr.ocrTextDisplay}
+      ocrLoading={chat.ocr.ocrLoading}
+      onOcrFilesSelected={chat.ocr.handleOcrFilesSelected}
+      onOcrTextChange={chat.ocr.handleOcrTextChange}
+      onRemoveOcrFile={chat.ocr.handleRemoveOcrFile}
+    />
+    {#if chat.documents.length > 0}
+      <div class="doc-summary" class:over-budget={chat.documentsOverBudget}>
+        {#each chat.documents as d (d.name)}
+          <span class="doc-line">• {d.name} (~{(
+            d.content.length / 4
+          ).toLocaleString()} tokens)</span>
+        {/each}
+        <span class="doc-total">
+          {chat.documents.length}
+          {chat.documents.length === 1 ? 'document' : 'documents'} · ~{chat.documentsTokenEstimate.toLocaleString()}
+          / {CHAT_DOC_BUDGET_TOKENS.toLocaleString()} tokens
+        </span>
+        {#if chat.documentsOverBudget}
+          <span class="doc-warning" role="alert">
+            Over the ~{CHAT_DOC_BUDGET_TOKENS.toLocaleString()}-token budget — trim the
+            document text (edit the preview above) or remove files before sending.
+          </span>
+        {/if}
+      </div>
+    {/if}
+  </div>
+
   <div class="input-area">
     <textarea
       class="chat-input"
@@ -84,7 +120,7 @@
     <button
       class="send-btn"
       onclick={sendMessage}
-      disabled={!input.trim() || isStreaming.value}
+      disabled={!input.trim() || isStreaming.value || chat.documentsOverBudget}
     >
       {isStreaming.value ? '...' : 'Send'}
     </button>
@@ -103,6 +139,36 @@
     flex: 1;
     overflow-y: auto;
     padding: 12px 0;
+  }
+
+  .documents-area {
+    padding: 0 16px;
+    border-top: 1px solid var(--border);
+  }
+
+  .doc-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 0 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .doc-line {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .doc-total {
+    margin-top: 2px;
+    color: var(--text-secondary);
+  }
+
+  .doc-warning {
+    margin-top: 4px;
+    color: var(--danger, #ef4444);
   }
 
   .welcome {

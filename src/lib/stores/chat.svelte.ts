@@ -3,6 +3,19 @@ import * as chatApi from '../api/chat';
 import type { ChatMessage, ToolCallRecord } from '../types';
 import { formatError } from '../types/errors';
 import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
+import { useOcr } from '../composables/useOcr.svelte';
+
+/** Conservative token estimate for English clinical text (~4 chars/token). */
+export function estimateTokens(chars: number): number {
+  return Math.ceil(chars / 4);
+}
+
+/**
+ * Document-stuffing budget for the conversation. Documents below this
+ * (combined) are sent whole; above it the UI warns and the user trims —
+ * oversized conversations get retrieval in phase 2 (chart-review mode).
+ */
+export const CHAT_DOC_BUDGET_TOKENS = 24_000;
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -16,6 +29,24 @@ export const isStreaming = new StreamingStore();
 
 class ChatStore {
   messages = $state<ChatMessage[]>([]);
+
+  // Conversation-scanned documents (drop → OCR). Once-off by design: they
+  // live only as long as the conversation — clear() wipes them, a restart
+  // wipes them, nothing is persisted or synced.
+  readonly ocr = useOcr();
+
+  /** Done-OCR files as chat documents. */
+  documents = $derived(
+    this.ocr.ocrFiles
+      .filter((f) => f.status === 'done' && f.text)
+      .map((f) => ({ name: f.filename, content: f.text ?? '' }))
+  );
+
+  documentsTokenEstimate = $derived(
+    this.documents.reduce((n, d) => n + estimateTokens(d.content.length), 0)
+  );
+
+  documentsOverBudget = $derived(this.documentsTokenEstimate > CHAT_DOC_BUDGET_TOKENS);
 
   // Active stream cleanup handles — set during sendMessage, cleared by cancel/cleanup.
   private _tokenUnlisten: UnlistenFn | null = null;
@@ -121,8 +152,11 @@ class ChatStore {
     }, 5 * 60 * 1000);
 
     try {
-      this._tokenUnlisten = await listen<string>('chat-token', (event) => {
-        this.appendToLast(event.payload);
+      this._tokenUnlisten = await listen<{ content: string }>('chat-token', (event) => {
+        // The backend emits TokenPayload { content } — an OBJECT, not a bare
+        // string. The old `listen<string>` type was compile-time fiction;
+        // concatenating the object rendered "[object Object]" per token.
+        this.appendToLast(event.payload.content);
         // Reset safety timeout on each token — the stream is still alive.
         if (this._safetyTimeout) clearTimeout(this._safetyTimeout);
         this._safetyTimeout = setTimeout(() => {
@@ -149,7 +183,12 @@ class ChatStore {
         )
         .map((m) => ({ role: m.role, content: m.content }));
 
-      await chatApi.chatStream(apiMessages);
+      // Attach documents when present (full-documents mode). The backend
+      // enforces its own hard cap; the UI's budget gate normally prevents
+      // an oversized send before it gets here.
+      await chatApi.chatStream(apiMessages, {
+        documents: this.documents.length > 0 ? this.documents : undefined,
+      });
     } catch (e) {
       if (e instanceof OfflineCancelled) {
         // Remove the empty streaming placeholder; the dialog already informed the user.
@@ -165,6 +204,7 @@ class ChatStore {
   clear() {
     this.cancel();
     this.messages = [];
+    this.ocr.clearOcr();
     isStreaming.value = false;
   }
 }
