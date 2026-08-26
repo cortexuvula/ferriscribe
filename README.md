@@ -25,7 +25,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
   - **Legal/Court** — Formal opinion, timeline
 
   Create custom audiences in **Settings → Letter Audiences** with your own system prompts and user templates.
-- **Letter Writer** — A standalone Workflow tab for drafting letters from paper documents: drop in any document (scanned PDF, photo, export), OCR it, fill in recipient / type / tone / RE line plus freeform instructions, and generate a polished letter. Anti-fabrication rules keep the letter grounded in the source document — anything missing surfaces as a `[NOT IN SOURCE: …]` placeholder instead of invented content. Not tied to a recording; the drafted letter stays on screen for copying (state persists across tab switches).
+- **Letter Writer** — A standalone Workflow tab for drafting letters from source material: drop in any document (scanned PDF, photo, export) or paste copied text, fill in recipient / type / tone / RE line plus freeform instructions, and generate a polished letter. Anti-fabrication rules keep the letter grounded in the source document — anything missing surfaces as a `[NOT IN SOURCE: …]` placeholder instead of invented content. Not tied to a recording; the drafted letter stays on screen for copying (state persists across tab switches).
 - **Context Templates** — Pre-built visit types (e.g. Follow-up, New Patient) with custom instructions layered on top of the base prompt; import/export as JSON.
 - **RSVP Speed Reader** — Rapid-serial-visual-presentation review mode for SOAP notes and transcripts — chunk-size, WPM, and per-section filters configurable in Settings.
 - **Inline Preview** — Generated documents display in a collapsible preview directly in the Generate tab, no need to switch tabs.
@@ -40,6 +40,14 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 - **OCR Model Setting** — Configure a dedicated vision model for OCR separately from the text generation model in **Settings → Models**.
 - **Integration** — OCR'd text is combined with notes and structured patient context (medications, allergies, conditions) and threaded into all generation types (SOAP, referral, letter, peer discussion). Available in the Record, Generate, and Letter Writer tabs.
 
+### Chat & Document Q&A
+- **Medical AI Chat** — Streaming chat against your local model with a grounding system prompt baked in: answers must be grounded in what you provide, facts are never fabricated, and every reply carries the "clinical decision support — review by a licensed provider" guardrail.
+- **Drop Documents into Chat** — Attach PDFs (embedded text or scanned), DOCX, XLSX, or images straight into a conversation; they're OCR'd on the spot with the same local pipeline used everywhere else. Extracted text stays editable so you can trim before asking.
+- **Token Budget, Visible** — Each document shows its token estimate against the stuffing budget, so you know what fits before you ask.
+- **Chart-Review Mode (big documents)** — Drop a full multi-hundred-page chart review and the chat switches automatically: documents are indexed once in memory (chunk → embed), and every question is answered from the most relevant excerpts via hybrid vector + BM25 retrieval, with answers citing the source document.
+- **Once-off by Design** — Conversations and their documents live in memory only. Clearing the chat (or closing the app) wipes everything; nothing is persisted, synced, or logged.
+- **Embedding model** — Chart-review mode needs an embedding model available on your provider (default: `nomic-embed-text` — `ollama pull nomic-embed-text` or load it in LM Studio). If it's missing, the error tells you exactly what to pull.
+
 ### Content Sync
 - **Bidirectional Sync** — Sync transcripts, SOAP notes, letters, referrals, peer discussions, and audio between machines over Tailscale. Per-field last-write-wins merge with separate push/pull cursors; each field carries its own timestamp and origin machine.
 - **Deletions & Restores Propagate** — Trashing a recording on one machine tombstones it everywhere; restoring it (newer write wins) revives it everywhere. The office server permanently purges trash after 30 days and keeps an id-only purge ledger, so a machine that was offline during the deletion can never resurrect purged content. Condition chips and the user dictionary sync with the same tombstone-aware merge, and a deleted chip stays deleted until explicitly re-added.
@@ -50,8 +58,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 ### AI providers
 - **Local and LAN-accessible only** — Ollama and LM Studio, each configurable with a remote host/port so you can run the heavy model on a separate machine over LAN or Tailscale.
 - **Thinking Control** — Reasoning models (Qwen3 & co.) can spend minutes in a "thinking" phase before writing a note. **Settings → Models** has a per-provider **Disable thinking** toggle. Ollama skips reasoning via `reasoning_effort: "none"`; LM Studio ignores API thinking parameters, so FerriScribe injects a pre-closed think-block prefill instead — for a fix that covers every app at once, edit the model's prompt template in LM Studio (Model Settings → Prompt Template, add `{%- set enable_thinking = false %}`).
-- **Retrieval-Augmented Generation (RAG)** — Ingest clinical documents; embeddings served by the same Ollama instance, with BM25 + vector + graph retrieval at query time.
-- **Agentic Workflows** — Multi-step orchestrator with tool use (RAG search, note generation) for chat sessions.
+- **Hybrid Retrieval (RAG)** — Powers the chat's chart-review mode: documents are chunked, embedded, and searched with vector + BM25 fusion at question time. Embeddings work against either provider via the OpenAI-compatible `/v1/embeddings` endpoint (Ollama or LM Studio).
 
 ### Data
 - **Recording Management** — Record, import, search, tag, and organize audio. SQLite-backed with soft-delete and undo (8-second window), a 30-day trash (with a configurable retention policy under **Settings → Data Management** for auto-trashing old recordings), and permanent purge on the office server with a resurrection-proof ledger.
@@ -77,7 +84,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 
 ## Architecture
 
-FerriScribe is organized as a Cargo workspace with 13 crates:
+FerriScribe is organized as a Cargo workspace with 14 crates:
 
 ```
 crates/
@@ -89,11 +96,12 @@ crates/
   stt-providers/  — whisper transcription + pyannote diarization
   tts-providers/  — text-to-speech
   agents/         — agentic orchestrator with tool registry
-  rag/            — vector store, BM25, graph search, ingestion
+  rag/            — vector store, BM25, embeddings, ingestion
   processing/     — transcription pipeline, SOAP generation, OCR, ICD-9 selector
   export/         — PDF, DOCX, FHIR export
   translation/    — text translation
   sharing/        — office-server sharing, mDNS, Tailscale, auth proxy, whisper supervisor
+  backup/         — encrypted append-only off-machine backup (sidecar binary)
 src-tauri/        — Tauri app shell, commands, state management
 src/              — Svelte 5 frontend
 ```
@@ -163,9 +171,9 @@ Models are downloaded from HuggingFace / GitHub and stored under the app's data 
 4. **Generate** — Produce a SOAP note, referral, clinical letter, or synopsis from the transcript, optionally guided by a Context Template. Supporting documents and patient context are automatically included.
 5. **Review** — Preview inline in the Generate tab, edit in the Editor tab, or use the RSVP speed reader.
 6. **Export** — Save as PDF, DOCX, or FHIR R4.
-7. **Chat** — Ask follow-up questions grounded in the recording and any ingested RAG documents.
+7. **Chat** — Ask a local model anything, with grounded anti-fabrication rules. Drop documents (or a whole chart) into the conversation and ask questions about them — see [Chat & Document Q&A](#chat--document-qa).
 
-**No recording needed?** Use the **Letter Writer** tab (Workflow section) to OCR a paper document and draft a letter directly from it.
+**No recording needed?** Use the **Letter Writer** tab (Workflow section) to OCR a paper document — or paste text — and draft a letter directly from it. Or drop documents into **Chat** and interrogate them.
 
 ## Running Across Machines (LAN / Tailscale)
 
@@ -178,19 +186,19 @@ variables.
 1. Install FerriScribe.
 2. Open **Settings → Sharing** → **This machine is the office server** →
    **Start sharing**. The wizard installs a persistent Ollama service,
-   downloads whisper.cpp (Windows only — see note below), and shows a pairing
+   downloads a verified whisper-server binary (see note below), and shows a pairing
    screen with a QR code and a 6-digit code.
 3. If LM Studio is installed, open it and click **Start Server** in its
    Local Server tab. (FerriScribe doesn't manage LM Studio's toggle.)
 
-> **macOS / Linux whisper-server:** whisper.cpp does not currently ship prebuilt
-> `whisper-server` binaries for macOS or Linux. Office-server admins on those
-> platforms must build it from source
+> **whisper-server downloads:** FerriScribe downloads a pinned, SHA-256-verified
+> `whisper-server` binary automatically on Windows, macOS (Apple Silicon), and
+> Linux (x86-64) office servers — nothing to build. **macOS Intel** office
+> servers have no prebuilt binary: build it from source
 > (`cmake -B build && cmake --build build --target whisper-server -j`)
 > and place the resulting binary in the FerriScribe app-data `bin/` directory
 > before starting sharing. See https://github.com/ggml-org/whisper.cpp#server
-> for full build instructions. Windows office servers download the binary
-> automatically.
+> for full build instructions.
 
 ### On each clinician's laptop
 
