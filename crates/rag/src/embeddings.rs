@@ -142,10 +142,10 @@ impl EmbeddingGenerator {
                 // Both servers 404 when the embedding model isn't pulled or
                 // loaded — surface the remedy instead of a bare error.
                 let body_text = medical_core::http_error_body::read_error_body(resp, 200).await;
-                let _ = body_text;
                 return Err(AppError::ai_provider(format!(
                     "Embedding model '{}' is not available on {} — pull or load it \
-                     (e.g. `ollama pull {}` or add the model in LM Studio) and try again",
+                     (e.g. `ollama pull {}` or add the model in LM Studio) and try \
+                     again. Server said: {body_text}",
                     self.model, self.host, self.model
                 )));
             }

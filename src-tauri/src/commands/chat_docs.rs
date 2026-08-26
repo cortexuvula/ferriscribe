@@ -33,8 +33,11 @@ use uuid::Uuid;
 use super::chat::ChatDocumentInput;
 
 /// Total document chars at or below which the full-documents (stuffing)
-/// mode is used; above it, retrieval. ~25k tokens at 4 chars/token.
-pub(crate) const STUFFING_CHAR_LIMIT: usize = 100_000;
+/// mode is used; above it, retrieval. 96k chars = the frontend's
+/// CHAT_DOC_BUDGET_TOKENS (24_000) × its 4-chars/token estimate — keep the
+/// two in lockstep or the UI promises chart-review mode while the backend
+/// still stuffs (or vice versa).
+pub(crate) const STUFFING_CHAR_LIMIT: usize = 96_000;
 
 /// Hard ceiling for retrieval mode. Still finite so a runaway client can't
 /// OOM the indexer; ~600 dense pages of OCR text is well under it.
@@ -111,17 +114,19 @@ impl ChatDocIndex {
         );
         let vector = VectorStore::new(Arc::clone(&db));
         let bm25 = Bm25Search::new(Arc::clone(&db));
+        let display_names = dedupe_names(documents);
         let mut names = HashMap::new();
 
-        for doc in documents {
+        for (doc, doc_name) in documents.iter().zip(&display_names) {
+            let doc_name = doc_name.clone();
             let chunks = chunk_text(&doc.content, CHUNK_WORDS, CHUNK_OVERLAP);
             if chunks.is_empty() {
                 continue;
             }
-            // Deterministic id per name → stable citation mapping across
-            // rebuilds of the same set.
-            let document_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, doc.name.as_bytes());
-            names.insert(document_id, doc.name.clone());
+            // Deterministic id per (deduped) name → stable citation mapping
+            // across rebuilds of the same set.
+            let document_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, doc_name.as_bytes());
+            names.insert(document_id, doc_name.clone());
             let total = chunks.len() as u32;
 
             let refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
@@ -135,7 +140,7 @@ impl ChatDocIndex {
                     embedding,
                     chunk_index: i as u32,
                     metadata: RagChunkMetadata {
-                        document_title: Some(doc.name.clone()),
+                        document_title: Some(doc_name.clone()),
                         chunk_index: i as u32,
                         total_chunks: total,
                         page_number: None,
@@ -190,6 +195,25 @@ impl ChatDocIndex {
     }
 }
 
+/// Deduplicate display names: two files both named "scan.pdf" would
+/// otherwise collapse into one UUIDv5 citation identity. Later duplicates
+/// get a " (2)" suffix (originals keep their exact name).
+pub(crate) fn dedupe_names(documents: &[ChatDocumentInput]) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    documents
+        .iter()
+        .map(|d| {
+            let count = seen.entry(d.name.clone()).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                d.name.clone()
+            } else {
+                format!("{} ({})", d.name, count)
+            }
+        })
+        .collect()
+}
+
 /// Compose the excerpt section appended to the grounding prompt in
 /// retrieval mode. Pure — unit-tested.
 pub(crate) fn build_excerpt_section(excerpts: &[(String, String)]) -> String {
@@ -240,6 +264,25 @@ mod tests {
             name: name.into(),
             content: content.into(),
         }
+    }
+
+    #[test]
+    fn duplicate_document_names_get_distinct_citation_names() {
+        let names = dedupe_names(&[
+            doc("scan.pdf", "first"),
+            doc("other.pdf", "x"),
+            doc("scan.pdf", "second"),
+            doc("scan.pdf", "third"),
+        ]);
+        assert_eq!(
+            names,
+            vec![
+                "scan.pdf".to_string(),
+                "other.pdf".to_string(),
+                "scan.pdf (2)".to_string(),
+                "scan.pdf (3)".to_string(),
+            ]
+        );
     }
 
     #[test]
