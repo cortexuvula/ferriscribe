@@ -27,6 +27,37 @@ use super::chat_docs;
 
 const MAX_HISTORY_CHARS: usize = 200_000;
 
+/// Per-request cap on conversation history actually SENT (~15k tokens at
+/// 4 chars/token). [`trim_history`] keeps the newest whole messages within
+/// this budget; documents are re-attached fresh every turn, so dropping
+/// ancient turns degrades gracefully instead of tripping the model's
+/// context limit mid-session (previously a loud context-exceeded error at
+/// hour two of a long chart review).
+const HISTORY_TRIM_CHARS: usize = 60_000;
+
+/// Sliding-window history trim: whole-message granularity, newest kept,
+/// the current (last) message always survives even if it alone exceeds the
+/// budget — the hard caps and the provider's context-exceeded error remain
+/// the backstop for that case. Pure; unit-tested.
+fn trim_history(messages: Vec<ChatMessageInput>) -> Vec<ChatMessageInput> {
+    let total: usize = messages.iter().map(|m| m.content.len()).sum();
+    if total <= HISTORY_TRIM_CHARS {
+        return messages;
+    }
+    let mut kept: Vec<ChatMessageInput> = Vec::new();
+    let mut budget: usize = HISTORY_TRIM_CHARS;
+    for m in messages.into_iter().rev() {
+        let cost = m.content.len();
+        if !kept.is_empty() && cost > budget {
+            break;
+        }
+        budget = budget.saturating_sub(cost);
+        kept.push(m);
+    }
+    kept.reverse();
+    kept
+}
+
 /// Default system prompt for the chat tab, applied when the caller sends
 /// none (the live UI path). Establishes the clinical-support role and the
 /// hardened anti-fabrication stance used across the app's generators —
@@ -303,14 +334,13 @@ pub async fn chat_stream(
     }
     .ok_or_else(|| AppError::ai_provider("No active AI provider configured".to_string()))?;
 
-    // Latest user question — needed by retrieval mode; extracted before
-    // `messages` is consumed by convert_messages.
-    let last_question = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
+    // Retrieval query for chart-review mode — composed BEFORE `messages`
+    // is consumed. Includes a slice of the preceding turn so follow-ups
+    // keep their conversational referents (see compose_retrieval_query).
+    let retrieval_query = chat_docs::compose_retrieval_query(&messages);
+    // Sliding-window trim keeps the request inside realistic context
+    // budgets on long sessions.
+    let messages = trim_history(messages);
     let core_messages = convert_messages(messages);
 
     // Document mode: stuff whole documents when they fit the context
@@ -335,7 +365,7 @@ pub async fn chat_stream(
             *slot = Some(chat_docs::ChatDocIndex::build(docs, embeddings).await?);
         }
         let index = slot.as_ref().expect("just built or reused");
-        let excerpts = index.retrieve(&last_question).await?;
+        let excerpts = index.retrieve(&retrieval_query).await?;
         let mut prompt = base;
         prompt.push_str(&chat_docs::build_excerpt_section(&excerpts));
         prompt
@@ -660,6 +690,61 @@ mod prompt_tests {
         assert!(prompt.contains("Cardiology says hi"));
         // Grounding text comes first, documents after.
         assert!(prompt.find("Never fabricate") < prompt.find("consult.pdf"));
+    }
+
+    #[test]
+    fn trim_history_passes_short_conversations_through_untouched() {
+        let msgs = vec![
+            ChatMessageInput {
+                role: "user".into(),
+                content: "hi".into(),
+            },
+            ChatMessageInput {
+                role: "assistant".into(),
+                content: "hello".into(),
+            },
+        ];
+        let trimmed = trim_history(msgs.clone());
+        assert_eq!(trimmed.len(), 2);
+        assert_eq!(trimmed[0].content, "hi");
+    }
+
+    #[test]
+    fn trim_history_drops_oldest_whole_messages_keeps_newest() {
+        let big = "x".repeat(30_000); // 3 messages x 30k = 90k > 60k budget
+        let msgs = vec![
+            ChatMessageInput {
+                role: "user".into(),
+                content: big.clone(),
+            },
+            ChatMessageInput {
+                role: "assistant".into(),
+                content: big.clone(),
+            },
+            ChatMessageInput {
+                role: "user".into(),
+                content: "keep me".into(),
+            },
+            ChatMessageInput {
+                role: "assistant".into(),
+                content: "final".into(),
+            },
+        ];
+        let trimmed = trim_history(msgs);
+        // Oldest (30k) message is dropped; the newest three fit the budget.
+        assert_eq!(trimmed.len(), 3);
+        assert_eq!(trimmed.first().unwrap().content, big);
+        assert_eq!(trimmed.last().unwrap().content, "final");
+    }
+
+    #[test]
+    fn trim_history_always_keeps_the_current_message() {
+        let msgs = vec![ChatMessageInput {
+            role: "user".into(),
+            content: "y".repeat(HISTORY_TRIM_CHARS + 10_000),
+        }];
+        let trimmed = trim_history(msgs);
+        assert_eq!(trimmed.len(), 1, "the current question always survives");
     }
 
     #[test]

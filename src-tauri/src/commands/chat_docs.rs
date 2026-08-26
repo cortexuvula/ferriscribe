@@ -195,6 +195,60 @@ impl ChatDocIndex {
     }
 }
 
+/// Compose the retrieval query for chart-review mode.
+///
+/// The LATEST user question alone loses conversational referents — "and the
+/// trend before that?" retrieves nothing useful. Prepending a slice of the
+/// preceding turn (the prior question + the head of the prior answer)
+/// restores the anchor terms, which the prior answer almost always
+/// contains. Pure; unit-tested. Empty result = no user question at all.
+pub(crate) fn compose_retrieval_query(messages: &[super::chat::ChatMessageInput]) -> String {
+    /// Head of the previous question kept as context.
+    const PRIOR_QUESTION_CAP: usize = 300;
+    /// Head of the previous answer kept as context (answers carry the
+    /// entity anchors a follow-up refers to).
+    const PRIOR_ANSWER_CAP: usize = 500;
+    /// Total query cap — comfortably inside embedding-model context
+    /// windows (nomic-embed-text: 8k tokens).
+    const QUERY_CAP: usize = 2_000;
+
+    let Some(last_pos) = messages.iter().rposition(|m| m.role == "user") else {
+        return String::new();
+    };
+    let last_question = messages[last_pos].content.trim();
+    if last_question.is_empty() {
+        return String::new();
+    }
+
+    // One preceding turn (newest answer + newest question before it),
+    // collected newest-first then restored to chronological order.
+    let mut parts: Vec<String> = Vec::new();
+    for m in messages[..last_pos].iter().rev() {
+        if parts.len() >= 2 {
+            break;
+        }
+        let (label, cap) = match m.role.as_str() {
+            "assistant" => ("assistant", PRIOR_ANSWER_CAP),
+            "user" => ("user", PRIOR_QUESTION_CAP),
+            _ => continue,
+        };
+        let text = m.content.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let snippet: String = text.chars().take(cap).collect();
+        parts.push(format!("[{label}] {snippet}"));
+    }
+    parts.reverse();
+
+    let mut query = parts.join("\n");
+    if !query.is_empty() {
+        query.push('\n');
+    }
+    query.push_str(last_question);
+    query.chars().take(QUERY_CAP).collect()
+}
+
 /// Deduplicate display names: two files both named "scan.pdf" would
 /// otherwise collapse into one UUIDv5 citation identity. Later duplicates
 /// get a " (2)" suffix (originals keep their exact name).
@@ -264,6 +318,57 @@ mod tests {
             name: name.into(),
             content: content.into(),
         }
+    }
+
+    fn msg(role: &str, content: &str) -> super::super::chat::ChatMessageInput {
+        super::super::chat::ChatMessageInput {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+
+    #[test]
+    fn retrieval_query_carries_prior_turn_anchors_into_follow_ups() {
+        let messages = vec![
+            msg("user", "What was his latest creatinine?"),
+            msg(
+                "assistant",
+                "The most recent creatinine (2024-03-12) was 112 umol/L.",
+            ),
+            msg("user", "and the trend before that?"),
+        ];
+        let q = compose_retrieval_query(&messages);
+        // The follow-up keeps its own words AND regains the referent.
+        assert!(q.contains("and the trend before that?"), "{q}");
+        assert!(q.contains("creatinine"), "anchor from prior answer: {q}");
+        assert!(q.contains("[user] What was his latest creatinine?"));
+    }
+
+    #[test]
+    fn retrieval_query_is_bare_question_when_no_history() {
+        let q = compose_retrieval_query(&[msg("user", "lipid history?")]);
+        assert_eq!(q, "lipid history?");
+    }
+
+    #[test]
+    fn retrieval_query_caps_oversized_context() {
+        let messages = vec![
+            msg("assistant", &"x".repeat(40_000)),
+            msg("user", &"y".repeat(40_000)),
+            msg("assistant", &"z".repeat(40_000)),
+            msg("user", "current question"),
+        ];
+        let q = compose_retrieval_query(&messages);
+        assert!(q.chars().count() <= 2_000, "cap respected");
+        assert!(
+            q.ends_with("current question"),
+            "latest question survives: {q}"
+        );
+    }
+
+    #[test]
+    fn retrieval_query_empty_without_a_user_message() {
+        assert_eq!(compose_retrieval_query(&[msg("assistant", "hi")]), "");
     }
 
     #[test]
