@@ -1,9 +1,26 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// Mock the Tauri event + API modules
+// Mock the Tauri event + API modules. The event mock CAPTURES registered
+// handlers so tests can fire them with realistic payload SHAPES — the
+// previous inert mock (listen: vi.fn()) hid the chat-token payload bug
+// where the backend's { content } object was concatenated as
+// "[object Object]".
+type CapturedHandler = (event: { event: string; payload: unknown }) => void;
+const listeners = vi.hoisted(() => new Map<string, CapturedHandler[]>());
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn().mockResolvedValue(vi.fn()),
+  listen: vi.fn((name: string, handler: CapturedHandler) => {
+    if (!listeners.has(name)) listeners.set(name, []);
+    listeners.get(name)!.push(handler);
+    return Promise.resolve(() => {
+      listeners.set(name, (listeners.get(name) || []).filter((h) => h !== handler));
+    });
+  }),
 }));
+
+/** Fire a captured listener the way Tauri would deliver it. */
+function emit(name: string, payload: unknown) {
+  for (const h of listeners.get(name) ?? []) h({ event: name, payload });
+}
 vi.mock('../api/chat', () => ({
   chatSend: vi.fn(),
   chatStream: vi.fn(),
@@ -27,6 +44,8 @@ const { chat, isStreaming } = await import('./chat.svelte');
 
 describe('ChatStore', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
+    listeners.clear();
     chat.cancel();
     chat.messages = [];
   });
@@ -79,6 +98,81 @@ describe('ChatStore', () => {
   it('cancel stops streaming and cleans up', () => {
     chat.startStreaming();
     chat.cancel();
+    expect(isStreaming.value).toBe(false);
+  });
+
+  // ── sendMessage: the streaming engine (first real coverage) ────────────
+
+  it('sendMessage streams tokens as text — never "[object Object]"', async () => {
+    // chatStream resolves when we say so; meanwhile we fire events.
+    let releaseStream: (() => void) | undefined;
+    const { chatStream } = await import('../api/chat');
+    vi.mocked(chatStream).mockImplementation(
+      () => new Promise<void>((res) => (releaseStream = res))
+    );
+
+    const sending = chat.sendMessage('summarize the lipid trend');
+    // Listeners register before the stream call, so wait for the CALL.
+    await vi.waitFor(() => expect(releaseStream).toBeInstanceOf(Function));
+
+    // REALISTIC payloads: the backend emits TokenPayload { content } objects.
+    emit('chat-token', { content: 'Lipids improved ' });
+    emit('chat-token', { content: 'since 2024.' });
+    emit('chat-done', { usage: null, finish_reason: 'stop' });
+    releaseStream!();
+    await sending;
+
+    const last = chat.messages[chat.messages.length - 1];
+    expect(last.role).toBe('assistant');
+    expect(last.content).toBe('Lipids improved since 2024.');
+    expect(last.content).not.toContain('[object Object]');
+    expect(isStreaming.value).toBe(false);
+  });
+
+  it('sendMessage sends only user and non-empty assistant history', async () => {
+    let captured: Array<{ role: string; content: string }> = [];
+    const { chatStream } = await import('../api/chat');
+    vi.mocked(chatStream).mockImplementation((msgs) => {
+      captured = msgs;
+      return Promise.resolve();
+    });
+
+    chat.addUserMessage('first question');
+    chat.addAssistantMessage('first answer');
+    await chat.sendMessage('second question');
+
+    // The empty streaming placeholder is excluded; history is included.
+    expect(captured.map((m) => m.content)).toEqual([
+      'first question',
+      'first answer',
+      'second question',
+    ]);
+    expect(captured.every((m) => m.role === 'user' || m.role === 'assistant')).toBe(true);
+  });
+
+  it('sendMessage removes the placeholder on OfflineCancelled and stays silent', async () => {
+    const { chatStream } = await import('../api/chat');
+    const { OfflineCancelled } = await import('../api/invokeWithOfflineHandling');
+    vi.mocked(chatStream).mockRejectedValue(new OfflineCancelled('cancel'));
+
+    const before = chat.messages.length;
+    await chat.sendMessage('hello');
+
+    // User message only — no placeholder, no error text.
+    expect(chat.messages.length).toBe(before + 1);
+    expect(chat.messages[chat.messages.length - 1].content).toBe('hello');
+    expect(isStreaming.value).toBe(false);
+  });
+
+  it('sendMessage surfaces stream errors into the assistant message', async () => {
+    const { chatStream } = await import('../api/chat');
+    vi.mocked(chatStream).mockRejectedValue(new Error('provider exploded'));
+
+    await chat.sendMessage('hello');
+
+    const last = chat.messages[chat.messages.length - 1];
+    expect(last.role).toBe('assistant');
+    expect(last.content).toContain('provider exploded');
     expect(isStreaming.value).toBe(false);
   });
 });

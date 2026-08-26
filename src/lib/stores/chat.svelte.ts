@@ -121,8 +121,11 @@ class ChatStore {
     }, 5 * 60 * 1000);
 
     try {
-      this._tokenUnlisten = await listen<string>('chat-token', (event) => {
-        this.appendToLast(event.payload);
+      this._tokenUnlisten = await listen<{ content: string }>('chat-token', (event) => {
+        // The backend emits TokenPayload { content } — an OBJECT, not a bare
+        // string. The old `listen<string>` type was compile-time fiction;
+        // concatenating the object rendered "[object Object]" per token.
+        this.appendToLast(event.payload.content);
         // Reset safety timeout on each token — the stream is still alive.
         if (this._safetyTimeout) clearTimeout(this._safetyTimeout);
         this._safetyTimeout = setTimeout(() => {

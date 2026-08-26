@@ -25,6 +25,33 @@ use crate::state::AppState;
 /// models.
 const MAX_HISTORY_CHARS: usize = 200_000;
 
+/// Default system prompt for the chat tab, applied when the caller sends
+/// none (the live UI path). Establishes the clinical-support role and the
+/// hardened anti-fabrication stance used across the app's generators —
+/// before this, chat ran the raw model with zero medical framing. Static
+/// text only, no patient content (PHI rule); a caller-provided prompt
+/// replaces it wholesale. The documents-drop feature (phase 1+) will append
+/// its grounding section on top of this.
+const DEFAULT_CHAT_SYSTEM_PROMPT: &str = "\
+You are a clinical documentation assistant inside a local, offline medical records \
+application used by healthcare professionals. The user may paste or drop patient \
+material into this conversation; treat everything as confidential clinical information.
+
+Rules:
+- Ground every answer in the information provided in this conversation. Never \
+fabricate facts, findings, values, dates, medications, or citations.
+- If the conversation's material does not contain the answer, say so plainly. You \
+may then offer well-established general medical knowledge, but clearly label it as \
+background rather than as coming from the user's material.
+- Keep what the user's material states and your own inferences visibly separate.
+- You are clinical decision support, not a substitute for professional judgment. \
+All outputs must be reviewed by a licensed healthcare provider before clinical use.";
+
+/// Caller prompt wins; otherwise the default grounding prompt applies.
+fn resolve_system_prompt(user: Option<String>) -> Option<String> {
+    Some(user.unwrap_or_else(|| DEFAULT_CHAT_SYSTEM_PROMPT.to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // Input / output types
 // ---------------------------------------------------------------------------
@@ -147,7 +174,7 @@ async fn chat_send_inner(
         messages: core_messages,
         temperature: Some(settings_temp),
         max_tokens: Some(4096),
-        system_prompt,
+        system_prompt: resolve_system_prompt(system_prompt),
         reasoning_effort: None,
     };
 
@@ -224,7 +251,7 @@ pub async fn chat_stream(
         messages: core_messages,
         temperature: Some(settings_temp),
         max_tokens: Some(4096),
-        system_prompt,
+        system_prompt: resolve_system_prompt(system_prompt),
         reasoning_effort: None,
     };
 
@@ -487,6 +514,34 @@ pub async fn list_models(
     let provider = provider
         .ok_or_else(|| AppError::ai_provider("Provider not found or not configured".to_string()))?;
     provider.available_models().await
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn default_grounding_prompt_applies_when_caller_sends_none() {
+        let resolved = resolve_system_prompt(None).expect("always Some");
+        assert!(
+            resolved.contains("Never fabricate"),
+            "anti-fabrication rule"
+        );
+        assert!(
+            resolved.contains("licensed healthcare provider"),
+            "guardrail"
+        );
+        // No PHI-shaped content in the static prompt itself.
+        assert!(!resolved.contains("patient_name"));
+    }
+
+    #[test]
+    fn caller_prompt_replaces_default_wholesale() {
+        assert_eq!(
+            resolve_system_prompt(Some("custom".into())).as_deref(),
+            Some("custom")
+        );
+    }
 }
 
 #[cfg(test)]
