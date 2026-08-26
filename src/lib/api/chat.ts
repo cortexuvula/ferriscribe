@@ -19,15 +19,28 @@ export async function chatSend(
   });
 }
 
+/** A document attached to the chat conversation (OCR'd on the frontend). */
+export interface ChatDocument {
+  name: string;
+  content: string;
+}
+
+export interface ChatStreamOptions {
+  model?: string;
+  systemPrompt?: string;
+  /** Attached documents; the backend appends them to the system prompt. */
+  documents?: ChatDocument[];
+}
+
 export async function chatStream(
   messages: ChatMessageInput[],
-  model?: string,
-  systemPrompt?: string
+  opts: ChatStreamOptions = {}
 ): Promise<void> {
   return invokeWithOfflineHandling('chat_stream', {
     messages,
-    model: model ?? null,
-    systemPrompt: systemPrompt ?? null,
+    model: opts.model ?? null,
+    systemPrompt: opts.systemPrompt ?? null,
+    documents: opts.documents && opts.documents.length > 0 ? opts.documents : null,
   });
 }
 

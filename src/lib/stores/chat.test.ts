@@ -21,6 +21,9 @@ vi.mock('@tauri-apps/api/event', () => ({
 function emit(name: string, payload: unknown) {
   for (const h of listeners.get(name) ?? []) h({ event: name, payload });
 }
+vi.mock('../api/ocr', () => ({
+  ocrDocuments: vi.fn(),
+}));
 vi.mock('../api/chat', () => ({
   chatSend: vi.fn(),
   chatStream: vi.fn(),
@@ -48,6 +51,7 @@ describe('ChatStore', () => {
     listeners.clear();
     chat.cancel();
     chat.messages = [];
+    chat.ocr.clearOcr();
   });
 
   it('starts with no messages', () => {
@@ -108,7 +112,7 @@ describe('ChatStore', () => {
     let releaseStream: (() => void) | undefined;
     const { chatStream } = await import('../api/chat');
     vi.mocked(chatStream).mockImplementation(
-      () => new Promise<void>((res) => (releaseStream = res))
+      (_msgs, _opts) => new Promise<void>((res) => (releaseStream = res))
     );
 
     const sending = chat.sendMessage('summarize the lipid trend');
@@ -174,5 +178,67 @@ describe('ChatStore', () => {
     expect(last.role).toBe('assistant');
     expect(last.content).toContain('provider exploded');
     expect(isStreaming.value).toBe(false);
+  });
+
+  // ── Documents (drop → OCR → attached to the request) ───────────────────
+
+  it('estimateTokens is a conservative chars/4 rounding up', async () => {
+    const { estimateTokens, CHAT_DOC_BUDGET_TOKENS } = await import('./chat.svelte');
+    expect(estimateTokens(0)).toBe(0);
+    expect(estimateTokens(1)).toBe(1);
+    expect(estimateTokens(80)).toBe(20);
+    expect(CHAT_DOC_BUDGET_TOKENS).toBeGreaterThan(0);
+  });
+
+  it('done OCR files become documents and ride along with sendMessage', async () => {
+    const { ocrDocuments } = await import('../api/ocr');
+    vi.mocked(ocrDocuments).mockResolvedValue([
+      { filename: 'consult.pdf', page_count: 3, text: 'Cardiology consult text' },
+    ]);
+    await chat.ocr.handleOcrFilesSelected(['/tmp/consult.pdf']);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(chat.documents).toEqual([
+      { name: 'consult.pdf', content: 'Cardiology consult text' },
+    ]);
+    expect(chat.documentsTokenEstimate).toBeGreaterThan(0);
+
+    let capturedDocs: Array<{ name: string; content: string }> | undefined;
+    const { chatStream } = await import('../api/chat');
+    vi.mocked(chatStream).mockImplementation((_msgs, opts) => {
+      capturedDocs = opts?.documents;
+      return Promise.resolve();
+    });
+    await chat.sendMessage('what does the consult say?');
+
+    expect(capturedDocs).toEqual([
+      { name: 'consult.pdf', content: 'Cardiology consult text' },
+    ]);
+  });
+
+  it('no documents means no documents field on the request', async () => {
+    const { chatStream } = await import('../api/chat');
+    let capturedDocs: unknown = 'sentinel';
+    vi.mocked(chatStream).mockImplementation((_msgs, opts) => {
+      capturedDocs = opts?.documents;
+      return Promise.resolve();
+    });
+    await chat.sendMessage('plain question');
+    expect(capturedDocs).toBeUndefined();
+  });
+
+  it('clear() wipes documents along with the conversation', async () => {
+    const { ocrDocuments } = await import('../api/ocr');
+    vi.mocked(ocrDocuments).mockResolvedValue([
+      { filename: 'labs.pdf', page_count: 1, text: 'LDL 3.2' },
+    ]);
+    await chat.ocr.handleOcrFilesSelected(['/tmp/labs.pdf']);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(chat.documents.length).toBe(1);
+
+    chat.clear();
+    expect(chat.messages).toHaveLength(0);
+    expect(chat.documents).toHaveLength(0);
+    expect(chat.ocr.ocrFiles).toHaveLength(0);
   });
 });
