@@ -134,6 +134,17 @@ impl RemoteSttProvider {
             medical_core::endpoint_policy::validate_local_endpoint(host, allow_public)
                 .map_err(|e| AppError::invalid_endpoint_for(e, "stt_remote_host"))?;
         }
+        // Same policy set_endpoint enforces: an endpoint supplied at
+        // construction must not smuggle a public host past validation
+        // (its bearer would then be sent to an unvalidated host).
+        if let Some(ref e) = ep {
+            medical_core::endpoint_policy::validate_endpoint_pair(
+                e.lan.as_deref(),
+                e.tailscale.as_deref(),
+                allow_public,
+            )
+            .map_err(|err| AppError::invalid_endpoint_for(err, "stt_remote_host"))?;
+        }
         let host = if host.is_empty() { "localhost" } else { host };
         let base_url = http_url(host, port);
         let client = Client::builder()
@@ -167,17 +178,12 @@ impl RemoteSttProvider {
         allow_public: bool,
     ) -> AppResult<()> {
         if let Some(ref e) = ep {
-            for (label, opt_host) in [
-                ("lan", e.lan.as_deref()),
-                ("tailscale", e.tailscale.as_deref()),
-            ] {
-                if let Some(h) = opt_host {
-                    medical_core::endpoint_policy::validate_local_endpoint(h, allow_public)
-                        .map_err(|err| {
-                            AppError::invalid_endpoint_for(err, format!("stt_remote_host.{label}"))
-                        })?;
-                }
-            }
+            medical_core::endpoint_policy::validate_endpoint_pair(
+                e.lan.as_deref(),
+                e.tailscale.as_deref(),
+                allow_public,
+            )
+            .map_err(|err| AppError::invalid_endpoint_for(err, "stt_remote_host"))?;
         }
         let new_bearer = ep.as_ref().and_then(|e| e.bearer.clone());
         *self.url_cache.lock().await = None;
@@ -367,9 +373,34 @@ impl SttProvider for RemoteSttProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use medical_core::types::{AudioData, SttConfig};
+    use medical_core::types::{AudioData, RemoteEndpoint, SttConfig};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Regression: `new_with_endpoint` used to skip the lan/tailscale
+    /// validation `set_endpoint` enforces, letting a public host bypass
+    /// the local-only policy at construction time (with the endpoint's
+    /// bearer then sent to that host).
+    #[test]
+    fn new_with_endpoint_rejects_public_ep_host() {
+        let ep = RemoteEndpoint {
+            lan: Some("api.openai.com".into()),
+            tailscale: None,
+            port: 9000,
+            bearer: None,
+        };
+        let err = RemoteSttProvider::new_with_endpoint(
+            "localhost",
+            9000,
+            "whisper-1",
+            /* allow_public */ false,
+            None,
+            PathBuf::new(),
+            PathBuf::new(),
+            Some(ep),
+        );
+        assert!(err.is_err(), "public ep.lan must be rejected");
+    }
 
     fn dummy_audio() -> AudioData {
         // 1 second of silent 16 kHz mono f32.

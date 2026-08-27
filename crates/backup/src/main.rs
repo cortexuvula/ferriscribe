@@ -67,7 +67,9 @@ fn print_usage() {
   backup [--data-dir DIR] [--recordings-dir DIR] [--out DIR]
                                             build an encrypted snapshot locally
   backup-and-push ... (--url URL --token T | --dest DIR)
-                                            build + push (agent or folder) + drill
+                                            build + push (agent or folder) + drill;
+                                            --token may instead come from the
+                                            FERRISCRIBE_BACKUP_APPEND_TOKEN env
   push --url URL --token T --snapshot-dir DIR
   pull --url URL --token T [--id ID] --out DIR (--escrow-file F | --key-hex H)
   verify --snapshot-dir DIR (--escrow-file F | --key-hex H)
@@ -131,6 +133,26 @@ impl Flags {
         self.get(name).map(|s| s.to_string()).ok_or_else(|| {
             medical_backup::BackupError::Setup(format!("missing required flag --{name}"))
         })
+    }
+
+    /// Resolve the target's append token: an explicit `--token` flag
+    /// wins, otherwise fall back to the FERRISCRIBE_BACKUP_APPEND_TOKEN
+    /// environment variable. The env path exists so the launchd-scheduled
+    /// job can carry the credential in the plist's EnvironmentVariables
+    /// (a 0600 file) instead of argv, where any local user could read it
+    /// via `ps`.
+    fn req_token(&self) -> Result<String, medical_backup::BackupError> {
+        if let Some(t) = self.get("token") {
+            return Ok(t.to_string());
+        }
+        std::env::var("FERRISCRIBE_BACKUP_APPEND_TOKEN")
+            .ok()
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| {
+                medical_backup::BackupError::Setup(
+                    "missing required flag --token (or FERRISCRIBE_BACKUP_APPEND_TOKEN env)".into(),
+                )
+            })
     }
 }
 
@@ -326,7 +348,7 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
         } else if let Some(url) = flags.get("url") {
             Some(medical_backup::job::BackupTarget::Agent {
                 url: url.to_string(),
-                token: flags.req("token")?,
+                token: flags.req_token()?,
             })
         } else {
             None
@@ -377,7 +399,7 @@ async fn cmd_backup_and_push(flags: &Flags) -> CmdResult {
 
 async fn cmd_push(flags: &Flags) -> CmdResult {
     let url = flags.req("url")?;
-    let token = flags.req("token")?;
+    let token = flags.req_token()?;
     let dir = flags.req("snapshot-dir")?;
     let wrapping = resolve_wrapping_key(flags)?;
     let recordings = flags.get("recordings-dir").map(PathBuf::from);
@@ -393,7 +415,7 @@ async fn cmd_push(flags: &Flags) -> CmdResult {
 
 async fn cmd_pull(flags: &Flags) -> CmdResult {
     let url = flags.req("url")?;
-    let token = flags.req("token")?;
+    let token = flags.req_token()?;
     let out = flags.req("out")?;
     let wrapping = resolve_wrapping_key(flags)?;
     let id = flags.get("id");
@@ -489,7 +511,7 @@ async fn cmd_drill(flags: &Flags) -> CmdResult {
         medical_backup::store::assemble_from_folder(Path::new(store), None, &staging, &wrapping)?
     } else if let Some(url) = flags.get("url") {
         // Drill the FULL path: pull the latest from the target, then drill.
-        let token = flags.req("token")?;
+        let token = flags.req_token()?;
         let staging = std::env::temp_dir().join(format!(
             "ferriscribe-drill-pull-{}",
             uuid::Uuid::new_v4().simple()
@@ -569,7 +591,11 @@ fn cmd_install_schedule(flags: &Flags) -> CmdResult {
         hour,
         minute,
         url: flags.get("url").unwrap_or("").to_string(),
-        token: flags.get("token").unwrap_or("").to_string(),
+        token: flags
+            .get("token")
+            .map(|t| t.to_string())
+            .or_else(|| std::env::var("FERRISCRIBE_BACKUP_APPEND_TOKEN").ok())
+            .unwrap_or_default(),
         dest_dir: flags.get("dest").map(PathBuf::from),
         snapshots_dir: data_dir.join("backups"),
         recordings_dir: flags

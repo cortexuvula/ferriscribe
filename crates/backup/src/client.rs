@@ -320,6 +320,11 @@ impl BackupClient {
             })?,
         };
         let local_dir = dest_dir.join(&receipt.snapshot_id);
+        // Wire-supplied names are joined into local paths and interpolated
+        // into request URLs — validate them BEFORE any use. A malicious or
+        // corrupted target must not be able to traverse out of the
+        // destination or corrupt the request URL.
+        validate_plain_name("snapshot id", &receipt.snapshot_id)?;
         std::fs::create_dir_all(local_dir.join(PAYLOAD_DIR))?;
 
         // Receipt from the target.
@@ -342,6 +347,7 @@ impl BackupClient {
 
         let mut fetched = std::collections::HashSet::new();
         for entry in &manifest.entries {
+            validate_plain_name("entry opaque_name", &entry.opaque_name)?;
             let dest = local_dir.join(PAYLOAD_DIR).join(&entry.opaque_name);
             if receipt.version >= 3 {
                 // CAS: one shared blob on the target serves every entry
@@ -349,6 +355,12 @@ impl BackupClient {
                 // in this branch — a v2 snapshot may hold two entries with
                 // identical bytes under DIFFERENT opaque names, and each
                 // private copy must still be fetched.
+                validate_cas_hash(&entry.sha256)?;
+                if entry.opaque_name != entry.sha256 {
+                    return Err(crate::BackupError::Format(
+                        "v3 manifest entry has opaque_name != sha256".into(),
+                    ));
+                }
                 if !fetched.insert(entry.sha256.clone()) {
                     continue;
                 }
@@ -415,5 +427,95 @@ impl BackupClient {
             )));
         }
         Ok(resp.bytes().await?.to_vec())
+    }
+}
+
+/// Wire-supplied names (snapshot ids, manifest `opaque_name`s) must be
+/// boring single-component filenames before they are joined into local
+/// paths or interpolated into request URLs. Restricting to
+/// `[A-Za-z0-9._-]` simultaneously kills path traversal (`..`, `/`,
+/// `\`), absolute paths, and URL metacharacters (`?`, `#`, `&`, spaces).
+/// The name itself is deliberately NOT echoed into the error — a hostile
+/// value can be arbitrarily large.
+fn validate_plain_name(kind: &str, name: &str) -> BackupResult<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 128
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(crate::BackupError::Format(format!(
+            "{kind} is not a plain single-component filename"
+        )))
+    }
+}
+
+/// v3 (CAS) blob names ARE their content hashes — enforce the 64-hex
+/// shape before the value is interpolated into `/v1/blobs/{hash}` and
+/// used as a dedup key.
+fn validate_cas_hash(hash: &str) -> BackupResult<()> {
+    if hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(crate::BackupError::Format(
+            "v3 entry sha256 must be 64 hex characters".into(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_name_accepts_boring_filenames() {
+        assert!(validate_plain_name("id", "snap-20260827-1a2b3c").is_ok());
+        assert!(validate_plain_name("name", "f000042.bin").is_ok());
+        assert!(
+            validate_plain_name(
+                "name",
+                "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn plain_name_rejects_traversal_and_url_metacharacters() {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "a/b",
+            "a\\b",
+            "/absolute",
+            "a?query",
+            "a#frag",
+            "a&b",
+            "a b",
+            "a%20b",
+            &"x".repeat(129),
+        ] {
+            assert!(
+                validate_plain_name("test", bad).is_err(),
+                "must reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cas_hash_requires_64_hex() {
+        let good = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
+        assert!(validate_cas_hash(good).is_ok());
+        assert!(validate_cas_hash(&good.to_uppercase()).is_ok());
+        assert!(validate_cas_hash("../etc/passwd").is_err());
+        assert!(validate_cas_hash("abc").is_err());
+        assert!(validate_cas_hash(&format!("{good}!")).is_err());
+        assert!(validate_cas_hash(&good[..63]).is_err());
     }
 }
