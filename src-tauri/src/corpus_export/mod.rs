@@ -77,10 +77,13 @@ pub fn export(conn: &Connection, opts: ExportOptions) -> Result<ExportResult, St
         if PhiRedactor::contains_phi_with(&redacted_user, &extensions)
             || PhiRedactor::contains_phi_with(&redacted_final, &extensions)
         {
+            // A row the redactor could not fully clean must never reach
+            // the exported corpus — record it and skip it.
             warnings.push(manifest::Warning {
                 row_index: idx as u32,
-                reason: "residual PHI detected after redaction".to_string(),
+                reason: "residual PHI detected after redaction; row excluded".to_string(),
             });
+            continue;
         }
 
         input_tokens_est += manifest::estimate_tokens(&redacted_user);
