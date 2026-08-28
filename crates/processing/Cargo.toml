@@ -19,7 +19,7 @@ pdf-extract = "0.12"
 base64 = "0.23"
 zip = "2.4"
 quick-xml = "0.41"
-calamine = "0.26"
+calamine = "0.36"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "tiff"] }
 pdfium-render = "0.9"
 # pdfium runtime download (fetched into the app data dir on first scanned-PDF OCR,
