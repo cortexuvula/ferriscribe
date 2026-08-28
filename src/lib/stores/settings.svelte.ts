@@ -55,6 +55,7 @@ const defaults: AppConfig = {
   backup_append_token: null,
   backup_dest_path: null,
   onboarding_completed: false,
+  tos_accepted_at: null,
   auto_update_check: true,
   custom_conditions: [],
   sync_condition_chips: false,
