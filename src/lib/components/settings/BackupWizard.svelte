@@ -173,10 +173,16 @@
         h,
         m,
         kind === 'agent' ? agentUrl.trim() : null,
-        kind === 'agent' ? agentToken.trim() : null,
+        // Blank token means "keep the stored one" — an empty string
+        // would be treated by merge_destination as an explicit override
+        // and wipe the stored secret.
+        kind === 'agent' && agentToken.trim() ? agentToken.trim() : null,
         kind === 'folder' ? folderPath : null,
       );
       agentToken = '';
+      // A freshly-pasted token is now persisted; destOk must keep
+      // passing on back-navigation even though the field is cleared.
+      if (kind === 'agent') hasStoredToken = true;
       scheduleInstalled = true;
     } catch (e) {
       scheduleError = e instanceof Error ? e.message : String(e);

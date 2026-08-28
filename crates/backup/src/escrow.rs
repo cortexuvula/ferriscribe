@@ -26,24 +26,39 @@ const SHEET_END: &str = "-----END RECOVERY KEY-----";
 /// full wrapping key, so the default umask's group/other read bits (0644)
 /// must never apply to them — especially since the suggested output
 /// folder is `~/Desktop`, which sync/backup services routinely scoop.
+///
+/// Unix hardening:
+/// - `O_NOFOLLOW`: a pre-planted symlink at the artifact path makes the
+///   open fail (ELOOP) instead of silently redirecting the key material
+///   (and the chmod) to an attacker-chosen file.
+/// - `mode(0o600)` applies atomically at creation, so there is no
+///   create-then-chmod window where the fresh file is world-readable.
+/// - The follow-up path chmod covers pre-existing files (mode() never
+///   touches those); a race there is benign — at worst it tightens a
+///   decoy file, while the key bytes go through the already-opened,
+///   never-a-symlink descriptor.
 fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
-    let file = std::fs::File::create(path)?;
     #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::fs::PermissionsExt;
-        // set_permissions rather than OpenOptions::mode(0o600): mode() only
-        // applies at creation and is masked by the umask, and a pre-existing
-        // file keeps its old permissions. An explicit chmod covers both,
-        // before the payload is written.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(file)
     }
     #[cfg(not(unix))]
     {
         // Windows: new files inherit the containing directory's ACL; the
         // user-profile directories this tool writes into are already
         // user-scoped.
+        std::fs::File::create(path)
     }
-    Ok(file)
 }
 
 /// Render the printable recovery sheet and write it to `path`.
@@ -257,6 +272,25 @@ mod tests {
                 p.display()
             );
         }
+    }
+
+    /// A pre-planted symlink at the artifact path must FAIL the write —
+    /// never silently redirect the wrapping key (and the chmod) to an
+    /// attacker-chosen file.
+    #[test]
+    #[cfg(unix)]
+    fn escrow_artifacts_refuse_symlink_targets() {
+        let dir = tmp();
+        let decoy = dir.path().join("decoy.txt");
+        let link = dir.path().join(USB_FILENAME);
+        std::os::unix::fs::symlink(&decoy, &link).expect("plant symlink");
+
+        let result = write_usb_file(&link, &[0x33u8; 32]);
+        assert!(result.is_err(), "writing through a symlink must fail");
+        assert!(
+            !decoy.exists(),
+            "no key material may reach the symlink target"
+        );
     }
 
     #[test]

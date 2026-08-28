@@ -34,6 +34,9 @@ tokio-util = { workspace = true, features = ["io"] }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
 dirs = { workspace = true }
+# O_NOFOLLOW for creating escrow/schedule artifacts without following
+# pre-planted symlinks (Unix only).
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

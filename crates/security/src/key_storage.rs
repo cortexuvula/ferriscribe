@@ -294,15 +294,58 @@ where
 }
 
 /// Load an existing salt or create and persist a new random one.
+///
+/// Creation is exclusive (`create_new`): if two first-time opens race,
+/// exactly one wins and the loser must ADOPT the winner's salt. A
+/// last-writer-wins overwrite would leave the loser deriving keys from a
+/// salt that no longer matches the one on disk — permanently
+/// undecryptable data.
 fn load_or_create_salt(config_dir: &Path) -> SecurityResult<Vec<u8>> {
     let path = config_dir.join(SALT_FILE_NAME);
+    // Fast path: the salt has existed since a previous run.
     if path.exists() {
         return Ok(std::fs::read(&path)?);
     }
     let mut salt = vec![0u8; SALT_LENGTH];
     rand::rng().fill_bytes(&mut salt);
-    atomic_write(&path, &salt)?;
-    Ok(salt)
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            std::io::Write::write_all(&mut file, &salt)?;
+            // Durable + visible before anyone can observe the file via
+            // the AlreadyExists branch below.
+            file.sync_all()?;
+            Ok(salt)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Lost a concurrent first-create (or the salt appeared since
+            // the exists() check): adopt the on-disk salt.
+            read_complete_salt_or_wait(&path)
+        }
+        Err(e) => Err(SecurityError::Io(e)),
+    }
+}
+
+/// Read the salt file, tolerating a concurrent winner that has created
+/// but not yet finished writing it. A file that stays incomplete is
+/// corruption — deriving keys from a wrong-length salt would silently
+/// break every existing key, so surface it as an error instead.
+fn read_complete_salt_or_wait(path: &Path) -> SecurityResult<Vec<u8>> {
+    const RETRIES: u8 = 50;
+    const SLEEP: std::time::Duration = std::time::Duration::from_millis(2);
+    for _ in 0..RETRIES {
+        let bytes = std::fs::read(path)?;
+        if bytes.len() == SALT_LENGTH {
+            return Ok(bytes);
+        }
+        std::thread::sleep(SLEEP);
+    }
+    Err(SecurityError::Other(format!(
+        "salt file is corrupt (expected {SALT_LENGTH} bytes)"
+    )))
 }
 
 /// Write `content` to `path` atomically by first writing a temp file in
@@ -510,5 +553,43 @@ mod tests {
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
         // Known value: SHA-256("") starts with e3b0c442
         assert_eq!(hash, "e3b0c442");
+    }
+
+    /// Regression for the salt TOCTOU race: concurrent first-time opens
+    /// must all converge on ONE salt. With the old exists()-then-write
+    /// sequence, the loser kept its own in-memory salt while the winner's
+    /// landed on disk — every key the loser encrypted became permanently
+    /// undecryptable.
+    #[test]
+    fn concurrent_first_open_adopts_single_salt() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::sync::Barrier;
+
+        const RACERS: usize = 8;
+        let dir = TempDir::new().unwrap();
+        let config_dir = Arc::new(dir.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(RACERS));
+
+        let handles: Vec<_> = (0..RACERS)
+            .map(|_| {
+                let config_dir = Arc::clone(&config_dir);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    load_or_create_salt(&config_dir)
+                })
+            })
+            .collect();
+
+        let salts: HashSet<Vec<u8>> = handles
+            .into_iter()
+            .map(|h| h.join().expect("racer thread"))
+            .map(|r| r.expect("load_or_create_salt"))
+            .collect();
+        assert_eq!(salts.len(), 1, "all racers must adopt the same salt");
+        // And the disk holds that same salt for the next open.
+        let on_disk = load_or_create_salt(&config_dir).unwrap();
+        assert!(salts.contains(&on_disk));
     }
 }

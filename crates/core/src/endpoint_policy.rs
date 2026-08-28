@@ -154,6 +154,26 @@ pub fn validate_local_endpoint(host: &str, allow_public: bool) -> Result<(), End
     }
 }
 
+/// Validate the optional `lan` and `tailscale` hosts of a remote-endpoint
+/// pair against the local-only policy.
+///
+/// Single source of truth for provider constructors (`new_with_endpoint`)
+/// AND their `set_endpoint` methods: a constructor that skips this check
+/// lets a caller smuggle a public host past the very policy that
+/// settings-save enforces — and the endpoint's bearer credential would
+/// then be sent to that unvalidated host. The error names the offending
+/// host, so no per-field label is needed at call sites.
+pub fn validate_endpoint_pair(
+    lan: Option<&str>,
+    tailscale: Option<&str>,
+    allow_public: bool,
+) -> Result<(), EndpointPolicyError> {
+    for host in [lan, tailscale].into_iter().flatten() {
+        validate_local_endpoint(host, allow_public)?;
+    }
+    Ok(())
+}
+
 /// Extract the bare host from a string that may be a bare host, `host:port`,
 /// or `scheme://host:port/path`.
 ///
@@ -498,6 +518,20 @@ mod tests {
         assert_eq!(extract_host("[fd00::1]"), "fd00::1");
         assert_eq!(extract_host("[fd00::1]:11434"), "fd00::1");
         assert_eq!(extract_host("http://[fd00::1]:11434/v1"), "fd00::1");
+    }
+
+    // ── validate_endpoint_pair ─────────────────────────────────────
+    #[test]
+    fn validate_endpoint_pair_checks_both_fields_and_skips_none() {
+        // None fields are skipped entirely.
+        assert!(validate_endpoint_pair(None, None, false).is_ok());
+        // Local hosts pass on both fields.
+        assert!(validate_endpoint_pair(Some("192.168.1.10"), Some("mac.x.ts.net"), false).is_ok());
+        // A public host on EITHER field is rejected.
+        assert!(validate_endpoint_pair(Some("api.openai.com"), None, false).is_err());
+        assert!(validate_endpoint_pair(None, Some("api.openai.com"), false).is_err());
+        // The opt-out applies to the pair as a whole.
+        assert!(validate_endpoint_pair(Some("api.openai.com"), Some("8.8.8.8"), true).is_ok());
     }
 
     // ── validate_url ───────────────────────────────────────────────

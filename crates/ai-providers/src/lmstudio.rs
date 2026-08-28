@@ -138,6 +138,16 @@ impl LmStudioProvider {
         let base = host.unwrap_or("http://localhost:1234");
         medical_core::endpoint_policy::validate_url(base, allow_public)
             .map_err(|e| AppError::invalid_endpoint_for(e, "lmstudio_host"))?;
+        // Same policy set_endpoint enforces: an endpoint supplied at
+        // construction must not smuggle a public host past validation.
+        if let Some(ref e) = ep {
+            medical_core::endpoint_policy::validate_endpoint_pair(
+                e.lan.as_deref(),
+                e.tailscale.as_deref(),
+                allow_public,
+            )
+            .map_err(|err| AppError::invalid_endpoint_for(err, "lmstudio_host"))?;
+        }
         let base_url = format!("{base}/v1");
         let http = Client::builder()
             .pool_max_idle_per_host(5)
@@ -214,17 +224,12 @@ impl LmStudioProvider {
         allow_public: bool,
     ) -> AppResult<()> {
         if let Some(ref e) = ep {
-            for (label, opt_host) in [
-                ("lan", e.lan.as_deref()),
-                ("tailscale", e.tailscale.as_deref()),
-            ] {
-                if let Some(h) = opt_host {
-                    medical_core::endpoint_policy::validate_local_endpoint(h, allow_public)
-                        .map_err(|err| {
-                            AppError::invalid_endpoint_for(err, format!("lmstudio_host.{label}"))
-                        })?;
-                }
-            }
+            medical_core::endpoint_policy::validate_endpoint_pair(
+                e.lan.as_deref(),
+                e.tailscale.as_deref(),
+                allow_public,
+            )
+            .map_err(|err| AppError::invalid_endpoint_for(err, "lmstudio_host"))?;
         }
         let new_bearer = ep.as_ref().and_then(|e| e.bearer.clone());
         *self.url_cache.lock().await = None;
@@ -372,6 +377,27 @@ mod tests {
         let p = LmStudioProvider::new(None, false, None, RetryConfig::default())
             .expect("build default provider");
         assert_eq!(p.static_base_url, "http://localhost:1234/v1");
+    }
+
+    /// Regression: `new_with_endpoint` used to skip the lan/tailscale
+    /// validation `set_endpoint` enforces, letting a public host bypass
+    /// the local-only policy at construction time.
+    #[test]
+    fn new_with_endpoint_rejects_public_ep_host() {
+        let ep = RemoteEndpoint {
+            lan: Some("api.openai.com".into()),
+            tailscale: None,
+            port: 1234,
+            bearer: None,
+        };
+        let err = LmStudioProvider::new_with_endpoint(
+            None,
+            false,
+            None,
+            RetryConfig::default(),
+            Some(ep),
+        );
+        assert!(err.is_err(), "public ep.lan must be rejected");
     }
 
     #[test]

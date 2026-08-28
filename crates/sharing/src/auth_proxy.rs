@@ -264,6 +264,19 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
         path_query
     );
 
+    // RFC 7230 §6.1: any header named in `Connection:` is hop-by-hop too.
+    let connection_named: Vec<String> = parts
+        .headers
+        .get(reqwest::header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .map(|t| t.trim().to_ascii_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let build_upstream = |body_bytes: BodyBytes| {
         let mut req_builder = state
             .client
@@ -271,6 +284,15 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
             .body(body_bytes);
         for (k, v) in parts.headers.iter() {
             if k == reqwest::header::HOST || k == reqwest::header::AUTHORIZATION {
+                continue;
+            }
+            // Hop-by-hop and framing headers must be dropped: the body is
+            // buffered, so reqwest computes its own content-length/transfer
+            // encoding — forwarding the originals produces conflicting
+            // framing headers (the request-smuggling surface).
+            if is_hop_by_hop(k.as_str())
+                || connection_named.contains(&k.as_str().to_ascii_lowercase())
+            {
                 continue;
             }
             req_builder = req_builder.header(k.clone(), v.clone());
@@ -306,10 +328,31 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
     };
 
     let status = upstream.status();
+    // RFC 7230 §6.1 for the response direction as well.
+    let upstream_connection_named: Vec<String> = upstream
+        .headers()
+        .get(reqwest::header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .map(|t| t.trim().to_ascii_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut resp_headers = HeaderMap::new();
     for (k, v) in upstream.headers() {
+        // Drop hop-by-hop + framing headers: the body is re-streamed
+        // through axum, which sets its own framing.
+        if is_hop_by_hop(k.as_str())
+            || upstream_connection_named.contains(&k.as_str().to_ascii_lowercase())
+        {
+            continue;
+        }
         if let Ok(hv) = HeaderValue::from_bytes(v.as_bytes()) {
-            resp_headers.insert(k.clone(), hv);
+            // append (not insert): multi-valued headers such as set-cookie
+            // and www-authenticate must survive intact.
+            resp_headers.append(k.clone(), hv);
         }
     }
 
@@ -320,6 +363,25 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
     *resp.status_mut() = status;
     *resp.headers_mut() = resp_headers;
     Ok(resp)
+}
+
+/// Hop-by-hop (RFC 7230 §6.1) and payload-framing headers. These must never
+/// be forwarded across the proxy: the body is re-buffered (request) or
+/// re-streamed (response), so each side computes its own framing — copying
+/// the originals yields conflicting/duplicate content-length or
+/// transfer-encoding headers (the request-smuggling surface).
+fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "keep-alive"
+            | "proxy-connection"
+            | "te"
+            | "trailer"
+            | "upgrade"
+            | "transfer-encoding"
+            | "content-length"
+    )
 }
 
 /// 502 response with a plain-text body that tells the operator exactly what to

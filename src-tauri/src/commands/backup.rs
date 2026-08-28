@@ -245,6 +245,15 @@ fn merge_destination(
     token: Option<String>,
     dest: Option<String>,
 ) -> AppResult<EffectiveDestination> {
+    // A blank string means "not provided", not "clear the stored value":
+    // the UI leaves the token field empty when the user relies on the
+    // stored credential, and treating Some("") as an explicit override
+    // would wipe it (then fail with "a target URL needs an append
+    // token", destroying the secret in the persisted config).
+    let url = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+    let token = token
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
     if url.is_some() && dest.is_some() {
         return Err(AppError::InvalidInput(
             "choose one destination: the backup server (URL + token) or a folder — not both".into(),
@@ -618,6 +627,31 @@ mod tests {
             }
         );
         // And the config still holds them.
+        assert_eq!(
+            config.backup_append_token.as_ref().map(|t| t.0.as_str()),
+            Some("secret")
+        );
+    }
+
+    /// Regression: the wizard's token field is blank when the user
+    /// relies on the stored credential, and the frontend used to send
+    /// `""` — which wiped the stored token and failed the install.
+    /// Blank strings must behave exactly like `None`.
+    #[test]
+    fn merge_destination_blank_strings_keep_stored_values() {
+        let mut config = AppConfig::default();
+        config.backup_target_url = Some("http://t:8741".into());
+        config.backup_append_token = Some(SecretString("secret".into()));
+
+        let d = merge_destination(&mut config, Some("  ".into()), Some("".into()), None)
+            .expect("merge");
+        assert_eq!(
+            d,
+            EffectiveDestination::Agent {
+                url: "http://t:8741".into(),
+                token: "secret".into()
+            }
+        );
         assert_eq!(
             config.backup_append_token.as_ref().map(|t| t.0.as_str()),
             Some("secret")

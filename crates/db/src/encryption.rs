@@ -166,11 +166,24 @@ pub fn migrate_plaintext_to_encrypted(
 
     match result {
         Ok(()) => {
-            // On success delete the backup.
-            std::fs::remove_file(&backup_path).ok();
+            // On success delete the backup. The DB is already encrypted at
+            // this point, so a failed delete must NOT fail the migration
+            // (the Err path would restore the plaintext backup over the
+            // encrypted file) — but the outcome must say a plaintext copy
+            // is still on disk so the caller can surface it.
+            let backup_deleted = match std::fs::remove_file(&backup_path) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "encryption succeeded but the plaintext backup could not be deleted — it remains on disk"
+                    );
+                    false
+                }
+            };
             Ok(MigrationOutcome {
                 encrypted_path: db_path.to_path_buf(),
-                backup_deleted: true,
+                backup_deleted,
             })
         }
         Err(e) => {

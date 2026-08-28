@@ -11,7 +11,7 @@
 //
 // cargo build is incremental — after the first build this is ~seconds.
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 // --debug builds the default (dev) profile and stages from there. CI's
 // lint/test jobs use it: tauri-build validates externalBin EXISTENCE at
 // compile time, those jobs never bundle, and the dev profile reuses the
@@ -28,7 +28,7 @@ const target =
   targetArg !== -1 && process.argv[targetArg + 1]
     ? process.argv[targetArg + 1]
     : (() => {
-        const host = execSync('rustc -vV', { encoding: 'utf8' })
+        const host = execFileSync('rustc', ['-vV'], { encoding: 'utf8' })
           .split('\n')
           .find((l) => l.startsWith('host:'))
           ?.split(':')[1]
@@ -40,18 +40,31 @@ const target =
         return host;
       })();
 
-console.log(`building ferriscribe-backup for ${target}…`);
-execSync(`cargo build -p medical-backup ${debug ? '' : '--release'} --target ${target}`, {
-  cwd: root,
-  stdio: 'inherit',
-});
+// The triple is interpolated into paths and (below) handed to cargo as a
+// single argv element — but validate its shape anyway so a malformed
+// --target value fails loudly here instead of downstream.
+if (!/^[A-Za-z0-9_-]+$/.test(target)) {
+  console.error(`invalid target triple: ${target}`);
+  process.exit(1);
+}
 
-const bin = process.platform === 'win32' ? 'ferriscribe-backup.exe' : 'ferriscribe-backup';
+console.log(`building ferriscribe-backup for ${target}…`);
+// execFileSync, never a shell string: the triple is untrusted argv input.
+execFileSync(
+  'cargo',
+  ['build', '-p', 'medical-backup', ...(debug ? [] : ['--release']), '--target', target],
+  { cwd: root, stdio: 'inherit' }
+);
+
+// Derive the binary name AND staged extension from the TARGET triple, not
+// the host platform — cross-compiling a Windows target on macOS/Linux must
+// stage ferriscribe-backup-<triple>.exe (Tauri resolves externalBin with
+// the extension for Windows bundle targets), and vice versa.
+const targetIsWindows = /-windows-(msvc|gnu)$/.test(target);
+const bin = targetIsWindows ? 'ferriscribe-backup.exe' : 'ferriscribe-backup';
 const src = join(root, 'target', target, debug ? 'debug' : 'release', bin);
 const destDir = join(root, 'src-tauri', 'binaries');
-// Tauri resolves externalBin entries as <name>-<triple>.exe on Windows —
-// without the extension the Windows bundle/dev build cannot find the sidecar.
-const ext = process.platform === 'win32' ? '.exe' : '';
+const ext = targetIsWindows ? '.exe' : '';
 const dest = join(destDir, `ferriscribe-backup-${target}${ext}`);
 
 if (!existsSync(src)) {
@@ -60,5 +73,5 @@ if (!existsSync(src)) {
 }
 mkdirSync(destDir, { recursive: true });
 copyFileSync(src, dest);
-if (process.platform !== 'win32') chmodSync(dest, 0o755);
+if (!targetIsWindows) chmodSync(dest, 0o755);
 console.log(`staged sidecar: ${dest}`);

@@ -62,6 +62,23 @@ pub fn render_plist(cfg: &ScheduleConfig) -> String {
     } else {
         ""
     };
+    // The append token rides in EnvironmentVariables, NOT argv: argv is
+    // visible to every local user via `ps` on each scheduled run, while
+    // the plist itself is written mode 0600 (see `install`). Only the
+    // agent destination carries a token — folder/local-only configs
+    // never pass one (mirrors schedule_args' dest-wins precedence).
+    let env_vars = if cfg.dest_dir.is_none() && !cfg.url.is_empty() {
+        format!(
+            "    <key>EnvironmentVariables</key>\n\
+             \x20   <dict>\n\
+             \x20       <key>FERRISCRIBE_BACKUP_APPEND_TOKEN</key>\n\
+             \x20       <string>{}</string>\n\
+             \x20   </dict>\n",
+            xml_escape(&cfg.token)
+        )
+    } else {
+        String::new()
+    };
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -74,6 +91,7 @@ pub fn render_plist(cfg: &ScheduleConfig) -> String {
              <array>\n\
          {args}\
              </array>\n\
+         {env_vars}\
              <key>StartCalendarInterval</key>\n\
              <dict>\n\
                  <key>Hour</key>\n\
@@ -91,6 +109,7 @@ pub fn render_plist(cfg: &ScheduleConfig) -> String {
          </dict>\n\
          </plist>\n",
         args = args,
+        env_vars = env_vars,
         hour = cfg.hour,
         minute = cfg.minute,
         on_mount = on_mount,
@@ -100,7 +119,9 @@ pub fn render_plist(cfg: &ScheduleConfig) -> String {
 }
 
 /// The argument vector the scheduled job runs with. Extracted for tests
-/// and for `install-schedule --dry-run` display.
+/// and for `install-schedule --dry-run` display. Deliberately carries NO
+/// token: the credential travels via the plist's EnvironmentVariables
+/// (`FERRISCRIBE_BACKUP_APPEND_TOKEN`), keeping it out of `ps` output.
 pub fn schedule_args(cfg: &ScheduleConfig) -> Vec<String> {
     let mut args = vec![
         cfg.binary_path.to_string_lossy().into_owned(),
@@ -116,8 +137,6 @@ pub fn schedule_args(cfg: &ScheduleConfig) -> Vec<String> {
     } else if !cfg.url.is_empty() {
         args.push("--url".into());
         args.push(cfg.url.clone());
-        args.push("--token".into());
-        args.push(cfg.token.clone());
     }
     args
 }
@@ -142,7 +161,7 @@ pub fn install(cfg: &ScheduleConfig) -> BackupResult<PathBuf> {
     }
     std::fs::create_dir_all(&cfg.log_dir)?;
     std::fs::create_dir_all(&cfg.snapshots_dir)?;
-    let mut f = std::fs::File::create(&path)?;
+    let mut f = create_plist_file(&path)?;
     f.write_all(render_plist(cfg).as_bytes())?;
     f.sync_all()?;
 
@@ -155,6 +174,32 @@ pub fn install(cfg: &ScheduleConfig) -> BackupResult<PathBuf> {
         .args(["load", &path.to_string_lossy()])
         .status();
     Ok(path)
+}
+
+/// Create/truncate the plist with owner-only permissions — it carries the
+/// append token in EnvironmentVariables and `~/Library/LaunchAgents` is
+/// typically world-readable (0755) with default-umask files (0644).
+fn create_plist_file(path: &Path) -> BackupResult<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::PermissionsExt;
+        // mode() applies atomically when the file is newly created; the
+        // follow-up set_permissions heals plists written by older
+        // versions of the app with looser modes.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::create(path).map_err(Into::into)
+    }
 }
 
 /// Resolve the sidecar binary bundled next to the app executable
@@ -285,9 +330,68 @@ mod tests {
         assert!(plist.contains("<integer>3</integer>"), "hour");
         assert!(plist.contains("<integer>30</integer>"), "minute");
         assert!(plist.contains("backup-and-push"));
-        // The token contains XML specials — must be escaped.
+        // The token contains XML specials — must be escaped in the
+        // EnvironmentVariables dict.
         assert!(plist.contains("tok&amp;&lt;xml&gt;"), "token escaped");
         assert!(!plist.contains("tok&<xml>"), "no raw specials");
+    }
+
+    /// The append token must ride in EnvironmentVariables (the plist is
+    /// written mode 0600), never in ProgramArguments where any local
+    /// user could read it via `ps`.
+    #[test]
+    fn token_travels_via_env_vars_not_argv() {
+        let args = schedule_args(&cfg());
+        assert!(
+            !args.contains(&"--token".to_string()),
+            "argv must not carry the token"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("tok&<xml>")),
+            "no argv element may embed the token"
+        );
+        let plist = render_plist(&cfg());
+        assert!(plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains("<key>FERRISCRIBE_BACKUP_APPEND_TOKEN</key>"));
+
+        // Local-only and folder configs carry no token at all.
+        let mut local = cfg();
+        local.url = String::new();
+        assert!(!render_plist(&local).contains("EnvironmentVariables"));
+        let mut folder = cfg();
+        folder.dest_dir = Some(PathBuf::from("/Volumes/BK"));
+        assert!(!render_plist(&folder).contains("EnvironmentVariables"));
+    }
+
+    /// The plist file must be owner-only — it holds the append token and
+    /// lives in a typically world-readable LaunchAgents directory.
+    #[test]
+    fn create_plist_file_is_owner_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("agent.plist");
+        let f = create_plist_file(&path).unwrap();
+        drop(f);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "plist must be 0600");
+
+            // Re-opening a pre-existing looser-mode plist heals it.
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::remove_file(&path).unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o644)
+                .open(&path)
+                .unwrap();
+            let f = create_plist_file(&path).unwrap();
+            drop(f);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "existing plist healed to 0600");
+        }
     }
 
     #[test]

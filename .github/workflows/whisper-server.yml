@@ -10,9 +10,18 @@ on:
         description: 'whisper.cpp upstream tag to build'
         required: true
         default: 'v1.8.4'
+      release_tag:
+        description: 'whisper-server-vX.Y.Z tag to publish assets under (upload is skipped when empty)'
+        required: false
+        default: ''
 
 env:
   WHISPER_TAG: ${{ github.event.inputs.whisper_tag || 'v1.8.4' }}
+  # Publish target. On tag pushes this is the pushed tag. On manual
+  # dispatch github.ref_name is the BRANCH (e.g. master) — publishing
+  # under it would create a bogus release — so dispatch must name the
+  # release tag explicitly; empty means the upload step is skipped.
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
   # Opt into Node.js 24 for GitHub Actions (actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7 and others
   # still run on Node.js 20 by default, which is deprecated as of 2026-05-26).
   # Node.js 24 will become the default on 2026-06-02.
@@ -28,8 +37,8 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            triple: macos-aarch64
-            archive: zip
+            triple: darwin-aarch64
+            archive: tar.gz
           - platform: ubuntu-24.04
             triple: linux-x86_64
             archive: tar.gz
@@ -40,6 +49,19 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
+      - name: Validate inputs
+        run: |
+          # whisper_tag MUST be an upstream RELEASE tag (v-prefixed semver):
+          # CMake configure/build executes the checked-out code, and this
+          # job's token carries contents:write — an arbitrary ref would be
+          # untrusted code running with release-publishing privileges.
+          echo "$WHISPER_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
+            || { echo "::error::whisper_tag must be an upstream release tag like v1.8.4, got: $WHISPER_TAG"; exit 1; }
+          if [ -n "$RELEASE_TAG" ]; then
+            echo "$RELEASE_TAG" | grep -Eq '^whisper-server-v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
+              || { echo "::error::release_tag must look like whisper-server-v1.2.3, got: $RELEASE_TAG"; exit 1; }
+          fi
+
       - name: Checkout whisper.cpp
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -148,8 +170,16 @@ jobs:
           echo "::notice title=whisper-server ${{ matrix.triple }}::SHA256=$SHA"
 
       - name: Upload to release
+        # Skipped on manual dispatch without an explicit release_tag —
+        # github.ref_name would be the branch, not a whisper-server tag.
+        if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           files: whisper-server-${{ matrix.triple }}.${{ matrix.archive }}
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: false
+
+      - name: Notice (upload skipped)
+        if: env.RELEASE_TAG == ''
+        run: |
+          echo "::notice::No release_tag provided (manual dispatch) — built artifacts were NOT uploaded to a release. SHA-256 digests are in the step log above."

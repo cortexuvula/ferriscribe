@@ -155,31 +155,30 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#v}"
-          echo "Generating consolidated latest.json for $TAG"
-
-          # Get release metadata
-          PUB_DATE=$(gh release view "$TAG" --json createdAt -q .createdAt)
-          NOTES=$(gh release view "$TAG" --json body -q .body)
-
-          # List all assets
-          ASSETS=$(gh release view "$TAG" --json assets -q '.assets[].name')
-
-          # Generate latest.json using Node
           node << 'SCRIPT'
-          const { execSync } = require('child_process');
+          const { execFileSync } = require('child_process');
           const fs = require('fs');
 
+          // The tag comes from the push ref and asset names come from the
+          // release — both are externally influenceable. Validate the tag
+          // shape up front (every gh arg, URL, and filename below is then
+          // known-boring), and never interpolate either into a shell
+          // string: execFileSync passes arguments without interpretation.
           const tag = process.env.GITHUB_REF.replace('refs/tags/', '');
+          if (!/^v\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$/.test(tag)) {
+            console.error(`Refusing to build latest.json: unexpected tag shape: ${tag}`);
+            process.exit(1);
+          }
           const version = tag.replace(/^v/, '');
           const repo = process.env.GITHUB_REPOSITORY;
           const baseUrl = `https://github.com/${repo}/releases/download/${tag}`;
-          const pubDate = execSync(`gh release view ${tag} --json createdAt -q .createdAt`).toString().trim();
-          const notes = execSync(`gh release view ${tag} --json body -q .body`).toString().trim();
+          const gh = (...args) => execFileSync('gh', args, { encoding: 'utf8' });
+          const pubDate = JSON.parse(gh('release', 'view', tag, '--json', 'createdAt')).createdAt;
+          const notes = JSON.parse(gh('release', 'view', tag, '--json', 'body')).body;
 
-          const assetsJson = JSON.parse(execSync(`gh release view ${tag} --json assets`).toString());
-          const assetNames = assetsJson.assets.map(a => a.name);
+          const assetNames = JSON.parse(gh('release', 'view', tag, '--json', 'assets')).assets.map(
+            (a) => a.name
+          );
 
           const platforms = {};
 
@@ -189,7 +188,7 @@ jobs:
             if (!assetNames.includes(baseAsset)) continue;
 
             // Read the signature content
-            const signature = execSync(`gh release download ${tag} --pattern "${name}" --output - 2>/dev/null`).toString().trim();
+            const signature = gh('release', 'download', tag, '--pattern', name, '--output', '-').trim();
 
             // Map filename to Tauri platform key
             let platform = null;
@@ -208,6 +207,19 @@ jobs:
             };
           }
 
+          // Completeness guard: this upload overwrites the release's
+          // latest.json with --clobber. If platform detection silently
+          // matched nothing (renamed asset, missing build), refuse rather
+          // than strand every auto-updater client on a partial manifest
+          // until the next release.
+          const expected = ['linux-x86_64', 'windows-x86_64', 'darwin-aarch64'];
+          const missing = expected.filter((p) => !platforms[p]);
+          if (missing.length > 0) {
+            console.error(`Refusing to overwrite latest.json: missing platforms: ${missing.join(', ')}`);
+            console.error(`Assets seen: ${assetNames.join(', ')}`);
+            process.exit(1);
+          }
+
           const manifest = {
             version,
             notes,
@@ -224,5 +236,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          # Same shape gate as the generator: "$TAG" inside double quotes
+          # still expands $(...) — never hand an unvalidated tag to a shell.
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "Refusing to upload latest.json: unexpected tag shape: $TAG"
+            exit 1
+          fi
           gh release upload "$TAG" latest.json --clobber
           echo "Consolidated latest.json uploaded to release $TAG"

@@ -74,6 +74,12 @@ class SettingsStore {
    *  successful reload. */
   loadError = $state(false);
   private saveQueue: Promise<void> = Promise.resolve();
+  /** The last config known to be persisted server-side (from load(),
+   *  successful saves, or the post-failure reload). updateField payloads
+   *  are derived from THIS at drain time — never from the optimistic
+   *  `state` snapshot — so a rolled-back change can never be resurrected
+   *  by a later queued save that captured it. */
+  private serverState: AppConfig | null = null;
   /**
    * Svelte-store-compatible subscribers. We use an explicit Set + manual
    * notification instead of `$effect.root` so `subscribe()` is safe to call
@@ -105,6 +111,7 @@ class SettingsStore {
     try {
       const config = await getSettings();
       this.state = config;
+      this.serverState = config;
       this.loaded = true;
       this.loadError = false;
       this.notify();
@@ -129,11 +136,13 @@ class SettingsStore {
       await prev.catch(() => {});
       try {
         await saveSettings(config);
+        this.serverState = config;
       } catch (err) {
         console.error('Failed to save settings:', err);
         try {
           const latest = await getSettings();
           this.state = latest;
+          this.serverState = latest;
           this.notify();
         } catch (_reloadErr) {
           // If reload also fails, leave local state as-is.
@@ -158,13 +167,21 @@ class SettingsStore {
     const prev = this.saveQueue;
     this.saveQueue = (async () => {
       await prev.catch(() => {});
+      // Derive the payload at DRAIN time from the last known persisted
+      // state + ONLY this call's delta. Sending the call-time optimistic
+      // snapshot instead let a queued updateField resurrect a sibling
+      // change whose save had just failed and been rolled back by the
+      // reload above.
+      const payload = { ...(this.serverState ?? this.state), [key]: value };
       try {
-        await saveSettings(next);
+        await saveSettings(payload);
+        this.serverState = payload;
       } catch (err) {
         console.error('Save failed:', err);
         try {
           const latest = await getSettings();
           this.state = latest;
+          this.serverState = latest;
           this.notify();
         } catch (_reloadErr) {
           // If reload also fails, leave local state as-is.
