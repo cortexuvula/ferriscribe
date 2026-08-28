@@ -5,8 +5,16 @@
   import { exportSupportBundle } from '../../api/support';
   import { toasts } from '../../stores/toasts.svelte';
   import { formatError } from '../../types/errors';
+  import TermsOfServiceModal from '../TermsOfServiceModal.svelte';
 
   const appVersion = __APP_VERSION__;
+
+  let tosOpen = $state(false);
+  const tosAcceptedAt = $derived(
+    settings.state.tos_accepted_at
+      ? new Date(settings.state.tos_accepted_at).toLocaleDateString()
+      : null,
+  );
 
   async function toggleAutoUpdate(e: Event) {
     const checked = (e.target as HTMLInputElement).checked;
@@ -109,6 +117,18 @@
   </p>
 
   <div class="form-group">
+    <h3>Terms of Service</h3>
+    <button class="btn-check" onclick={() => (tosOpen = true)}>View Terms of Service</button>
+    <span class="form-hint">
+      {#if tosAcceptedAt}
+        Accepted {tosAcceptedAt}. Your use of FerriScribe remains governed by these Terms.
+      {:else}
+        Not yet accepted — you will be asked to accept on next launch.
+      {/if}
+    </span>
+  </div>
+
+  <div class="form-group">
     <h3>Support</h3>
     <button
       class="btn-check"
@@ -119,6 +139,8 @@
     </button>
     <span class="form-hint">Exports application logs with PHI (phone numbers, emails, etc.) automatically redacted. Safe to share with support.</span>
   </div>
+
+  <TermsOfServiceModal open={tosOpen} onClose={() => (tosOpen = false)} />
 </div>
 
 <style>

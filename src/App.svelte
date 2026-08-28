@@ -19,6 +19,7 @@
   import DatabaseRecoveryDialog from './lib/dialogs/DatabaseRecoveryDialog.svelte';
   import FatalErrorDialog from './lib/dialogs/FatalErrorDialog.svelte';
   import OnboardingWizard from './lib/components/OnboardingWizard.svelte';
+  import TermsGate from './lib/components/TermsGate.svelte';
   import EndpointOfflineDialog from './lib/components/EndpointOfflineDialog.svelte';
   import { settingsNav } from './lib/stores/settingsNav.svelte';
   import type { ServiceKind } from './lib/api/invokeWithOfflineHandling';
@@ -83,6 +84,11 @@
   // flips this reactive and reveals the app shell. Existing users never see it
   // (the backend auto-marks onboarding_completed when a config already existed).
   const onboardingComplete = $derived(settings.state.onboarding_completed);
+  // Terms-of-service gate: null until the user accepts (once — new users
+  // see it before onboarding; existing users see it once after the update
+  // that introduced the field). Rendering order matters: terms first, then
+  // onboarding, then the shell.
+  const termsAccepted = $derived(settings.state.tos_accepted_at != null);
   // The store initializes with default config where onboarding_completed=false.
   // Before settings.load() resolves, that default would flash the onboarding
   // wizard at returning users. Gate the whole wizard-vs-shell branch on the
@@ -364,6 +370,8 @@
   <!-- Blank while the real settings haven't loaded yet. The store's default
        config has onboarding_completed=false; rendering on it before load()
        completes would flash the onboarding wizard at returning users. -->
+{:else if !termsAccepted}
+  <TermsGate />
 {:else if !onboardingComplete}
   <OnboardingWizard />
 {:else}

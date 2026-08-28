@@ -539,6 +539,13 @@ pub struct AppConfig {
     #[serde(default)]
     pub onboarding_completed: bool,
 
+    /// ISO-8601 timestamp of when the user accepted the Terms of Service
+    /// (TERMS_OF_SERVICE.md). `None` until accepted — the app gates on this
+    /// exactly once. Amendments are governed by §13.2 of the Terms (continued
+    /// use constitutes acceptance), so a single timestamp suffices.
+    #[serde(default)]
+    pub tos_accepted_at: Option<String>,
+
     // Updates
     /// When true, the app checks GitHub Releases for updates on launch and
     /// every 12h. The user consents to this in onboarding and can toggle it in

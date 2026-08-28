@@ -177,6 +177,10 @@ export interface AppConfig {
   backup_dest_path: string | null;
   // Onboarding
   onboarding_completed: boolean;
+  /** ISO timestamp of when the user accepted the Terms of Service.
+   *  `null` until accepted — App.svelte gates on it once. Mirrors
+   *  `tos_accepted_at` in crates/core settings.rs. */
+  tos_accepted_at: string | null;
   // Updates
   auto_update_check: boolean;
   // Quick-add condition chips
