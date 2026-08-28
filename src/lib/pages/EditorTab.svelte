@@ -204,28 +204,47 @@
     };
 
     if (saveTimer !== null) clearTimeout(saveTimer);
+    // Capture the identity of the edit at schedule time. Resolving
+    // `recordings.selectedRecording`/`config.field` at fire time instead
+    // could (if the timer ever beats the key-change $effect's flush) save
+    // recording A's pending edit under recording B's id — cross-patient
+    // contamination.
+    const editRecordingId = recordings.selectedRecording.id;
+    const editField = String(config.field);
+    const editKey = currentKey;
     saveTimer = setTimeout(async () => {
       saveTimer = null;
       const value = pendingValue;
       pendingValue = null;
-      if (value === null || !recordings.selectedRecording) return;
+      if (value === null) return;
       saveStatus = 'saving';
       saveError = null;
       try {
         await invoke('save_recording_field', {
-          recordingId: recordings.selectedRecording.id,
-          field: String(config.field),
+          recordingId: editRecordingId,
+          field: editField,
           value,
         });
-        saveStatus = 'saved';
-        // Clear the "Saved" badge after 1.5 s.
-        clearBadgeTimer = setTimeout(() => {
-          clearBadgeTimer = null;
-          if (saveStatus === 'saved') saveStatus = 'idle';
-        }, 1500);
+        // Scope the completion writes to the edit's context: if the user
+        // switched recording/tab mid-save, the new context already reset
+        // these and a stale "Saved"/error badge would mislead.
+        if (editKey === currentKey) {
+          saveStatus = 'saved';
+          // Clear the "Saved" badge after 1.5 s.
+          clearBadgeTimer = setTimeout(() => {
+            clearBadgeTimer = null;
+            if (saveStatus === 'saved') saveStatus = 'idle';
+          }, 1500);
+        }
       } catch (e) {
-        saveStatus = 'error';
-        saveError = formatError(e);
+        if (editKey === currentKey) {
+          saveStatus = 'error';
+          saveError = formatError(e);
+        } else {
+          // The failed edit's context is gone; surface it as a toast so
+          // the (silently optimistic) edit isn't invisible data loss.
+          toasts.error(`Save failed — ${config.label} edit may be lost (${formatError(e)})`);
+        }
       }
     }, 1000); // 1 s debounce
   }

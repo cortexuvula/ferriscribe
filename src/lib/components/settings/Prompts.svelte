@@ -70,7 +70,13 @@
     if (promptStatusTimer) clearTimeout(promptStatusTimer);
   });
 
+  // Monotonic generation counter: increments on every prompt switch so a
+  // stale async load (or save/reset completion) can detect it no longer
+  // belongs to the active prompt and skip its state writes.
+  let promptLoadGen = 0;
+
   async function loadPromptEditor(docType: DocType) {
+    const gen = ++promptLoadGen;
     promptLoading = true;
     promptDirty = false;
     promptSaveStatus = 'idle';
@@ -84,18 +90,22 @@
         () => settings.state?.[info.configField],
       ) as string | null | undefined;
       if (customValue && customValue.length > 0) {
+        if (gen !== promptLoadGen) return; // user switched while loading
         promptEditorText = customValue;
         promptIsCustom = true;
       } else {
-        promptEditorText = await getDefaultPrompt(docType);
+        const defaultText = await getDefaultPrompt(docType);
+        if (gen !== promptLoadGen) return; // stale load — user moved on
+        promptEditorText = defaultText;
         promptIsCustom = false;
       }
     } catch (e) {
+      if (gen !== promptLoadGen) return;
       console.error('Failed to load prompt editor:', e);
       promptEditorText = '';
       promptIsCustom = false;
     } finally {
-      promptLoading = false;
+      if (gen === promptLoadGen) promptLoading = false;
     }
   }
 
@@ -111,9 +121,14 @@
 
   async function handlePromptSave() {
     const info = PROMPT_TYPES.find((p) => p.key === activePromptKey)!;
+    const gen = promptLoadGen;
     promptSaveStatus = 'saving';
     try {
       await settings.updateField(info.configField, promptEditorText);
+      // The save itself landed for `info` regardless; only the shared
+      // editor flags belong to the CURRENTLY selected prompt — skip them
+      // if the user switched away mid-save.
+      if (gen !== promptLoadGen) return;
       promptIsCustom = true;
       promptDirty = false;
       promptSaveStatus = 'saved';
@@ -125,22 +140,25 @@
       }, 1500);
     } catch (e) {
       console.error('Failed to save custom prompt:', e);
-      promptSaveStatus = 'error';
+      if (gen === promptLoadGen) promptSaveStatus = 'error';
     }
   }
 
   async function handlePromptReset() {
     const info = PROMPT_TYPES.find((p) => p.key === activePromptKey)!;
+    const gen = promptLoadGen;
     if (promptIsCustom && !confirm('Clear the custom prompt and restore the default?')) return;
     try {
       await settings.updateField(info.configField, null);
-      promptEditorText = await getDefaultPrompt(activePromptKey);
+      const defaultText = await getDefaultPrompt(info.key);
+      if (gen !== promptLoadGen) return; // user switched mid-reset
+      promptEditorText = defaultText;
       promptIsCustom = false;
       promptDirty = false;
       promptSaveStatus = 'idle';
     } catch (e) {
       console.error('Failed to reset prompt:', e);
-      promptSaveStatus = 'error';
+      if (gen === promptLoadGen) promptSaveStatus = 'error';
     }
   }
 

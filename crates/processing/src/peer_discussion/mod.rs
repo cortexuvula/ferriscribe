@@ -25,5 +25,10 @@ pub struct PeerDiscussionPromptConfig {
     /// Reason for the discussion.
     pub reason: String,
     /// User-supplied override for the entire system prompt.
+    ///
+    /// Trust boundary: this value replaces the default template —
+    /// including every anti-fabrication guard — verbatim. Only the
+    /// prompt-editor settings surface should set it; it is NOT
+    /// sanitized because it IS the prompt.
     pub custom_prompt: Option<String>,
 }

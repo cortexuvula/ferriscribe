@@ -124,12 +124,13 @@ function scanDecorations(doc: ProseMirrorNode): DecorationSet {
   return DecorationSet.create(doc, decos);
 }
 
-// Module-level signal flipped when the dictionary finishes loading. The
-// plugin's `apply` checks `DICT_JUST_LOADED()` on every transaction; the
-// first transaction observed after load causes a full re-scan. This is the
-// simplest cross-view mechanism — the plugin instance has no handle to the
-// view from inside `state.init`, and we want every active editor to
-// re-scan exactly once.
+// Module-level dictionary-loaded flag. On load, the plugin dispatches a
+// RESCAN_META transaction to EVERY active view (see addProseMirrorPlugins).
+// The plugin's `apply` also checks `DICT_JUST_LOADED()` as a fallback for
+// the case where the load resolved before any view was registered: the
+// first transaction observed after load causes a full re-scan of that
+// view. New views created after the load scan with the dictionary at
+// `state.init`, so they need no signal.
 let DICT_LOADED = false;
 let SEEN_LOADED = false;
 
@@ -182,13 +183,26 @@ export const Spellcheck = Extension.create<SpellcheckOptions>({
 
   addProseMirrorPlugins() {
     const opts = this.options;
-    // Kick off async dictionary load and flip the module-level signal when
-    // ready so the next transaction re-scans.
+    // Kick off async dictionary load; on completion re-scan EVERY active
+    // editor view by dispatching the rescan meta (same mechanism the
+    // debounce path uses). The old one-shot signal could only ever fire
+    // for the first view to run a transaction, leaving other views with
+    // stale decorations until they were edited.
     const spell = getSpellchecker();
     if (!spell.ready) {
       spell.load().then(() => {
         DICT_LOADED = true;
-        SEEN_LOADED = false;
+        let dispatched = false;
+        for (const v of activeViews) {
+          try {
+            v.dispatch(v.state.tr.setMeta(RESCAN_META, true));
+            dispatched = true;
+          } catch { /* view may have been destroyed */ }
+        }
+        // Fallback: if no view was registered yet (never in practice —
+        // load is kicked off by a mounting editor), arm the one-shot so
+        // the first transaction to observe the loaded dict re-scans.
+        SEEN_LOADED = dispatched;
       });
     } else {
       DICT_LOADED = true;
