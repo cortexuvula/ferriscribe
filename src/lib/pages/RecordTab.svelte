@@ -4,6 +4,7 @@
   import { pipeline } from '../stores/pipeline.svelte';
   import { recordings } from '../stores/recordings.svelte';
   import { importAudioFile, getRecording } from '../api/recordings';
+  import type { Recording } from '../types';
   import { checkRecordingAudioLevels } from '../api/audio';
   import { copyWithStatus } from '../utils/clipboard';
   import { clampSidebarWidth } from '../utils/resize';
@@ -182,6 +183,10 @@
   // SOAP note text for ICD code extraction — fetched when pipeline completes
   let soapNoteText = $state<string | null>(null);
 
+  // Recording metadata for the same fetch — carries the structured
+  // `icd_codes` (new-format recordings keep the note body code-free).
+  let pipelineMetadata = $state<Recording['metadata'] | null>(null);
+
   // Throughput of the most recent AI generation for the pipeline's recording
   // (from metadata.generation_stats), shown next to the elapsed time in
   // PipelineStatus. Refreshed on pipeline completion and after Regenerate.
@@ -193,13 +198,16 @@
     if (current?.stage === 'completed' && pipelineRecordingId) {
       getRecording(pipelineRecordingId).then((rec) => {
         soapNoteText = rec?.soap_note ?? null;
+        pipelineMetadata = rec?.metadata ?? null;
         pipelineTokensPerSecond = rec ? latestTokensPerSecond(rec.metadata) : null;
       }).catch(() => {
         soapNoteText = null;
+        pipelineMetadata = null;
         pipelineTokensPerSecond = null;
       });
     } else {
       soapNoteText = null;
+      pipelineMetadata = null;
       pipelineTokensPerSecond = null;
     }
   });
@@ -368,6 +376,7 @@
       // Re-fetch so soapNoteText (and the editor) reflect the new note.
       const rec = await getRecording(rid);
       soapNoteText = rec?.soap_note ?? null;
+      pipelineMetadata = rec?.metadata ?? null;
       pipelineTokensPerSecond = rec ? latestTokensPerSecond(rec.metadata) : null;
       await recordings.load();
       generation.finish();
@@ -527,6 +536,7 @@
         <PipelineStatus
           bind:copyStatus
           soapNoteText={soapNoteText}
+          metadata={pipelineMetadata}
           tokensPerSecond={pipelineTokensPerSecond}
           {regenerating}
           onCancel={handleCancelPipeline}
