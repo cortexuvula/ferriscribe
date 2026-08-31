@@ -214,7 +214,11 @@
     // Load the BC MSP ICD-9 code set for post-generation validation of
     // SOAP-note codes. Non-blocking — chips render neutrally until it
     // resolves, then re-validate reactively via the store's $state.
+    // The description map is a separate best-effort load backing the
+    // billing-code list's explaining titles (fallback only — a failure
+    // there never blocks validation).
     icd9Store.load();
+    icd9Store.loadDescriptions();
 
     // Start the auto-update check (if the user has it enabled). The check is
     // an anonymous GET to GitHub Releases — no PHI transmitted.

@@ -362,6 +362,7 @@ pub fn run() {
             commands::generation::synopsis::generate_synopsis,
             commands::generation::peer_discussion::generate_peer_discussion,
             commands::icd::get_icd9_code_set,
+            commands::icd::get_icd9_descriptions,
             commands::models::list_whisper_models,
             commands::models::list_pyannote_models,
             commands::models::download_model,

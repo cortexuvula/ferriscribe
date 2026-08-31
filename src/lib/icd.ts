@@ -4,16 +4,83 @@
  * The extraction in `rsvp/engine.ts` returns code strings that still
  * carry their `ICD-9:` / `ICD-9 Code:` prefix. This module strips the
  * prefix, normalizes the bare code (handles zero-padding differences),
- * and tests membership against the cached MSP set.
+ * and tests membership against the cached MSP set. It also resolves an
+ * explaining title for each code — the note's own " — <description>"
+ * text first (the SOAP output format emits one per code), falling back
+ * to the official BC MSP description from the cached description map.
  */
 import { extractIcdCodes } from './rsvp/engine';
 
 export interface ValidatedIcdCode {
   /** Original extracted string, e.g. "ICD-9 Code: 401.9". */
   raw: string;
+  /** Prefix-stripped code, e.g. "401.9" — what the chip displays. */
+  bare: string;
   /** True if the code is on the MSP list, false if not, null if we
    *  couldn't validate (set not loaded yet). */
   valid: boolean | null;
+  /** Explaining title for the code: the note's own description text when
+   *  present, otherwise the official BC MSP description, null when
+   *  neither is available (e.g. an ICD-10 code, or neither source
+   *  loaded). */
+  description: string | null;
+}
+
+/**
+ * Per-line `ICD-9 Code: 847.2 — Sprain of lumbar` form the SOAP output
+ * format mandates. Captures (code, description). Inline mentions like
+ * "(ICD-9: 250.0)" carry no description and are intentionally unmatched —
+ * their titles come from the MSP fallback map instead.
+ */
+const ICD_DESC_LINE_RE =
+  /^[ \t]*ICD[-\s]?\d+(?:\s+Code)?[\s:—–-]+([A-Z]?[\d.]+[A-Z]?)[ \t]*[—–-][ \t]*(.+?)[ \t]*$/gimu;
+
+/**
+ * Collect the per-code descriptions embedded in note text. Keys are the
+ * bare codes exactly as captured (first occurrence wins — a note repeats
+ * a code line only when the model duplicated it).
+ */
+export function extractIcdDescriptions(text: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const m of text.matchAll(ICD_DESC_LINE_RE)) {
+    const code = m[1];
+    const desc = m[2]?.trim();
+    if (code && desc && !map.has(code)) map.set(code, desc);
+  }
+  return map;
+}
+
+/**
+ * Soften the MSP source's ALL-CAPS descriptions ("LUMBAR") into title
+ * case for the billing-code list. Note-written descriptions are already
+ * sentence-cased and pass through untouched.
+ */
+function toDisplayCase(desc: string): string {
+  return desc.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Resolve the explaining title for a bare code: the note's own
+ * description first, then the official MSP description. Both lookups try
+ * the code's normalized forms (the note may emit "1.0" where the MSP
+ * list keys "001.0").
+ */
+function resolveDescription(
+  bare: string,
+  noteDescs: ReadonlyMap<string, string>,
+  mspDescriptions: ReadonlyMap<string, string> | null,
+): string | null {
+  for (const form of normalizedForms(bare)) {
+    const note = noteDescs.get(form);
+    if (note) return note;
+  }
+  if (mspDescriptions) {
+    for (const form of normalizedForms(bare)) {
+      const msp = mspDescriptions.get(form);
+      if (msp) return toDisplayCase(msp);
+    }
+  }
+  return null;
 }
 
 /**
@@ -91,20 +158,40 @@ export type IcdMode = 'icd9' | 'icd10' | 'both';
  * bundled ICD-10 list) and ICD-9 codes are NOT validated against the
  * wrong set. In `both` mode, ICD-9 codes validate, ICD-10 codes render
  * neutral. Defaults to `icd9` (the BC MSP billing standard).
+ *
+ * `mspDescriptions` (the official code → description map from
+ * `get_icd9_descriptions`) supplies explaining titles for codes whose
+ * note text carries none; null/omitted skips the fallback.
  */
 export function extractIcdCodesValidated(
   text: string,
   codeSet: Set<string> | null,
   mode: IcdMode = 'icd9',
+  mspDescriptions: ReadonlyMap<string, string> | null = null,
 ): ValidatedIcdCode[] {
   const validateIcd9 = mode === 'icd9' || mode === 'both';
+  const noteDescs = extractIcdDescriptions(text);
   return extractIcdCodes(text).map((raw) => {
+    const bare = stripIcdPrefix(raw);
     const isIcd9 = /ICD-9/i.test(raw);
     // Only validate ICD-9 codes when we're in a mode that uses ICD-9,
     // and never validate ICD-10 codes (no bundled list). This prevents
     // the wrong-set false warning (e.g. an ICD-10 code validated
     // against the ICD-9 MSP list in pure icd10 mode).
-    if (isIcd9 && validateIcd9) return { raw, valid: validateIcdCode(raw, codeSet) };
-    return { raw, valid: null };
+    const valid =
+      isIcd9 && validateIcd9 ? validateIcdCode(raw, codeSet) : null;
+    return { raw, bare, valid, description: resolveDescription(bare, noteDescs, mspDescriptions) };
   });
+}
+
+/** Heading for the billing-code list, matching the configured ICD mode. */
+export function billingCodesLabel(mode: IcdMode = 'icd9'): string {
+  switch (mode) {
+    case 'icd10':
+      return 'Billing codes (ICD-10)';
+    case 'both':
+      return 'Billing codes (ICD-9/ICD-10)';
+    default:
+      return 'Billing codes (ICD-9)';
+  }
 }

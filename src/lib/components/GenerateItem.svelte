@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ValidatedIcdCode } from '../icd';
-  import IcdChip from './IcdChip.svelte';
+  import IcdCodeList from './IcdCodeList.svelte';
 
   interface Props {
     title: string;
@@ -12,6 +12,8 @@
     done: boolean;
     copyStatus: 'idle' | 'copying' | 'copied' | undefined;
     icdCodes?: ValidatedIcdCode[];
+    /** Heading for the billing-code list (mode-aware, e.g. "Billing codes (ICD-9)"). */
+    icdLabel?: string;
     generatedText?: string | null;
     progressText?: string | null;
     failed?: boolean;
@@ -30,6 +32,7 @@
     done,
     copyStatus,
     icdCodes,
+    icdLabel = 'Billing codes (ICD-9)',
     generatedText = null,
     progressText = null,
     failed = false,
@@ -97,11 +100,8 @@
     {/if}
   </div>
   {#if done && icdCodes && icdCodes.length > 0}
-    <div class="icd-codes">
-      <span class="icd-label">ICD Codes:</span>
-      {#each icdCodes as code (code.raw)}
-        <IcdChip code={code.raw} valid={code.valid} />
-      {/each}
+    <div class="icd-list-row">
+      <IcdCodeList codes={icdCodes} label={icdLabel} />
     </div>
   {/if}
   {#if done && generatedText}
@@ -260,19 +260,9 @@
     background-color: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
   }
 
-  .icd-codes {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 8px;
-    flex-wrap: wrap;
+  .icd-list-row {
     width: 100%;
-  }
-
-  .icd-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
+    margin-top: 8px;
   }
 
   .generated-preview {

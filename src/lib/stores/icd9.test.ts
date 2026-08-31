@@ -17,6 +17,7 @@ describe('Icd9Store — load / retry / failure', () => {
     icd9.codeSet = null;
     icd9.loaded = false;
     icd9.loadError = false;
+    icd9.descriptions = null;
   });
 
   it('load() populates codeSet on success', async () => {
@@ -63,5 +64,50 @@ describe('Icd9Store — load / retry / failure', () => {
     await icd9.retry();
     expect(icd9.loadError).toBe(false);
     expect(icd9.codeSet?.has('401.9')).toBe(true);
+  });
+});
+
+describe('Icd9Store — descriptions load', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    icd9.descriptions = null;
+    icd9.loadError = false;
+  });
+
+  it('loadDescriptions() populates the code → description map', async () => {
+    invokeMock.mockResolvedValue({ '847.2': 'LUMBAR', 'V70.0': 'ROUTINE GENERAL MEDICAL EXAMINATION' });
+    await icd9.retryDescriptions();
+    expect(icd9.descriptions).toBeInstanceOf(Map);
+    expect(icd9.descriptions?.get('847.2')).toBe('LUMBAR');
+    expect(icd9.descriptions?.get('V70.0')).toBe('ROUTINE GENERAL MEDICAL EXAMINATION');
+    expect(invokeMock).toHaveBeenCalledWith('get_icd9_descriptions');
+  });
+
+  it('concurrent loadDescriptions() calls fire invoke once (dedup)', async () => {
+    invokeMock.mockResolvedValue({ '847.2': 'LUMBAR' });
+    await icd9.retryDescriptions(); // clears the guard, starts one load
+    const p1 = icd9.loadDescriptions();
+    const p2 = icd9.loadDescriptions();
+    await Promise.all([p1, p2]);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('failure leaves descriptions null and never trips the validation error state', async () => {
+    invokeMock.mockRejectedValue(new Error('DB locked'));
+    await icd9.retryDescriptions();
+    // Cosmetic-only contract: a description-load failure must not surface
+    // as a validation error (loadError drives the retry notice in the UI).
+    expect(icd9.descriptions).toBeNull();
+    expect(icd9.loadError).toBe(false);
+  });
+
+  it('retryDescriptions() re-attempts after a failure (guard cleared)', async () => {
+    invokeMock.mockRejectedValueOnce(new Error('transient'));
+    await icd9.retryDescriptions();
+    expect(icd9.descriptions).toBeNull();
+
+    invokeMock.mockResolvedValue({ '847.2': 'LUMBAR' });
+    await icd9.retryDescriptions();
+    expect(icd9.descriptions?.get('847.2')).toBe('LUMBAR');
   });
 });
