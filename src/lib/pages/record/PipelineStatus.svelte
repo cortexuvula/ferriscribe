@@ -3,10 +3,10 @@
   import { generation } from '../../stores/generation.svelte';
   import { generationProgressText } from '../../utils/generationStats';
   import { formatTokensPerSecond } from '../../utils/format';
-  import { extractIcdCodesValidated } from '../../icd';
+  import { extractIcdCodesValidated, billingCodesLabel } from '../../icd';
   import { icd9 as icd9Store } from '../../stores/icd9.svelte';
   import { settings } from '../../stores/settings.svelte';
-  import IcdChip from '../../components/IcdChip.svelte';
+  import IcdCodeList from '../../components/IcdCodeList.svelte';
 
   type CopyStatus = 'idle' | 'copying' | 'copied';
 
@@ -35,9 +35,13 @@
     onRegenerate,
   }: Props = $props();
 
-  // Extract and validate ICD codes from the SOAP note text
+  // Extract and validate ICD codes from the SOAP note text; official MSP
+  // descriptions back the list's explaining titles when the note's own
+  // " — description" text is missing.
   const icdCodes = $derived(
-    soapNoteText ? extractIcdCodesValidated(soapNoteText, icd9Store.codeSet, settings.state.icd_version) : []
+    soapNoteText
+      ? extractIcdCodesValidated(soapNoteText, icd9Store.codeSet, settings.state.icd_version, icd9Store.descriptions)
+      : []
   );
 
   function stageLabel(stage: PipelineStage): string {
@@ -159,10 +163,7 @@
 
       {#if icdCodes.length > 0}
         <div class="icd-codes">
-          <span class="icd-label">ICD Codes:</span>
-          {#each icdCodes as code}
-            <IcdChip code={code.raw} valid={code.valid} />
-          {/each}
+          <IcdCodeList codes={icdCodes} label={billingCodesLabel(settings.state.icd_version)} />
         </div>
       {/if}
     {/if}
@@ -330,15 +331,6 @@
   .icd-codes {
     margin-top: 12px;
     display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
     justify-content: center;
-  }
-
-  .icd-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
   }
 </style>

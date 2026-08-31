@@ -4,6 +4,8 @@ import {
   normalizedForms,
   validateIcdCode,
   extractIcdCodesValidated,
+  extractIcdDescriptions,
+  billingCodesLabel,
 } from './icd';
 
 describe('stripIcdPrefix', () => {
@@ -206,5 +208,123 @@ describe('extractIcdCodesValidated', () => {
     const text = 'ICD-9 Code: 401.9\nICD-10 Code: I10';
     const result = extractIcdCodesValidated(text, mspSet, 'icd10');
     expect(result.every((r) => r.valid === null)).toBe(true);
+  });
+});
+
+describe('extractIcdDescriptions', () => {
+  it('captures the per-line "code — description" form the SOAP prompt emits', () => {
+    const text = 'Assessment: back pain\n\nICD-9 Code: 847.2 — Sprain of lumbar\nICD-9 Code: 724.5 — Lumbago';
+    const map = extractIcdDescriptions(text);
+    expect(map.get('847.2')).toBe('Sprain of lumbar');
+    expect(map.get('724.5')).toBe('Lumbago');
+  });
+
+  it('accepts a plain hyphen as the code/description separator', () => {
+    const map = extractIcdDescriptions('ICD-9 - 847.2 - Sprain of lumbar');
+    expect(map.get('847.2')).toBe('Sprain of lumbar');
+  });
+
+  it('accepts the colon-less "ICD9 847.2 — desc" variant', () => {
+    const map = extractIcdDescriptions('ICD9 847.2 — Sprain of lumbar');
+    expect(map.get('847.2')).toBe('Sprain of lumbar');
+  });
+
+  it('skips description-less code lines (inline mentions)', () => {
+    // Inline "(ICD-9: 250.0)" and bare "ICD-9 Code: 401.9" lines carry no
+    // description — they must not seed the map with junk.
+    const map = extractIcdDescriptions('(ICD-9: 250.0)\nICD-9 Code: 401.9');
+    expect(map.size).toBe(0);
+  });
+
+  it('keeps the first description when a code line repeats', () => {
+    const map = extractIcdDescriptions(
+      'ICD-9 Code: 847.2 — Sprain of lumbar\nICD-9 Code: 847.2 — Duplicate',
+    );
+    expect(map.get('847.2')).toBe('Sprain of lumbar');
+    expect(map.size).toBe(1);
+  });
+
+  it('does not treat ordinary dashed prose lines as code descriptions', () => {
+    const map = extractIcdDescriptions('1. Ibuprofen 400 mg — take with food');
+    expect(map.size).toBe(0);
+  });
+
+  it('returns an empty map for empty text', () => {
+    expect(extractIcdDescriptions('').size).toBe(0);
+  });
+});
+
+describe('extractIcdCodesValidated — bare code + explaining title', () => {
+  const mspSet = new Set(['847.2', '001.0']);
+  const mspDescs = new Map([
+    ['847.2', 'LUMBAR'],
+    ['001.0', 'CHOLERA DUE TO VIBRIO CHOLERAE'],
+    ['V70.0', 'ROUTINE GENERAL MEDICAL EXAMINATION'],
+  ]);
+
+  it('exposes the bare (prefix-stripped) code for chip display', () => {
+    const result = extractIcdCodesValidated('ICD-9 Code: 847.2', mspSet);
+    expect(result[0].bare).toBe('847.2');
+    expect(result[0].raw).toBe('ICD-9 Code: 847.2');
+  });
+
+  it('uses the note description when the note carries one', () => {
+    const text = 'ICD-9 Code: 847.2 — Sprain of lumbar';
+    const result = extractIcdCodesValidated(text, mspSet, 'icd9', mspDescs);
+    expect(result[0].description).toBe('Sprain of lumbar');
+  });
+
+  it('falls back to the official MSP description, softened to title case', () => {
+    // No " — description" in the note; the MSP map is ALL-CAPS.
+    const result = extractIcdCodesValidated('(ICD-9: 847.2)', mspSet, 'icd9', mspDescs);
+    expect(result[0].description).toBe('Lumbar');
+  });
+
+  it('note description wins over the MSP description', () => {
+    const text = 'ICD-9 Code: 847.2 — Sprain of lumbar';
+    const result = extractIcdCodesValidated(text, mspSet, 'icd9', mspDescs);
+    expect(result[0].description).toBe('Sprain of lumbar');
+  });
+
+  it('MSP fallback matches the zero-padded form of a trimmed code', () => {
+    // Note emits "1.0", the MSP map keys "001.0" — description must still
+    // resolve (normalizedForms lookup).
+    const result = extractIcdCodesValidated('ICD-9 Code: 1.0', mspSet, 'icd9', mspDescs);
+    expect(result[0].description).toBe('Cholera Due To Vibrio Cholerae');
+  });
+
+  it('description is null when neither source has the code', () => {
+    const result = extractIcdCodesValidated('ICD-9 Code: 999.99', mspSet, 'icd9', mspDescs);
+    expect(result[0].description).toBeNull();
+  });
+
+  it('description is null for a no-description ICD-10 code (no bundled list)', () => {
+    const result = extractIcdCodesValidated('ICD-10 Code: Z00.00', mspSet, 'both', mspDescs);
+    expect(result[0].description).toBeNull();
+  });
+
+  it('works without an MSP map (note descriptions only)', () => {
+    const result = extractIcdCodesValidated('ICD-9 Code: 847.2 — Sprain of lumbar', mspSet);
+    expect(result[0].description).toBe('Sprain of lumbar');
+    const bare = extractIcdCodesValidated('(ICD-9: 847.2)', mspSet);
+    expect(bare[0].description).toBeNull();
+  });
+
+  it('title-case softening keeps alphanumerics like B12 intact', () => {
+    const descs = new Map([['266.2', 'OTHER B-COMPLEX DEFICIENCIES']]);
+    const result = extractIcdCodesValidated('ICD-9 Code: 266.2', null, 'icd9', descs);
+    expect(result[0].description).toBe('Other B-Complex Deficiencies');
+  });
+});
+
+describe('billingCodesLabel', () => {
+  it('labels the list for each ICD mode', () => {
+    expect(billingCodesLabel('icd9')).toBe('Billing codes (ICD-9)');
+    expect(billingCodesLabel('icd10')).toBe('Billing codes (ICD-10)');
+    expect(billingCodesLabel('both')).toBe('Billing codes (ICD-9/ICD-10)');
+  });
+
+  it('defaults to the BC MSP ICD-9 label', () => {
+    expect(billingCodesLabel()).toBe('Billing codes (ICD-9)');
   });
 });

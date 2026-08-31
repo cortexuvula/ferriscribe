@@ -10,10 +10,10 @@
   import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { formatError } from '../types/errors';
-  import { extractIcdCodesValidated } from '../icd';
+  import { extractIcdCodesValidated, billingCodesLabel } from '../icd';
   import { icd9 as icd9Store } from '../stores/icd9.svelte';
   import { settings } from '../stores/settings.svelte';
-  import IcdChip from '../components/IcdChip.svelte';
+  import IcdCodeList from '../components/IcdCodeList.svelte';
   import { save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { exportAudio } from '../api/export';
   import { fetchAudioFromServer } from '../api/contentSync';
@@ -40,9 +40,11 @@
 
   // Extract and validate ICD codes from SOAP note content (only relevant for soap tab).
   // Validation is against the BC MSP ICD-9 list; codes not on the list render as amber.
+  // Each row also carries its explaining title (the note's own description
+  // text, with the official MSP description as fallback).
   const icdCodes = $derived(
     tabId === 'soap' && content && typeof content === 'string'
-      ? extractIcdCodesValidated(content, icd9Store.codeSet, settings.state.icd_version)
+      ? extractIcdCodesValidated(content, icd9Store.codeSet, settings.state.icd_version, icd9Store.descriptions)
       : []
   );
 
@@ -403,14 +405,6 @@
             </button>
           {/if}
         {/if}
-        {#if icdCodes.length > 0}
-          <div class="icd-codes">
-            <span class="icd-label">ICD:</span>
-            {#each icdCodes as code}
-              <IcdChip code={code.raw} valid={code.valid} />
-            {/each}
-          </div>
-        {/if}
         {#if icd9Store.loadError && tabId === 'soap'}
           <button
             class="icd-validation-notice"
@@ -423,6 +417,12 @@
       {/if}
     </div>
   </div>
+
+  {#if icdCodes.length > 0}
+    <div class="icd-strip">
+      <IcdCodeList codes={icdCodes} label={billingCodesLabel(settings.state.icd_version)} />
+    </div>
+  {/if}
 
   {#if content === null}
     <div class="empty-state">
@@ -562,24 +562,11 @@
     color: var(--text-secondary);
   }
 
-  .icd-codes {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: 8px;
-    padding: 4px 8px;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
-    border-radius: var(--radius-sm);
-    flex-wrap: wrap;
-  }
-
-  .icd-label {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+  .icd-strip {
+    flex-shrink: 0;
+    padding: 8px 16px;
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
   }
 
   .icd-validation-notice {
