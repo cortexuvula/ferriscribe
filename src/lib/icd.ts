@@ -195,3 +195,96 @@ export function billingCodesLabel(mode: IcdMode = 'icd9'): string {
       return 'Billing codes (ICD-9)';
   }
 }
+
+// ─── metadata.icd_codes (structured codes, note body is code-free) ──────────
+
+/**
+ * One entry of `recordings.metadata.icd_codes` — written by the backend
+ * at generation time when it strips the per-code ICD lines out of the
+ * SOAP note. Mirrors the Rust `ExtractedIcdCode` wire shape
+ * (`soap_generator::postprocess`); keep the two in sync.
+ */
+export interface IcdCodeMetadataEntry {
+  code: string;
+  description?: string | null;
+  kind?: 'icd9' | 'icd10';
+}
+
+/**
+ * Type guard for `metadata.icd_codes`. Returns `null` when the key is
+ * absent (or not an array) — a legacy recording whose codes live inline
+ * in the note text (mined via `extractIcdCodesValidated` as fallback).
+ *
+ * Individual entries are validated and malformed ones are DROPPED, not
+ * fatal: the mapper calls `description?.trim()` and a non-string from
+ * synced or corrupted metadata would crash the render. `kind` is
+ * constrained to the wire vocabulary so a garbage value can't make an
+ * ICD-10 entry validate against the ICD-9 MSP list.
+ */
+export function icdCodeMetadataEntries(metadata: unknown): IcdCodeMetadataEntry[] | null {
+  if (typeof metadata !== 'object' || metadata === null) return null;
+  const raw = (metadata as Record<string, unknown>)['icd_codes'];
+  if (!Array.isArray(raw)) return null;
+  return raw.flatMap((e): IcdCodeMetadataEntry[] => {
+    if (typeof e !== 'object' || e === null) return [];
+    const rec = e as Record<string, unknown>;
+    const code = rec['code'];
+    if (typeof code !== 'string' || code.length === 0) return [];
+    const description = rec['description'];
+    if (description !== undefined && description !== null && typeof description !== 'string') {
+      return [];
+    }
+    const kind = rec['kind'];
+    if (kind !== undefined && kind !== 'icd9' && kind !== 'icd10') return [];
+    return [{ code, description: description as string | null | undefined, kind }];
+  });
+}
+
+/**
+ * Map structured metadata codes to the list's `ValidatedIcdCode` rows.
+ * Same mode/validation rules as `extractIcdCodesValidated`: ICD-9 codes
+ * validate against the MSP set in icd9/both modes; ICD-10 codes render
+ * neutral. Titles come from the entry's description, with the official
+ * MSP description as fallback.
+ */
+export function icdCodesFromMetadata(
+  entries: IcdCodeMetadataEntry[],
+  codeSet: Set<string> | null,
+  mode: IcdMode = 'icd9',
+  mspDescriptions: ReadonlyMap<string, string> | null = null,
+): ValidatedIcdCode[] {
+  const validateIcd9 = mode === 'icd9' || mode === 'both';
+  return entries.map((entry) => {
+    const bare = entry.code;
+    const isIcd10 = entry.kind === 'icd10';
+    const valid =
+      !isIcd10 && validateIcd9 ? validateIcdCode(bare, codeSet) : null;
+    const description =
+      entry.description?.trim() ||
+      resolveDescription(bare, new Map(), mspDescriptions);
+    return {
+      raw: `ICD-${isIcd10 ? '10' : '9'} Code: ${bare}`,
+      bare,
+      valid,
+      description,
+    };
+  });
+}
+
+/**
+ * Resolve the billing codes for a recording: from `metadata.icd_codes`
+ * when present (new-format recordings — the note body is code-free),
+ * otherwise by mining the note text (legacy recordings whose codes are
+ * inline). `noteText` may be null when only metadata is at hand.
+ */
+export function resolveIcdCodes(
+  metadata: unknown,
+  noteText: string | null,
+  codeSet: Set<string> | null,
+  mode: IcdMode = 'icd9',
+  mspDescriptions: ReadonlyMap<string, string> | null = null,
+): ValidatedIcdCode[] {
+  const entries = icdCodeMetadataEntries(metadata);
+  if (entries) return icdCodesFromMetadata(entries, codeSet, mode, mspDescriptions);
+  return noteText ? extractIcdCodesValidated(noteText, codeSet, mode, mspDescriptions) : [];
+}

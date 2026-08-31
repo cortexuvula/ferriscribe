@@ -4,7 +4,7 @@
   import type { Recording, GenerationProgressStats } from '../types';
   import type { GeneratingType } from '../stores/generation.svelte';
   import { generationProgressText } from '../utils/generationStats';
-  import { extractIcdCodesValidated, billingCodesLabel } from '../icd';
+  import { resolveIcdCodes, billingCodesLabel } from '../icd';
   import { icd9 as icd9Store } from '../stores/icd9.svelte';
   import { settings } from '../stores/settings.svelte';
 
@@ -124,7 +124,7 @@
         anyGenerating={generationState.generating !== null}
         done={!!recording?.soap_note}
         copyStatus={copyStatus['soap']}
-        icdCodes={recording?.soap_note ? extractIcdCodesValidated(recording.soap_note, icd9Store.codeSet, settings.state.icd_version, icd9Store.descriptions) : undefined}
+        icdCodes={recording ? resolveIcdCodes(recording.metadata ?? null, recording.soap_note ?? null, icd9Store.codeSet, settings.state.icd_version, icd9Store.descriptions) : undefined}
         icdLabel={billingCodesLabel(settings.state.icd_version)}
         generatedText={generatedSoap}
         progressText={liveProgressText('soap')}
