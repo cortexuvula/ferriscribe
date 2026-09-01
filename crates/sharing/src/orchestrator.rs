@@ -213,6 +213,28 @@ struct GateOutcome {
     backend: String,
 }
 
+/// Pre-bind an OPTIONAL provider's proxy port (LM Studio, oMLX). Unlike the
+/// core proxies, a busy port is not fatal to Start sharing — the office
+/// server can still serve the other providers, and the ReadinessWatcher
+/// retries this bind on later passes once the port frees up.
+async fn bind_optional_listener(
+    port: u16,
+    provider_label: &str,
+) -> Option<tokio::net::TcpListener> {
+    match bind_proxy_listener(port).await {
+        Ok(l) => Some(l),
+        Err(e) => {
+            tracing::warn!(
+                port,
+                provider = provider_label,
+                error = %e,
+                "sharing: optional proxy port busy; skipping (ReadinessWatcher retries later)"
+            );
+            None
+        }
+    }
+}
+
 impl SharingService {
     /// Create a new sharing service from the given config.
     ///
@@ -370,18 +392,23 @@ impl SharingService {
         let _guard = StartingGuard(&self.starting);
 
         // 1. Pre-bind all proxy listeners so port conflicts surface as Err now.
-        //    We hold them until the gate decides which to keep.
+        //    We hold them until the gate decides which to keep. The core
+        //    proxies (Ollama, whisper) stay fatal — sharing without them
+        //    serves nothing. The optional providers (LM Studio, oMLX) degrade
+        //    instead: a busy port is logged and skipped, and the
+        //    ReadinessWatcher retries the bind on later passes once the port
+        //    frees up.
         let ollama_listener = bind_proxy_listener(self.config.ollama_proxy_port).await?;
         let whisper_listener = bind_proxy_listener(self.config.whisper_proxy_port).await?;
         let lmstudio_listener = match (
             self.config.lmstudio_internal_port,
             self.config.lmstudio_proxy_port,
         ) {
-            (Some(_), Some(proxy)) => Some(bind_proxy_listener(proxy).await?),
+            (Some(_), Some(proxy)) => bind_optional_listener(proxy, "LM Studio").await,
             _ => None,
         };
         let omlx_listener = match (self.config.omlx_internal_port, self.config.omlx_proxy_port) {
-            (Some(_), Some(proxy)) => Some(bind_proxy_listener(proxy).await?),
+            (Some(_), Some(proxy)) => bind_optional_listener(proxy, "oMLX").await,
             _ => None,
         };
 
@@ -433,7 +460,8 @@ impl SharingService {
         // 4. Bind proxies for ready upstreams; drop listeners for unready ones.
         //    Any error here (after whisper started) must stop whisper so it
         //    isn't orphaned. We use a helper closure to centralize cleanup.
-        let bind_result = self
+        //    Returns which upstreams actually got a proxy bound.
+        let bound_kinds = match self
             .bind_ready_proxies_after_gate(vec![
                 GateOutcome {
                     kind: UpstreamKind::Ollama,
@@ -468,35 +496,42 @@ impl SharingService {
                         .unwrap_or_default(),
                 },
             ])
-            .await;
-        if let Err(e) = bind_result {
-            // Clean up the whisper child we started in step 2.
-            let _ = self.whisper.stop().await;
-            return Err(e);
-        }
+            .await
+        {
+            Ok(bound) => bound,
+            Err(e) => {
+                // Clean up the whisper child we started in step 2.
+                let _ = self.whisper.stop().await;
+                return Err(e);
+            }
+        };
 
-        // 5. Update readiness cache from gate results.
+        // 5. Update readiness cache from gate results. `proxy_bound` comes
+        //    from the actual binds (step 4), not from probe results — a ready
+        //    upstream whose proxy bind was skipped (busy port) must NOT be
+        //    reported or advertised as bound.
         {
             let mut r = self.readiness.write().await;
             let now = Instant::now();
+            let is_bound = |k: UpstreamKind| bound_kinds.contains(&k);
             if let Some(e) = r.get_mut(&UpstreamKind::Ollama) {
                 e.last_probe_ok = ollama_ready;
-                e.proxy_bound = ollama_ready;
+                e.proxy_bound = is_bound(UpstreamKind::Ollama);
                 e.last_probe_at = Some(now);
             }
             if let Some(e) = r.get_mut(&UpstreamKind::Whisper) {
                 e.last_probe_ok = whisper_ready;
-                e.proxy_bound = whisper_ready;
+                e.proxy_bound = is_bound(UpstreamKind::Whisper);
                 e.last_probe_at = Some(now);
             }
             if let Some(e) = r.get_mut(&UpstreamKind::LmStudio) {
                 e.last_probe_ok = lmstudio_ready;
-                e.proxy_bound = lmstudio_ready && self.config.lmstudio_proxy_port.is_some();
+                e.proxy_bound = is_bound(UpstreamKind::LmStudio);
                 e.last_probe_at = Some(now);
             }
             if let Some(e) = r.get_mut(&UpstreamKind::Omlx) {
                 e.last_probe_ok = omlx_ready;
-                e.proxy_bound = omlx_ready && self.config.omlx_proxy_port.is_some();
+                e.proxy_bound = is_bound(UpstreamKind::Omlx);
                 e.last_probe_at = Some(now);
             }
             let _ = self.readiness_tx.send(r.clone());
@@ -547,14 +582,17 @@ impl SharingService {
     }
 
     /// Bind the auth proxies for upstreams that passed the gate, push their
-    /// handles, and return. Listeners for unready upstreams (or upstreams
-    /// without a configured proxy port) are dropped so their ports free up.
-    /// Centralized so the start() error path can clean up whisper uniformly.
+    /// handles, and return the kinds that actually got a proxy bound.
+    /// Listeners for unready upstreams (or upstreams without a configured
+    /// proxy port, or whose pre-bind was skipped) are dropped so their ports
+    /// free up. Centralized so the start() error path can clean up whisper
+    /// uniformly.
     async fn bind_ready_proxies_after_gate(
         &self,
         outcomes: Vec<GateOutcome>,
-    ) -> Result<(), SharingError> {
+    ) -> Result<Vec<UpstreamKind>, SharingError> {
         let mut handles = self.handles.lock().await;
+        let mut bound = Vec::new();
         for outcome in outcomes {
             if !outcome.ready {
                 continue; // dropping the listener frees the pre-bound port
@@ -568,8 +606,9 @@ impl SharingService {
             };
             let h = spawn_auth_proxy_on_listener(listener, proxy_cfg, self.store.clone()).await?;
             handles.push(h);
+            bound.push(outcome.kind);
         }
-        Ok(())
+        Ok(bound)
     }
 
     /// Rebuild the live /info snapshot from the current readiness cache.
@@ -1513,6 +1552,81 @@ mod lifecycle_tests {
         let p = l.local_addr().unwrap().port();
         drop(l);
         p
+    }
+
+    /// Regression: a busy OPTIONAL proxy port (here: LM Studio's, held by a
+    /// foreign listener) must not abort Start sharing — the server still
+    /// starts, and the ready-but-unbindable upstream is not reported or
+    /// advertised as bound. The busy port stays occupied for the whole test.
+    #[tokio::test]
+    async fn start_survives_busy_optional_proxy_port() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // A live LM Studio "upstream" so the gate marks it ready.
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&upstream)
+            .await;
+        let lmstudio_internal: u16 = upstream
+            .uri()
+            .rsplit(':')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .expect("wiremock uri must end in :port");
+
+        // Foreign listener squatting on the proxy port. Must bind the same
+        // wildcard address the proxy uses — a loopback-only squatter
+        // coexists with 0.0.0.0 on macOS (SO_REUSEADDR) and wouldn't
+        // actually conflict.
+        let busy = tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+        let busy_proxy = busy.local_addr().unwrap().port();
+
+        let dir = tempdir().unwrap();
+        let c = SharingConfig {
+            enabled: true,
+            friendly_name: "busy-port-test".into(),
+            ollama_proxy_port: ephemeral_port().await,
+            whisper_proxy_port: ephemeral_port().await,
+            pairing_port: ephemeral_port().await,
+            // whisper_internal is a closed ephemeral port → whisper unready,
+            // keeping the test independent of a real whisper install.
+            whisper_internal_port: ephemeral_port().await,
+            lmstudio_internal_port: Some(lmstudio_internal),
+            lmstudio_proxy_port: Some(busy_proxy),
+            omlx_internal_port: None,
+            omlx_proxy_port: None,
+            vocab_port: ephemeral_port().await,
+            token_store_path: dir.path().join("tokens.db"),
+            token_store_key: [0u8; 32],
+            binary_dir: PathBuf::from("/tmp"),
+            whisper_model_path: PathBuf::from("/tmp/model.bin"),
+            whisper_internal_api_key: "k".into(),
+            version: "9.9.9".into(),
+        };
+        let svc = SharingService::new(c).unwrap();
+
+        svc.start_with_gate(std::time::Duration::ZERO)
+            .await
+            .expect("start must survive a busy optional proxy port");
+
+        // Upstream answered, but the proxy couldn't bind → NOT reported bound.
+        {
+            let r = svc.readiness.read().await;
+            let lm = r[&UpstreamKind::LmStudio];
+            assert!(lm.last_probe_ok, "upstream is up; probe should have passed");
+            assert!(!lm.proxy_bound, "proxy port is busy; must not be bound");
+        }
+        // And /info must not advertise the busy port.
+        let info = svc.info.read().await;
+        assert_eq!(
+            info.ports.lmstudio, None,
+            "busy proxy port must not be advertised"
+        );
+
+        let _ = svc.stop().await;
     }
 
     /// Gate test: an unready upstream must NOT get its proxy bound. We use the

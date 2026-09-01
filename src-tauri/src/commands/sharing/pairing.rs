@@ -141,11 +141,11 @@ async fn try_pair_at_base(
 /// providers are updated immediately so the "models visible" success message
 /// in the UI is truthful without requiring an app restart.
 ///
-/// If the client's current `ai_provider` isn't served by this server (e.g. a
-/// fresh install defaults to `"lmstudio"` but the office runs Ollama only),
-/// the pair flow probes each advertised provider proxy and switches to the
-/// first one that answers — pairing succeeds as long as ANY of Ollama, LM
-/// Studio, or oMLX is available.
+/// If the client's current `ai_provider` doesn't answer through the office
+/// server's proxies (e.g. a fresh install defaults to `"lmstudio"` but the
+/// office runs Ollama only), the pair flow probes each advertised provider
+/// proxy and switches to the first one that answers — pairing succeeds as
+/// long as ANY of Ollama, LM Studio, or oMLX is available.
 #[tauri::command]
 pub async fn pair_with_server(
     state: State<'_, AppState>,
@@ -310,17 +310,38 @@ pub async fn pair_with_server(
     // ── Availability-aware provider selection ──
     //
     // A fresh client defaults to ai_provider = "lmstudio". If the server
-    // doesn't serve that provider (its proxy port is advertised only when
-    // the upstream is actually ready), generation would point at a dead
-    // endpoint even though the server happily serves Ollama or oMLX —
-    // looking exactly like "the client won't connect". Check all three
-    // providers: when the current one isn't served, probe each advertised
-    // proxy with the fresh token and switch to the first that answers.
-    let served = served_providers(&ports);
+    // doesn't serve that provider, generation would point at a dead endpoint
+    // even though the server happily serves Ollama or oMLX — looking exactly
+    // like "the client won't connect".
+    //
+    // Advertisement alone is not trusted: the QR encodes the server's static
+    // config ports (LM Studio / oMLX may be listed without their proxies
+    // bound), and Ollama's proxy port is advertised unconditionally. So the
+    // CURRENT provider is always probed through the just-established proxies
+    // — if it answers, it is kept (respects an explicit user choice). Only
+    // when it doesn't answer (or isn't advertised at all) are the other
+    // providers probed, switching to the first that answers. If nothing
+    // answers, the current setting stands and pairing still succeeds.
+    let current = pair_cfg.ai_provider.clone();
+    let current_answers = match provider_proxy_port(&ports, &current) {
+        Some(port) => {
+            probe_provider_proxy(&state.http_client, &winning_host, port, &current, &token).await
+        }
+        None => false,
+    };
+
     let mut chosen_provider: Option<String> = None;
     let mut chosen_model: Option<String> = None;
-    if !served.contains(&pair_cfg.ai_provider.as_str()) {
-        for cand in served {
+    if current_answers {
+        tracing::info!(
+            provider = %current,
+            "pair: current provider answered through the office proxy; keeping it"
+        );
+    } else {
+        for cand in served_providers(&ports) {
+            if cand == current.as_str() {
+                continue; // already probed above and it didn't answer
+            }
             let Some(proxy_port) = provider_proxy_port(&ports, cand) else {
                 continue;
             };
@@ -336,11 +357,18 @@ pub async fn pair_with_server(
             chosen_provider = Some(cand.to_string());
             break;
         }
+        if chosen_provider.is_none() {
+            tracing::info!(
+                "pair: no advertised provider proxy answered; keeping current provider setting"
+            );
+        }
     }
 
     // Best-effort model selection for a switched provider: the old
     // provider's model name likely doesn't exist on the new one. Ask the
-    // (already re-endpointed) provider for its list and take the first.
+    // (already re-endpointed) provider for its list and take the first —
+    // unless the list is the provider's hardcoded fetch-failure fallback,
+    // which would persist a model the server doesn't have.
     if let Some(ref provider_id) = chosen_provider {
         let arc = {
             let registry = state.ai_providers.lock().await;
@@ -349,6 +377,7 @@ pub async fn pair_with_server(
         if let Some(provider) = arc
             && let Ok(models) = provider.available_models().await
             && let Some(first) = models.first()
+            && !is_fallback_model(provider_id, &first.id)
         {
             chosen_model = Some(first.id.clone());
         }
@@ -471,6 +500,20 @@ fn provider_proxy_port(ports: &PairPorts, provider: &str) -> Option<u16> {
     }
 }
 
+/// Build the probe URL for one of the server's provider auth-proxies.
+/// Goes through [`medical_core::types::http_url`] so IPv6 literals get
+/// bracketed — a raw `http://{host}:{port}` format makes reqwest fail URL
+/// parsing with an opaque "Builder error" (the same trap the pair handshake
+/// above documents).
+fn provider_probe_url(host: &str, port: u16, provider: &str) -> String {
+    let path = if provider == "ollama" {
+        "/api/tags"
+    } else {
+        "/v1/models"
+    };
+    format!("{}{path}", medical_core::types::http_url(host, port))
+}
+
 /// Probe one of the server's provider auth-proxies with the freshly issued
 /// token. `true` iff it answered 2xx — i.e. the provider is actually served
 /// and reachable through the exact path generation will use. Probes hit the
@@ -483,12 +526,7 @@ async fn probe_provider_proxy(
     provider: &str,
     token: &str,
 ) -> bool {
-    let path = if provider == "ollama" {
-        "/api/tags"
-    } else {
-        "/v1/models"
-    };
-    let url = format!("http://{host}:{port}{path}");
+    let url = provider_probe_url(host, port, provider);
     match http
         .get(&url)
         .timeout(std::time::Duration::from_secs(3))
@@ -499,6 +537,18 @@ async fn probe_provider_proxy(
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
     }
+}
+
+/// The hardcoded model ids `available_models` falls back to when the model
+/// list can't be fetched (see `local_openai::ProviderMeta::fallback_model`).
+/// Persisting one of these as `ai_model` after a provider switch would bake
+/// in a model the server almost certainly doesn't have, so the pair flow
+/// skips them.
+fn is_fallback_model(provider: &str, model: &str) -> bool {
+    matches!(
+        (provider, model),
+        ("ollama", "llama3") | ("lmstudio", "default") | ("omlx", "default")
+    )
 }
 
 /// Returns the saved paired-connection metadata, or `None` if not paired.
@@ -757,6 +807,38 @@ mod tests {
         let none = ports(None, None);
         assert_eq!(provider_proxy_port(&none, "lmstudio"), None);
         assert_eq!(provider_proxy_port(&none, "omlx"), None);
+    }
+
+    /// Regression: an unbracketed IPv6 host used to make reqwest fail URL
+    /// parsing, so the availability probe silently never succeeded.
+    #[test]
+    fn provider_probe_url_brackets_ipv6_literals() {
+        assert_eq!(
+            provider_probe_url("fe80::1", 8001, "omlx"),
+            "http://[fe80::1]:8001/v1/models"
+        );
+        assert_eq!(
+            provider_probe_url("2001:db8::a:1", 11435, "ollama"),
+            "http://[2001:db8::a:1]:11435/api/tags"
+        );
+        // Plain hostnames and IPv4 are untouched.
+        assert_eq!(
+            provider_probe_url("clinic.local", 1235, "lmstudio"),
+            "http://clinic.local:1235/v1/models"
+        );
+        assert_eq!(
+            provider_probe_url("192.168.1.9", 11435, "ollama"),
+            "http://192.168.1.9:11435/api/tags"
+        );
+    }
+
+    #[test]
+    fn is_fallback_model_matches_provider_fallback_ids() {
+        assert!(is_fallback_model("ollama", "llama3"));
+        assert!(is_fallback_model("lmstudio", "default"));
+        assert!(is_fallback_model("omlx", "default"));
+        assert!(!is_fallback_model("ollama", "qwen3:8b"));
+        assert!(!is_fallback_model("omlx", "mlx-community/Qwen3-8B"));
     }
 
     #[tokio::test]
