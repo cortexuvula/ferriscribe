@@ -67,6 +67,7 @@ pub async fn discover_via_tailscale(timeout_ms: u64) -> AppResult<Vec<Discovered
                     ollama: info.ports.ollama,
                     whisper: info.ports.whisper,
                     lmstudio: info.ports.lmstudio,
+                    omlx: info.ports.omlx,
                     pairing: info.ports.pairing,
                     vocab: info.ports.vocab,
                 },
@@ -141,6 +142,8 @@ struct WirePorts {
     whisper: Option<u16>,
     #[serde(default)]
     lmstudio: Option<u16>,
+    #[serde(default)]
+    omlx: Option<u16>,
     #[serde(default)]
     pairing: Option<u16>,
     #[serde(default)]

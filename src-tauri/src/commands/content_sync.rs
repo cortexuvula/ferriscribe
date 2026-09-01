@@ -450,6 +450,7 @@ async fn run_sync(
                 whisper: 0,
                 pairing: 0,
                 lmstudio: None,
+                omlx: None,
                 vocab: Some(vp),
             },
             label: String::new(),

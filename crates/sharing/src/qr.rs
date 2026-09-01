@@ -38,8 +38,8 @@ pub struct PairPayload {
 
 /// Service ports carried in the QR payload.
 ///
-/// `lmstudio` and `vocab` are optional because not every server runs those
-/// subsystems. A missing `vocab` port means "vocab sync unavailable" and
+/// `lmstudio`, `omlx`, and `vocab` are optional because not every server runs
+/// those subsystems. A missing `vocab` port means "vocab sync unavailable" and
 /// clients fall back to local vocabulary.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairPorts {
@@ -51,6 +51,9 @@ pub struct PairPorts {
     pub pairing: u16,
     /// LM Studio auth proxy port (query param `lp`). Absent when LM Studio isn't running.
     pub lmstudio: Option<u16>,
+    /// oMLX auth proxy port (query param `mp`). Absent when oMLX isn't running.
+    #[serde(default)]
+    pub omlx: Option<u16>,
     /// Vocabulary CRUD HTTP API port (query param `vp`). `None` when the
     /// office server predates the vocab-sync feature; clients should treat
     /// absence as "vocab sync unavailable" and fall back to local vocab.
@@ -76,6 +79,9 @@ pub fn encode(p: &PairPayload) -> String {
     q.insert("pp", p.ports.pairing.to_string());
     if let Some(l) = p.ports.lmstudio {
         q.insert("lp", l.to_string());
+    }
+    if let Some(m) = p.ports.omlx {
+        q.insert("mp", m.to_string());
     }
     if let Some(v) = p.ports.vocab {
         q.insert("vp", v.to_string());
@@ -130,6 +136,7 @@ pub fn decode(url: &str) -> Result<PairPayload, DecodeError> {
     let wp = map.remove("wp").ok_or(DecodeError::Missing("wp"))?;
     let pp = map.remove("pp").ok_or(DecodeError::Missing("pp"))?;
     let lp = map.remove("lp").and_then(|s| s.parse().ok());
+    let mp = map.remove("mp").and_then(|s| s.parse().ok());
     let vp = map.remove("vp").and_then(|s| s.parse().ok());
     let code = map.remove("code").ok_or(DecodeError::Missing("code"))?;
     Ok(PairPayload {
@@ -141,6 +148,7 @@ pub fn decode(url: &str) -> Result<PairPayload, DecodeError> {
             whisper: parse_port(&wp)?,
             pairing: parse_port(&pp)?,
             lmstudio: lp,
+            omlx: mp,
             vocab: vp,
         },
         code,
@@ -161,7 +169,8 @@ mod tests {
                 ollama: 11435,
                 whisper: 8081,
                 pairing: 11436,
-                lmstudio: Some(1234),
+                lmstudio: Some(1235),
+                omlx: Some(8001),
                 vocab: Some(11437),
             },
             code: "123456".to_string(),
@@ -169,6 +178,18 @@ mod tests {
         let url = encode(&p);
         let back = decode(&url).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn round_trip_without_optional_ports() {
+        // Pre-oMLX server: no lp/mp/vp params at all.
+        let url =
+            "ferriscribe://pair?code=042917&host=S&lan=192.168.1.42&op=11435&wp=8081&pp=11436";
+        let back = decode(url).unwrap();
+        assert_eq!(back.ports.ollama, 11435);
+        assert_eq!(back.ports.lmstudio, None);
+        assert_eq!(back.ports.omlx, None);
+        assert_eq!(back.ports.vocab, None);
     }
 
     #[test]
