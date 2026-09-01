@@ -3,16 +3,20 @@
   import { generation } from '../../stores/generation.svelte';
   import { generationProgressText } from '../../utils/generationStats';
   import { formatTokensPerSecond } from '../../utils/format';
-  import { extractIcdCodesValidated, billingCodesLabel } from '../../icd';
+  import { resolveIcdCodes, billingCodesLabel } from '../../icd';
   import { icd9 as icd9Store } from '../../stores/icd9.svelte';
   import { settings } from '../../stores/settings.svelte';
   import IcdCodeList from '../../components/IcdCodeList.svelte';
+  import type { Recording } from '../../types';
 
   type CopyStatus = 'idle' | 'copying' | 'copied';
 
   interface Props {
     copyStatus?: CopyStatus;
     soapNoteText?: string | null;
+    /** The pipeline recording's metadata — carries the structured
+     *  `icd_codes` (new-format recordings keep the note body code-free). */
+    metadata?: Recording['metadata'] | null;
     /** Throughput of the most recent AI generation for this recording
      *  (tokens/sec, from `metadata.generation_stats`); null hides it. */
     tokensPerSecond?: number | null;
@@ -26,6 +30,7 @@
   let {
     copyStatus = $bindable<CopyStatus>('idle'),
     soapNoteText,
+    metadata = null,
     tokensPerSecond = null,
     regenerating = false,
     onCancel,
@@ -35,13 +40,12 @@
     onRegenerate,
   }: Props = $props();
 
-  // Extract and validate ICD codes from the SOAP note text; official MSP
-  // descriptions back the list's explaining titles when the note's own
-  // " — description" text is missing.
+  // Billing codes for the completed note: from `metadata.icd_codes` when
+  // present, otherwise mined from the note text (legacy recordings).
+  // Official MSP descriptions back the list's explaining titles when the
+  // model-written description is missing.
   const icdCodes = $derived(
-    soapNoteText
-      ? extractIcdCodesValidated(soapNoteText, icd9Store.codeSet, settings.state.icd_version, icd9Store.descriptions)
-      : []
+    resolveIcdCodes(metadata, soapNoteText ?? null, icd9Store.codeSet, settings.state.icd_version, icd9Store.descriptions)
   );
 
   function stageLabel(stage: PipelineStage): string {

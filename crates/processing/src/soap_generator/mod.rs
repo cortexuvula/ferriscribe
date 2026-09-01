@@ -9,7 +9,9 @@
 //!
 //! - `prompt_template` — the built-in default prompt and [`build_soap_prompt`].
 //! - `user_prompt` — [`build_user_prompt`], plus the `sanitize_prompt` helper.
-//! - `postprocess` — markdown cleanup and section formatting on AI output.
+//! - `postprocess` — markdown cleanup, section formatting, and ICD code
+//!   extraction (codes are stripped from the note and returned for
+//!   `metadata.icd_codes`) on AI output.
 //!
 //! # Critical Constraint: Anti-Fabrication
 //!
@@ -34,7 +36,7 @@ pub(crate) mod user_prompt;
 
 pub mod icd_selector;
 
-pub use postprocess::postprocess_soap;
+pub use postprocess::{ExtractedIcdCode, IcdKind, extract_icd_codes, postprocess_soap};
 // Crate-visible in test builds only, for the anti-drift suite in
 // `crate::markdown` (pins clean_text's contract next to strip_markdown's).
 #[cfg(test)]

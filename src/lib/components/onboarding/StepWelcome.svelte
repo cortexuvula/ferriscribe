@@ -13,7 +13,7 @@
   </p>
   <ul class="points">
     <li><strong>Local-only.</strong> Your audio, transcripts, and notes stay on this computer.</li>
-    <li><strong>No cloud AI.</strong> Works with Ollama or LM Studio running on your machine or LAN.</li>
+    <li><strong>No cloud AI.</strong> Works with Ollama, LM Studio, or oMLX running on your machine or LAN.</li>
     <li><strong>Clinical documents.</strong> SOAP notes, referrals, letters, and peer discussions in seconds.</li>
   </ul>
   <button class="btn-primary" onclick={onContinue}>Let's get started →</button>

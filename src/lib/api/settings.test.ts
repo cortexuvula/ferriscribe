@@ -9,6 +9,7 @@ import {
   testLmStudioConnection,
   testSttRemoteConnection,
   testOllamaConnection,
+  testOmlxConnection,
   setApiKey,
   getApiKey,
 } from './settings';
@@ -54,6 +55,14 @@ describe('settings api', () => {
     invokeMock.mockReset();
     await testOllamaConnection('127.0.0.1', 11434, 'secret');
     expect(invokeMock).toHaveBeenCalledWith('test_ollama_connection', { host: '127.0.0.1', port: 11434, apiKey: 'secret' });
+  });
+
+  it('testOmlxConnection passes host + port + apiKey (null when omitted)', async () => {
+    await testOmlxConnection('127.0.0.1', 8000);
+    expect(invokeMock).toHaveBeenCalledWith('test_omlx_connection', { host: '127.0.0.1', port: 8000, apiKey: null });
+    invokeMock.mockReset();
+    await testOmlxConnection('127.0.0.1', 8000, 'secret');
+    expect(invokeMock).toHaveBeenCalledWith('test_omlx_connection', { host: '127.0.0.1', port: 8000, apiKey: 'secret' });
   });
 
   it('setApiKey / getApiKey pass provider (and key on set)', async () => {

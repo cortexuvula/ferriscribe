@@ -29,6 +29,7 @@ pub struct SharingStatusDto {
     pub ollama_ok: bool,
     pub whisper_ok: bool,
     pub lmstudio_ok: bool,
+    pub omlx_ok: bool,
     pub mdns_ok: bool,
     pub pairing_ok: bool,
     pub paired_clients: u32,
@@ -41,6 +42,7 @@ impl From<SharingStatus> for SharingStatusDto {
             ollama_ok: s.ollama_ok,
             whisper_ok: s.whisper_ok,
             lmstudio_ok: s.lmstudio_ok,
+            omlx_ok: s.omlx_ok,
             mdns_ok: s.mdns_ok,
             pairing_ok: s.pairing_ok,
             paired_clients: s.paired_clients,
@@ -57,30 +59,31 @@ pub struct PairedConnection {
     pub label: String,
 }
 
-/// Build the (ollama, lmstudio, whisper) `RemoteEndpoint` triple from a
-/// paired connection, injecting `bearer` into each endpoint. Single source
-/// of truth for provider wiring — used by `AppState::initialize`,
-/// `reinit_providers`, and `pair_with_server`, so a port/bearer change
-/// lands in one place instead of three.
-pub fn paired_endpoints(
-    paired: &PairedConnection,
-    bearer: Option<String>,
-) -> (
-    Option<medical_core::types::RemoteEndpoint>,
-    Option<medical_core::types::RemoteEndpoint>,
-    Option<medical_core::types::RemoteEndpoint>,
-) {
+/// The `RemoteEndpoint`s a paired client should point its providers at,
+/// built from a [`PairedConnection`] with `bearer` injected into each.
+/// Single source of truth for provider wiring — used by
+/// `AppState::initialize`, `reinit_providers`, `pair_with_server`, and
+/// `stop_sharing`, so a port/bearer change lands in one place.
+pub struct PairedEndpoints {
+    pub ollama: Option<medical_core::types::RemoteEndpoint>,
+    pub lmstudio: Option<medical_core::types::RemoteEndpoint>,
+    pub omlx: Option<medical_core::types::RemoteEndpoint>,
+    pub whisper: Option<medical_core::types::RemoteEndpoint>,
+}
+
+pub fn paired_endpoints(paired: &PairedConnection, bearer: Option<String>) -> PairedEndpoints {
     let endpoint = |port| medical_core::types::RemoteEndpoint {
         lan: paired.lan.clone(),
         tailscale: paired.tailscale.clone(),
         port,
         bearer: bearer.clone(),
     };
-    (
-        Some(endpoint(paired.ports.ollama)),
-        paired.ports.lmstudio.map(endpoint),
-        Some(endpoint(paired.ports.whisper)),
-    )
+    PairedEndpoints {
+        ollama: Some(endpoint(paired.ports.ollama)),
+        lmstudio: paired.ports.lmstudio.map(endpoint),
+        omlx: paired.ports.omlx.map(endpoint),
+        whisper: Some(endpoint(paired.ports.whisper)),
+    }
 }
 
 pub(super) fn paired_connection_path() -> AppResult<std::path::PathBuf> {

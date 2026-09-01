@@ -34,8 +34,9 @@
     <li>FerriScribe will configure persistent Ollama, download whisper.cpp,
         start an authenticated proxy, and advertise this server on the
         local network.</li>
-    <li>If LM Studio is installed, open it and click "Start Server" in its
-        Local Server tab. (We don't manage LM Studio's server toggle.)</li>
+    <li>If LM Studio or oMLX is installed, open it and start its local
+        server. (We don't manage their server toggles — they appear here
+        automatically once running.)</li>
     <li>Your operating system may ask permission for FerriScribe to accept
         incoming connections. Click <b>Allow</b>.</li>
   </ol>

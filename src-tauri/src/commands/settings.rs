@@ -87,6 +87,7 @@ pub async fn save_settings(state: tauri::State<'_, AppState>, config: AppConfig)
         for (field, host) in [
             ("ollama_host", config.ollama_host.as_str()),
             ("lmstudio_host", config.lmstudio_host.as_str()),
+            ("omlx_host", config.omlx_host.as_str()),
             ("stt_remote_host", config.stt_remote_host.as_str()),
         ] {
             // Empty host means "use default" — defer enforcement until the user

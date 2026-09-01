@@ -96,7 +96,7 @@ pub async fn resolve_provider(
         .or_else(|| registry.get_active_arc())
         .ok_or_else(|| {
             AppError::ai_provider(
-                "No AI provider configured. Check LM Studio / Ollama settings.".to_string(),
+                "No AI provider configured. Check LM Studio / Ollama / oMLX settings.".to_string(),
             )
         })
 }

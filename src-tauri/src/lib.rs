@@ -332,6 +332,7 @@ pub fn run() {
             commands::providers::test_lmstudio_connection,
             commands::providers::test_stt_remote_connection,
             commands::providers::test_ollama_connection,
+            commands::providers::test_omlx_connection,
             commands::providers::probe_endpoint_reachable,
             commands::audio::list_audio_devices,
             commands::audio::start_recording,

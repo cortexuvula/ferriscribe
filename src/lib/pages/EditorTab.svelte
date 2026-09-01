@@ -10,7 +10,7 @@
   import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { formatError } from '../types/errors';
-  import { extractIcdCodesValidated, billingCodesLabel } from '../icd';
+  import { resolveIcdCodes, billingCodesLabel } from '../icd';
   import { icd9 as icd9Store } from '../stores/icd9.svelte';
   import { settings } from '../stores/settings.svelte';
   import IcdCodeList from '../components/IcdCodeList.svelte';
@@ -38,13 +38,21 @@
       : null
   );
 
-  // Extract and validate ICD codes from SOAP note content (only relevant for soap tab).
-  // Validation is against the BC MSP ICD-9 list; codes not on the list render as amber.
-  // Each row also carries its explaining title (the note's own description
-  // text, with the official MSP description as fallback).
+  // Billing codes for the soap tab. New-format recordings carry them in
+  // `metadata.icd_codes` (the note body is code-free); legacy recordings
+  // fall back to mining the note text. Validation is against the BC MSP
+  // ICD-9 list; codes not on the list render as amber. Each row also
+  // carries its explaining title (the model-written description, with the
+  // official MSP description as fallback).
   const icdCodes = $derived(
-    tabId === 'soap' && content && typeof content === 'string'
-      ? extractIcdCodesValidated(content, icd9Store.codeSet, settings.state.icd_version, icd9Store.descriptions)
+    tabId === 'soap' && content
+      ? resolveIcdCodes(
+          recordings.selectedRecording?.metadata ?? null,
+          content,
+          icd9Store.codeSet,
+          settings.state.icd_version,
+          icd9Store.descriptions,
+        )
       : []
   );
 
