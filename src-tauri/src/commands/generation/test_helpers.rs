@@ -169,6 +169,7 @@ impl MockCompletionProvider {
                 prompt_tokens: 128,
                 completion_tokens,
                 total_tokens: 128 + completion_tokens,
+                decode_tokens_per_second: None,
             },
         }
     }
