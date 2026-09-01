@@ -262,9 +262,8 @@ pub struct AppState {
     pub ollama_provider: RwLock<Option<Arc<OllamaProvider>>>,
     /// Concrete LM Studio provider reference; allows `set_endpoint` after startup.
     pub lmstudio_provider: RwLock<Option<Arc<LmStudioProvider>>>,
-    /// Typed oMLX handle for runtime endpoint updates. oMLX is not part of
-    /// the office-sharing proxy layer, so nothing calls `set_endpoint` on it
-    /// today; the handle exists for symmetry and future sharing support.
+    /// Typed oMLX handle for runtime endpoint updates (pairing/unpairing and
+    /// office-server wiring call `set_endpoint` on it).
     pub omlx_provider: RwLock<Option<Arc<OmlxProvider>>>,
     /// Concrete RemoteSttProvider reference; `None` when STT mode is Local.
     pub remote_stt_provider:
@@ -354,14 +353,14 @@ pub struct AiProviderHandles {
 
 /// Register all supported AI providers (LM Studio + Ollama + oMLX).
 ///
-/// `config` supplies host/port; `ollama_ep` / `lmstudio_ep` override with a
-/// `RemoteEndpoint` for LAN/Tailscale resolution when this machine is a paired
-/// client. Pass `None` for local-only (default) mode. oMLX has no paired
-/// endpoint yet — it is not part of the office-sharing proxy layer.
+/// `config` supplies host/port; `ollama_ep` / `lmstudio_ep` / `omlx_ep`
+/// override with a `RemoteEndpoint` for LAN/Tailscale resolution when this
+/// machine is a paired client. Pass `None` for local-only (default) mode.
 pub fn init_ai_providers(
     config: &AppConfig,
     ollama_ep: Option<RemoteEndpoint>,
     lmstudio_ep: Option<RemoteEndpoint>,
+    omlx_ep: Option<RemoteEndpoint>,
 ) -> AiProviderHandles {
     let mut registry = ProviderRegistry::new();
     let policy = RetryConfig::from_app_config(config);
@@ -430,20 +429,21 @@ pub fn init_ai_providers(
         }
     }
 
-    // oMLX — always available (local or remote, no key needed). Not part of
-    // the office-sharing proxy layer; built from config host/port only.
+    // oMLX — always available (local or remote, no key needed). Wired into
+    // the office-sharing proxy layer alongside Ollama and LM Studio.
     let omlx_host = if config.omlx_host.is_empty() {
         "localhost"
     } else {
         &config.omlx_host
     };
     let omlx_url = format!("http://{}:{}", omlx_host, config.omlx_port);
+    let omlx_bearer = omlx_ep.as_ref().and_then(|ep| ep.bearer.clone());
     match OmlxProvider::new_with_endpoint(
         Some(&omlx_url),
         config.allow_public_endpoint,
-        None,
+        omlx_bearer,
         policy,
-        None,
+        omlx_ep,
     ) {
         Ok(p) => {
             // Captured at construction — a settings toggle only takes effect
@@ -743,16 +743,21 @@ impl AppState {
             None
         };
 
-        let (ollama_ep, lmstudio_ep, whisper_ep) = if let Some(ref p) = paired {
+        let eps = if let Some(ref p) = paired {
             crate::commands::sharing::paired_endpoints(p, bearer)
         } else {
-            (None, None, None)
+            crate::commands::sharing::PairedEndpoints {
+                ollama: None,
+                lmstudio: None,
+                omlx: None,
+                whisper: None,
+            }
         };
 
         // Initialize provider registries from saved API keys + config
-        let mut ai_handles = init_ai_providers(&config_ref, ollama_ep, lmstudio_ep);
+        let mut ai_handles = init_ai_providers(&config_ref, eps.ollama, eps.lmstudio, eps.omlx);
 
-        let stt_handles = init_stt_providers_with_config(&data_dir, &config_ref, whisper_ep);
+        let stt_handles = init_stt_providers_with_config(&data_dir, &config_ref, eps.whisper);
 
         // Set the active AI provider from saved settings
         if let Some(ref cfg) = config
@@ -814,7 +819,7 @@ mod tests {
         config.ollama_port = 11500;
         // Non-localhost hostname requires allow_public_endpoint = true.
         config.allow_public_endpoint = true;
-        let handles = init_ai_providers(&config, None, None);
+        let handles = init_ai_providers(&config, None, None, None);
         assert!(
             handles
                 .registry
@@ -835,7 +840,7 @@ mod tests {
         config.omlx_port = 8100;
         // Non-localhost hostname requires allow_public_endpoint = true.
         config.allow_public_endpoint = true;
-        let handles = init_ai_providers(&config, None, None);
+        let handles = init_ai_providers(&config, None, None, None);
         assert!(
             handles
                 .registry

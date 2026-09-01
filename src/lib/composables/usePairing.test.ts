@@ -28,7 +28,7 @@ function makeDiscovered(overrides: Partial<Discovered>): Discovered {
     host: 'clinics-host.local',
     addresses: [],
     tailscale_addresses: [],
-    ports: { ollama: null, whisper: null, lmstudio: null, pairing: null, vocab: null },
+    ports: { ollama: null, whisper: null, lmstudio: null, omlx: null, pairing: null, vocab: null },
     version: '1',
     ...overrides,
   };
@@ -120,13 +120,32 @@ describe('usePairing', () => {
     expect(mockInvoke).toHaveBeenCalledWith('pair_with_server', {
       lan: '192.168.1.9',
       tailscale: 'clinic.ts.net',
-      ports: { ollama: 11435, whisper: 8081, pairing: 11436, lmstudio: null, vocab: 9000 },
+      ports: { ollama: 11435, whisper: 8081, pairing: 11436, lmstudio: null, omlx: null, vocab: 9000 },
       code: '123456',
       label: 'Test MacBook', // pre-filled from suggestedClientLabel
     });
     expect(mockSettingsLoad).toHaveBeenCalled();
     expect(onPaired).toHaveBeenCalled();
     expect(pairing.error).toBeNull();
+  });
+
+  it('pairFromUrl parses the oMLX proxy port (mp param)', async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const onPaired = vi.fn();
+    const pairing = usePairing(onPaired);
+
+    pairing.pasteUrl =
+      'ferriscribe://pair?lan=192.168.1.9&code=123456&pp=11436&op=11435&wp=8081&mp=8001&lp=1235';
+    pairing.pairFromUrl();
+    await vi.waitFor(() => expect(pairing.busy).toBe(false));
+
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'pair_with_server',
+      expect.objectContaining({
+        ports: { ollama: 11435, whisper: 8081, pairing: 11436, lmstudio: 1235, omlx: 8001, vocab: null },
+      }),
+    );
+    vi.mocked(mockInvoke).mockClear();
   });
 
   it('pairDiscovered routes addresses into lan/tailscale slots with default ports', async () => {
@@ -138,7 +157,7 @@ describe('usePairing', () => {
       makeDiscovered({
         addresses: ['192.168.1.60', 'fe80::1'],
         tailscale_addresses: ['server.tail161478.ts.net'],
-        ports: { ollama: null, whisper: null, lmstudio: null, pairing: null, vocab: null },
+        ports: { ollama: null, whisper: null, lmstudio: null, omlx: null, pairing: null, vocab: null },
       }),
     );
     await vi.waitFor(() => expect(pairing.busy).toBe(false));
@@ -153,6 +172,7 @@ describe('usePairing', () => {
           whisper: 8081,
           pairing: 11436,
           lmstudio: null,
+          omlx: null,
           vocab: null,
         },
         code: '654321',

@@ -406,7 +406,7 @@
   <div class="form-group-divider"></div>
   <h4 class="subsection-title">oMLX Server</h4>
   <p class="subsection-hint">
-    Configure the oMLX server address (MLX inference for Apple Silicon). Use <code>localhost</code> if oMLX runs on this machine, or enter a remote IP for a network server. Not part of office-sharing pairing.
+    Configure the oMLX server address (MLX inference for Apple Silicon). Use <code>localhost</code> if oMLX runs on this machine, or enter a remote IP for a network server.
   </p>
 
   <div class="form-group">

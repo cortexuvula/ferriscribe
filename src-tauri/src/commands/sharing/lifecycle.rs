@@ -155,8 +155,9 @@ async fn wire_upstream_endpoints(state: &AppState) -> AppResult<()> {
 
     // Heavy-box routing: this machine IS the office server, so route AI/STT
     // calls to the upstream services on localhost directly — no proxy hop, no
-    // bearer needed. Ports are the upstream ports (Ollama 11434, LM Studio 1234,
-    // whisper.cpp 8080), NOT the proxy ports (11435 / 8081).
+    // bearer needed. Ports are the upstream ports (Ollama 11434, LM Studio
+    // 1234, oMLX 8000, whisper.cpp 8080), NOT the proxy ports
+    // (11435 / 1235 / 8001 / 8081).
     let allow_public = crate::commands::load_app_config(&state.db, "sharing start")
         .await?
         .allow_public_endpoint;
@@ -171,6 +172,7 @@ async fn wire_upstream_endpoints(state: &AppState) -> AppResult<()> {
     };
     let local_ollama = endpoint(11434);
     let local_lmstudio = endpoint(1234);
+    let local_omlx = endpoint(8000);
     let local_whisper = endpoint(8080);
 
     {
@@ -185,6 +187,14 @@ async fn wire_upstream_endpoints(state: &AppState) -> AppResult<()> {
         let provider = { state.lmstudio_provider.read().await.clone() };
         if let Some(p) = provider
             && let Err(e) = p.set_endpoint(local_lmstudio, allow_public).await
+        {
+            return Err(e);
+        }
+    }
+    {
+        let provider = { state.omlx_provider.read().await.clone() };
+        if let Some(p) = provider
+            && let Err(e) = p.set_endpoint(local_omlx, allow_public).await
         {
             return Err(e);
         }
@@ -232,48 +242,39 @@ pub async fn stop_sharing_inner(state: &AppState) -> AppResult<()> {
         None
     };
 
-    use medical_core::types::RemoteEndpoint;
-    let (ollama_ep, lmstudio_ep, whisper_ep) = if let Some(ref p) = paired {
-        (
-            Some(RemoteEndpoint {
-                lan: p.lan.clone(),
-                tailscale: p.tailscale.clone(),
-                port: p.ports.ollama,
-                bearer: bearer.clone(),
-            }),
-            p.ports.lmstudio.map(|lp| RemoteEndpoint {
-                lan: p.lan.clone(),
-                tailscale: p.tailscale.clone(),
-                port: lp,
-                bearer: bearer.clone(),
-            }),
-            Some(RemoteEndpoint {
-                lan: p.lan.clone(),
-                tailscale: p.tailscale.clone(),
-                port: p.ports.whisper,
-                bearer,
-            }),
-        )
+    let eps = if let Some(ref p) = paired {
+        super::paired_endpoints(p, bearer)
     } else {
-        (None, None, None)
+        super::PairedEndpoints {
+            ollama: None,
+            lmstudio: None,
+            omlx: None,
+            whisper: None,
+        }
     };
 
     {
         let provider = { state.ollama_provider.read().await.clone() };
         if let Some(p) = provider {
-            p.set_endpoint(ollama_ep, allow_public).await?;
+            p.set_endpoint(eps.ollama, allow_public).await?;
         }
     }
     {
         let provider = { state.lmstudio_provider.read().await.clone() };
         if let Some(p) = provider {
-            p.set_endpoint(lmstudio_ep, allow_public).await?;
+            p.set_endpoint(eps.lmstudio, allow_public).await?;
+        }
+    }
+    {
+        let provider = { state.omlx_provider.read().await.clone() };
+        if let Some(p) = provider {
+            p.set_endpoint(eps.omlx, allow_public).await?;
         }
     }
     {
         let provider = { state.remote_stt_provider.read().await.clone() };
         if let Some(p) = provider {
-            p.set_endpoint(whisper_ep, allow_public).await?;
+            p.set_endpoint(eps.whisper, allow_public).await?;
         }
     }
 
@@ -290,6 +291,7 @@ pub async fn sharing_status(state: State<'_, AppState>) -> AppResult<SharingStat
             ollama_ok: false,
             whisper_ok: false,
             lmstudio_ok: false,
+            omlx_ok: false,
             mdns_ok: false,
             pairing_ok: false,
             paired_clients: 0,
@@ -315,9 +317,10 @@ async fn build_sharing_config(friendly_name: String) -> AppResult<SharingConfig>
     std::fs::create_dir_all(&app_data)?;
     let mut whisper_api = [0u8; 16];
     rand::rng().fill_bytes(&mut whisper_api);
-    // LM Studio is always a candidate in office mode. The start() gate probes
-    // it once; the ReadinessWatcher brings it online later if it boots after
-    // the gate (the login-launch race we're fixing). No Stop+Start needed.
+    // LM Studio and oMLX are always candidates in office mode. The start()
+    // gate probes each once; the ReadinessWatcher brings them online later
+    // if they boot after the gate (the login-launch race we're fixing). No
+    // Stop+Start needed.
     Ok(SharingConfig {
         enabled: true,
         friendly_name,
@@ -327,6 +330,8 @@ async fn build_sharing_config(friendly_name: String) -> AppResult<SharingConfig>
         whisper_internal_port: 8080,
         lmstudio_internal_port: Some(1234),
         lmstudio_proxy_port: Some(1235),
+        omlx_internal_port: Some(8000),
+        omlx_proxy_port: Some(8001),
         vocab_port: 11437,
         token_store_path: app_data.join("sharing.db"),
         token_store_key: key,

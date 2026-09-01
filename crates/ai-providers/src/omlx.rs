@@ -53,9 +53,6 @@ pub(crate) static META: ProviderMeta = ProviderMeta {
 /// optional [`RemoteEndpoint`] for LAN/Tailscale resolution, bearer-token
 /// authentication, and configurable retry policy.
 ///
-/// Note: oMLX is not yet part of the office-sharing proxy layer — it is
-/// reachable locally or via a directly configured LAN host only.
-///
 /// [`OpenAiCompatibleClient`]: crate::openai_compat::OpenAiCompatibleClient
 /// [`AiProvider`]: medical_core::traits::AiProvider
 pub struct OmlxProvider {

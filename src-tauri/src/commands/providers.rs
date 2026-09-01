@@ -133,14 +133,19 @@ pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Ve
     } else {
         None
     };
-    let (ollama_ep, lmstudio_ep, whisper_ep) = if let Some(ref p) = paired {
+    let eps = if let Some(ref p) = paired {
         crate::commands::sharing::paired_endpoints(p, bearer)
     } else {
-        (None, None, None)
+        crate::commands::sharing::PairedEndpoints {
+            ollama: None,
+            lmstudio: None,
+            omlx: None,
+            whisper: None,
+        }
     };
 
     // Rebuild AI providers with current config (includes LM Studio host/port).
-    let mut ai_handles = state::init_ai_providers(&config, ollama_ep, lmstudio_ep);
+    let mut ai_handles = state::init_ai_providers(&config, eps.ollama, eps.lmstudio, eps.omlx);
 
     // Restore the user's active provider preference from saved settings
     // so reinit doesn't silently switch to a random provider.
@@ -161,7 +166,7 @@ pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Ve
     }
 
     // Rebuild STT provider based on current config (mode + whisper model + remote host/port/key).
-    let stt_handles = state::init_stt_providers_with_config(&state.data_dir, &config, whisper_ep);
+    let stt_handles = state::init_stt_providers_with_config(&state.data_dir, &config, eps.whisper);
     let state::SttProviderHandles {
         provider: new_stt_provider,
         remote: new_remote_stt,

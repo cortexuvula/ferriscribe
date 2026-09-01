@@ -60,7 +60,7 @@
   <div class="status-right">
     <EndpointHealthPill {onopenSettings} />
     {#if sharing?.enabled}
-      <span class="sharing-badge server" title="This machine is acting as an office server. Other paired clients can reach Ollama / Whisper / LM Studio via this device.">
+      <span class="sharing-badge server" title="This machine is acting as an office server. Other paired clients can reach Ollama / Whisper / LM Studio / oMLX via this device.">
         <span class="dot" aria-hidden="true"></span>
         Office Server
         {#if sharing.paired_clients > 0}

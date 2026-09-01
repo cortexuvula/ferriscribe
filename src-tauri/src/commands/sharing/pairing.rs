@@ -27,6 +27,7 @@ pub async fn pairing_qr(state: State<'_, AppState>) -> AppResult<String> {
             whisper: cfg.whisper_proxy_port,
             pairing: cfg.pairing_port,
             lmstudio: cfg.lmstudio_proxy_port,
+            omlx: cfg.omlx_proxy_port,
             vocab: Some(cfg.vocab_port),
         },
         code,
@@ -136,9 +137,15 @@ async fn try_pair_at_base(
 /// metadata to disk. Returns nothing to the frontend — no raw token is ever
 /// sent to JS.
 ///
-/// After persisting, the in-memory Ollama, LM Studio, and remote-STT providers
-/// are updated immediately so the "models visible" success message in the UI is
-/// truthful without requiring an app restart.
+/// After persisting, the in-memory Ollama, LM Studio, oMLX, and remote-STT
+/// providers are updated immediately so the "models visible" success message
+/// in the UI is truthful without requiring an app restart.
+///
+/// If the client's current `ai_provider` isn't served by this server (e.g. a
+/// fresh install defaults to `"lmstudio"` but the office runs Ollama only),
+/// the pair flow probes each advertised provider proxy and switches to the
+/// first one that answers — pairing succeeds as long as ANY of Ollama, LM
+/// Studio, or oMLX is available.
 #[tauri::command]
 pub async fn pair_with_server(
     state: State<'_, AppState>,
@@ -237,22 +244,27 @@ pub async fn pair_with_server(
 
     // Update in-memory provider endpoints immediately so the "models visible"
     // success message in ClientPair.svelte is truthful without an app restart.
-    let allow_public = crate::commands::load_app_config(&state.db, "pairing")
-        .await?
-        .allow_public_endpoint;
+    let pair_cfg = crate::commands::load_app_config(&state.db, "pairing").await?;
+    let allow_public = pair_cfg.allow_public_endpoint;
     let bearer = Some(token.clone());
-    let (ollama_ep, lmstudio_ep, whisper_ep) = super::paired_endpoints(&conn, bearer);
+    let eps = super::paired_endpoints(&conn, bearer);
 
     {
         let guard = state.ollama_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(ollama_ep, allow_public).await?;
+            p.set_endpoint(eps.ollama, allow_public).await?;
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(lmstudio_ep, allow_public).await?;
+            p.set_endpoint(eps.lmstudio, allow_public).await?;
+        }
+    }
+    {
+        let guard = state.omlx_provider.read().await;
+        if let Some(ref p) = *guard {
+            p.set_endpoint(eps.omlx, allow_public).await?;
         }
     }
 
@@ -283,13 +295,63 @@ pub async fn pair_with_server(
         .await
         .map_err(crate::commands::join_err)??;
 
-        let stt_handles =
-            crate::state::init_stt_providers_with_config(&state.data_dir, &cfg, whisper_ep.clone());
+        let stt_handles = crate::state::init_stt_providers_with_config(
+            &state.data_dir,
+            &cfg,
+            eps.whisper.clone(),
+        );
         {
             let mut guard = state.stt_providers.lock().await;
             *guard = stt_handles.provider;
         }
         *state.remote_stt_provider.write().await = stt_handles.remote;
+    }
+
+    // ── Availability-aware provider selection ──
+    //
+    // A fresh client defaults to ai_provider = "lmstudio". If the server
+    // doesn't serve that provider (its proxy port is advertised only when
+    // the upstream is actually ready), generation would point at a dead
+    // endpoint even though the server happily serves Ollama or oMLX —
+    // looking exactly like "the client won't connect". Check all three
+    // providers: when the current one isn't served, probe each advertised
+    // proxy with the fresh token and switch to the first that answers.
+    let served = served_providers(&ports);
+    let mut chosen_provider: Option<String> = None;
+    let mut chosen_model: Option<String> = None;
+    if !served.contains(&pair_cfg.ai_provider.as_str()) {
+        for cand in served {
+            let Some(proxy_port) = provider_proxy_port(&ports, cand) else {
+                continue;
+            };
+            if !probe_provider_proxy(&state.http_client, &winning_host, proxy_port, cand, &token)
+                .await
+            {
+                tracing::info!(
+                    provider = cand,
+                    "pair: provider proxy not answering; skipping"
+                );
+                continue;
+            }
+            chosen_provider = Some(cand.to_string());
+            break;
+        }
+    }
+
+    // Best-effort model selection for a switched provider: the old
+    // provider's model name likely doesn't exist on the new one. Ask the
+    // (already re-endpointed) provider for its list and take the first.
+    if let Some(ref provider_id) = chosen_provider {
+        let arc = {
+            let registry = state.ai_providers.lock().await;
+            registry.get_arc(provider_id)
+        };
+        if let Some(provider) = arc
+            && let Ok(models) = provider.available_models().await
+            && let Some(first) = models.first()
+        {
+            chosen_model = Some(first.id.clone());
+        }
     }
 
     // ── Phase 3: per-service keychain mirror + AppConfig population ──
@@ -314,25 +376,43 @@ pub async fn pair_with_server(
 
         // 2. Write the bearer to per-service keychain slots via state.keys.
         //    Same KeyStorage abstraction the set_api_key Tauri command uses.
-        for slot in &["stt_remote_api_key", "ollama_api_key", "lmstudio_api_key"] {
+        for slot in &[
+            "stt_remote_api_key",
+            "ollama_api_key",
+            "lmstudio_api_key",
+            "omlx_api_key",
+        ] {
             state
                 .keys
                 .store_key(slot, &token)
                 .map_err(|e| AppError::Other(format!("autofill: store {slot}: {e}")))?;
         }
 
-        // 3. Update AppConfig with the paired endpoint values.
+        // 3. Update AppConfig with the paired endpoint values (and the
+        //    availability-selected provider, when a switch happened).
         //    Wrapped in spawn_blocking so the SQLite read-modify-write never
         //    blocks the async runtime worker.
         let db = std::sync::Arc::clone(&state.db);
         let host_for_db = host.clone();
         let ports_for_db = ports.clone();
+        let provider_for_db = chosen_provider.clone();
+        let model_for_db = chosen_model.clone();
         tokio::task::spawn_blocking(move || -> AppResult<()> {
             let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
             let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
                 .map_err(|e| AppError::Other(e.to_string()))?;
             cfg.migrate();
             apply_paired_settings(&mut cfg, &host_for_db, &ports_for_db);
+            if let Some(p) = provider_for_db {
+                tracing::info!(
+                    from = %cfg.ai_provider, to = %p,
+                    "pair: current provider not served by server; switching"
+                );
+                cfg.ai_provider = p;
+                if let Some(m) = model_for_db {
+                    cfg.ai_model = m;
+                }
+            }
             medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
                 .map_err(|e| AppError::Other(e.to_string()))?;
             Ok(())
@@ -340,16 +420,85 @@ pub async fn pair_with_server(
         .await
         .map_err(crate::commands::join_err)??;
 
+        // 4. Flip the live registry's active provider to match, so generation
+        //    uses the served provider immediately (no reinit needed).
+        if let Some(ref p) = chosen_provider {
+            let mut registry = state.ai_providers.lock().await;
+            if registry.set_active(p) {
+                tracing::info!(provider = %p, "pair: active provider switched to served provider");
+            }
+        }
+
         tracing::info!(
             host = %host,
             whisper_port = ports.whisper,
             ollama_port = ports.ollama,
             lmstudio_port = ?ports.lmstudio,
+            omlx_port = ?ports.omlx,
             "pair: populated per-service api_keys and AppConfig host/ports"
         );
     }
 
     Ok(())
+}
+
+/// Provider ids the office server can serve, derived from the pairing
+/// ports. Ollama's proxy port is a required field (always advertised); the
+/// LM Studio / oMLX ports appear only when those upstreams are actually
+/// ready (readiness-gated advertisement), so their presence is a real
+/// availability signal. Order is the switch preference when the client's
+/// current provider isn't served: Ollama first (the office wizard installs
+/// it persistently), then LM Studio, then oMLX.
+fn served_providers(ports: &PairPorts) -> Vec<&'static str> {
+    let mut v = vec!["ollama"];
+    if ports.lmstudio.is_some() {
+        v.push("lmstudio");
+    }
+    if ports.omlx.is_some() {
+        v.push("omlx");
+    }
+    v
+}
+
+/// The advertised proxy port for a provider id, or `None` when the server
+/// doesn't serve it.
+fn provider_proxy_port(ports: &PairPorts, provider: &str) -> Option<u16> {
+    match provider {
+        "ollama" => Some(ports.ollama),
+        "lmstudio" => ports.lmstudio,
+        "omlx" => ports.omlx,
+        _ => None,
+    }
+}
+
+/// Probe one of the server's provider auth-proxies with the freshly issued
+/// token. `true` iff it answered 2xx — i.e. the provider is actually served
+/// and reachable through the exact path generation will use. Probes hit the
+/// user-configured office server only (the host that just answered the pair
+/// handshake) and carry no PHI.
+async fn probe_provider_proxy(
+    http: &reqwest::Client,
+    host: &str,
+    port: u16,
+    provider: &str,
+    token: &str,
+) -> bool {
+    let path = if provider == "ollama" {
+        "/api/tags"
+    } else {
+        "/v1/models"
+    };
+    let url = format!("http://{host}:{port}{path}");
+    match http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .bearer_auth(token)
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
 }
 
 /// Returns the saved paired-connection metadata, or `None` if not paired.
@@ -384,7 +533,12 @@ pub async fn unpair(state: State<'_, AppState>) -> AppResult<()> {
     {
         use super::settings_helpers::reset_paired_settings;
 
-        for slot in &["stt_remote_api_key", "ollama_api_key", "lmstudio_api_key"] {
+        for slot in &[
+            "stt_remote_api_key",
+            "ollama_api_key",
+            "lmstudio_api_key",
+            "omlx_api_key",
+        ] {
             // Idempotent — ignore "not found" errors per the existing pattern.
             let _ = state.keys.remove_key(slot);
         }
@@ -564,5 +718,68 @@ mod tests {
             }
             Ok(_) => panic!("expected error from closed port"),
         }
+    }
+
+    fn ports(lmstudio: Option<u16>, omlx: Option<u16>) -> PairPorts {
+        PairPorts {
+            ollama: 11435,
+            whisper: 8081,
+            pairing: 11436,
+            lmstudio,
+            omlx,
+            vocab: Some(11437),
+        }
+    }
+
+    #[test]
+    fn served_providers_reflects_advertised_ports() {
+        // Ollama-only server (LM Studio / oMLX never came ready).
+        assert_eq!(served_providers(&ports(None, None)), vec!["ollama"]);
+        // All three advertised.
+        assert_eq!(
+            served_providers(&ports(Some(1235), Some(8001))),
+            vec!["ollama", "lmstudio", "omlx"]
+        );
+        // oMLX-only (Apple Silicon office without LM Studio).
+        assert_eq!(
+            served_providers(&ports(None, Some(8001))),
+            vec!["ollama", "omlx"]
+        );
+    }
+
+    #[test]
+    fn provider_proxy_port_maps_ids_to_advertised_ports() {
+        let p = ports(Some(1235), Some(8001));
+        assert_eq!(provider_proxy_port(&p, "ollama"), Some(11435));
+        assert_eq!(provider_proxy_port(&p, "lmstudio"), Some(1235));
+        assert_eq!(provider_proxy_port(&p, "omlx"), Some(8001));
+        assert_eq!(provider_proxy_port(&p, "unknown"), None);
+        let none = ports(None, None);
+        assert_eq!(provider_proxy_port(&none, "lmstudio"), None);
+        assert_eq!(provider_proxy_port(&none, "omlx"), None);
+    }
+
+    #[tokio::test]
+    async fn probe_provider_proxy_hits_provider_specific_path_with_bearer() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer fixture-auth-value"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "qwen3-8b"}]
+            })))
+            .expect(1)
+            .mount(&srv)
+            .await;
+        let parsed: reqwest::Url = srv.uri().parse().unwrap();
+        let host = parsed.host_str().unwrap().to_string();
+        let port = parsed.port().unwrap();
+
+        let http = reqwest::Client::new();
+        assert!(probe_provider_proxy(&http, &host, port, "omlx", "fixture-auth-value").await);
+        srv.verify().await;
     }
 }

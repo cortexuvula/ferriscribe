@@ -16,6 +16,7 @@
     ollama_ok: boolean;
     whisper_ok: boolean;
     lmstudio_ok: boolean;
+    omlx_ok: boolean;
     mdns_ok: boolean;
     pairing_ok: boolean;
     paired_clients: number;
@@ -138,6 +139,11 @@
       key: 'lmstudio_ok',
       label: 'LM Studio',
       offHint: 'LM Studio is not running yet. It will appear automatically once its local server starts.',
+    },
+    {
+      key: 'omlx_ok',
+      label: 'oMLX',
+      offHint: 'oMLX is not running yet. It will appear automatically once its local server starts.',
     },
     { key: 'mdns_ok', label: 'mDNS' },
     { key: 'pairing_ok', label: 'Pairing' },
