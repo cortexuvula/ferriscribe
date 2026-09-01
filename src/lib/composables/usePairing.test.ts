@@ -145,7 +145,6 @@ describe('usePairing', () => {
         ports: { ollama: 11435, whisper: 8081, pairing: 11436, lmstudio: 1235, omlx: 8001, vocab: null },
       }),
     );
-    vi.mocked(mockInvoke).mockClear();
   });
 
   it('pairDiscovered routes addresses into lan/tailscale slots with default ports', async () => {

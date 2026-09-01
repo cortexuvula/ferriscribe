@@ -54,7 +54,9 @@ async fn probe_endpoint_reachable_inner(
     } else {
         host
     };
-    let base_url = format!("http://{}:{}", effective_host, port);
+    // http_url brackets IPv6 literals — a raw format! would make reqwest
+    // fail URL parsing with an opaque "Builder error".
+    let base_url = medical_core::types::http_url(&effective_host, port);
     let url = format!(
         "{}/{}",
         base_url.trim_end_matches('/'),
@@ -221,7 +223,12 @@ async fn test_models_endpoint(
     spec: &ProbeSpec,
 ) -> AppResult<String> {
     let effective_host = if host.is_empty() { "localhost" } else { host };
-    let url = format!("http://{effective_host}:{port}{}", spec.path);
+    // http_url brackets IPv6 literals (see probe_endpoint_reachable_inner).
+    let url = format!(
+        "{}{}",
+        medical_core::types::http_url(effective_host, port),
+        spec.path
+    );
 
     info!(url = %url, "Testing {} connection", spec.service);
 
