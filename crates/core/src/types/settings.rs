@@ -24,9 +24,9 @@ pub enum SttMode {
 /// AI providers supported at runtime.
 ///
 /// Used by [`AppConfig::migrate`] to reject stale values left over from
-/// older versions of the app that supported cloud providers. Only
-/// `"lmstudio"` and `"ollama"` are valid.
-pub const SUPPORTED_AI_PROVIDERS: &[&str] = &["lmstudio", "ollama"];
+/// older versions of the app that supported cloud providers. Valid values
+/// are the local inference servers: `"lmstudio"`, `"ollama"`, and `"omlx"`.
+pub const SUPPORTED_AI_PROVIDERS: &[&str] = &["lmstudio", "ollama", "omlx"];
 
 /// Supported TTS provider names. Only local TTS is supported — AGENTS.md
 /// forbids hosted AI APIs, so cloud providers (e.g. ElevenLabs) were removed.
@@ -256,6 +256,14 @@ fn default_ollama_port() -> u16 {
     11434
 }
 
+fn default_omlx_host() -> String {
+    "localhost".into()
+}
+
+fn default_omlx_port() -> u16 {
+    8000
+}
+
 fn default_vocabulary_enabled() -> bool {
     true
 }
@@ -393,6 +401,20 @@ pub struct AppConfig {
     /// SOAP note on thinking models.
     #[serde(default)]
     pub ollama_disable_thinking: bool,
+
+    // oMLX server (local MLX inference for Apple Silicon)
+    #[serde(default = "default_omlx_host")]
+    pub omlx_host: String,
+    #[serde(default = "default_omlx_port")]
+    pub omlx_port: u16,
+    /// Disable the reasoning/"thinking" phase for oMLX models (Qwen3 &
+    /// co.). oMLX renders mlx-lm's Jinja chat templates but drops
+    /// API-level thinking parameters, so the provider injects an assistant
+    /// prefill with a pre-closed `<think>` block instead (same strategy as
+    /// LM Studio). Default `false` — opt-in, saves minutes of latency per
+    /// SOAP note on thinking models.
+    #[serde(default)]
+    pub omlx_disable_thinking: bool,
 
     // Temperature
     #[serde(default = "default_temperature")]
@@ -669,6 +691,9 @@ mod tests {
         assert_eq!(config.lmstudio_port, 1234);
         assert!(!config.lmstudio_disable_thinking);
         assert!(!config.ollama_disable_thinking);
+        assert_eq!(config.omlx_host, "localhost");
+        assert_eq!(config.omlx_port, 8000);
+        assert!(!config.omlx_disable_thinking);
         assert!(config.vocabulary_enabled);
         assert_eq!(config.rsvp_wpm, 300);
         assert_eq!(config.rsvp_font_size, 48);
@@ -781,6 +806,11 @@ mod tests {
         let mut config: AppConfig = serde_json::from_str(json).unwrap();
         config.migrate();
         assert_eq!(config.ai_provider, "ollama");
+
+        let json = r#"{"ai_provider": "omlx"}"#;
+        let mut config: AppConfig = serde_json::from_str(json).unwrap();
+        config.migrate();
+        assert_eq!(config.ai_provider, "omlx");
     }
 
     #[test]
@@ -810,6 +840,14 @@ mod tests {
         let config: AppConfig = serde_json::from_str("{}").expect("parse empty");
         assert_eq!(config.ollama_host, "localhost");
         assert_eq!(config.ollama_port, 11434);
+    }
+
+    #[test]
+    fn new_config_defaults_omlx_host_and_port() {
+        let config: AppConfig = serde_json::from_str("{}").expect("parse empty");
+        assert_eq!(config.omlx_host, "localhost");
+        assert_eq!(config.omlx_port, 8000);
+        assert!(!config.omlx_disable_thinking);
     }
 
     #[test]

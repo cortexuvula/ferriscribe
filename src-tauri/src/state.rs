@@ -10,6 +10,7 @@ use medical_ai_providers::ProviderRegistry;
 use medical_ai_providers::http_client::RetryConfig;
 use medical_ai_providers::lmstudio::LmStudioProvider;
 use medical_ai_providers::ollama::OllamaProvider;
+use medical_ai_providers::omlx::OmlxProvider;
 
 use medical_core::types::RemoteEndpoint;
 use medical_core::types::settings::AppConfig;
@@ -261,6 +262,10 @@ pub struct AppState {
     pub ollama_provider: RwLock<Option<Arc<OllamaProvider>>>,
     /// Concrete LM Studio provider reference; allows `set_endpoint` after startup.
     pub lmstudio_provider: RwLock<Option<Arc<LmStudioProvider>>>,
+    /// Typed oMLX handle for runtime endpoint updates. oMLX is not part of
+    /// the office-sharing proxy layer, so nothing calls `set_endpoint` on it
+    /// today; the handle exists for symmetry and future sharing support.
+    pub omlx_provider: RwLock<Option<Arc<OmlxProvider>>>,
     /// Concrete RemoteSttProvider reference; `None` when STT mode is Local.
     pub remote_stt_provider:
         RwLock<Option<Arc<medical_stt_providers::remote_provider::RemoteSttProvider>>>,
@@ -344,13 +349,15 @@ pub struct AiProviderHandles {
     pub registry: ProviderRegistry,
     pub ollama: Option<Arc<OllamaProvider>>,
     pub lmstudio: Option<Arc<LmStudioProvider>>,
+    pub omlx: Option<Arc<OmlxProvider>>,
 }
 
-/// Register all supported AI providers (LM Studio + Ollama).
+/// Register all supported AI providers (LM Studio + Ollama + oMLX).
 ///
 /// `config` supplies host/port; `ollama_ep` / `lmstudio_ep` override with a
 /// `RemoteEndpoint` for LAN/Tailscale resolution when this machine is a paired
-/// client. Pass `None` for local-only (default) mode.
+/// client. Pass `None` for local-only (default) mode. oMLX has no paired
+/// endpoint yet — it is not part of the office-sharing proxy layer.
 pub fn init_ai_providers(
     config: &AppConfig,
     ollama_ep: Option<RemoteEndpoint>,
@@ -360,6 +367,7 @@ pub fn init_ai_providers(
     let policy = RetryConfig::from_app_config(config);
     let mut ollama_handle: Option<Arc<OllamaProvider>> = None;
     let mut lmstudio_handle: Option<Arc<LmStudioProvider>> = None;
+    let mut omlx_handle: Option<Arc<OmlxProvider>> = None;
 
     // Ollama — always available (local, no key needed).
     // Builder failures are logged and the provider skipped rather than
@@ -422,11 +430,41 @@ pub fn init_ai_providers(
         }
     }
 
+    // oMLX — always available (local or remote, no key needed). Not part of
+    // the office-sharing proxy layer; built from config host/port only.
+    let omlx_host = if config.omlx_host.is_empty() {
+        "localhost"
+    } else {
+        &config.omlx_host
+    };
+    let omlx_url = format!("http://{}:{}", omlx_host, config.omlx_port);
+    match OmlxProvider::new_with_endpoint(
+        Some(&omlx_url),
+        config.allow_public_endpoint,
+        None,
+        policy,
+        None,
+    ) {
+        Ok(p) => {
+            // Captured at construction — a settings toggle only takes effect
+            // after reinit_providers rebuilds the registry.
+            p.set_thinking_disabled(config.omlx_disable_thinking);
+            info!(url = %omlx_url, "Registering oMLX provider");
+            let arc = Arc::new(p);
+            registry.register(Arc::clone(&arc) as Arc<dyn medical_core::traits::AiProvider>);
+            omlx_handle = Some(arc);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, url = %omlx_url, "Failed to build oMLX provider; skipping")
+        }
+    }
+
     info!("AI providers available: {:?}", registry.list_available());
     AiProviderHandles {
         registry,
         ollama: ollama_handle,
         lmstudio: lmstudio_handle,
+        omlx: omlx_handle,
     }
 }
 
@@ -728,6 +766,7 @@ impl AppState {
 
         let ollama_provider = RwLock::new(ai_handles.ollama.take());
         let lmstudio_provider = RwLock::new(ai_handles.lmstudio.take());
+        let omlx_provider = RwLock::new(ai_handles.omlx.take());
         let remote_stt_provider = RwLock::new(stt_handles.remote.clone());
 
         // Initialize the agent orchestrator. RAG tools (RagSearchTool) are
@@ -752,6 +791,7 @@ impl AppState {
             vocab_api: RwLock::new(None),
             ollama_provider,
             lmstudio_provider,
+            omlx_provider,
             remote_stt_provider,
             http_client,
             content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -786,6 +826,24 @@ mod tests {
             handles.ollama.is_some(),
             "ollama handle should be populated"
         );
+    }
+
+    #[test]
+    fn init_ai_providers_uses_configured_omlx_host() {
+        let mut config = AppConfig::default();
+        config.omlx_host = "tailnet-node".into();
+        config.omlx_port = 8100;
+        // Non-localhost hostname requires allow_public_endpoint = true.
+        config.allow_public_endpoint = true;
+        let handles = init_ai_providers(&config, None, None);
+        assert!(
+            handles
+                .registry
+                .list_available()
+                .contains(&"omlx".to_string()),
+            "omlx should still be registered with a custom host"
+        );
+        assert!(handles.omlx.is_some(), "omlx handle should be populated");
     }
 
     #[test]

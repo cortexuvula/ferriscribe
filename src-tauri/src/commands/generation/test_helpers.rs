@@ -136,6 +136,7 @@ async fn build_test_state_inner(
         vocab_api: RwLock::new(None),
         ollama_provider: RwLock::new(None),
         lmstudio_provider: RwLock::new(None),
+        omlx_provider: RwLock::new(None),
         remote_stt_provider: RwLock::new(None),
         http_client,
         content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),

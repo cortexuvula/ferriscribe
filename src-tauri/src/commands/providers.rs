@@ -153,6 +153,7 @@ pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Ve
         registry,
         ollama: new_ollama,
         lmstudio: new_lmstudio,
+        omlx: new_omlx,
     } = ai_handles;
     {
         let mut guard = state.ai_providers.lock().await;
@@ -176,6 +177,7 @@ pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Ve
     // mutates the provider that is actually in the request path.
     *state.ollama_provider.write().await = new_ollama;
     *state.lmstudio_provider.write().await = new_lmstudio;
+    *state.omlx_provider.write().await = new_omlx;
     *state.remote_stt_provider.write().await = new_remote_stt;
 
     info!(providers = ?available, "Providers reinitialized");
@@ -183,7 +185,7 @@ pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Ve
     Ok(available)
 }
 
-/// Per-service knobs for [`test_models_endpoint`]. The three test-connection
+/// Per-service knobs for [`test_models_endpoint`]. The test-connection
 /// commands differ only in these; everything else (bearer header, offline
 /// error classification, 401/403 wording, model counting, success message
 /// shape) is shared.
@@ -312,6 +314,37 @@ pub async fn test_lmstudio_connection(
     .await
 }
 
+/// Test connectivity to an oMLX server (OpenAI-compatible).
+///
+/// Makes a GET request to `http://{host}:{port}/v1/models` with a 5-second
+/// timeout. If `api_key` is present and non-empty, an
+/// `Authorization: Bearer …` header is sent. Returns a success message with
+/// the model count, or an error.
+#[tauri::command]
+pub async fn test_omlx_connection(
+    state: tauri::State<'_, AppState>,
+    host: String,
+    port: u16,
+    api_key: Option<String>,
+) -> AppResult<String> {
+    validate_probe_host(&state, &host).await?;
+    test_models_endpoint(
+        &state.http_client,
+        &host,
+        port,
+        api_key.as_deref(),
+        &ProbeSpec {
+            service: "oMLX",
+            path: "/v1/models",
+            array_key: "data",
+            timeout: Duration::from_secs(5),
+            installed_wording: false,
+            err: |m| AppError::ai_provider(m),
+        },
+    )
+    .await
+}
+
 /// Test connectivity to a remote Whisper server (OpenAI-compatible).
 ///
 /// Makes a GET request to `http://{host}:{port}/v1/models` with a 10-second
@@ -375,12 +408,67 @@ pub async fn test_ollama_connection(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use medical_core::error::AppError;
 
-    use super::probe_endpoint_reachable_inner;
+    use super::{ProbeSpec, probe_endpoint_reachable_inner, test_models_endpoint};
+
+    fn omlx_spec() -> ProbeSpec {
+        ProbeSpec {
+            service: "oMLX",
+            path: "/v1/models",
+            array_key: "data",
+            timeout: Duration::from_secs(5),
+            installed_wording: false,
+            err: |m| AppError::ai_provider(m),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_models_endpoint_omlx_counts_models_from_data_array() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "qwen3-8b"}, {"id": "llama-8b"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let parsed: reqwest::Url = server.uri().parse().unwrap();
+        let host = parsed.host_str().unwrap().to_string();
+        let port = parsed.port().unwrap();
+
+        let client = reqwest::Client::new();
+        let msg = test_models_endpoint(&client, &host, port, None, &omlx_spec())
+            .await
+            .expect("mocked /v1/models should succeed");
+        assert_eq!(msg, "Connected — 2 models available");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn test_models_endpoint_omlx_connection_refused_errors() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let client = reqwest::Client::new();
+        let result = test_models_endpoint(&client, "127.0.0.1", port, None, &omlx_spec()).await;
+        let err = result.expect_err("dead port must error");
+        assert!(
+            matches!(
+                err,
+                AppError::AiProvider { .. } | AppError::EndpointOffline { .. }
+            ),
+            "transport failure must surface as a provider error; got {err:?}"
+        );
+    }
 
     #[tokio::test]
     async fn probe_endpoint_reachable_returns_ok_on_any_2xx() {

@@ -53,6 +53,7 @@ class EndpointHealthStore {
       cfg.ai_provider,
       cfg.lmstudio_host, cfg.lmstudio_port,
       cfg.ollama_host, cfg.ollama_port,
+      cfg.omlx_host, cfg.omlx_port,
       cfg.stt_remote_host, cfg.stt_remote_port,
       cfg.stt_mode,
     ].join('|');
@@ -104,6 +105,31 @@ class EndpointHealthStore {
           providerName: 'LM Studio',
           host: cfg.lmstudio_host,
           port: cfg.lmstudio_port,
+          probePath: '/v1/models',
+          apiKey,
+        });
+        return 'online';
+      } catch {
+        return 'offline';
+      }
+    }
+    if (provider === 'omlx') {
+      if (isLoopbackHost(cfg.omlx_host)) return 'skipped';
+      let apiKey: string | undefined = undefined;
+      try {
+        const key = await invoke<string | null>('get_api_key', {
+          provider: 'omlx_api_key',
+        });
+        if (key) apiKey = key;
+      } catch {
+        // Keychain unavailable or no key stored — continue without auth.
+      }
+      try {
+        await invoke('probe_endpoint_reachable', {
+          service: 'AiProvider',
+          providerName: 'oMLX',
+          host: cfg.omlx_host,
+          port: cfg.omlx_port,
           probePath: '/v1/models',
           apiKey,
         });

@@ -1,10 +1,15 @@
-//! LM Studio provider — wraps [`OpenAiCompatibleClient`] against a local LM Studio server.
+//! oMLX provider — wraps [`OpenAiCompatibleClient`] against a local oMLX server.
+//!
+//! [oMLX](https://github.com/jundot/omlx) is an MLX-based LLM inference
+//! server for Apple Silicon (macOS menu-bar app, continuous batching,
+//! SSD-backed KV cache). Its OpenAI-compatible API listens on
+//! `http://localhost:8000/v1` by default.
 //!
 //! # Default configuration
 //!
-//! - Base URL: `http://localhost:1234/v1`
+//! - Base URL: `http://localhost:8000/v1`
 //! - Fallback model: `default`
-//! - Provider name: `"lmstudio"`
+//! - Provider name: `"omlx"`
 //!
 //! All endpoint-resolution, caching, retry, and thinking-control machinery
 //! lives in [`crate::local_openai`]; this module only supplies the
@@ -28,40 +33,39 @@ use medical_core::{
 use crate::http_client::RetryConfig;
 use crate::local_openai::{LocalOpenAiProvider, ProviderMeta, ThinkingControl};
 
-/// Static identity for the LM Studio provider. `thinking` uses the
-/// assistant `<think>`-prefill strategy: LM Studio (as of 0.4.16+) silently
-/// drops every API-level thinking parameter (`enable_thinking`,
-/// `reasoning_effort`, `chat_template_kwargs`), so the prefill is the
-/// model-side equivalent of the recommended server-side fix of editing the
-/// model's Jinja prompt template with `{%- set enable_thinking = false %}`
-/// (LM Studio → Model Settings → Prompt Template;
-/// lmstudio.ai/docs/app/advanced/prompt-template), which needs no
-/// FerriScribe code and also disables thinking for every other client.
+/// Static identity for the oMLX provider. `thinking` uses the assistant
+/// `<think>`-prefill strategy: oMLX serves mlx-lm's Jinja chat templates
+/// but, like LM Studio, ignores API-level thinking parameters, so a
+/// pre-closed `<think>` block in an assistant prefill is the one switch
+/// that reaches the template.
 pub(crate) static META: ProviderMeta = ProviderMeta {
-    id: "lmstudio",
-    display: "LM Studio",
-    default_base: "http://localhost:1234",
-    err_field: "lmstudio_host",
+    id: "omlx",
+    display: "oMLX",
+    default_base: "http://localhost:8000",
+    err_field: "omlx_host",
     fallback_model: "default",
     thinking: ThinkingControl::AssistantPrefill,
 };
 
-/// LM Studio provider implementing the [`AiProvider`] trait.
+/// oMLX provider implementing the [`AiProvider`] trait.
 ///
-/// Wraps an [`OpenAiCompatibleClient`] pointed at an LM Studio server. Supports
+/// Wraps an [`OpenAiCompatibleClient`] pointed at an oMLX server. Supports
 /// optional [`RemoteEndpoint`] for LAN/Tailscale resolution, bearer-token
 /// authentication, and configurable retry policy.
 ///
+/// Note: oMLX is not yet part of the office-sharing proxy layer — it is
+/// reachable locally or via a directly configured LAN host only.
+///
 /// [`OpenAiCompatibleClient`]: crate::openai_compat::OpenAiCompatibleClient
 /// [`AiProvider`]: medical_core::traits::AiProvider
-pub struct LmStudioProvider {
+pub struct OmlxProvider {
     inner: LocalOpenAiProvider,
 }
 
-impl LmStudioProvider {
-    /// Create a new LM Studio provider.
+impl OmlxProvider {
+    /// Create a new oMLX provider.
     ///
-    /// `host` defaults to `http://localhost:1234` when `None`.
+    /// `host` defaults to `http://localhost:8000` when `None`.
     /// `bearer` is an optional bearer token for auth-proxied remote connections.
     /// `policy` controls retry behavior for inner HTTP calls.
     pub fn new(
@@ -75,7 +79,7 @@ impl LmStudioProvider {
         })
     }
 
-    /// Create a new LM Studio provider with a `RemoteEndpoint` pre-configured.
+    /// Create a new oMLX provider with a `RemoteEndpoint` pre-configured.
     ///
     /// Usable in synchronous initialization code (no running async runtime required).
     pub fn new_with_endpoint(
@@ -99,11 +103,10 @@ impl LmStudioProvider {
 
     /// Toggle the reasoning/"thinking" phase off for this provider.
     ///
-    /// LM Studio drops API-level thinking parameters, so disabling appends an
-    /// assistant prefill message with a pre-closed `<think>` block — see
-    /// [`META`] for the full rationale and the server-side alternative.
+    /// When disabled, every request appends an assistant prefill message
+    /// with a pre-closed `<think>` block (see [`META`] for the rationale).
     /// Called from `init_ai_providers` with the user's
-    /// `lmstudio_disable_thinking` setting; the frontend must call
+    /// `omlx_disable_thinking` setting; the frontend must call
     /// `reinit_providers` after changing that setting for it to take effect.
     pub fn set_thinking_disabled(&self, disabled: bool) {
         self.inner.set_thinking_disabled(disabled);
@@ -122,7 +125,7 @@ impl LmStudioProvider {
 }
 
 #[async_trait]
-impl AiProvider for LmStudioProvider {
+impl AiProvider for OmlxProvider {
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -156,13 +159,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_lmstudio_identity() {
-        let p = LmStudioProvider::new(None, false, None, RetryConfig::default())
+    fn exposes_omlx_identity() {
+        let p = OmlxProvider::new(None, false, None, RetryConfig::default())
             .expect("build default provider");
-        assert_eq!(p.name(), "lmstudio");
-        assert_eq!(META.id, "lmstudio");
-        assert_eq!(META.default_base, "http://localhost:1234");
-        assert_eq!(META.err_field, "lmstudio_host");
+        assert_eq!(p.name(), "omlx");
+        assert_eq!(META.id, "omlx");
+        assert_eq!(META.default_base, "http://localhost:8000");
+        assert_eq!(META.err_field, "omlx_host");
         assert_eq!(META.fallback_model, "default");
         assert_eq!(META.thinking, ThinkingControl::AssistantPrefill);
     }
