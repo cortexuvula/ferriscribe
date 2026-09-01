@@ -107,9 +107,6 @@ pub struct ProviderMeta {
     /// `AppError::InvalidEndpoint` field name for endpoint-policy failures
     /// (e.g. `"ollama_host"`) — the frontend maps this to the offending input.
     pub err_field: &'static str,
-    /// Model returned by `available_models` when the server's model list is
-    /// empty or unreachable.
-    pub fallback_model: &'static str,
     /// How `thinking_disabled` is expressed on the wire.
     pub thinking: ThinkingControl,
 }
@@ -348,34 +345,31 @@ impl AiProvider for LocalOpenAiProvider {
 
     async fn available_models(&self) -> AppResult<Vec<ModelInfo>> {
         let client = self.sync_client_url().await?;
-        // All supported servers expose the OpenAI-compatible /v1/models endpoint
-        if let Ok(ids) = client.list_models().await {
-            let mut models: Vec<ModelInfo> = ids
-                .into_iter()
-                .map(|id| ModelInfo {
-                    name: id.clone(),
-                    id,
-                    provider: self.meta.id.into(),
-                    max_tokens: 8_192,
-                    supports_tools: false,
-                    supports_streaming: true,
-                })
-                .collect();
-            if !models.is_empty() {
-                models.sort_by_key(|m| m.id.clone());
-                return Ok(models);
-            }
+        // Errors propagate instead of substituting a placeholder list:
+        // callers (Settings → Models, the pair flow) must be able to tell
+        // "server unreachable" apart from a real list, and the offline
+        // error already carries the endpoint URL so the UI can tell the
+        // user exactly what isn't running.
+        let ids = client.list_models().await?;
+        let mut models: Vec<ModelInfo> = ids
+            .into_iter()
+            .map(|id| ModelInfo {
+                name: id.clone(),
+                id,
+                provider: self.meta.id.into(),
+                max_tokens: 8_192,
+                supports_tools: false,
+                supports_streaming: true,
+            })
+            .collect();
+        if models.is_empty() {
+            return Err(AppError::ai_provider(format!(
+                "{} is reachable but returned no models at {}. Pull or download a model in the {} app, then refresh.",
+                self.meta.display, client.base_url, self.meta.display
+            )));
         }
-
-        // Fallback
-        Ok(vec![ModelInfo {
-            id: self.meta.fallback_model.into(),
-            name: self.meta.fallback_model.into(),
-            provider: self.meta.id.into(),
-            max_tokens: 8_192,
-            supports_tools: false,
-            supports_streaming: true,
-        }])
+        models.sort_by_key(|m| m.id.clone());
+        Ok(models)
     }
 
     async fn complete(&self, mut request: CompletionRequest) -> AppResult<CompletionResponse> {
@@ -978,5 +972,80 @@ mod offline_tests {
                 other => panic!("expected EndpointOffline, got {other:?}"),
             }
         }
+    }
+
+    /// Model listing must fail loudly when the provider's server is down.
+    /// The Settings → Models UI relies on this error (which carries the
+    /// endpoint URL) to tell the user exactly what isn't running — the old
+    /// behavior of silently returning a placeholder model made a dead
+    /// server look like a one-model server.
+    #[tokio::test]
+    async fn available_models_errors_when_server_down() {
+        let port = dead_port();
+        let host = format!("http://127.0.0.1:{port}");
+
+        for m in [
+            &crate::ollama::META,
+            &crate::lmstudio::META,
+            &crate::omlx::META,
+        ] {
+            let policy = RetryConfig {
+                max_retries: 0,
+                ..RetryConfig::default()
+            };
+            let p = LocalOpenAiProvider::new(m, Some(&host), false, None, policy).expect("build");
+
+            let err = p.available_models().await.unwrap_err();
+            match err {
+                AppError::EndpointOffline {
+                    provider_name,
+                    endpoint,
+                    ..
+                } => {
+                    assert_eq!(provider_name, m.display);
+                    assert!(
+                        endpoint.contains("127.0.0.1"),
+                        "endpoint should carry host; got {endpoint:?}"
+                    );
+                }
+                other => panic!("expected EndpointOffline, got {other:?}"),
+            }
+        }
+    }
+
+    /// A reachable server with zero models is an actionable error too
+    /// ("pull a model"), not an empty success.
+    #[tokio::test]
+    async fn available_models_errors_on_empty_model_list() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })),
+            )
+            .expect(1)
+            .mount(&srv)
+            .await;
+
+        let p = LocalOpenAiProvider::new(
+            &crate::omlx::META,
+            Some(srv.uri().as_str()),
+            false,
+            None,
+            RetryConfig {
+                max_retries: 0,
+                ..RetryConfig::default()
+            },
+        )
+        .expect("build");
+
+        let err = p.available_models().await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no models"), "got: {msg}");
+        assert!(msg.contains("oMLX"), "names the provider: {msg}");
+        srv.verify().await;
     }
 }

@@ -43,7 +43,6 @@ pub(crate) static META: ProviderMeta = ProviderMeta {
     display: "oMLX",
     default_base: "http://localhost:8000",
     err_field: "omlx_host",
-    fallback_model: "default",
     thinking: ThinkingControl::AssistantPrefill,
 };
 
@@ -163,7 +162,6 @@ mod tests {
         assert_eq!(META.id, "omlx");
         assert_eq!(META.default_base, "http://localhost:8000");
         assert_eq!(META.err_field, "omlx_host");
-        assert_eq!(META.fallback_model, "default");
         assert_eq!(META.thinking, ThinkingControl::AssistantPrefill);
     }
 }
