@@ -16,7 +16,7 @@
  * these tests should be replaced/augmented with full render tests.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { endpointOfflineStore } from '../stores/endpointOffline.svelte.ts';
+import { endpointOfflineStore } from '../stores/endpointOffline.svelte';
 import type {
   EndpointOfflinePayload,
   OfflineReason,

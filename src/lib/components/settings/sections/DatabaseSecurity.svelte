@@ -3,14 +3,17 @@
   import { invoke } from '@tauri-apps/api/core';
 
   let encryptionState = $state<'no-database' | 'plaintext' | 'encrypted' | 'unknown'>('unknown');
+  let keyPresent = $state<boolean | null>(null);
 
   async function loadEncryptionStatus() {
     try {
       const result = await invoke<{ state: string; key_present?: boolean }>('database_encryption_status');
       encryptionState = (result.state as 'no-database' | 'plaintext' | 'encrypted') || 'unknown';
+      keyPresent = typeof result.key_present === 'boolean' ? result.key_present : null;
     } catch (e) {
       console.error('Failed to query database encryption status:', e);
       encryptionState = 'unknown';
+      keyPresent = null;
     }
   }
 
@@ -26,7 +29,11 @@
 </p>
 <div class="form-group">
   <span class="form-label">Encryption status</span>
-  {#if encryptionState === 'encrypted'}
+  {#if encryptionState === 'encrypted' && keyPresent === false}
+    <span class="status-pill plaintext">
+      ⚠ Encrypted — key NOT found in OS keychain (data may be unrecoverable)
+    </span>
+  {:else if encryptionState === 'encrypted'}
     <span class="status-pill encrypted">✓ Encrypted (key in OS keychain)</span>
   {:else if encryptionState === 'plaintext'}
     <span class="status-pill plaintext">⚠ Plaintext (encryption disabled)</span>

@@ -212,5 +212,13 @@ async fn check_status(resp: &reqwest::Response) -> AppResult<()> {
                 .to_string(),
         ));
     }
+    if status == reqwest::StatusCode::CONFLICT {
+        // The server maps unique-index violations (duplicate find_text on
+        // insert/update) to 409.
+        return Err(AppError::Other(
+            "A vocabulary entry with that find text already exists on the office server."
+                .to_string(),
+        ));
+    }
     Err(AppError::Other(format!("vocab API: HTTP {status}")))
 }

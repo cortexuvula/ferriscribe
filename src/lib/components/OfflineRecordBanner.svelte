@@ -1,27 +1,26 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-  import { endpointHealth, type EndpointHealthState } from '../stores/endpointHealth.svelte';
+  import { onMount, onDestroy } from 'svelte';
+  import { endpointHealth } from '../stores/endpointHealth.svelte';
 
   type Props = {
     onopenSettings: (target: 'models' | 'audio') => void;
   };
   const { onopenSettings }: Props = $props();
 
-  let health = $state<EndpointHealthState>({
-    ai: 'skipped', stt: 'skipped', lastCheckedAt: null, overall: 'hidden',
-  });
-  const unsub = endpointHealth.subscribe((s) => (health = s));
-  onDestroy(unsub);
+  // Read the store's reactive state directly — no subscribe()/local copy.
+  let stop: () => void = () => {};
+  onMount(() => { stop = endpointHealth.start(); });
+  onDestroy(() => stop());
 
   function bannerText(): string {
-    if (health.overall === 'offline') {
+    if (endpointHealth.state.overall === 'offline') {
       return "Office server offline — your recording will save locally, but transcription and SOAP will fail until it's back online.";
     }
-    if (health.overall === 'partial') {
-      if (health.ai === 'offline' && health.stt === 'online') {
+    if (endpointHealth.state.overall === 'partial') {
+      if (endpointHealth.state.ai === 'offline' && endpointHealth.state.stt === 'online') {
         return 'AI offline — your recording will save locally, but SOAP generation will fail.';
       }
-      if (health.stt === 'offline' && health.ai === 'online') {
+      if (endpointHealth.state.stt === 'offline' && endpointHealth.state.ai === 'online') {
         return 'Whisper STT offline — your recording will save locally, but transcription will fail.';
       }
     }
@@ -32,7 +31,7 @@
     // Same routing decision the pill makes:
     // partial with STT offline only → audio
     // everything else (partial with AI offline / offline both) → models
-    if (health.overall === 'partial' && health.ai === 'online' && health.stt === 'offline') {
+    if (endpointHealth.state.overall === 'partial' && endpointHealth.state.ai === 'online' && endpointHealth.state.stt === 'offline') {
       onopenSettings('audio');
     } else {
       onopenSettings('models');
@@ -40,7 +39,7 @@
   }
 </script>
 
-{#if health.overall === 'partial' || health.overall === 'offline'}
+{#if endpointHealth.state.overall === 'partial' || endpointHealth.state.overall === 'offline'}
   <div class="offline-banner" role="status" aria-live="polite">
     <span class="banner-text">{bannerText()}</span>
     <button type="button" class="banner-action" onclick={onOpenSettingsClick}>

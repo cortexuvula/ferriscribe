@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use medical_core::icd9::Icd9Entry;
-use medical_core::types::settings::SoapTemplate;
+use medical_core::types::settings::{IcdVersion, SoapTemplate};
 
 use crate::prompt_resolver::resolve_prompt;
 
@@ -25,11 +25,11 @@ use super::SoapPromptConfig;
 
 /// Build the placeholder map for the SOAP template.
 fn soap_placeholders(
-    icd_version: &str,
+    icd_version: IcdVersion,
     template: &SoapTemplate,
     icd9_candidates: &[Icd9Entry],
 ) -> HashMap<&'static str, String> {
-    let (icd_instruction, icd_label) = icd_code_parts(icd_version);
+    let (icd_instruction, icd_label) = icd_code_parts(icd_version.clone());
     let template_guidance = template_guidance_text(template);
     let icd_candidates = icd_candidates_block(icd_version, icd9_candidates);
 
@@ -46,23 +46,29 @@ fn soap_placeholders(
 /// Returns an empty string for ICD-10-only mode (no bundled ICD-10
 /// list) and when the candidate list is empty. The block instructs the
 /// model to select from the provided BC MSP-accepted codes.
-fn icd_candidates_block(icd_version: &str, candidates: &[Icd9Entry]) -> String {
-    let inject_icd9 = matches!(icd_version, "ICD-9" | "both");
+fn icd_candidates_block(icd_version: IcdVersion, candidates: &[Icd9Entry]) -> String {
+    let inject_icd9 = matches!(icd_version, IcdVersion::Icd9 | IcdVersion::Both);
     if !inject_icd9 || candidates.is_empty() {
         return String::new();
     }
     let mut out = String::with_capacity(candidates.len() * 48);
-    out.push_str("ICD-9 CODE SELECTION — choose up to 3 ICD-9 codes from this BC MSP-accepted list, one per line, ordered by clinical complexity (most complex first). Use the most specific code available (4- or 5-digit preferred). If none fits, choose the closest unspecified \".9\" variant, or V70.0 for routine encounters:\n");
+    out.push_str("ICD-9 CODE SELECTION — choose up to 3 ICD-9 codes from this BC MSP-accepted list, one per line, ordered by clinical complexity (most complex first). Use the most specific code available (4- or 5-digit preferred). Prefer screening codes (V81.x, V77.x, V16.x) for wellness/preventive visits. Avoid non-specific codes like V70.x unless the visit truly has no diagnosable complaint. If none fits, choose the closest unspecified \".9\" variant:\n");
     for entry in candidates {
+        // Sanitize description as a defense-in-depth measure against prompt
+        // injection (the ICD data is trusted government data compiled at
+        // build time, but this prevents future regressions if the source
+        // changes). Applied before truncation so a sanitizer that strips
+        // content cannot push a suffix past the truncation boundary.
+        let sanitized = crate::soap_generator::user_prompt::sanitize_prompt(&entry.description);
         // Truncate long descriptions to keep the prompt lean. Truncate by
         // char count (not byte index) — MSP descriptions contain en-dashes
         // and other multi-byte chars that would panic a byte slice.
-        let char_count = entry.description.chars().count();
+        let char_count = sanitized.chars().count();
         let desc = if char_count > 60 {
-            let head: String = entry.description.chars().take(57).collect();
+            let head: String = sanitized.chars().take(57).collect();
             format!("{head}…")
         } else {
-            entry.description.clone()
+            sanitized
         };
         out.push_str(&format!("  {} — {}\n", entry.code, desc));
     }
@@ -74,23 +80,23 @@ fn icd_candidates_block(icd_version: &str, candidates: &[Icd9Entry]) -> String {
 /// biller in either case). Encodes the CPSBC "up to 3 codes, complexity-
 /// ordered, most-specific available" guidance plus an explicit under-coding
 /// guard so a trivial visit is not padded to reach 3.
-const ICD9_MULTI_CODE_BODY: &str = "ICD-9 Codes (up to 3, one per line, most clinically complex first): [List each code on its own line as \"ICD-9 Code: <code> — <brief description>\". Use the most specific code available (4- or 5-digit preferred over 3-digit) — e.g., 250.40 (diabetes with renal manifestations) rather than 250.00 (diabetes without complication). Include every distinct condition actively addressed, assessed, or managed at this visit — not just the primary complaint. When a chronic condition (diabetes, hypertension, COPD, heart failure, depression, etc.) is managed or reviewed, include its code even if it is not the primary reason for the visit. When a definitive diagnosis is established, use the disease-specific code rather than a symptom code; if workup is still in progress, use the most specific symptom code for the presenting complaint. Do not use 780 (General Symptoms) as a catch-all. Prefer fewer codes for simple visits — a single acute complaint with no comorbidities managed at the visit correctly uses one code; do not pad to reach 3. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0.]";
+const ICD9_MULTI_CODE_BODY: &str = "ICD-9 Codes (up to 3, one per line, most clinically complex first): [List each code on its own line as \"ICD-9 Code: <code> — <brief description>\". Use the most specific code available (4- or 5-digit preferred over 3-digit) — e.g., 250.40 (diabetes with renal manifestations) rather than 250.00 (diabetes without complication). Include every distinct condition actively addressed, assessed, or managed at this visit — not just the primary complaint. When a chronic condition (diabetes, hypertension, COPD, heart failure, depression, etc.) is managed or reviewed, include its code even if it is not the primary reason for the visit. When a definitive diagnosis is established, use the disease-specific code rather than a symptom code; if workup is still in progress, use the most specific symptom code for the presenting complaint. Do not use 780 (General Symptoms) as a catch-all. Avoid non-specific routine-exam codes (V70.x) — prefer screening codes (V81.x for thyroid, V77.x for diabetes, V16.x for family history of cancer) when the visit is a screening or wellness encounter. Prefer fewer codes for simple visits — a single acute complaint with no comorbidities managed at the visit correctly uses one code; do not pad to reach 3.]";
 
 /// The `both`-mode label: the ICD-9 multi-code body followed by the
 /// single-code ICD-10 line. Pre-composed as a const so the function can
 /// return `&'static str` without allocating.
 const ICD9_AND_10_LABEL: &str = concat!(
-    "ICD-9 Codes (up to 3, one per line, most clinically complex first): [List each code on its own line as \"ICD-9 Code: <code> — <brief description>\". Use the most specific code available (4- or 5-digit preferred over 3-digit) — e.g., 250.40 (diabetes with renal manifestations) rather than 250.00 (diabetes without complication). Include every distinct condition actively addressed, assessed, or managed at this visit — not just the primary complaint. When a chronic condition (diabetes, hypertension, COPD, heart failure, depression, etc.) is managed or reviewed, include its code even if it is not the primary reason for the visit. When a definitive diagnosis is established, use the disease-specific code rather than a symptom code; if workup is still in progress, use the most specific symptom code for the presenting complaint. Do not use 780 (General Symptoms) as a catch-all. Prefer fewer codes for simple visits — a single acute complaint with no comorbidities managed at the visit correctly uses one code; do not pad to reach 3. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as V70.0.]",
-    "\nICD-10 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00.]"
+    "ICD-9 Codes (up to 3, one per line, most clinically complex first): [List each code on its own line as \"ICD-9 Code: <code> — <brief description>\". Use the most specific code available (4- or 5-digit preferred over 3-digit) — e.g., 250.40 (diabetes with renal manifestations) rather than 250.00 (diabetes without complication). Include every distinct condition actively addressed, assessed, or managed at this visit — not just the primary complaint. When a chronic condition (diabetes, hypertension, COPD, heart failure, depression, etc.) is managed or reviewed, include its code even if it is not the primary reason for the visit. When a definitive diagnosis is established, use the disease-specific code rather than a symptom code; if workup is still in progress, use the most specific symptom code for the presenting complaint. Do not use 780 (General Symptoms) as a catch-all. Avoid non-specific routine-exam codes (V70.x) — prefer screening codes (V81.x for thyroid, V77.x for diabetes, V16.x for family history of cancer) when the visit is a screening or wellness encounter. Prefer fewer codes for simple visits — a single acute complaint with no comorbidities managed at the visit correctly uses one code; do not pad to reach 3.]",
+    "\nICD-10 Code: [specific code reflecting the visit's primary issue.]"
 );
 
-fn icd_code_parts(version: &str) -> (&'static str, &'static str) {
+fn icd_code_parts(version: IcdVersion) -> (&'static str, &'static str) {
     match version {
-        "ICD-9" => ("ICD-9 code", ICD9_MULTI_CODE_BODY),
+        IcdVersion::Icd9 => ("ICD-9 code", ICD9_MULTI_CODE_BODY),
         // ICD-9 uses the same multi-code complexity body as pure ICD-9
         // mode (BC MSP bills ICD-9); ICD-10 stays single-code.
-        "both" => ("both ICD-9 and ICD-10 codes", ICD9_AND_10_LABEL),
-        _ => (
+        IcdVersion::Both => ("both ICD-9 and ICD-10 codes", ICD9_AND_10_LABEL),
+        IcdVersion::Icd10 => (
             "ICD-10 code",
             "ICD-10 Code: [specific code reflecting the visit's primary issue. For paperwork-only / wellness / lab-review visits with no diagnosable complaint, use a routine-encounter code such as Z00.00.]",
         ),
@@ -397,7 +403,7 @@ pub fn build_soap_prompt(config: &SoapPromptConfig) -> String {
         .unwrap_or_else(|| default_soap_prompt());
 
     let placeholders = soap_placeholders(
-        &config.icd_version,
+        config.icd_version.clone(),
         &config.template,
         &config.icd9_candidates,
     );
@@ -487,7 +493,7 @@ mod tests {
     #[test]
     fn default_soap_prompt_resolves_icd9() {
         let config = SoapPromptConfig {
-            icd_version: "ICD-9".into(),
+            icd_version: IcdVersion::Icd9,
             ..Default::default()
         };
         let prompt = build_soap_prompt(&config);
@@ -509,7 +515,7 @@ mod tests {
     #[test]
     fn default_soap_prompt_resolves_icd10() {
         let config = SoapPromptConfig {
-            icd_version: "ICD-10".into(),
+            icd_version: IcdVersion::Icd10,
             ..Default::default()
         };
         let prompt = build_soap_prompt(&config);
@@ -528,7 +534,7 @@ mod tests {
     #[test]
     fn default_soap_prompt_resolves_both_icd() {
         let config = SoapPromptConfig {
-            icd_version: "both".into(),
+            icd_version: IcdVersion::Both,
             ..Default::default()
         };
         let prompt = build_soap_prompt(&config);
@@ -555,7 +561,7 @@ mod tests {
         // with explicit guards against the 780 catch-all and the
         // under-coding of chronic conditions.
         let prompt = build_soap_prompt(&SoapPromptConfig {
-            icd_version: "ICD-9".into(),
+            icd_version: IcdVersion::Icd9,
             ..Default::default()
         });
         assert!(prompt.contains("up to 3"), "must teach up-to-3 codes");
@@ -581,12 +587,12 @@ mod tests {
         // complexity systems consume ICD-9; ICD-10 stays single-code. The
         // shared self-check legitimately *mentions* "ICD-9 mode: up to 3" as
         // an explanation, so we scope this assertion to the resolved label.
-        let (_, icd10_label) = icd_code_parts("ICD-10");
+        let (_, icd10_label) = icd_code_parts(IcdVersion::Icd10);
         assert!(
             !icd10_label.contains("up to 3"),
             "ICD-10 label must stay single-code: {icd10_label}"
         );
-        let (_, icd9_label) = icd_code_parts("ICD-9");
+        let (_, icd9_label) = icd_code_parts(IcdVersion::Icd9);
         assert!(
             icd9_label.contains("up to 3"),
             "ICD-9 label must carry the multi-code directive: {icd9_label}"
@@ -603,7 +609,7 @@ mod tests {
         // F4 guard: the `both` arm must use the SAME multi-code ICD-9 body
         // as pure ICD-9 mode (no contradiction with the shared self-check,
         // which describes "ICD-9 mode: up to 3 codes"). ICD-10 stays single.
-        let (_, both_label) = icd_code_parts("both");
+        let (_, both_label) = icd_code_parts(IcdVersion::Both);
         assert!(
             both_label.contains("up to 3"),
             "`both` ICD-9 portion must be multi-code (consistent with self-check): {both_label}"
@@ -807,14 +813,17 @@ mod tests {
     fn custom_soap_prompt_overrides_default() {
         let config = SoapPromptConfig {
             custom_prompt: Some("My custom template with {icd_label}".into()),
-            icd_version: "ICD-9".into(),
+            icd_version: IcdVersion::Icd9,
             ..Default::default()
         };
         let prompt = build_soap_prompt(&config);
         // Custom template is used, and placeholders are still resolved.
         // The ICD-9 label now carries the multi-code complexity guidance.
         assert!(prompt.starts_with("My custom template with ICD-9 Codes (up to 3"));
-        assert!(prompt.contains("V70.0"));
+        // The multi-code body steers away from V70.x routine-exam codes
+        // and toward screening codes for wellness visits.
+        assert!(prompt.contains("V70.x"));
+        assert!(prompt.contains("screening codes"));
         // ICD instruction no longer carries the (suggested) marker
         assert!(!prompt.contains("(suggested)"));
     }
@@ -1116,7 +1125,7 @@ mod tests {
 
     #[test]
     fn icd_candidates_block_empty_for_empty_list() {
-        let block = icd_candidates_block("ICD-9", &[]);
+        let block = icd_candidates_block(IcdVersion::Icd9, &[]);
         assert!(
             block.is_empty(),
             "empty candidate list must produce no block"
@@ -1129,7 +1138,7 @@ mod tests {
         // if the selector erroneously passed some (it only runs for
         // ICD-9/both, but this guard is the safety net).
         let cands = vec![entry("401.9", "HYPERTENSION")];
-        let block = icd_candidates_block("ICD-10", &cands);
+        let block = icd_candidates_block(IcdVersion::Icd10, &cands);
         assert!(
             block.is_empty(),
             "ICD-10 mode must never inject ICD-9 candidates"
@@ -1139,7 +1148,7 @@ mod tests {
     #[test]
     fn icd_candidates_block_formats_entries() {
         let cands = vec![entry("847.2", "LUMBAR"), entry("V70.0", "ROUTINE EXAM")];
-        let block = icd_candidates_block("ICD-9", &cands);
+        let block = icd_candidates_block(IcdVersion::Icd9, &cands);
         assert!(block.contains("ICD-9 CODE SELECTION"), "header present");
         assert!(block.contains("847.2 — LUMBAR"), "first entry formatted");
         assert!(
@@ -1157,7 +1166,7 @@ mod tests {
             "test setup: desc must be >60 chars"
         );
         let cands = vec![entry("999.9", long_desc)];
-        let block = icd_candidates_block("ICD-9", &cands);
+        let block = icd_candidates_block(IcdVersion::Icd9, &cands);
         assert!(
             block.contains("…"),
             "long description must be truncated with ellipsis"
@@ -1174,7 +1183,7 @@ mod tests {
         // Exactly 60 chars — must NOT be truncated (the boundary is >60).
         let exact_60 = "EXACTLY SIXTY CHARACTERS LONG DESCRIPTION HERE FOR TEST!!"; // 58 chars — under, should be intact
         let cands = vec![entry("401.9", exact_60)];
-        let block = icd_candidates_block("ICD-9", &cands);
+        let block = icd_candidates_block(IcdVersion::Icd9, &cands);
         assert!(
             block.contains(exact_60),
             "description under 60 chars must appear verbatim"
@@ -1194,7 +1203,7 @@ mod tests {
         let multibyte = "DIABETES WITH NEUROLOGICAL MANIFESTATIONS – TYPE II UNSPECIFIED";
         assert!(multibyte.chars().count() > 60, "test setup");
         let cands = vec![entry("250.60", multibyte)];
-        let block = icd_candidates_block("ICD-9", &cands);
+        let block = icd_candidates_block(IcdVersion::Icd9, &cands);
         // Must not panic (the test reaching this assertion is the guard)
         // and must contain the ellipsis.
         assert!(
@@ -1208,7 +1217,7 @@ mod tests {
     fn icd_candidates_block_injected_for_both_mode() {
         // `both` mode should also inject ICD-9 candidates (BC MSP bills ICD-9).
         let cands = vec![entry("401.9", "HYPERTENSION")];
-        let block = icd_candidates_block("both", &cands);
+        let block = icd_candidates_block(IcdVersion::Both, &cands);
         assert!(
             !block.is_empty(),
             "`both` mode must inject ICD-9 candidates"
@@ -1221,7 +1230,7 @@ mod tests {
         // resolve the {icd_candidates} placeholder (no leftover token) and
         // include the candidate block.
         let config = SoapPromptConfig {
-            icd_version: "ICD-9".into(),
+            icd_version: IcdVersion::Icd9,
             icd9_candidates: vec![entry("847.2", "LUMBAR"), entry("V70.0", "ROUTINE")],
             ..Default::default()
         };
@@ -1244,7 +1253,7 @@ mod tests {
     fn icd_candidates_placeholder_empty_for_icd10_prompt() {
         // Even with candidates present, ICD-10 mode must not inject them.
         let config = SoapPromptConfig {
-            icd_version: "ICD-10".into(),
+            icd_version: IcdVersion::Icd10,
             icd9_candidates: vec![entry("401.9", "HYPERTENSION")],
             ..Default::default()
         };

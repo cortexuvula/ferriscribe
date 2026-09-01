@@ -16,6 +16,27 @@ export interface PatientContext {
   allergies: string[];
 }
 
+// ── Generation Stats ──────────────────────────────────────────────────────────
+
+/** Mirrors Rust `GenerationStat` — throughput metrics for one LLM generation. */
+export interface GenerationStat {
+  provider: string;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  duration_ms: number;
+  tokens_per_second: number;
+  generated_at: string;
+}
+
+/** Mirrors Rust `GenerationProgressStats` — live generation throughput.
+ *  Counts and durations only, never content. */
+export interface GenerationProgressStats {
+  tokens: number;
+  elapsed_ms: number;
+  tokens_per_second: number;
+}
+
 // ── Recording ─────────────────────────────────────────────────────────────────
 
 export interface Recording {
@@ -39,6 +60,7 @@ export interface Recording {
   metadata: {
     context?: string;
     patient_context?: PatientContext;
+    generation_stats?: { [docType: string]: GenerationStat };
     [key: string]: unknown;
   } | null;
 }
@@ -59,6 +81,7 @@ export interface RecordingSummary {
   has_letter: boolean;
   has_peer_discussion: boolean;
   is_remote: boolean;
+  tokens_per_second: number | null;
 }
 
 // ── Context Template ──────────────────────────────────────────────────────────
@@ -81,23 +104,46 @@ export interface AppConfig {
   storage_path: string | null;
   ai_provider: string;
   ai_model: string;
+  /** Optional vision model for OCR (extracting text from dropped documents).
+   *  Mirrors `ocr_model: Option<String>` in crates/core/src/types/settings.rs.
+   *  When null, the generation model (`ai_model`) is used. */
+  ocr_model: string | null;
   whisper_model: string;
   tts_provider: string;
   tts_voice: string;
   lmstudio_host: string;
   lmstudio_port: number;
+  /** Disable the reasoning/"thinking" phase for LM Studio models. LM Studio
+   *  drops API-level thinking parameters, so the provider appends an
+   *  assistant prefill with a pre-closed <think> block instead. Mirrors
+   *  `lmstudio_disable_thinking: bool` in crates/core/src/types/settings.rs. */
+  lmstudio_disable_thinking: boolean;
   stt_mode: 'local' | 'remote';
   stt_remote_host: string;
   stt_remote_port: number;
   stt_remote_model: string;
   ollama_host: string;
   ollama_port: number;
+  /** Disable the reasoning/"thinking" phase for Ollama models — sends
+   *  `reasoning_effort: "none"` on the OpenAI-compatible endpoint. Mirrors
+   *  `ollama_disable_thinking: bool` in crates/core/src/types/settings.rs. */
+  ollama_disable_thinking: boolean;
+  omlx_host: string;
+  omlx_port: number;
+  /** Disable the reasoning/"thinking" phase for oMLX models — appends an
+   *  assistant prefill with a pre-closed <think> block (same strategy as LM
+   *  Studio). Mirrors `omlx_disable_thinking: bool` in
+   *  crates/core/src/types/settings.rs. */
+  omlx_disable_thinking: boolean;
   temperature: number;
   input_device: string | null;
   sample_rate: number;
   autosave_enabled: boolean;
   autosave_interval_secs: number;
   auto_generate_soap: boolean;
+  /** Play a short local chime when a SOAP note finishes generating.
+   *  Mirrors `soap_notification_sound: bool` in crates/core/src/types/settings.rs. */
+  soap_notification_sound: boolean;
   search_top_k: number;
   mmr_lambda: number;
   vocabulary_enabled: boolean;
@@ -126,8 +172,22 @@ export interface AppConfig {
   capture_for_training: boolean;
   // Security
   allow_public_endpoint: boolean;
+  /** Backup target agent URL; null until configured. Mirrors
+   *  `backup_target_url: Option<String>` in crates/core/src/types/settings.rs. */
+  backup_target_url: string | null;
+  /** Append token for the backup target (encrypted at rest in the DB).
+   *  The target-side admin/prune token never lives on this machine. */
+  backup_append_token: string | null;
+  /** Folder destination for backups (USB / network / cloud-synced
+   *  folder) — alternative to `backup_target_url`, mutually exclusive
+   *  with it. Mirrors `backup_dest_path` in crates/core settings.rs. */
+  backup_dest_path: string | null;
   // Onboarding
   onboarding_completed: boolean;
+  /** ISO timestamp of when the user accepted the Terms of Service.
+   *  `null` until accepted — App.svelte gates on it once. Mirrors
+   *  `tos_accepted_at` in crates/core settings.rs. */
+  tos_accepted_at: string | null;
   // Updates
   auto_update_check: boolean;
   // Quick-add condition chips
@@ -138,6 +198,12 @@ export interface AppConfig {
    *  syncs two-way with the paired server over Tailscale. Audio is archived on the
    *  server and fetched on demand. Defaults to false. */
   sync_content: boolean;
+  /** Per-machine recordings retention policy — the daily sweeper moves
+   *  recordings older than this many days to trash. `null` = keep forever
+   *  (default; `#[serde(default)]` on the backend deserializes old configs as
+   *  null). Mirrors `retention_days: Option<u32>` in
+   *  crates/core/src/types/settings.rs. */
+  retention_days: number | null;
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────

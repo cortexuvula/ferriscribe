@@ -14,7 +14,7 @@
     <span class="mode-icon" aria-hidden="true">🖥️</span>
     <div class="mode-info">
       <strong>This machine runs its own AI</strong>
-      <span>For a single computer, or the clinic's main server. You'll set up Ollama or LM Studio here.</span>
+      <span>For a single computer, or the clinic's main server. You'll set up a local AI server (Ollama, LM Studio, or oMLX) here.</span>
     </div>
   </button>
 

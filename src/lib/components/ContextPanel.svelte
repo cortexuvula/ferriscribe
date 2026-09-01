@@ -1,6 +1,7 @@
 <script lang="ts">
   import { contextTemplates } from '../stores/contextTemplates.svelte';
   import ConditionChips from './ConditionChips.svelte';
+  import OcrDropZone, { type OcrFileStatus } from './OcrDropZone.svelte';
 
   interface Props {
     medicationsText: string;
@@ -9,6 +10,7 @@
     contextText: string;
     expanded: boolean;
     hasActiveContext: boolean;
+    contextCharCount?: number;
     onToggle: () => void;
     onInsertTemplate: (text: string) => void;
     onClearContext: () => void;
@@ -16,6 +18,12 @@
     onAllergiesChange: (value: string) => void;
     onConditionsChange: (value: string) => void;
     onContextChange: (value: string) => void;
+    ocrFiles: OcrFileStatus[];
+    ocrText: string;
+    ocrLoading: boolean;
+    onOcrFilesSelected: (paths: string[]) => void;
+    onOcrTextChange: (text: string) => void;
+    onRemoveOcrFile: (id: string) => void;
   }
 
   const {
@@ -25,6 +33,7 @@
     contextText,
     expanded,
     hasActiveContext,
+    contextCharCount = 0,
     onToggle,
     onInsertTemplate,
     onClearContext,
@@ -32,6 +41,12 @@
     onAllergiesChange,
     onConditionsChange,
     onContextChange,
+    ocrFiles = [],
+    ocrText = '',
+    ocrLoading = false,
+    onOcrFilesSelected = () => {},
+    onOcrTextChange = () => {},
+    onRemoveOcrFile = () => {},
   }: Props = $props();
 
   const CONTEXT_TEMPLATES = [
@@ -52,6 +67,19 @@
     const next = conditionsText.trimEnd();
     const sep = next.length > 0 && !next.endsWith('\n') ? '\n' : '';
     onConditionsChange(next + sep + condition + '\n');
+  }
+
+  // Remove the exact-matching line (case-insensitive, trimmed) from the
+  // textarea — the mirror of addCondition, invoked when an active chip is
+  // clicked to toggle it off. Only the single matching line is removed;
+  // hand-edited variants are preserved.
+  function removeCondition(condition: string) {
+    const target = condition.trim().toLowerCase();
+    if (target.length === 0) return;
+    const kept = conditionsText
+      .split('\n')
+      .filter((l) => l.trim().toLowerCase() !== target);
+    onConditionsChange(kept.join('\n'));
   }
 
   // Refresh saved templates when the panel is first expanded, so newly-created
@@ -101,7 +129,11 @@
       ></textarea>
 
       <label class="field-label" for="ctx-conditions">Known conditions (one per line)</label>
-      <ConditionChips onAdd={addCondition} />
+      <ConditionChips
+        onAdd={addCondition}
+        onRemove={removeCondition}
+        selectedConditions={conditionsText}
+      />
       <textarea
         id="ctx-conditions"
         class="context-textarea structured"
@@ -113,7 +145,7 @@
 
       <label class="field-label" for="ctx-notes">Notes</label>
       <div class="context-templates">
-        {#each CONTEXT_TEMPLATES as tmpl}
+        {#each CONTEXT_TEMPLATES as tmpl (tmpl.label)}
           <button class="template-chip" onclick={() => onInsertTemplate(tmpl.text)}>
             {tmpl.label}
           </button>
@@ -144,6 +176,20 @@
           Clear notes
         </button>
       {/if}
+
+      <span class="char-counter" class:warning={contextCharCount > 40000} class:danger={contextCharCount > 50000}>
+        {contextCharCount.toLocaleString()} / 50,000 chars
+      </span>
+
+      <!-- OCR Drop Zone — shared component -->
+      <OcrDropZone
+        {ocrFiles}
+        {ocrText}
+        {ocrLoading}
+        {onOcrFilesSelected}
+        {onOcrTextChange}
+        {onRemoveOcrFile}
+      />
     </div>
   {/if}
 </div>
@@ -202,7 +248,7 @@
     padding: 0 14px 14px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
   }
 
   .context-hint {
@@ -274,12 +320,12 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    margin-top: 4px;
-    margin-bottom: -4px;
+    margin-top: 6px;
+    margin-bottom: 2px;
   }
 
   .context-textarea.structured {
-    min-height: 56px;
+    min-height: 72px;
   }
 
   .context-textarea::placeholder {
@@ -307,5 +353,19 @@
   .context-clear:hover {
     color: var(--danger, #ef4444);
     border-color: var(--danger, #ef4444);
+  }
+
+  .char-counter {
+    font-size: 11px;
+    color: var(--text-muted);
+    align-self: flex-end;
+  }
+
+  .char-counter.warning {
+    color: var(--warning, #f59e0b);
+  }
+
+  .char-counter.danger {
+    color: var(--danger, #ef4444);
   }
 </style>

@@ -9,7 +9,9 @@
 //!
 //! - `prompt_template` — the built-in default prompt and [`build_soap_prompt`].
 //! - `user_prompt` — [`build_user_prompt`], plus the `sanitize_prompt` helper.
-//! - `postprocess` — markdown cleanup and section formatting on AI output.
+//! - `postprocess` — markdown cleanup, section formatting, and ICD code
+//!   extraction (codes are stripped from the note and returned for
+//!   `metadata.icd_codes`) on AI output.
 //!
 //! # Critical Constraint: Anti-Fabrication
 //!
@@ -26,15 +28,19 @@
 //! and fabrication guards.
 
 use medical_core::icd9::Icd9Entry;
-use medical_core::types::settings::SoapTemplate;
+use medical_core::types::settings::{IcdVersion, SoapTemplate};
 
 mod postprocess;
 mod prompt_template;
-mod user_prompt;
+pub(crate) mod user_prompt;
 
 pub mod icd_selector;
 
-pub use postprocess::postprocess_soap;
+pub use postprocess::{ExtractedIcdCode, IcdKind, extract_icd_codes, postprocess_soap};
+// Crate-visible in test builds only, for the anti-drift suite in
+// `crate::markdown` (pins clean_text's contract next to strip_markdown's).
+#[cfg(test)]
+pub(crate) use postprocess::clean_text;
 pub use prompt_template::{build_soap_prompt, default_soap_prompt};
 pub use user_prompt::build_user_prompt;
 
@@ -47,9 +53,11 @@ pub struct SoapPromptConfig {
     /// Template variant that selects template-specific guidance text
     /// (e.g., "focus on changes since last visit" for FollowUp).
     pub template: SoapTemplate,
-    /// One of `"ICD-9"`, `"ICD-10"`, `"both"` (case-sensitive).
-    /// Determines the ICD code label and instruction placeholders.
-    pub icd_version: String,
+    /// ICD version used to select the ICD code label and instruction
+    /// placeholders. Threaded as an enum rather than a display string so
+    /// a typo in one of the three call sites cannot silently disable
+    /// ICD-9 selection.
+    pub icd_version: IcdVersion,
     /// User-supplied override for the entire system prompt. Empty string is
     /// treated as absent and falls back to the default template.
     pub custom_prompt: Option<String>,
@@ -64,7 +72,7 @@ impl Default for SoapPromptConfig {
     fn default() -> Self {
         Self {
             template: SoapTemplate::FollowUp,
-            icd_version: "ICD-10".into(),
+            icd_version: IcdVersion::Icd10,
             custom_prompt: None,
             icd9_candidates: vec![],
         }

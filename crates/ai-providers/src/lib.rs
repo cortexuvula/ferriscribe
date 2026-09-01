@@ -1,6 +1,6 @@
 //! Local AI provider integration for FerriScribe.
 //!
-//! This crate provides Ollama and LM Studio connectivity via the
+//! This crate provides Ollama, LM Studio, and oMLX connectivity via the
 //! OpenAI-compatible chat-completions wire protocol, with streaming (SSE),
 //! tool calling, automatic retry with exponential backoff, and LAN/Tailscale
 //! endpoint resolution.
@@ -17,27 +17,39 @@
 //!
 //! - [`ProviderRegistry`] — holds registered [`AiProvider`] instances keyed
 //!   by name, tracks the active provider. Used by `src-tauri` to switch
-//!   between Ollama and LM Studio at runtime.
-//! - [`ollama::OllamaProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed at
-//!   an Ollama server (default `http://localhost:11434/v1`).
+//!   between the local providers at runtime.
+//! - [`local_openai`] — the shared implementation every local provider
+//!   delegates to: endpoint policy, LAN/Tailscale resolution with a 30s
+//!   cache, bearer propagation, thinking-model control, and the full
+//!   [`AiProvider`] surface, parameterized by a static
+//!   [`local_openai::ProviderMeta`].
+//! - [`ollama::OllamaProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed
+//!   at an Ollama server (default `http://localhost:11434/v1`).
 //! - [`lmstudio::LmStudioProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed
 //!   at an LM Studio server (default `http://localhost:1234/v1`).
+//! - [`omlx::OmlxProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed
+//!   at an oMLX server (default `http://localhost:8000/v1`).
 //! - [`openai_compat::OpenAiCompatibleClient`] — generic HTTP client for any
 //!   endpoint implementing the OpenAI chat-completions protocol.
-//! - [`http_client`] — retry infrastructure: [`RetryConfig`], [`CircuitBreaker`],
+//! - [`http_client`] — retry infrastructure: [`RetryConfig`],
 //!   `send_with_retry`, and retry classification helpers.
 //! - [`sse`] — SSE stream parser for streaming AI responses.
 //!
 //! [`AiProvider`]: medical_core::traits::AiProvider
 //! [`endpoint_policy`]: medical_core::endpoint_policy
 //! [`RetryConfig`]: http_client::RetryConfig
-//! [`CircuitBreaker`]: http_client::CircuitBreaker
 
 pub mod http_client;
 pub mod lmstudio;
+pub mod local_openai;
 pub mod ollama;
+pub mod omlx;
 pub mod openai_compat;
 pub mod sse;
+
+// Re-exported so non-streaming consumers outside this crate (e.g. the
+// src-tauri generation stream driver) share ONE think-strip implementation.
+pub use openai_compat::strip_leading_think_block;
 
 use medical_core::traits::AiProvider;
 use std::collections::HashMap;

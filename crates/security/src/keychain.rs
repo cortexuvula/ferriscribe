@@ -5,12 +5,12 @@
 //! - Windows: Credential Manager via `windows-native`
 //! - Linux: libsecret / Secret Service via `sync-secret-service`
 //!
-//! This module manages a **single** 32-byte secret — the SQLCipher database
-//! encryption key — stored under service `rustMedicalAssistant` / account
-//! `db-key`. Other secrets (API keys, sharing tokens) live in
-//! [`crate::key_storage::KeyStorage`]; do not add new keychain entries
-//! here without coordinating with the recovery path in
-//! `src-tauri/src/commands/recovery.rs`.
+//! This module manages 32-byte secrets under service `rustMedicalAssistant`:
+//! the SQLCipher database encryption key (account `db-key`) and the backup
+//! wrapping key (account `backup-wrapping-key`, added by the off-machine
+//! backup tool — kept separate so wiping the DB key never destroys the
+//! ability to restore old snapshots). Other secrets (API keys, sharing
+//! tokens) live in [`crate::key_storage::KeyStorage`].
 //!
 //! The sharing crate reuses this same keychain entry as the sharing-store
 //! encryption key so there is only one OS-level secret to manage per
@@ -36,6 +36,12 @@ pub const KEYCHAIN_SERVICE: &str = "rustMedicalAssistant";
 /// Account name used to identify the database encryption key within the
 /// [`KEYCHAIN_SERVICE`] service.
 pub const KEYCHAIN_DB_KEY_ACCOUNT: &str = "db-key";
+/// Account name for the backup wrapping key — the 32-byte root key whose
+/// only copies off-machine are the escrow artifacts (recovery sheet +
+/// offline USB) produced by the `medical-backup` tool. Distinct from
+/// `db-key` so a "wipe and start fresh" of the DB key never destroys the
+/// ability to restore old snapshots.
+pub const KEYCHAIN_BACKUP_KEY_ACCOUNT: &str = "backup-wrapping-key";
 
 /// Errors returned by the keychain wrapper.
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +50,9 @@ pub enum KeychainError {
     Access(String),
     #[error("keychain entry malformed: {0}")]
     Malformed(String),
+    // Entropy is no longer constructible after the rand 0.9 migration
+    // (fill_bytes is infallible on ThreadRng). Retained for API/doc stability.
+    #[allow(dead_code)]
     #[error("entropy source failed: {0}")]
     Entropy(String),
 }
@@ -63,8 +72,16 @@ pub type KeychainResult<T> = Result<T, KeychainError>;
 /// - [`KeychainError::Malformed`] if the stored entry is not exactly 32
 ///   bytes (indicates corruption or a different writer).
 pub fn get_db_key() -> KeychainResult<Option<[u8; 32]>> {
-    let entry = Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_DB_KEY_ACCOUNT)
-        .map_err(|e| KeychainError::Access(e.to_string()))?;
+    get_secret(KEYCHAIN_DB_KEY_ACCOUNT)
+}
+
+/// Read a 32-byte secret from the OS keychain under `account`.
+///
+/// Returns `Ok(None)` if no entry exists. Shared implementation behind
+/// [`get_db_key`] and the backup wrapping-key lookup in `medical-backup`.
+pub fn get_secret(account: &str) -> KeychainResult<Option<[u8; 32]>> {
+    let entry =
+        Entry::new(KEYCHAIN_SERVICE, account).map_err(|e| KeychainError::Access(e.to_string()))?;
     match entry.get_secret() {
         Ok(bytes) => {
             if bytes.len() != 32 {
@@ -82,6 +99,15 @@ pub fn get_db_key() -> KeychainResult<Option<[u8; 32]>> {
     }
 }
 
+/// Store a 32-byte secret under `account`, creating or replacing the entry.
+pub fn set_secret(account: &str, key: [u8; 32]) -> KeychainResult<()> {
+    let entry =
+        Entry::new(KEYCHAIN_SERVICE, account).map_err(|e| KeychainError::Access(e.to_string()))?;
+    entry
+        .set_secret(&key)
+        .map_err(|e| KeychainError::Access(e.to_string()))
+}
+
 /// Get the existing database key from the keychain, or generate and store
 /// a new random 32-byte key if none exists yet.
 ///
@@ -95,18 +121,19 @@ pub fn get_db_key() -> KeychainResult<Option<[u8; 32]>> {
 /// - [`KeychainError::Entropy`] if the platform RNG cannot produce 32
 ///   random bytes (effectively impossible on a functioning OS).
 pub fn get_or_create_db_key() -> KeychainResult<[u8; 32]> {
-    if let Some(key) = get_db_key()? {
+    get_or_create_secret(KEYCHAIN_DB_KEY_ACCOUNT)
+}
+
+/// Get the existing 32-byte secret under `account`, or generate and store
+/// a new random key if none exists yet. Shared implementation behind
+/// [`get_or_create_db_key`] and the backup wrapping-key bootstrap.
+pub fn get_or_create_secret(account: &str) -> KeychainResult<[u8; 32]> {
+    if let Some(key) = get_secret(account)? {
         return Ok(key);
     }
     let mut key = [0u8; 32];
-    rand::thread_rng()
-        .try_fill_bytes(&mut key)
-        .map_err(|e| KeychainError::Entropy(e.to_string()))?;
-    let entry = Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_DB_KEY_ACCOUNT)
-        .map_err(|e| KeychainError::Access(e.to_string()))?;
-    entry
-        .set_secret(&key)
-        .map_err(|e| KeychainError::Access(e.to_string()))?;
+    rand::rng().fill_bytes(&mut key);
+    set_secret(account, key)?;
     Ok(key)
 }
 

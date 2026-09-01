@@ -6,6 +6,8 @@ export interface ConditionChip {
   updated_at: string;
   deleted_at: string | null;
   sort_order: number;
+  /** Times this chip has been added to a note. Drives frequency ordering. */
+  use_count: number;
 }
 
 export async function listConditionChips(): Promise<ConditionChip[]> {
@@ -20,8 +22,14 @@ export async function removeConditionChip(text: string): Promise<ConditionChip[]
   return invoke<ConditionChip[]>('remove_condition_chip', { text });
 }
 
-export async function reorderConditionChips(orderedIds: string[]): Promise<ConditionChip[]> {
-  return invoke<ConditionChip[]>('reorder_condition_chips', { orderedIds });
+/**
+ * Increment a chip's use count (called when the condition is added to a note).
+ * Returns the active list, reordered by use-count descending. Sync reconciles
+ * counts across machines via MAX merge, so this never clobbers a larger count
+ * elsewhere.
+ */
+export async function incrementConditionChipUse(text: string): Promise<ConditionChip[]> {
+  return invoke<ConditionChip[]>('increment_condition_chip_use', { text });
 }
 
 export async function syncConditionChips(): Promise<ConditionChip[]> {

@@ -1,0 +1,32 @@
+name: Scheduled cargo audit
+
+# Re-scans Cargo.lock for RustSec advisories between releases. ci.yml's
+# security job only runs on PR/push, so an advisory published after the last
+# push would otherwise go unnoticed until the next code change touches the
+# repo. Scheduled workflows run against the default branch's copy of this
+# file.
+#
+# Keep the --ignore list and the accepted-risk rationale in sync with the
+# security job in ci.yml (the canonical, commented copy lives there).
+
+on:
+  schedule:
+    # Mondays, 06:30 UTC.
+    - cron: '30 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: taiki-e/install-action@17dfa9a7aa66ae804b5cbd9f505a33815221f967 # cargo-audit
+        with:
+          tool: cargo-audit
+      - name: Cargo audit
+        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195

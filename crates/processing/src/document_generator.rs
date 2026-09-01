@@ -52,6 +52,39 @@ fn format_now_for_prompt() -> String {
     Local::now().format("Time %H:%M Date %d %b %Y").to_string()
 }
 
+/// Prepend a "Supporting Documents" section to the user prompt when context
+/// is present. Used by all generation prompt builders.
+///
+/// When `context` is `Some` and non-empty (after trimming), the returned
+/// string has the form:
+///
+/// ```text
+/// ## Supporting Documents
+///
+/// {ctx}
+///
+/// ---
+///
+/// {user_prompt}
+/// ```
+///
+/// When `context` is `None` or whitespace-only, `user_prompt` is returned
+/// unchanged.
+pub(crate) fn inject_context(user_prompt: &str, context: Option<&str>) -> String {
+    match context {
+        Some(ctx) if !ctx.trim().is_empty() => {
+            // Sanitize user-supplied context to strip prompt-injection patterns
+            // (same patterns the SOAP generator strips via sanitize_prompt).
+            let sanitized = crate::soap_generator::user_prompt::sanitize_prompt(ctx);
+            if sanitized.is_empty() {
+                return user_prompt.to_string();
+            }
+            format!("## Supporting Documents\n\n{sanitized}\n\n---\n\n{user_prompt}")
+        }
+        _ => user_prompt.to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Default templates
 // ---------------------------------------------------------------------------
@@ -97,6 +130,29 @@ pub fn default_synopsis_prompt() -> &'static str {
      Write in clear, professional language suitable for a quick clinical overview."
 }
 
+/// Returns the built-in default system prompt for the standalone Letter Writer
+/// (OCR a document → draft a letter from it).
+///
+/// The template has no placeholders. It instructs the model to rely strictly on
+/// facts present in the source document (anti-fabrication), honour the requested
+/// tone and letter type, follow the writer's instructions, and output plain text.
+pub fn default_letter_from_document_prompt() -> &'static str {
+    "You are a professional medical letter writer. Draft a polished letter based \
+     on the provided source document and the writer's instructions. \
+     Use only facts that appear in the source document — do not invent clinical \
+     details, diagnoses, medications, dates, or patient identifiers that are not \
+     present in the source. \
+     Match the requested tone and letter type, and follow the writer's specific \
+     instructions closely. \
+     Format the letter with a date line, greeting, body paragraphs, and a \
+     professional closing. \
+     Do not use markdown formatting. Write in plain text only. \
+     You may use uppercase headings (e.g., RE:) for structure. \
+     If the source document is missing information needed for a complete letter, \
+     insert a clearly marked placeholder such as [NOT IN SOURCE: ...] rather than \
+     guessing."
+}
+
 // ---------------------------------------------------------------------------
 // Referral letter
 // ---------------------------------------------------------------------------
@@ -115,6 +171,7 @@ pub fn build_referral_prompt(
     recipient_type: &str,
     urgency: &str,
     custom_template: Option<&str>,
+    context: Option<&str>,
 ) -> (String, String) {
     let template = custom_template
         .filter(|s| !s.is_empty())
@@ -136,7 +193,7 @@ pub fn build_referral_prompt(
         soap_note = soap_note,
     );
 
-    (system, user)
+    (system, inject_context(&user, context))
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +219,7 @@ pub fn build_letter_prompt(
     letter_type: &str,
     audience: Option<&LetterAudienceContext>,
     custom_template: Option<&str>,
+    context: Option<&str>,
 ) -> (String, String) {
     let time_date = format_now_for_prompt();
 
@@ -176,7 +234,7 @@ pub fn build_letter_prompt(
             // Case 1: audience with user_template — resolve placeholders
             let user =
                 resolve_audience_user_template(user_tmpl, letter_type, &time_date, soap_note);
-            return (system, user);
+            return (system, inject_context(&user, context));
         }
 
         // Case 2: audience without user_template — default user template with audience name
@@ -188,7 +246,7 @@ pub fn build_letter_prompt(
             time_date = time_date,
             soap_note = soap_note,
         );
-        return (system, user);
+        return (system, inject_context(&user, context));
     }
 
     // Case 3: no audience — legacy behaviour
@@ -206,7 +264,7 @@ pub fn build_letter_prompt(
         soap_note = soap_note,
     );
 
-    (system, user)
+    (system, inject_context(&user, context))
 }
 
 /// Resolve `{letter_type}`, `{time_date}`, and `{soap_note}` in an audience user template.
@@ -223,8 +281,11 @@ fn resolve_audience_user_template(
     out
 }
 
-// NOTE: see also `postprocess::clean_text` which strips similar markdown patterns
-// for SOAP output. If consolidating in the future, extract shared helpers.
+// NOTE: see also `postprocess::clean_text` which strips similar markdown
+// patterns for SOAP output. The two have intentionally different contracts
+// (headings, bullets, links, citations, code fences) — documented and
+// pinned by the anti-drift suite in `crate::markdown`. Do NOT merge them
+// blindly: every nominally-shared regex differs in a quantifier.
 
 /// Remove common markdown syntax from AI-generated text.
 ///
@@ -322,7 +383,11 @@ pub fn strip_markdown(text: &str) -> String {
 ///
 /// The user prompt includes the current date/time and the full SOAP note,
 /// with an instruction to summarise in under 200 words.
-pub fn build_synopsis_prompt(soap_note: &str, custom_template: Option<&str>) -> (String, String) {
+pub fn build_synopsis_prompt(
+    soap_note: &str,
+    custom_template: Option<&str>,
+    context: Option<&str>,
+) -> (String, String) {
     let template = custom_template
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_synopsis_prompt());
@@ -337,7 +402,104 @@ pub fn build_synopsis_prompt(soap_note: &str, custom_template: Option<&str>) -> 
         soap_note = soap_note,
     );
 
-    (system, user)
+    (system, inject_context(&user, context))
+}
+
+// ---------------------------------------------------------------------------
+// Letter from document (standalone Letter Writer)
+// ---------------------------------------------------------------------------
+
+/// Build `(system_prompt, user_prompt)` for the standalone Letter Writer, which
+/// drafts a letter from an OCR'd (or pasted) source document plus a few optional
+/// fields and freeform writer's instructions.
+///
+/// If `custom_template` is provided and non-empty, it replaces
+/// [`default_letter_from_document_prompt`]. The default template has no
+/// placeholders; a custom template is resolved with an empty map so that any
+/// unknown `{tokens}` remain visible (matching [`build_synopsis_prompt`]'s
+/// contract).
+///
+/// `document_text` is treated as trusted input (analogous to the SOAP note in
+/// the other builders) and passed verbatim. `user_instructions`, by contrast,
+/// is freeform user text and is sanitised via the SOAP generator's prompt-
+/// injection filter before being inserted, then rendered under a clearly
+/// delimited "## Writer's instructions" section.
+pub fn build_letter_from_document_prompt(
+    document_text: &str,
+    recipient: Option<&str>,
+    letter_type: Option<&str>,
+    tone: Option<&str>,
+    re_line: Option<&str>,
+    user_instructions: Option<&str>,
+    custom_template: Option<&str>,
+) -> (String, String) {
+    let template = custom_template
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_letter_from_document_prompt());
+
+    // Default template has no placeholders; resolve with an empty map so custom
+    // templates keep their unresolved tokens visible (same contract as synopsis).
+    let system = resolve_prompt(template, &HashMap::new());
+
+    let time_date = format_now_for_prompt();
+
+    let recipient_line = recipient
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("Recipient: {s}"))
+        .unwrap_or_else(|| {
+            "Recipient: (not specified — infer from the document, or use a generic greeting)"
+                .to_string()
+        });
+
+    let letter_type_line = letter_type
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("Letter type: {s}"))
+        .unwrap_or_else(|| {
+            "Letter type: (not specified — choose the most appropriate for the document)"
+                .to_string()
+        });
+
+    let tone_line = tone
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("Tone: {s}"))
+        .unwrap_or_else(|| "Tone: professional".to_string());
+
+    let re_section = re_line
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("RE: {s}\n"))
+        .unwrap_or_default();
+
+    // Freeform instructions are user-supplied, so sanitise prompt-injection
+    // patterns (same filter `inject_context` applies to user context).
+    let instructions_section = user_instructions
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            let sanitized = crate::soap_generator::user_prompt::sanitize_prompt(s);
+            if sanitized.is_empty() {
+                String::new()
+            } else {
+                format!("## Writer's instructions\n\n{sanitized}\n\n---\n\n")
+            }
+        })
+        .unwrap_or_default();
+
+    let user = format!(
+        "Please draft a letter based on the source document below.\n\n\
+         {time_date}\n\n\
+         {recipient_line}\n\
+         {letter_type_line}\n\
+         {tone_line}\n\
+         {re_section}\
+         \n## Source document\n\n{document_text}",
+        time_date = time_date,
+        recipient_line = recipient_line,
+        letter_type_line = letter_type_line,
+        tone_line = tone_line,
+        re_section = re_section,
+        document_text = document_text,
+    );
+
+    (system, format!("{instructions_section}{user}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +513,7 @@ mod tests {
     #[test]
     fn referral_default_contains_recipient_and_urgency() {
         let soap = "S: Chest pain\nO: BP 140/90\nA: Hypertension\nP: Refer to Cardiology";
-        let (system, user) = build_referral_prompt(soap, "Cardiologist", "urgent", None);
+        let (system, user) = build_referral_prompt(soap, "Cardiologist", "urgent", None, None);
 
         assert!(system.contains("Cardiologist"));
         assert!(system.contains("urgent"));
@@ -365,7 +527,8 @@ mod tests {
     fn referral_custom_template_overrides() {
         let soap = "S: foo";
         let custom = "CUSTOM: Refer to {recipient_type} ({urgency})";
-        let (system, _user) = build_referral_prompt(soap, "Neurology", "routine", Some(custom));
+        let (system, _user) =
+            build_referral_prompt(soap, "Neurology", "routine", Some(custom), None);
 
         assert!(system.starts_with("CUSTOM: Refer to Neurology (routine)"));
     }
@@ -373,14 +536,14 @@ mod tests {
     #[test]
     fn referral_empty_custom_falls_back_to_default() {
         let soap = "S: foo";
-        let (system, _user) = build_referral_prompt(soap, "Derm", "routine", Some(""));
+        let (system, _user) = build_referral_prompt(soap, "Derm", "routine", Some(""), None);
         assert!(system.contains("professional referral letters"));
     }
 
     #[test]
     fn letter_default_contains_type() {
         let soap = "S: Anxiety\nO: HR 90\nA: GAD\nP: CBT referral";
-        let (system, user) = build_letter_prompt(soap, "results", None, None);
+        let (system, user) = build_letter_prompt(soap, "results", None, None, None);
 
         assert!(system.contains("results"));
         assert!(!system.contains("{letter_type}"));
@@ -392,7 +555,7 @@ mod tests {
     fn letter_custom_template_overrides() {
         let soap = "S: foo";
         let custom = "CUSTOM: {letter_type} letter";
-        let (system, _user) = build_letter_prompt(soap, "follow-up", None, Some(custom));
+        let (system, _user) = build_letter_prompt(soap, "follow-up", None, Some(custom), None);
         assert!(system.starts_with("CUSTOM: follow-up letter"));
     }
 
@@ -409,7 +572,8 @@ mod tests {
                     .into(),
             ),
         };
-        let (system, user) = build_letter_prompt(soap, "medical report", Some(&audience), None);
+        let (system, user) =
+            build_letter_prompt(soap, "medical report", Some(&audience), None, None);
 
         assert!(system.contains("insurance company"));
         assert!(system.contains("factual and concise"));
@@ -428,7 +592,7 @@ mod tests {
                 .into(),
             user_template: None,
         };
-        let (system, user) = build_letter_prompt(soap, "fitness", Some(&audience), None);
+        let (system, user) = build_letter_prompt(soap, "fitness", Some(&audience), None, None);
 
         assert!(system.contains("fitness for work"));
         // Default user template should include audience name
@@ -441,14 +605,14 @@ mod tests {
     fn letter_without_audience_uses_legacy_behavior() {
         let soap = "S: Back pain\nO: Limited flexion\nA: Lumbar strain\nP: Physio";
         // audience=None, custom_template=None -> default
-        let (system, user) = build_letter_prompt(soap, "results", None, None);
+        let (system, user) = build_letter_prompt(soap, "results", None, None, None);
         assert!(system.contains("patient-friendly"));
         assert!(user.contains("for the patient"));
         assert!(user.contains("results"));
 
         // audience=None, custom_template=Some -> custom
         let custom = "LEGACY CUSTOM: {letter_type}";
-        let (system2, _user2) = build_letter_prompt(soap, "summary", None, Some(custom));
+        let (system2, _user2) = build_letter_prompt(soap, "summary", None, Some(custom), None);
         assert!(system2.starts_with("LEGACY CUSTOM: summary"));
     }
 
@@ -463,7 +627,8 @@ mod tests {
         let custom = "THIS CUSTOM TEMPLATE SHOULD BE IGNORED";
 
         // Even though custom_template is provided, audience takes precedence
-        let (system, user) = build_letter_prompt(soap, "referral", Some(&audience), Some(custom));
+        let (system, user) =
+            build_letter_prompt(soap, "referral", Some(&audience), Some(custom), None);
 
         assert!(system.contains("specialist colleague"));
         assert!(!system.contains("THIS CUSTOM TEMPLATE"));
@@ -475,7 +640,7 @@ mod tests {
     #[test]
     fn synopsis_default_mentions_word_limit() {
         let soap = "S: Patient reports fatigue\nO: Haemoglobin 9.0\nA: Iron deficiency anaemia";
-        let (system, user) = build_synopsis_prompt(soap, None);
+        let (system, user) = build_synopsis_prompt(soap, None, None);
         assert!(system.contains("200 words") || system.contains("200-word"));
         assert!(user.contains("Iron deficiency anaemia"));
         assert!(user.contains("Time") && user.contains("Date"));
@@ -484,7 +649,7 @@ mod tests {
     #[test]
     fn synopsis_custom_template_overrides() {
         let soap = "S: foo";
-        let (system, _user) = build_synopsis_prompt(soap, Some("CUSTOM SYNOPSIS"));
+        let (system, _user) = build_synopsis_prompt(soap, Some("CUSTOM SYNOPSIS"), None);
         assert!(system.starts_with("CUSTOM SYNOPSIS"));
     }
 
@@ -550,5 +715,162 @@ mod tests {
             strip_markdown("patient_id and some_variable"),
             "patient_id and some_variable"
         );
+    }
+
+    #[test]
+    fn build_letter_prompt_with_context_prepends_supporting_documents() {
+        let (system, user) = build_letter_prompt(
+            "SOAP content here",
+            "follow-up",
+            None,
+            None,
+            Some("Lab: HbA1c 7.2%"),
+        );
+        let _ = system;
+        assert!(
+            user.contains("## Supporting Documents"),
+            "user prompt should contain Supporting Documents section: {user}"
+        );
+        assert!(
+            user.contains("Lab: HbA1c 7.2%"),
+            "context text should appear in prompt"
+        );
+        assert!(
+            user.contains("SOAP content here"),
+            "SOAP note should still be present"
+        );
+    }
+
+    #[test]
+    fn build_letter_prompt_without_context_omits_section() {
+        let (_system, user) = build_letter_prompt("SOAP", "follow-up", None, None, None);
+        assert!(
+            !user.contains("Supporting Documents"),
+            "no context should not add Supporting Documents section"
+        );
+    }
+
+    #[test]
+    fn build_referral_prompt_with_context_prepends_supporting_documents() {
+        let (_system, user) = build_referral_prompt(
+            "SOAP content",
+            "Specialist",
+            "routine",
+            None,
+            Some("Prior MRI report attached"),
+        );
+        assert!(user.contains("## Supporting Documents"));
+        assert!(user.contains("Prior MRI report attached"));
+    }
+
+    #[test]
+    fn build_referral_prompt_without_context_omits_section() {
+        let (_system, user) = build_referral_prompt("SOAP", "Specialist", "routine", None, None);
+        assert!(!user.contains("Supporting Documents"));
+    }
+
+    #[test]
+    fn build_synopsis_prompt_with_context_prepends_supporting_documents() {
+        let (_system, user) =
+            build_synopsis_prompt("SOAP content", None, Some("ECG: sinus rhythm"));
+        assert!(user.contains("## Supporting Documents"));
+        assert!(user.contains("ECG: sinus rhythm"));
+        assert!(user.contains("SOAP content"));
+    }
+
+    #[test]
+    fn build_synopsis_prompt_without_context_omits_section() {
+        let (_system, user) = build_synopsis_prompt("SOAP", None, None);
+        assert!(!user.contains("Supporting Documents"));
+    }
+
+    #[test]
+    fn inject_context_empty_string_omits_section() {
+        // Whitespace-only context should be treated as absent.
+        let out = inject_context("base", Some("   "));
+        assert_eq!(out, "base");
+    }
+
+    #[test]
+    fn inject_context_formats_exactly() {
+        let out = inject_context("USER", Some("CTX"));
+        assert_eq!(out, "## Supporting Documents\n\nCTX\n\n---\n\nUSER");
+    }
+
+    #[test]
+    fn letter_from_document_default_includes_source_and_fields() {
+        let doc = "Patient referred for abnormal ECG. Family history of IHD.";
+        let (system, user) = build_letter_from_document_prompt(
+            doc,
+            Some("Dr. Smith"),
+            Some("Referral"),
+            Some("Formal"),
+            Some("Abnormal ECG"),
+            None,
+            None,
+        );
+
+        // Default system prompt has no placeholders to resolve.
+        assert!(system.contains("professional medical letter writer"));
+        assert!(!system.contains('{'));
+
+        // Every supplied field appears in the user prompt.
+        assert!(user.contains("Dr. Smith"));
+        assert!(user.contains("Referral"));
+        assert!(user.contains("Formal"));
+        assert!(user.contains("RE: Abnormal ECG"));
+        // The source document is passed verbatim.
+        assert!(user.contains("abnormal ECG"));
+        // No instructions section when none provided.
+        assert!(!user.contains("Writer's instructions"));
+    }
+
+    #[test]
+    fn letter_from_document_omits_blank_optional_fields() {
+        let doc = "Lab results within normal limits.";
+        let (system, user) =
+            build_letter_from_document_prompt(doc, Some("   "), None, Some(""), None, None, None);
+
+        let _ = system;
+        // Blank recipient falls back to the "(not specified ...)" hint.
+        assert!(user.contains("(not specified"));
+        // No dangling "RE:" line when re_line is absent.
+        assert!(!user.contains("RE:"));
+        // Tone always has a value.
+        assert!(user.contains("Tone:"));
+    }
+
+    #[test]
+    fn letter_from_document_includes_sanitised_instructions() {
+        let doc = "Consult note regarding knee pain.";
+        let (_system, user) = build_letter_from_document_prompt(
+            doc,
+            None,
+            None,
+            None,
+            None,
+            Some("Keep it brief and request urgent follow-up."),
+            None,
+        );
+
+        assert!(user.contains("## Writer's instructions"));
+        assert!(user.contains("Keep it brief and request urgent follow-up."));
+        // Source document still present.
+        assert!(user.contains("knee pain"));
+    }
+
+    #[test]
+    fn letter_from_document_custom_template_overrides() {
+        let doc = "Source.";
+        let (system, _user) = build_letter_from_document_prompt(
+            doc,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("CUSTOM LETTER WRITER PROMPT"),
+        );
+        assert!(system.starts_with("CUSTOM LETTER WRITER PROMPT"));
     }
 }

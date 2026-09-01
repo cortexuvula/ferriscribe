@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { settings } from '../../stores/settings.svelte';
   import { listModels, setActiveProvider, reinitProviders, type ModelInfo } from '../../api/chat';
-  import { testLmStudioConnection, testOllamaConnection, getApiKey } from '../../api/settings';
+  import { testLmStudioConnection, testOllamaConnection, testOmlxConnection, getApiKey } from '../../api/settings';
   import { formatError } from '../../types/errors';
   import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
 
@@ -10,6 +10,8 @@
   const ollamaKind = $derived(classifyEndpoint(settings.state.ollama_host ?? ''));
   const lmstudioOk = $derived(isLocalOrAllowed(settings.state.lmstudio_host ?? '', settings.state.allow_public_endpoint));
   const lmstudioKind = $derived(classifyEndpoint(settings.state.lmstudio_host ?? ''));
+  const omlxOk = $derived(isLocalOrAllowed(settings.state.omlx_host ?? '', settings.state.allow_public_endpoint));
+  const omlxKind = $derived(classifyEndpoint(settings.state.omlx_host ?? ''));
 
   let availableModels = $state<ModelInfo[]>([]);
   let modelsLoading = $state(false);
@@ -19,14 +21,19 @@
   let lmstudioTestMessage = $state('');
   let ollamaTestStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
   let ollamaTestMessage = $state('');
+  let omlxTestStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
+  let omlxTestMessage = $state('');
 
   async function fetchModelsForProvider(provider: string) {
     modelsLoading = true;
     try {
-      availableModels = await listModels(provider);
+      const models = await listModels(provider);
+      availableModels = models;
+      return models;
     } catch (e) {
       console.error('Failed to fetch models:', e);
       availableModels = [];
+      return [];
     } finally {
       modelsLoading = false;
     }
@@ -51,12 +58,12 @@
     }
     await settings.updateField('ai_provider', newProvider);
     await setActiveProvider(newProvider);
-    await fetchModelsForProvider(newProvider);
+    const models = await fetchModelsForProvider(newProvider);
     const remembered = modelMemory[newProvider];
-    if (remembered && availableModels.some((m) => m.id === remembered)) {
+    if (remembered && models.some((m) => m.id === remembered)) {
       await settings.updateField('ai_model', remembered);
-    } else if (availableModels.length > 0) {
-      await settings.updateField('ai_model', availableModels[0].id);
+    } else if (models.length > 0) {
+      await settings.updateField('ai_model', models[0].id);
     }
   }
 
@@ -123,6 +130,7 @@
     >
       <option value="lmstudio">LM Studio</option>
       <option value="ollama">Ollama</option>
+      <option value="omlx">oMLX</option>
     </select>
   </div>
 
@@ -140,7 +148,7 @@
         {:else if availableModels.length === 0}
           <option value="">No models available</option>
         {:else}
-          {#each availableModels as model}
+          {#each availableModels as model (model.id)}
             <option value={model.id}>{model.name}</option>
           {/each}
         {/if}
@@ -154,6 +162,29 @@
         {modelsLoading ? '…' : '↻'}
       </button>
     </div>
+  </div>
+
+  <div class="form-group">
+    <label for="ocr-model" class="form-label">OCR / Vision Model</label>
+    <div class="model-select-row">
+      <select
+        id="ocr-model"
+        value={settings.state.ocr_model ?? ''}
+        onchange={async (e) => {
+          const val = (e.currentTarget as HTMLSelectElement).value;
+          await settings.updateField('ocr_model', val || null);
+        }}
+      >
+        <option value="">(use generation model)</option>
+        {#each availableModels as m (m.id)}
+          <option value={m.id}>{m.name}</option>
+        {/each}
+      </select>
+    </div>
+    <p class="form-hint">
+      Vision model for extracting text from dropped documents (e.g. glm-ocr).
+      If not set, the generation model is used.
+    </p>
   </div>
 
   <div class="form-group">
@@ -233,6 +264,29 @@
     {:else if lmstudioTestStatus === 'error'}
       <span class="test-result test-error">✗ {lmstudioTestMessage}</span>
     {/if}
+  </div>
+
+  <div class="form-group">
+    <label class="form-row">
+      <input
+        type="checkbox"
+        checked={settings.state.lmstudio_disable_thinking ?? false}
+        onchange={async (e) => {
+          await settings.updateField('lmstudio_disable_thinking', (e.target as HTMLInputElement).checked);
+          try { await reinitProviders(); } catch (err) { console.error('Failed to reinit providers after thinking toggle:', err); }
+        }}
+      />
+      <span>
+        Disable thinking (reasoning models)
+        <p class="form-hint">
+          Skips the minutes-long reasoning/"thinking" phase on models like Qwen3
+          before they write a SOAP note. LM Studio ignores API thinking parameters,
+          so FerriScribe injects a pre-closed think block instead. For a fix that
+          covers every app, edit the model's Prompt Template in LM Studio
+          (Model Settings → Prompt Template, add <code>{'{%- set enable_thinking = false %}'}</code>).
+        </p>
+      </span>
+    </label>
   </div>
 
   <!-- Ollama Server -->
@@ -325,6 +379,140 @@
     {:else if ollamaTestStatus === 'error'}
       <span class="test-result test-error">✗ {ollamaTestMessage}</span>
     {/if}
+  </div>
+
+  <div class="form-group">
+    <label class="form-row">
+      <input
+        type="checkbox"
+        checked={settings.state.ollama_disable_thinking ?? false}
+        onchange={async (e) => {
+          await settings.updateField('ollama_disable_thinking', (e.target as HTMLInputElement).checked);
+          try { await reinitProviders(); } catch (err) { console.error('Failed to reinit providers after thinking toggle:', err); }
+        }}
+      />
+      <span>
+        Disable thinking (reasoning models)
+        <p class="form-hint">
+          Skips the minutes-long reasoning/"thinking" phase on models like Qwen3
+          before they write a SOAP note. Sends <code>reasoning_effort: "none"</code>
+          to Ollama's OpenAI-compatible endpoint.
+        </p>
+      </span>
+    </label>
+  </div>
+
+  <!-- oMLX Server -->
+  <div class="form-group-divider"></div>
+  <h4 class="subsection-title">oMLX Server</h4>
+  <p class="subsection-hint">
+    Configure the oMLX server address (MLX inference for Apple Silicon). Use <code>localhost</code> if oMLX runs on this machine, or enter a remote IP for a network server.
+  </p>
+
+  <div class="form-group">
+    <label for="omlx-host" class="form-label">Host</label>
+    <input
+      id="omlx-host"
+      type="text"
+      value={settings.state.omlx_host ?? ''}
+      placeholder="localhost"
+      onchange={async (e) => {
+        await settings.updateField('omlx_host', (e.target as HTMLInputElement).value);
+        omlxTestStatus = 'idle';
+        omlxTestMessage = '';
+        await reinitProviders();
+      }}
+      class="text-input"
+    />
+    {#if !omlxOk}
+      <div class="endpoint-warning" role="alert">
+        ⚠ This is a public-internet address ({omlxKind}). PHI may leave your device.
+        Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
+      </div>
+    {/if}
+  </div>
+
+  <div class="form-group">
+    <label for="omlx-port" class="form-label">Port</label>
+    <input
+      id="omlx-port"
+      type="number"
+      value={settings.state.omlx_port ?? 8000}
+      placeholder="8000"
+      min="1"
+      max="65535"
+      onchange={async (e) => {
+        const value = parseInt((e.target as HTMLInputElement).value, 10);
+        if (value >= 1 && value <= 65535) {
+          await settings.updateField('omlx_port', value);
+          omlxTestStatus = 'idle';
+          omlxTestMessage = '';
+          await reinitProviders();
+        }
+      }}
+      class="text-input port-input"
+    />
+  </div>
+
+  <div class="form-group">
+    <button
+      class="btn-test-connection"
+      disabled={omlxTestStatus === 'testing'}
+      onclick={async () => {
+        omlxTestStatus = 'testing';
+        omlxTestMessage = '';
+        try {
+          let apiKey: string | null = null;
+          try {
+            apiKey = await getApiKey('omlx_api_key');
+          } catch {
+            // Keychain unavailable — try without auth.
+          }
+          const msg = await testOmlxConnection(
+            settings.state.omlx_host || 'localhost',
+            settings.state.omlx_port || 8000,
+            apiKey,
+          );
+          omlxTestStatus = 'success';
+          omlxTestMessage = msg;
+        } catch (err) {
+          omlxTestStatus = 'error';
+          omlxTestMessage = formatError(err) || 'Connection failed';
+        }
+      }}
+    >
+      {#if omlxTestStatus === 'testing'}
+        Testing…
+      {:else}
+        Test Connection
+      {/if}
+    </button>
+    {#if omlxTestStatus === 'success'}
+      <span class="test-result test-success">✓ {omlxTestMessage}</span>
+    {:else if omlxTestStatus === 'error'}
+      <span class="test-result test-error">✗ {omlxTestMessage}</span>
+    {/if}
+  </div>
+
+  <div class="form-group">
+    <label class="form-row">
+      <input
+        type="checkbox"
+        checked={settings.state.omlx_disable_thinking ?? false}
+        onchange={async (e) => {
+          await settings.updateField('omlx_disable_thinking', (e.target as HTMLInputElement).checked);
+          try { await reinitProviders(); } catch (err) { console.error('Failed to reinit providers after thinking toggle:', err); }
+        }}
+      />
+      <span>
+        Disable thinking (reasoning models)
+        <p class="form-hint">
+          Skips the minutes-long reasoning/"thinking" phase on models like Qwen3
+          before they write a SOAP note. oMLX ignores API thinking parameters,
+          so FerriScribe injects a pre-closed think block instead.
+        </p>
+      </span>
+    </label>
   </div>
 </section>
 
@@ -431,5 +619,26 @@
     padding: 6px 10px;
     margin-top: 4px;
     font-size: 0.85rem;
+  }
+
+  .form-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin: 4px 0 0;
+    line-height: 1.5;
+  }
+
+  .form-hint code {
+    font-size: 10px;
+    background-color: var(--bg-tertiary, #374151);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  .form-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    cursor: pointer;
   }
 </style>

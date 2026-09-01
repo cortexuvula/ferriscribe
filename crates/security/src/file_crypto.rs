@@ -22,8 +22,9 @@
 //! are the only on-disk artifacts. Decryption is in-memory and the plaintext
 //! is never logged.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use aes_gcm::aead::consts::U12;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use rand::RngCore;
@@ -61,7 +62,11 @@ pub enum FileCryptoError {
 /// produces a distinct, fixed-length key for file encryption. (This is a
 /// KDF on a high-entropy 32-byte root key, so a single hash round is
 /// sufficient — unlike a password, the input already has full entropy.)
-fn derive_file_key(db_key: &[u8; 32]) -> [u8; 32] {
+///
+/// Public so the backup/restore tooling (`medical-backup`) can re-derive
+/// the exact WAV-file key from a restored DB key when verifying snapshot
+/// contents — the derivation must never be re-implemented downstream.
+pub fn derive_file_key(db_key: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(db_key);
     hasher.update(b"ferriescribe-file-v1");
@@ -69,6 +74,25 @@ fn derive_file_key(db_key: &[u8; 32]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
     out
+}
+
+/// Encrypt `plaintext` under an explicit 32-byte key (FE1 format:
+/// magic + nonce + AES-256-GCM ciphertext). Keychain-free counterpart of
+/// [`encrypt_bytes_in_memory`], used by the backup tooling where the key
+/// is a domain-derived snapshot key rather than the keychain DB key.
+pub fn encrypt_bytes_with_key(
+    key: &[u8; 32],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, FileCryptoError> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    encrypt_with_key(&cipher, plaintext)
+}
+
+/// Decrypt an FE1 blob under an explicit 32-byte key. Keychain-free
+/// counterpart of [`decrypt_bytes`].
+pub fn decrypt_bytes_with_key(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, FileCryptoError> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    decrypt_bytes_with(bytes, &cipher)
 }
 
 /// Obtain the AES-256-GCM cipher, deriving the key from the keychain DB key.
@@ -82,7 +106,7 @@ fn cipher() -> Result<Aes256Gcm, FileCryptoError> {
 /// `encrypt_file` and by tests to avoid concurrent keychain access).
 fn encrypt_with_key(cipher: &Aes256Gcm, plaintext: &[u8]) -> Result<Vec<u8>, FileCryptoError> {
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, plaintext)
@@ -108,19 +132,59 @@ pub fn encrypt_bytes_in_memory(plaintext: &[u8]) -> Result<Vec<u8>, FileCryptoEr
 /// never partially written — if encryption or I/O fails, the plaintext
 /// source is left intact.
 pub fn encrypt_file(path: &Path, plaintext: &[u8]) -> Result<(), FileCryptoError> {
-    let cipher = cipher()?;
-    let out = encrypt_with_key(&cipher, plaintext)?;
+    encrypt_file_with(path, &cipher()?, plaintext)
+}
+
+/// Keychain-free core of [`encrypt_file`] — the cipher is supplied by the
+/// caller. Internal seam so tests can exercise the atomic-write mechanics
+/// with a fixed key instead of the OS keychain (see the test module docs).
+fn encrypt_file_with(
+    path: &Path,
+    cipher: &Aes256Gcm,
+    plaintext: &[u8],
+) -> Result<(), FileCryptoError> {
+    let out = encrypt_with_key(cipher, plaintext)?;
     // Write to a temp sibling, fsync, then atomic rename. This avoids the
     // truncate-then-write race that could destroy the original on crash.
-    let tmp_path = path.with_extension("enc.tmp");
-    {
+    // The temp name carries the pid + a per-process counter: deriving it
+    // from the extension alone made `x.wav` and a sibling literally named
+    // `x` collide on the same `x.enc.tmp`.
+    let tmp_path = tmp_sibling(path);
+    let write = (|| -> Result<(), FileCryptoError> {
         let mut file = std::fs::File::create(&tmp_path)?;
         use std::io::Write;
         file.write_all(&out)?;
         file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
     }
-    std::fs::rename(&tmp_path, path)?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+    // Durability of the rename itself: without a parent-dir fsync a crash
+    // can lose the rename (the old plaintext file reappears) even though
+    // the data blocks hit disk. Best-effort — not all platforms/filesystems
+    // allow opening a directory.
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
     Ok(())
+}
+
+/// Unique temp sibling of `path` (see `encrypt_file_with`).
+fn tmp_sibling(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{}.{}.enc.tmp", std::process::id(), n));
+    PathBuf::from(name)
 }
 
 /// Read the plaintext file at `path`, encrypt it in place (atomic temp +
@@ -130,8 +194,13 @@ pub fn encrypt_file(path: &Path, plaintext: &[u8]) -> Result<(), FileCryptoError
 /// Propagates read errors rather than defaulting to empty — a failed read
 /// must NOT produce an empty encrypted file that destroys the original.
 pub fn encrypt_file_in_place(path: &Path) -> Result<(), FileCryptoError> {
+    encrypt_file_in_place_with(path, &cipher()?)
+}
+
+/// Keychain-free core of [`encrypt_file_in_place`].
+fn encrypt_file_in_place_with(path: &Path, cipher: &Aes256Gcm) -> Result<(), FileCryptoError> {
     let plaintext = std::fs::read(path)?;
-    encrypt_file(path, &plaintext)
+    encrypt_file_with(path, cipher, &plaintext)
 }
 
 /// Read `path` and decrypt. Returns the plaintext bytes.
@@ -143,8 +212,33 @@ pub fn decrypt_file(path: &Path) -> Result<Vec<u8>, FileCryptoError> {
     decrypt_bytes(&bytes)
 }
 
+/// Keychain-free core of [`decrypt_file`] — the cipher is supplied by the
+/// caller. Internal seam for hermetic tests.
+#[cfg(test)]
+fn decrypt_file_with(path: &Path, cipher: &Aes256Gcm) -> Result<Vec<u8>, FileCryptoError> {
+    let bytes = std::fs::read(path)?;
+    decrypt_bytes_with(&bytes, cipher)
+}
+
 /// Decrypt an in-memory buffer (magic + nonce + ciphertext).
 pub fn decrypt_bytes(bytes: &[u8]) -> Result<Vec<u8>, FileCryptoError> {
+    // Validate the header before the keychain round-trip so malformed and
+    // legacy-plaintext inputs are rejected even on machines with no
+    // keychain available.
+    split_header(bytes)?;
+    decrypt_bytes_with(bytes, &cipher()?)
+}
+
+/// Keychain-free core of [`decrypt_bytes`].
+fn decrypt_bytes_with(bytes: &[u8], cipher: &Aes256Gcm) -> Result<Vec<u8>, FileCryptoError> {
+    let (nonce, ciphertext) = split_header(bytes)?;
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| FileCryptoError::Decrypt(e.to_string()))
+}
+
+/// Validate the magic + nonce header and split it from the ciphertext.
+fn split_header(bytes: &[u8]) -> Result<(&Nonce<U12>, &[u8]), FileCryptoError> {
     let header = MAGIC.len() + NONCE_LEN;
     if bytes.len() < header {
         return Err(FileCryptoError::Decrypt("file too short for header".into()));
@@ -153,11 +247,7 @@ pub fn decrypt_bytes(bytes: &[u8]) -> Result<Vec<u8>, FileCryptoError> {
         return Err(FileCryptoError::NotEncrypted);
     }
     let nonce = Nonce::from_slice(&bytes[MAGIC.len()..header]);
-    let ciphertext = &bytes[header..];
-    let cipher = cipher()?;
-    cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|e| FileCryptoError::Decrypt(e.to_string()))
+    Ok((nonce, &bytes[header..]))
 }
 
 /// Returns true if the file at `path` begins with the encryption magic.
@@ -180,16 +270,25 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// A deterministic cipher for exercising the file-mechanics paths.
+    ///
+    /// The public wrappers source their key from the real OS keychain via
+    /// [`cipher`], which is untestable in-process: the keyring mock
+    /// installed by the `keychain` tests is process-global and EntryOnly
+    /// (a fresh empty credential per `Entry::new`), so depending on test
+    /// ordering the encrypt and decrypt halves of a roundtrip can end up
+    /// with different keys and fail spuriously. The `_with` seams take the
+    /// cipher as a parameter, so these tests are hermetic and deterministic
+    /// on every machine.
+    fn fixed_test_cipher() -> Aes256Gcm {
+        let raw_key = [42u8; 32];
+        let file_key = derive_file_key(&raw_key);
+        Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&file_key))
+    }
+
     #[test]
     fn encrypt_then_decrypt_roundtrips() {
-        // Use a fixed derived key to avoid concurrent keychain access
-        // (which flakes when the full security test suite runs in
-        // parallel). The crypto round-trip is what we're testing here;
-        // the keychain integration is exercised via the public
-        // encrypt_file/decrypt_file in production.
-        let raw_key = [42u8; 32]; // deterministic test key
-        let file_key = derive_file_key(&raw_key);
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&file_key));
+        let cipher = fixed_test_cipher();
 
         let original = b"patient audio bytes - sensitive PHI";
         let encrypted = encrypt_with_key(&cipher, original).expect("encryption must succeed");
@@ -253,34 +352,66 @@ mod tests {
         assert_ne!(MAGIC.as_slice(), b"ID3"); // not confused with MP3
     }
 
+    #[test]
+    fn key_taking_roundtrip_and_wrong_key_fails() {
+        let key = [7u8; 32];
+        let secret = b"backup manifest bytes";
+        let blob = encrypt_bytes_with_key(&key, secret).expect("encrypt");
+        assert!(blob.starts_with(MAGIC));
+        assert_eq!(
+            decrypt_bytes_with_key(&key, &blob).expect("decrypt"),
+            secret
+        );
+        // A different key must fail GCM authentication, not return garbage.
+        let wrong = decrypt_bytes_with_key(&[8u8; 32], &blob);
+        assert!(matches!(wrong, Err(FileCryptoError::Decrypt(_))));
+    }
+
+    #[test]
+    fn key_taking_decrypt_rejects_tampered_ciphertext() {
+        // Flip one bit of ciphertext — GCM must fail closed.
+        let key = [9u8; 32];
+        let mut blob = encrypt_bytes_with_key(&key, b"integrity matters").expect("encrypt");
+        let last = blob.len() - 1;
+        blob[last] ^= 0x01;
+        let result = decrypt_bytes_with_key(&key, &blob);
+        assert!(matches!(result, Err(FileCryptoError::Decrypt(_))));
+    }
+
+    #[test]
+    fn derive_file_key_is_domain_separated_and_stable() {
+        let db_key = [1u8; 32];
+        let k1 = derive_file_key(&db_key);
+        let k2 = derive_file_key(&db_key);
+        assert_eq!(k1, k2, "derivation must be deterministic");
+        assert_ne!(k1, db_key, "derived key must differ from root");
+    }
+
     // ---- encrypt_file_in_place (the production PHI-at-rest path) ----
 
     #[test]
     fn encrypt_file_in_place_roundtrips() {
         // This is the exact path called by audio capture + import:
         // read a plaintext file, encrypt it atomically (temp+rename),
-        // then decrypt to verify the round-trip.
+        // then decrypt to verify the round-trip. Driven with a fixed
+        // cipher (see `fixed_test_cipher`) so it never touches the
+        // keychain.
+        let cipher = fixed_test_cipher();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("recording.wav");
         let original = b"RIFF\x00\x00\x00\x00WAVEfmt fake-audio-data-PHI";
         std::fs::write(&path, original).unwrap();
 
-        match encrypt_file_in_place(&path) {
-            Ok(()) => {
-                // The file should now have the FE1 magic (encrypted).
-                assert!(
-                    is_encrypted(&path),
-                    "file should be encrypted after in-place"
-                );
-                // Decrypting should recover the original plaintext.
-                let decrypted = decrypt_file(&path).expect("decryption must roundtrip");
-                assert_eq!(decrypted, original);
-            }
-            Err(FileCryptoError::Keychain(_)) => {
-                eprintln!("skipping: keychain unavailable in this environment");
-            }
-            Err(e) => panic!("unexpected error: {e}"),
-        }
+        encrypt_file_in_place_with(&path, &cipher).expect("in-place encryption");
+
+        // The file should now have the FE1 magic (encrypted).
+        assert!(
+            is_encrypted(&path),
+            "file should be encrypted after in-place"
+        );
+        // Decrypting should recover the original plaintext.
+        let decrypted = decrypt_file_with(&path, &cipher).expect("decryption must roundtrip");
+        assert_eq!(decrypted, original);
     }
 
     #[test]
@@ -288,17 +419,49 @@ mod tests {
         // encrypt_file_in_place reads the file first. If the read fails
         // (e.g. file doesn't exist), the original must NOT be destroyed —
         // the function should return an error and leave nothing behind.
+        let cipher = fixed_test_cipher();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nonexistent.wav");
-        let result = encrypt_file_in_place(&path);
+        let result = encrypt_file_in_place_with(&path, &cipher);
         assert!(
             result.is_err(),
             "encrypting a nonexistent file should error"
         );
-        // No temp file should be left behind.
+        // No temp file should be left behind (name-agnostic: the temp
+        // name embeds the pid + a counter).
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| e.file_name().to_string_lossy().contains("enc.tmp"))
+                    .unwrap_or(false)
+            })
+            .collect();
         assert!(
-            !dir.path().join("nonexistent.wav.enc.tmp").exists(),
-            "temp file should be cleaned up on failure"
+            leftovers.is_empty(),
+            "temp files should be cleaned up on failure"
         );
+    }
+
+    #[test]
+    fn temp_sibling_names_never_collide() {
+        let cipher = fixed_test_cipher();
+        let dir = TempDir::new().unwrap();
+        // Old naming derived the temp from the extension: both `x.wav`
+        // and a sibling literally named `x` mapped to `x.enc.tmp`, so
+        // concurrent in-place encryptions in one directory clobbered each
+        // other's temp file.
+        let with_ext = dir.path().join("rec.wav");
+        let no_ext = dir.path().join("rec");
+        std::fs::write(&with_ext, b"RIFF one").unwrap();
+        std::fs::write(&no_ext, b"RIFF two").unwrap();
+        assert_ne!(tmp_sibling(&with_ext), tmp_sibling(&no_ext));
+        assert_ne!(tmp_sibling(&with_ext), tmp_sibling(&with_ext));
+
+        // Both encrypt in place without interfering.
+        encrypt_file_in_place_with(&with_ext, &cipher).expect("encrypt with ext");
+        encrypt_file_in_place_with(&no_ext, &cipher).expect("encrypt no ext");
+        assert_eq!(decrypt_file_with(&with_ext, &cipher).unwrap(), b"RIFF one");
+        assert_eq!(decrypt_file_with(&no_ext, &cipher).unwrap(), b"RIFF two");
     }
 }

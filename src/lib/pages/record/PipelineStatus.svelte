@@ -1,15 +1,25 @@
 <script lang="ts">
   import { pipeline, type PipelineStage } from '../../stores/pipeline.svelte';
-  import { extractIcdCodesValidated } from '../../icd';
+  import { generation } from '../../stores/generation.svelte';
+  import { generationProgressText } from '../../utils/generationStats';
+  import { formatTokensPerSecond } from '../../utils/format';
+  import { resolveIcdCodes, billingCodesLabel } from '../../icd';
   import { icd9 as icd9Store } from '../../stores/icd9.svelte';
   import { settings } from '../../stores/settings.svelte';
-  import IcdChip from '../../components/IcdChip.svelte';
+  import IcdCodeList from '../../components/IcdCodeList.svelte';
+  import type { Recording } from '../../types';
 
   type CopyStatus = 'idle' | 'copying' | 'copied';
 
   interface Props {
     copyStatus?: CopyStatus;
     soapNoteText?: string | null;
+    /** The pipeline recording's metadata — carries the structured
+     *  `icd_codes` (new-format recordings keep the note body code-free). */
+    metadata?: Recording['metadata'] | null;
+    /** Throughput of the most recent AI generation for this recording
+     *  (tokens/sec, from `metadata.generation_stats`); null hides it. */
+    tokensPerSecond?: number | null;
     regenerating?: boolean;
     onCancel: () => void;
     onRetry: () => void;
@@ -20,6 +30,8 @@
   let {
     copyStatus = $bindable<CopyStatus>('idle'),
     soapNoteText,
+    metadata = null,
+    tokensPerSecond = null,
     regenerating = false,
     onCancel,
     onRetry,
@@ -28,9 +40,12 @@
     onRegenerate,
   }: Props = $props();
 
-  // Extract and validate ICD codes from the SOAP note text
+  // Billing codes for the completed note: from `metadata.icd_codes` when
+  // present, otherwise mined from the note text (legacy recordings).
+  // Official MSP descriptions back the list's explaining titles when the
+  // model-written description is missing.
   const icdCodes = $derived(
-    soapNoteText ? extractIcdCodesValidated(soapNoteText, icd9Store.codeSet, settings.state.icd_version) : []
+    resolveIcdCodes(metadata, soapNoteText ?? null, icd9Store.codeSet, settings.state.icd_version, icd9Store.descriptions)
   );
 
   function stageLabel(stage: PipelineStage): string {
@@ -60,6 +75,10 @@
     const s = secs % 60;
     return m > 0 ? `${m}m ${s}s` : `${s}s`;
   }
+
+  // "42.3 tok/s" or '' when no generation stat is available (imported
+  // recordings, failed generations).
+  const tpsLabel = $derived(formatTokensPerSecond(tokensPerSecond));
 </script>
 
 {#if pipeline.state.current}
@@ -99,10 +118,14 @@
 
     <p class="pipeline-label">{stageLabel(pipeline.state.current.stage)}</p>
 
+    {#if pipeline.state.current.stage === 'generating_soap' && generation.state.progress}
+      <p class="pipeline-progress">{generationProgressText(generation.state.progress)}</p>
+    {/if}
+
     <p class="pipeline-elapsed">
       {#if pipeline.state.current.finishedAt !== null}
         {#if pipeline.state.current.stage === 'completed'}
-          Processing took {formatPipelineElapsed(pipeline.state.current.finishedAt - pipeline.state.current.startedAt)}
+          Processing took {formatPipelineElapsed(pipeline.state.current.finishedAt - pipeline.state.current.startedAt)}{tpsLabel ? ` · ${tpsLabel}` : ''}
         {:else}
           Stopped after {formatPipelineElapsed(pipeline.state.current.finishedAt - pipeline.state.current.startedAt)}
         {/if}
@@ -144,10 +167,7 @@
 
       {#if icdCodes.length > 0}
         <div class="icd-codes">
-          <span class="icd-label">ICD Codes:</span>
-          {#each icdCodes as code}
-            <IcdChip code={code.raw} valid={code.valid} />
-          {/each}
+          <IcdCodeList codes={icdCodes} label={billingCodesLabel(settings.state.icd_version)} />
         </div>
       {/if}
     {/if}
@@ -220,6 +240,13 @@
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
     margin-bottom: 8px;
+  }
+
+  .pipeline-progress {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    margin: 0 0 4px;
   }
 
   .pipeline-warning {
@@ -308,15 +335,6 @@
   .icd-codes {
     margin-top: 12px;
     display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
     justify-content: center;
-  }
-
-  .icd-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
   }
 </style>

@@ -46,17 +46,37 @@ pub async fn process_recording(
     if let Some(ref pc) = patient_context {
         super::generation::validate_patient_context(pc)?;
     }
+    // Validate context size up-front (fail fast before transcription runs).
+    if let Some(ref ctx) = context
+        && ctx.len() > super::generation::MAX_CONTEXT_CHARS
+    {
+        return Err(AppError::InvalidInput(format!(
+            "Context too large: {} chars, limit is {}",
+            ctx.len(),
+            super::generation::MAX_CONTEXT_CHARS
+        )));
+    }
 
     let rid = recording_id.clone();
 
     // Register a cancel token so the frontend can ask us to bail between
-    // stages and interrupt in-flight provider work.
+    // stages and interrupt in-flight provider work. Insert-only: a second
+    // pipeline for the same recording must be rejected, not silently
+    // replace the first's token — replacing it arms the first pipeline's
+    // CancelGuard::drop to remove the SECOND's entry, leaving the running
+    // pipeline uncancellable (and both interleave status writes on the
+    // same row).
     let cancel = CancellationToken::new();
     {
         let mut guard = state
             .pipeline_cancels
             .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("pipeline_cancels: {e}")))?;
+        if guard.contains_key(&recording_id) {
+            return Err(AppError::Other(
+                "a pipeline is already running for this recording".to_string(),
+            ));
+        }
         guard.insert(recording_id.clone(), cancel.clone());
     }
     // Ensure the flag is removed on every exit path.
@@ -65,36 +85,11 @@ pub async fn process_recording(
         key: recording_id.clone(),
     };
 
-    // If no explicit template, read the user's preferred template from settings.
-    let template = match template {
-        Some(t) => Some(t),
-        None => {
-            let db = std::sync::Arc::clone(&state.db);
-            tokio::task::spawn_blocking(move || {
-                let conn = db.conn().map_err(|e| {
-                    tracing::warn!(error = %e, "could not get DB conn for SOAP template lookup");
-                    e
-                }).ok()?;
-                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn).map_err(|e| {
-                    tracing::warn!(error = %e, "could not load config for SOAP template lookup");
-                    e
-                }).ok()?;
-                cfg.migrate();
-                let t = match cfg.soap_template {
-                    medical_core::types::settings::SoapTemplate::FollowUp => "follow_up",
-                    medical_core::types::settings::SoapTemplate::NewPatient => "new_patient",
-                    medical_core::types::settings::SoapTemplate::Telehealth => "telehealth",
-                    medical_core::types::settings::SoapTemplate::Emergency => "emergency",
-                    medical_core::types::settings::SoapTemplate::Pediatric => "pediatric",
-                    medical_core::types::settings::SoapTemplate::Geriatric => "geriatric",
-                };
-                Some(t.to_string())
-            })
-            .await
-            .ok()
-            .flatten()
-        }
-    };
+    // NOTE: no template lookup here. When `template` is None,
+    // `generate_soap` resolves the user's stored preference from
+    // AppConfig itself (generation::helpers::resolve_soap_template) —
+    // and fails loudly if config can't be loaded, rather than silently
+    // falling back to FollowUp the way the old lookup here did.
 
     // --- Stage 1: Transcribe ---
     emit_progress(&app, &rid, "transcribing", None);

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-  import { endpointHealth, type EndpointHealthState } from '../stores/endpointHealth.svelte';
+  import { onMount, onDestroy } from 'svelte';
+  import { endpointHealth } from '../stores/endpointHealth.svelte';
   import { settings } from '../stores/settings.svelte';
 
   type Props = {
@@ -8,35 +8,39 @@
   };
   const { onopenSettings }: Props = $props();
 
-  let health = $state<EndpointHealthState>({
-    ai: 'skipped', stt: 'skipped', lastCheckedAt: null, overall: 'hidden',
-  });
-  const unsub = endpointHealth.subscribe((s) => (health = s));
-  onDestroy(unsub);
+  // Read the store's reactive state directly — no subscribe()/local copy.
+  // start() returns a cleanup that releases the polling refcount.
+  let stop: () => void = () => {};
+  onMount(() => { stop = endpointHealth.start(); });
+  onDestroy(() => stop());
 
   function aiProviderLabel(): string {
-    // Valid providers are 'ollama' and 'lmstudio'; binary fallback is intentional.
-    return settings.state.ai_provider === 'ollama' ? 'Ollama' : 'LM Studio';
+    // Mirrors the backend's SUPPORTED_AI_PROVIDERS allowlist.
+    switch (settings.state.ai_provider) {
+      case 'ollama': return 'Ollama';
+      case 'omlx': return 'oMLX';
+      default: return 'LM Studio';
+    }
   }
 
   function lastCheckedDescription(): string {
-    if (!health.lastCheckedAt) return 'not checked yet';
-    const seconds = Math.floor((Date.now() - health.lastCheckedAt) / 1000);
+    if (!endpointHealth.state.lastCheckedAt) return 'not checked yet';
+    const seconds = Math.floor((Date.now() - endpointHealth.state.lastCheckedAt) / 1000);
     return `last checked ${seconds}s ago`;
   }
 
   function tooltipText(): string {
     const parts: string[] = [];
-    if (health.ai === 'online') parts.push(`${aiProviderLabel()} online`);
-    else if (health.ai === 'offline') parts.push(`${aiProviderLabel()} offline`);
-    if (health.stt === 'online') parts.push('Whisper STT online');
-    else if (health.stt === 'offline') parts.push('Whisper STT offline');
+    if (endpointHealth.state.ai === 'online') parts.push(`${aiProviderLabel()} online`);
+    else if (endpointHealth.state.ai === 'offline') parts.push(`${aiProviderLabel()} offline`);
+    if (endpointHealth.state.stt === 'online') parts.push('Whisper STT online');
+    else if (endpointHealth.state.stt === 'offline') parts.push('Whisper STT offline');
     if (parts.length === 0) return '';
     return `${parts.join(', ')} — ${lastCheckedDescription()}`;
   }
 
   function ariaLabelText(): string {
-    switch (health.overall) {
+    switch (endpointHealth.state.overall) {
       case 'online': return 'AI services online';
       case 'partial': return 'AI services partially offline';
       case 'offline': return 'AI services offline';
@@ -45,11 +49,11 @@
   }
 
   function onClick() {
-    if (health.overall === 'online' || health.overall === 'hidden') return;
+    if (endpointHealth.state.overall === 'online' || endpointHealth.state.overall === 'hidden') return;
     // partial with AI offline only → models
     // partial with STT offline only → audio
     // offline (both) → models (AI is the more common case)
-    if (health.overall === 'partial' && health.ai === 'online' && health.stt === 'offline') {
+    if (endpointHealth.state.overall === 'partial' && endpointHealth.state.ai === 'online' && endpointHealth.state.stt === 'offline') {
       onopenSettings('audio');
     } else {
       onopenSettings('models');
@@ -57,7 +61,7 @@
   }
 
   function variantClass(): string {
-    switch (health.overall) {
+    switch (endpointHealth.state.overall) {
       case 'online': return 'ok';
       case 'partial': return 'warn';
       case 'offline': return 'error';
@@ -66,7 +70,7 @@
   }
 </script>
 
-{#if health.overall !== 'hidden'}
+{#if endpointHealth.state.overall !== 'hidden'}
   <button
     type="button"
     class="endpoint-pill {variantClass()}"

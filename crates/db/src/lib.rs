@@ -1,7 +1,7 @@
 //! SQLite database layer for the FerriScribe medical transcription app.
 //!
 //! This crate owns all persistent state: consultation recordings, application
-//! settings, vocabulary rules, vector embeddings for RAG, a CozoDB-backed
+//! settings, vocabulary rules, vector embeddings for RAG, a SQLite-backed
 //! medical knowledge graph, processing queues, generation history, letter
 //! audiences, a user dictionary, and an append-only audit log.
 //!
@@ -11,11 +11,6 @@
 //! pool and runs all pending migrations on open. Individual domain areas are
 //! exposed as stateless repository structs (e.g. [`recordings::RecordingsRepo`],
 //! [`settings::SettingsRepo`]) whose methods take a `&Connection`.
-//!
-//! # Feature flags
-//!
-//! - **`graph`** -- enables the `graph` module (CozoDB-backed knowledge
-//!   graph). Gated because CozoDB pulls in the Sled storage engine.
 //!
 //! # Thread safety
 //!
@@ -31,7 +26,6 @@ pub mod letter_audiences;
 pub mod migrations;
 pub mod pool;
 pub mod processing_queue;
-pub mod recipients;
 pub mod recordings;
 pub mod search;
 pub mod settings;
@@ -78,9 +72,6 @@ pub enum DbError {
     /// A database constraint was violated (e.g. deleting a built-in row).
     #[error("Constraint violation: {0}")]
     Constraint(String),
-    /// An error from the CozoDB-backed knowledge graph.
-    #[error("Graph error: {0}")]
-    Graph(String),
     /// A string could not be parsed as a valid UUID.
     #[error("UUID parse error in {1}: {0}")]
     UuidParse(String, String),
@@ -96,6 +87,24 @@ pub enum DbError {
 
 /// Convenience result type for database operations.
 pub type DbResult<T> = Result<T, DbError>;
+
+impl DbError {
+    /// True when this is a SQLite `UNIQUE`-constraint violation — i.e. an
+    /// insert (or update) hit a row that already exists under a unique key.
+    /// Lets command handlers turn the raw constraint text into a plain,
+    /// actionable duplicate message for the UI.
+    ///
+    /// Checks the *extended* code: the primary `ConstraintViolation` code is
+    /// shared by NOT NULL / CHECK / FOREIGN KEY / PRIMARY KEY failures, which
+    /// must not be misreported as duplicates.
+    pub fn is_unique_violation(&self) -> bool {
+        matches!(
+            self,
+            DbError::Sqlite(rusqlite::Error::SqliteFailure(f, _))
+                if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+        )
+    }
+}
 
 /// Parse a timestamp column that may be stored in either of two legitimate
 /// formats: RFC 3339 (e.g. `2026-05-22T00:00:00Z`, used by rows written from
@@ -143,6 +152,37 @@ impl From<DbError> for medical_core::error::AppError {
     fn from(e: DbError) -> Self {
         medical_core::error::AppError::database_with_source(e.to_string(), e)
     }
+}
+
+/// Produce a consistent, self-contained snapshot copy of an (encrypted)
+/// database file at `dest` using SQLCipher's `VACUUM INTO`.
+///
+/// Unlike copying `medical.db` + WAL sidecars directly — which can capture
+/// a torn state while the app is writing — `VACUUM INTO` runs inside
+/// SQLite and writes a fully consistent database image. The destination
+/// inherits the source's encryption (same key opens it).
+///
+/// The database is opened with its own connection (key applied via
+/// [`encryption::apply_pragma_key`]); a wrong key fails on the pre-flight
+/// `sqlite_master` read rather than producing a garbage snapshot. Used by
+/// the off-machine backup tool (`medical-backup`), which may run while the
+/// Tauri app is open.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlite`] on open, key, or VACUUM failure.
+pub fn snapshot_db_to(db_path: &Path, db_key: [u8; 32], dest: &Path) -> DbResult<()> {
+    let conn = rusqlite::Connection::open(db_path)?;
+    // Match the app pool's busy_timeout: the backup runs while the app may
+    // be writing, and VACUUM INTO against a busy DB should WAIT, not fail
+    // the whole nightly job with an immediate SQLITE_BUSY.
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    encryption::apply_pragma_key(&conn, &db_key)?;
+    // Pre-flight: with a wrong key this fails (or returns garbage rows)
+    // before we spend time on the VACUUM.
+    let _: i64 = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
+    conn.execute("VACUUM INTO ?1", [dest.to_string_lossy().to_string()])?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -266,5 +306,39 @@ mod tests {
         // Verify everything is queryable
         assert_eq!(RecordingsRepo::count(&conn).expect("count"), 1);
         assert_eq!(AuditRepo::count(&conn).expect("count"), 1);
+    }
+
+    /// `snapshot_db_to` must produce a consistent copy that opens with the
+    /// same key (used by the off-machine backup tool).
+    #[test]
+    fn snapshot_db_to_produces_openable_encrypted_copy() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("medical.db");
+        let key = [0x5Fu8; 32];
+        let db = Database::open(&db_path, Some(key)).expect("open encrypted");
+        {
+            let conn = db.conn().expect("conn");
+            conn.execute(
+                "INSERT INTO recordings (id, filename, audio_path) VALUES ('11111111-1111-1111-1111-111111111111', 'a.enc', '/tmp/a.enc')",
+                [],
+            )
+            .expect("insert");
+        }
+        drop(db);
+
+        let dest = dir.path().join("snapshot.db");
+        snapshot_db_to(&db_path, key, &dest).expect("vacuum into");
+        assert!(dest.exists());
+
+        let reopened = Database::open(&dest, Some(key)).expect("copy opens with same key");
+        let conn = reopened.conn().expect("conn");
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM recordings", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(count, 1);
+
+        // A wrong key must fail on the pre-flight read.
+        let wrong = snapshot_db_to(&db_path, [0x60u8; 32], &dir.path().join("x.db"));
+        assert!(wrong.is_err());
     }
 }

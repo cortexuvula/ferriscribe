@@ -94,7 +94,7 @@ impl SttProvider for LocalSttProvider {
         }
 
         if !self.whisper_model_path.exists() {
-            return Err(AppError::SttProvider(format!(
+            return Err(AppError::stt_provider(format!(
                 "Whisper model not found at {}. Download a model in Settings → Audio / STT.",
                 self.whisper_model_path.display()
             )));
@@ -116,7 +116,7 @@ impl SttProvider for LocalSttProvider {
             transcriber.transcribe(&audio_for_whisper, language.as_deref())
         })
         .await
-        .map_err(|e| AppError::SttProvider(format!("Whisper task panicked: {e}")))??;
+        .map_err(|e| AppError::stt_provider(format!("Whisper task panicked: {e}")))??;
 
         // Post-check: if the user cancelled while whisper was running,
         // discard the transcript rather than continuing into diarization
@@ -203,7 +203,7 @@ impl SttProvider for LocalSttProvider {
         _stream: AudioStream,
         _config: SttConfig,
     ) -> AppResult<Box<dyn Stream<Item = AppResult<TranscriptChunk>> + Send + Unpin>> {
-        Err(AppError::SttProvider(
+        Err(AppError::stt_provider(
             "Local provider does not support streaming transcription".to_owned(),
         ))
     }

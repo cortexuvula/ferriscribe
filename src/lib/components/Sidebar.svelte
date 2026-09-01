@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { theme } from '../stores/theme.svelte.ts';
+  import { theme } from '../stores/theme.svelte';
   import { settings } from '../stores/settings.svelte';
 
   interface Props {
@@ -9,10 +9,11 @@
   let { activeTab = $bindable('record') }: Props = $props();
 
   const workflowNav = [
-    { id: 'record',     label: 'Record',     icon: '🎙' },
-    { id: 'recordings', label: 'Recordings', icon: '📋' },
-    { id: 'generate',   label: 'Generate',   icon: '⚡' },
-    { id: 'chat',       label: 'Chat',       icon: '💬' },
+    { id: 'record',        label: 'Record',        icon: '🎙' },
+    { id: 'recordings',    label: 'Recordings',    icon: '📋' },
+    { id: 'generate',      label: 'Generate',      icon: '⚡' },
+    { id: 'letter_writer', label: 'Letter Writer', icon: '📝' },
+    { id: 'chat',          label: 'Chat',          icon: '💬' },
   ];
 
   const documentNav = [
@@ -30,7 +31,7 @@
 
     <nav aria-label="Main navigation">
       <div class="nav-section-label">Workflow</div>
-      {#each workflowNav as item}
+      {#each workflowNav as item (item.id)}
         <button
           class="nav-item"
           class:active={activeTab === item.id}
@@ -43,7 +44,7 @@
       {/each}
 
       <div class="nav-section-label" style="margin-top: 16px;">Documents</div>
-      {#each documentNav as item}
+      {#each documentNav as item (item.id)}
         <button
           class="nav-item"
           class:active={activeTab === item.id}

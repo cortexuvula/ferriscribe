@@ -20,7 +20,7 @@
 
     {#if message.tool_calls && message.tool_calls.length > 0}
       <div class="tool-calls">
-        {#each message.tool_calls as tc}
+        {#each message.tool_calls as tc, i (i)}
           <span class="tool-badge" title="Duration: {tc.duration_ms}ms">
             ⚙ {tc.tool_name}
           </span>

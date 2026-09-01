@@ -24,9 +24,9 @@ pub enum SttMode {
 /// AI providers supported at runtime.
 ///
 /// Used by [`AppConfig::migrate`] to reject stale values left over from
-/// older versions of the app that supported cloud providers. Only
-/// `"lmstudio"` and `"ollama"` are valid.
-pub const SUPPORTED_AI_PROVIDERS: &[&str] = &["lmstudio", "ollama"];
+/// older versions of the app that supported cloud providers. Valid values
+/// are the local inference servers: `"lmstudio"`, `"ollama"`, and `"omlx"`.
+pub const SUPPORTED_AI_PROVIDERS: &[&str] = &["lmstudio", "ollama", "omlx"];
 
 /// Supported TTS provider names. Only local TTS is supported — AGENTS.md
 /// forbids hosted AI APIs, so cloud providers (e.g. ElevenLabs) were removed.
@@ -212,6 +212,10 @@ fn default_auto_generate_soap() -> bool {
     false
 }
 
+fn default_soap_notification_sound() -> bool {
+    true
+}
+
 fn default_max_retry_attempts() -> u32 {
     3
 }
@@ -250,6 +254,14 @@ fn default_ollama_host() -> String {
 
 fn default_ollama_port() -> u16 {
     11434
+}
+
+fn default_omlx_host() -> String {
+    "localhost".into()
+}
+
+fn default_omlx_port() -> u16 {
+    8000
 }
 
 fn default_vocabulary_enabled() -> bool {
@@ -296,6 +308,26 @@ fn default_rsvp_remembered_sections() -> Vec<String> {
     Vec::new()
 }
 
+/// Credential wrapper whose `Debug` redacts the value — the `RemoteEndpoint`
+/// precedent ("bearer tokens must not leak to logs"). Serializes as a plain
+/// string, so the wire format and TS types are unchanged.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretString(#[serde(default)] pub String);
+
+// Manual Debug — the derived one would print the credential verbatim
+// into any {:?}/tracing/panic sink.
+impl std::fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretString(<redacted>)")
+    }
+}
+
+impl SecretString {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AppConfig
 // ---------------------------------------------------------------------------
@@ -324,6 +356,10 @@ pub struct AppConfig {
     pub ai_provider: String,
     #[serde(default = "default_ai_model")]
     pub ai_model: String,
+    /// Vision-capable model name for OCR (e.g. "glm-ocr").
+    /// If None, falls back to `ai_model` for OCR.
+    #[serde(default)]
+    pub ocr_model: Option<String>,
     #[serde(default = "default_whisper_model")]
     pub whisper_model: String,
     #[serde(default = "default_tts_provider")]
@@ -335,6 +371,13 @@ pub struct AppConfig {
     pub lmstudio_host: String,
     #[serde(default = "default_lmstudio_port")]
     pub lmstudio_port: u16,
+    /// Disable the reasoning/"thinking" phase for LM Studio models (Qwen3
+    /// & co.). LM Studio drops API-level thinking parameters, so the
+    /// provider injects an assistant prefill with a pre-closed `<think>`
+    /// block instead. Default `false` — opt-in, saves minutes of latency
+    /// per SOAP note on thinking models.
+    #[serde(default)]
+    pub lmstudio_disable_thinking: bool,
 
     // STT mode selection
     #[serde(default)]
@@ -352,6 +395,26 @@ pub struct AppConfig {
     pub ollama_host: String,
     #[serde(default = "default_ollama_port")]
     pub ollama_port: u16,
+    /// Disable the reasoning/"thinking" phase for Ollama models (Qwen3 &
+    /// co.). Sends `reasoning_effort: "none"` on the OpenAI-compatible
+    /// endpoint. Default `false` — opt-in, saves minutes of latency per
+    /// SOAP note on thinking models.
+    #[serde(default)]
+    pub ollama_disable_thinking: bool,
+
+    // oMLX server (local MLX inference for Apple Silicon)
+    #[serde(default = "default_omlx_host")]
+    pub omlx_host: String,
+    #[serde(default = "default_omlx_port")]
+    pub omlx_port: u16,
+    /// Disable the reasoning/"thinking" phase for oMLX models (Qwen3 &
+    /// co.). oMLX renders mlx-lm's Jinja chat templates but drops
+    /// API-level thinking parameters, so the provider injects an assistant
+    /// prefill with a pre-closed `<think>` block instead (same strategy as
+    /// LM Studio). Default `false` — opt-in, saves minutes of latency per
+    /// SOAP note on thinking models.
+    #[serde(default)]
+    pub omlx_disable_thinking: bool,
 
     // Temperature
     #[serde(default = "default_temperature")]
@@ -364,6 +427,12 @@ pub struct AppConfig {
     pub auto_generate_letter: bool,
     #[serde(default = "default_auto_generate_soap")]
     pub auto_generate_soap: bool,
+    /// Play a short local chime when a SOAP note finishes generating.
+    /// Purely local (Web Audio synthesis in the app webview) — no TTS
+    /// provider, no audio asset, no network. Frontend-only concern; the
+    /// backend just persists the preference.
+    #[serde(default = "default_soap_notification_sound")]
+    pub soap_notification_sound: bool,
     #[serde(default = "default_auto_index_rag")]
     pub auto_index_rag: bool,
     #[serde(default = "default_vocabulary_enabled")]
@@ -408,6 +477,10 @@ pub struct AppConfig {
     pub custom_referral_prompt: Option<String>,
     #[serde(default)]
     pub custom_letter_prompt: Option<String>,
+    /// Optional custom system prompt for the standalone Letter Writer
+    /// (OCR → letter). When None/empty, the built-in default is used.
+    #[serde(default)]
+    pub custom_letter_writer_prompt: Option<String>,
     #[serde(default)]
     pub custom_synopsis_prompt: Option<String>,
     #[serde(default)]
@@ -439,6 +512,12 @@ pub struct AppConfig {
     #[serde(default = "default_max_retry_attempts")]
     pub max_retry_attempts: u32,
 
+    // Retention
+    /// Per-machine recordings retention policy — soft-delete recordings
+    /// older than this many days. `None` = keep forever (default).
+    #[serde(default)]
+    pub retention_days: Option<u32>,
+
     // Window
     #[serde(default = "default_window_width")]
     pub window_width: u32,
@@ -458,12 +537,36 @@ pub struct AppConfig {
     #[serde(default)]
     pub allow_public_endpoint: bool,
 
+    // Off-machine backup (configured by Settings → Backup; the schedule
+    // itself is a launchd agent invoking the bundled sidecar, NOT the app)
+    /// Backup target agent URL (e.g. http://100.64.0.2:8741). None until
+    /// the user configures the target.
+    #[serde(default)]
+    pub backup_target_url: Option<String>,
+    /// Append token for the backup target. Stored here (encrypted DB) so
+    /// the in-app "Back up now" reuses the scheduled job's credentials.
+    /// The admin/prune token NEVER lives on this machine.
+    #[serde(default)]
+    pub backup_append_token: Option<SecretString>,
+    /// Folder destination for backups (USB / network / cloud-synced
+    /// folder), alternative to `backup_target_url`. Mutually exclusive
+    /// with it; configuring one clears the other. Absolute path.
+    #[serde(default)]
+    pub backup_dest_path: Option<String>,
+
     // Onboarding
     /// `true` once the user has completed (or skipped through) the first-run
     /// onboarding wizard. The wizard is shown only when this is `false` AND no
     /// prior config existed (existing installs are auto-marked in `get_settings`).
     #[serde(default)]
     pub onboarding_completed: bool,
+
+    /// ISO-8601 timestamp of when the user accepted the Terms of Service
+    /// (TERMS_OF_SERVICE.md). `None` until accepted — the app gates on this
+    /// exactly once. Amendments are governed by §13.2 of the Terms (continued
+    /// use constitutes acceptance), so a single timestamp suffices.
+    #[serde(default)]
+    pub tos_accepted_at: Option<String>,
 
     // Updates
     /// When true, the app checks GitHub Releases for updates on launch and
@@ -496,6 +599,13 @@ pub struct AppConfig {
     /// machine keeps its own list unless the user opts in.
     #[serde(default)]
     pub sync_condition_chips: bool,
+
+    // User dictionary sync
+    /// When true, the per-user spellcheck dictionary syncs two-way between
+    /// this machine and the paired server via the vocab API. Defaults to
+    /// false — each machine keeps its own dictionary unless the user opts in.
+    #[serde(default)]
+    pub sync_user_dictionary: bool,
 
     // Content sync
     /// When true, patient content (transcripts, SOAP notes, letters, peer
@@ -579,6 +689,11 @@ mod tests {
         assert_eq!(config.window_height, 800);
         assert_eq!(config.lmstudio_host, "localhost");
         assert_eq!(config.lmstudio_port, 1234);
+        assert!(!config.lmstudio_disable_thinking);
+        assert!(!config.ollama_disable_thinking);
+        assert_eq!(config.omlx_host, "localhost");
+        assert_eq!(config.omlx_port, 8000);
+        assert!(!config.omlx_disable_thinking);
         assert!(config.vocabulary_enabled);
         assert_eq!(config.rsvp_wpm, 300);
         assert_eq!(config.rsvp_font_size, 48);
@@ -691,6 +806,11 @@ mod tests {
         let mut config: AppConfig = serde_json::from_str(json).unwrap();
         config.migrate();
         assert_eq!(config.ai_provider, "ollama");
+
+        let json = r#"{"ai_provider": "omlx"}"#;
+        let mut config: AppConfig = serde_json::from_str(json).unwrap();
+        config.migrate();
+        assert_eq!(config.ai_provider, "omlx");
     }
 
     #[test]
@@ -720,6 +840,14 @@ mod tests {
         let config: AppConfig = serde_json::from_str("{}").expect("parse empty");
         assert_eq!(config.ollama_host, "localhost");
         assert_eq!(config.ollama_port, 11434);
+    }
+
+    #[test]
+    fn new_config_defaults_omlx_host_and_port() {
+        let config: AppConfig = serde_json::from_str("{}").expect("parse empty");
+        assert_eq!(config.omlx_host, "localhost");
+        assert_eq!(config.omlx_port, 8000);
+        assert!(!config.omlx_disable_thinking);
     }
 
     #[test]
@@ -753,6 +881,14 @@ mod tests {
     }
 
     #[test]
+    fn sync_user_dictionary_defaults_to_false_in_older_configs() {
+        let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
+        let cfg: AppConfig =
+            serde_json::from_str(old_json).expect("should parse with serde defaults");
+        assert!(!cfg.sync_user_dictionary, "default must be false");
+    }
+
+    #[test]
     fn sync_content_defaults_to_false_in_older_configs() {
         let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
         let cfg: AppConfig =
@@ -773,5 +909,41 @@ mod tests {
     fn allow_public_endpoint_defaults_to_false() {
         let cfg: AppConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.allow_public_endpoint);
+    }
+
+    #[test]
+    fn ocr_model_defaults_to_none() {
+        let json = r#"{"theme":"dark","language":"en"}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap_or_default();
+        assert!(
+            config.ocr_model.is_none(),
+            "ocr_model should default to None"
+        );
+    }
+
+    #[test]
+    fn retention_days_defaults_to_none_when_missing() {
+        // Older config JSON without the field must keep-forever by default.
+        let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).expect("parse old config");
+        assert_eq!(
+            cfg.retention_days, None,
+            "missing field must default to None"
+        );
+    }
+
+    #[test]
+    fn retention_days_round_trips() {
+        let json = r#"{"retention_days": 42}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(cfg.retention_days, Some(42));
+
+        let out = serde_json::to_string(&cfg).expect("serialize");
+        assert!(
+            out.contains(r#""retention_days":42"#),
+            "expected retention_days in output, got: {out}"
+        );
+        let back: AppConfig = serde_json::from_str(&out).expect("re-parse");
+        assert_eq!(back.retention_days, Some(42));
     }
 }

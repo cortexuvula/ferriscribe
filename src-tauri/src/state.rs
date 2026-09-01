@@ -10,6 +10,7 @@ use medical_ai_providers::ProviderRegistry;
 use medical_ai_providers::http_client::RetryConfig;
 use medical_ai_providers::lmstudio::LmStudioProvider;
 use medical_ai_providers::ollama::OllamaProvider;
+use medical_ai_providers::omlx::OmlxProvider;
 
 use medical_core::types::RemoteEndpoint;
 use medical_core::types::settings::AppConfig;
@@ -20,7 +21,6 @@ use medical_agents::tools::ToolRegistry;
 use medical_audio::capture::CaptureHandle;
 
 use medical_db::Database;
-use medical_db::recordings::RecordingsRepo;
 
 use medical_security::key_storage::KeyStorage;
 
@@ -233,6 +233,11 @@ pub struct AppState {
     /// Agent orchestrator for chat and agent-driven commands. Holds the
     /// tool registry (RAG search) and all agent definitions.
     pub orchestrator: Arc<AgentOrchestrator>,
+    /// Conversation-scoped document index for chat chart-review mode
+    /// (`commands/chat_docs.rs`). `None` until the first oversized send;
+    /// rebuilt when the document set changes; dropped by
+    /// `chat_clear_documents`. In-memory only — never persisted or synced.
+    pub chat_doc_index: Arc<tokio::sync::Mutex<Option<crate::commands::chat_docs::ChatDocIndex>>>,
     /// Active audio capture stream. Wrapped in `SendCaptureHandle` to satisfy
     /// `Send + Sync` bounds. Access serialized through the `std::sync::Mutex`.
     pub capture_handle: Arc<std::sync::Mutex<SendCaptureHandle>>,
@@ -257,6 +262,9 @@ pub struct AppState {
     pub ollama_provider: RwLock<Option<Arc<OllamaProvider>>>,
     /// Concrete LM Studio provider reference; allows `set_endpoint` after startup.
     pub lmstudio_provider: RwLock<Option<Arc<LmStudioProvider>>>,
+    /// Typed oMLX handle for runtime endpoint updates (pairing/unpairing and
+    /// office-server wiring call `set_endpoint` on it).
+    pub omlx_provider: RwLock<Option<Arc<OmlxProvider>>>,
     /// Concrete RemoteSttProvider reference; `None` when STT mode is Local.
     pub remote_stt_provider:
         RwLock<Option<Arc<medical_stt_providers::remote_provider::RemoteSttProvider>>>,
@@ -271,6 +279,12 @@ pub struct AppState {
     /// Replaced on each `subscribe_content_sync` call so re-subscribes
     /// don't leak eternal tasks.
     pub content_sse_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    /// Cancellation tokens for the condition-chip and user-dictionary SSE
+    /// subscriber tasks. Same swap-on-resubscribe discipline as
+    /// [`Self::content_sse_cancel`]: the frontend (re)subscribes on every
+    /// mount of ConditionChips, so a token-less task would leak forever.
+    pub condition_sse_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+    pub dict_sse_cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -334,22 +348,25 @@ pub struct AiProviderHandles {
     pub registry: ProviderRegistry,
     pub ollama: Option<Arc<OllamaProvider>>,
     pub lmstudio: Option<Arc<LmStudioProvider>>,
+    pub omlx: Option<Arc<OmlxProvider>>,
 }
 
-/// Register all supported AI providers (LM Studio + Ollama).
+/// Register all supported AI providers (LM Studio + Ollama + oMLX).
 ///
-/// `config` supplies host/port; `ollama_ep` / `lmstudio_ep` override with a
-/// `RemoteEndpoint` for LAN/Tailscale resolution when this machine is a paired
-/// client. Pass `None` for local-only (default) mode.
+/// `config` supplies host/port; `ollama_ep` / `lmstudio_ep` / `omlx_ep`
+/// override with a `RemoteEndpoint` for LAN/Tailscale resolution when this
+/// machine is a paired client. Pass `None` for local-only (default) mode.
 pub fn init_ai_providers(
     config: &AppConfig,
     ollama_ep: Option<RemoteEndpoint>,
     lmstudio_ep: Option<RemoteEndpoint>,
+    omlx_ep: Option<RemoteEndpoint>,
 ) -> AiProviderHandles {
     let mut registry = ProviderRegistry::new();
     let policy = RetryConfig::from_app_config(config);
     let mut ollama_handle: Option<Arc<OllamaProvider>> = None;
     let mut lmstudio_handle: Option<Arc<LmStudioProvider>> = None;
+    let mut omlx_handle: Option<Arc<OmlxProvider>> = None;
 
     // Ollama — always available (local, no key needed).
     // Builder failures are logged and the provider skipped rather than
@@ -370,6 +387,9 @@ pub fn init_ai_providers(
         ollama_ep,
     ) {
         Ok(p) => {
+            // Captured at construction — a settings toggle only takes effect
+            // after reinit_providers rebuilds the registry.
+            p.set_thinking_disabled(config.ollama_disable_thinking);
             info!(url = %ollama_url, "Registering Ollama provider");
             let arc = Arc::new(p);
             registry.register(Arc::clone(&arc) as Arc<dyn medical_core::traits::AiProvider>);
@@ -396,6 +416,9 @@ pub fn init_ai_providers(
         lmstudio_ep,
     ) {
         Ok(p) => {
+            // Captured at construction — a settings toggle only takes effect
+            // after reinit_providers rebuilds the registry.
+            p.set_thinking_disabled(config.lmstudio_disable_thinking);
             info!(url = %lmstudio_url, "Registering LM Studio provider");
             let arc = Arc::new(p);
             registry.register(Arc::clone(&arc) as Arc<dyn medical_core::traits::AiProvider>);
@@ -406,11 +429,42 @@ pub fn init_ai_providers(
         }
     }
 
+    // oMLX — always available (local or remote, no key needed). Wired into
+    // the office-sharing proxy layer alongside Ollama and LM Studio.
+    let omlx_host = if config.omlx_host.is_empty() {
+        "localhost"
+    } else {
+        &config.omlx_host
+    };
+    let omlx_url = format!("http://{}:{}", omlx_host, config.omlx_port);
+    let omlx_bearer = omlx_ep.as_ref().and_then(|ep| ep.bearer.clone());
+    match OmlxProvider::new_with_endpoint(
+        Some(&omlx_url),
+        config.allow_public_endpoint,
+        omlx_bearer,
+        policy,
+        omlx_ep,
+    ) {
+        Ok(p) => {
+            // Captured at construction — a settings toggle only takes effect
+            // after reinit_providers rebuilds the registry.
+            p.set_thinking_disabled(config.omlx_disable_thinking);
+            info!(url = %omlx_url, "Registering oMLX provider");
+            let arc = Arc::new(p);
+            registry.register(Arc::clone(&arc) as Arc<dyn medical_core::traits::AiProvider>);
+            omlx_handle = Some(arc);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, url = %omlx_url, "Failed to build oMLX provider; skipping")
+        }
+    }
+
     info!("AI providers available: {:?}", registry.list_available());
     AiProviderHandles {
         registry,
         ollama: ollama_handle,
         lmstudio: lmstudio_handle,
+        omlx: omlx_handle,
     }
 }
 
@@ -656,141 +710,13 @@ impl AppState {
         let db = Database::open(&db_path, db_key)?;
         let db = Arc::new(db);
 
-        // Flip any recordings that were Processing when the previous run ended
-        // (crash, hard-quit, SIGKILL) to Failed so the UI doesn't show them
-        // spinning forever.  Best-effort: a DB hiccup here shouldn't block boot.
-        if let Ok(conn) = db.conn() {
-            match RecordingsRepo::fail_stuck_processing(
-                &conn,
-                "Processing interrupted — app was closed before the pipeline finished.",
-            ) {
-                Ok(0) => {}
-                Ok(n) => info!("Marked {n} stuck Processing recording(s) as Failed on boot"),
-                Err(e) => tracing::warn!("fail_stuck_processing on boot failed: {e}"),
-            }
-        }
-
-        // Sweep: encrypt any recordings left pending by a crash. A row is
-        // flagged encryption_pending=1 by stop_recording right before it
-        // spawns the background encrypt task; the task clears the flag when
-        // done. If the app died in between, the WAV is still plaintext at
-        // rest — finish the encryption here so no PHI audio is left
-        // unencrypted. Best-effort: a failure here must not block boot.
-        if let Ok(conn) = db.conn() {
-            let pending = match RecordingsRepo::list_encryption_pending(&conn) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "encryption sweep: list_encryption_pending failed");
-                    Vec::new()
-                }
-            };
-            if !pending.is_empty() {
-                info!(
-                    count = pending.len(),
-                    "Encrypting pending recordings from previous session"
-                );
-                for (id, path) in &pending {
-                    // Guard against the crash-after-encrypt-but-before-clear-
-                    // flag window: if the file is already encrypted on disk
-                    // (FE1 magic), just clear the flag instead of re-encrypting
-                    // — re-encrypting ciphertext would corrupt the file.
-                    if medical_security::file_crypto::is_encrypted(path) {
-                        let _ = RecordingsRepo::set_encryption_done(&conn, id);
-                        tracing::debug!(
-                            recording_id = %id,
-                            "Pending recording already encrypted on disk; cleared flag"
-                        );
-                        continue;
-                    }
-                    match medical_security::file_crypto::encrypt_file_in_place(path) {
-                        Ok(()) => {
-                            let _ = RecordingsRepo::set_encryption_done(&conn, id);
-                            tracing::debug!(recording_id = %id, "Encrypted pending recording");
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                recording_id = %id,
-                                "Failed to encrypt pending recording"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Tombstone sweeper (server only) ────────────────────────────────
-        // Permanently purge recordings soft-deleted >30 days ago. Runs only on
-        // machines acting as the office server (where durable deletion policy
-        // applies); client machines keep their soft-deletes for local undo.
-        // The loop sleeps a day between sweeps — the first pass runs ~24h after
-        // boot, which is fine since the 30-day window dwarfs the interval.
-        {
-            let db_clone = Arc::clone(&db);
-            let server_config = load_server_config();
-            if server_config.is_some() {
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
-                        tracing::info!("running tombstone sweeper");
-                        if let Ok(conn) = db_clone.conn() {
-                            // Get the IDs of recordings about to be purged,
-                            // so we can also clean up their RAG vectors.
-                            let ids_to_purge: Vec<String> = {
-                                let mut stmt = match conn.prepare(
-                                    "SELECT id FROM recordings
-                                     WHERE deleted_at IS NOT NULL
-                                     AND datetime(deleted_at) < datetime('now', '-30 days')",
-                                ) {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "tombstone sweeper: prepare failed");
-                                        continue;
-                                    }
-                                };
-                                stmt.query_map([], |row| row.get::<_, String>(0))
-                                    .ok()
-                                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                    .unwrap_or_default()
-                            };
-
-                            if ids_to_purge.is_empty() {
-                                continue;
-                            }
-
-                            // Clean up RAG vectors for each purged recording.
-                            use medical_db::vectors::VectorsRepo;
-                            for id in &ids_to_purge {
-                                if let Err(e) = VectorsRepo::delete_by_document(&conn, id) {
-                                    tracing::warn!(
-                                        recording_id = %id,
-                                        error = %e,
-                                        "tombstone sweeper: failed to delete RAG vectors"
-                                    );
-                                }
-                            }
-
-                            // Now permanently delete the recording rows.
-                            match conn.execute(
-                                "DELETE FROM recordings
-                                 WHERE deleted_at IS NOT NULL
-                                 AND datetime(deleted_at) < datetime('now', '-30 days')",
-                                [],
-                            ) {
-                                Ok(count) => {
-                                    tracing::info!(
-                                        purged = count,
-                                        vectors_cleaned = ids_to_purge.len(),
-                                        "tombstone sweeper purged soft-deleted recordings + RAG vectors"
-                                    );
-                                }
-                                Err(e) => tracing::warn!(error = %e, "tombstone sweeper failed"),
-                            }
-                        }
-                    }
-                });
-            }
-        }
+        // Boot-time sweeps (stuck-Processing flip, crash-pending encryption)
+        // and the daily retention/tombstone sweeper live in `sweeps.rs`,
+        // extracted from here so they are unit-testable against an
+        // in-memory DB.
+        crate::sweeps::fail_stuck_processing_sweep(&db);
+        crate::sweeps::encryption_pending_sweep(&db);
+        crate::sweeps::spawn_retention_sweeper(Arc::clone(&db));
 
         let config_dir = data_dir.join("config");
         let keys = KeyStorage::open(&config_dir)?;
@@ -817,35 +743,21 @@ impl AppState {
             None
         };
 
-        let (ollama_ep, lmstudio_ep, whisper_ep) = if let Some(ref p) = paired {
-            (
-                Some(RemoteEndpoint {
-                    lan: p.lan.clone(),
-                    tailscale: p.tailscale.clone(),
-                    port: p.ports.ollama,
-                    bearer: bearer.clone(),
-                }),
-                p.ports.lmstudio.map(|lms_port| RemoteEndpoint {
-                    lan: p.lan.clone(),
-                    tailscale: p.tailscale.clone(),
-                    port: lms_port,
-                    bearer: bearer.clone(),
-                }),
-                Some(RemoteEndpoint {
-                    lan: p.lan.clone(),
-                    tailscale: p.tailscale.clone(),
-                    port: p.ports.whisper,
-                    bearer: bearer.clone(),
-                }),
-            )
+        let eps = if let Some(ref p) = paired {
+            crate::commands::sharing::paired_endpoints(p, bearer)
         } else {
-            (None, None, None)
+            crate::commands::sharing::PairedEndpoints {
+                ollama: None,
+                lmstudio: None,
+                omlx: None,
+                whisper: None,
+            }
         };
 
         // Initialize provider registries from saved API keys + config
-        let mut ai_handles = init_ai_providers(&config_ref, ollama_ep, lmstudio_ep);
+        let mut ai_handles = init_ai_providers(&config_ref, eps.ollama, eps.lmstudio, eps.omlx);
 
-        let stt_handles = init_stt_providers_with_config(&data_dir, &config_ref, whisper_ep);
+        let stt_handles = init_stt_providers_with_config(&data_dir, &config_ref, eps.whisper);
 
         // Set the active AI provider from saved settings
         if let Some(ref cfg) = config
@@ -859,6 +771,7 @@ impl AppState {
 
         let ollama_provider = RwLock::new(ai_handles.ollama.take());
         let lmstudio_provider = RwLock::new(ai_handles.lmstudio.take());
+        let omlx_provider = RwLock::new(ai_handles.omlx.take());
         let remote_stt_provider = RwLock::new(stt_handles.remote.clone());
 
         // Initialize the agent orchestrator. RAG tools (RagSearchTool) are
@@ -875,6 +788,7 @@ impl AppState {
             ai_providers: Arc::new(Mutex::new(ai_handles.registry)),
             stt_providers: Arc::new(Mutex::new(stt_handles.provider)),
             orchestrator: Arc::new(orchestrator),
+            chat_doc_index: Arc::new(tokio::sync::Mutex::new(None)),
             capture_handle: Arc::new(std::sync::Mutex::new(SendCaptureHandle(None))),
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -882,10 +796,13 @@ impl AppState {
             vocab_api: RwLock::new(None),
             ollama_provider,
             lmstudio_provider,
+            omlx_provider,
             remote_stt_provider,
             http_client,
             content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             content_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
+            condition_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
+            dict_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 }
@@ -902,7 +819,7 @@ mod tests {
         config.ollama_port = 11500;
         // Non-localhost hostname requires allow_public_endpoint = true.
         config.allow_public_endpoint = true;
-        let handles = init_ai_providers(&config, None, None);
+        let handles = init_ai_providers(&config, None, None, None);
         assert!(
             handles
                 .registry
@@ -914,6 +831,24 @@ mod tests {
             handles.ollama.is_some(),
             "ollama handle should be populated"
         );
+    }
+
+    #[test]
+    fn init_ai_providers_uses_configured_omlx_host() {
+        let mut config = AppConfig::default();
+        config.omlx_host = "tailnet-node".into();
+        config.omlx_port = 8100;
+        // Non-localhost hostname requires allow_public_endpoint = true.
+        config.allow_public_endpoint = true;
+        let handles = init_ai_providers(&config, None, None, None);
+        assert!(
+            handles
+                .registry
+                .list_available()
+                .contains(&"omlx".to_string()),
+            "omlx should still be registered with a custom host"
+        );
+        assert!(handles.omlx.is_some(), "omlx handle should be populated");
     }
 
     #[test]

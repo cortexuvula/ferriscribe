@@ -24,8 +24,12 @@ updates:
       # to migrate together. Handle in a dedicated upgrade effort.
       - dependency-name: "@tiptap/*"
         update-types: ["version-update:semver-major"]
+      # tiptap-markdown 0.9.0+ requires @tiptap/core ^3.0.1 (incompatible
+      # with our tiptap v2 stack). For 0.x packages, a minor bump is breaking
+      # in semver terms. Ignore both minor and major until the tiptap v3
+      # migration is done.
       - dependency-name: "tiptap-markdown"
-        update-types: ["version-update:semver-major"]
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: "cargo"
     directory: "/"
@@ -53,6 +57,13 @@ updates:
       - dependency-name: "aes-gcm"
         update-types: ["version-update:semver-major"]
       - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # printpdf is deliberately pinned at 0.7: 0.9+ is a major API rewrite
+      # (see AGENTS.md "Dependency version pins"). Our copy is write-only —
+      # user-PDF parsing goes through pdf-extract/lopdf — so the vendored
+      # lopdf advisory is not reachable. Migrate deliberately, not via a
+      # weekly bot PR.
+      - dependency-name: "printpdf"
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"

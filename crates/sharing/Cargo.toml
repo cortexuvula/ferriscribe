@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 medical-core = { path = "../core" }
 medical-security = { path = "../security" }
-axum = { version = "0.8", features = ["macros"] }
+axum = { workspace = true, features = ["macros"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true }
@@ -23,7 +23,7 @@ base64 = { workspace = true }
 urlencoding = { workspace = true }
 mdns-sd = "0.20"
 rusqlite = { workspace = true }
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { workspace = true }
 dirs = { workspace = true }
 hostname = "0.4"
 zip = "2"

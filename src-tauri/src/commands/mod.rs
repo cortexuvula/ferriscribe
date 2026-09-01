@@ -1,5 +1,7 @@
 pub mod audio;
+pub mod backup;
 pub mod chat;
+pub mod chat_docs;
 pub mod conditions;
 pub mod content_sync;
 pub mod context_templates;
@@ -9,6 +11,7 @@ pub mod icd;
 pub mod letter_audiences;
 pub mod logging;
 pub mod models;
+pub mod ocr;
 pub mod pipeline;
 pub mod providers;
 pub mod recordings;
@@ -107,6 +110,54 @@ pub fn validate_user_path(path: &str) -> AppResult<PathBuf> {
     Ok(canonical)
 }
 
+/// Load the full `AppConfig` (with migrations applied) from the DB inside
+/// `spawn_blocking`, so the SQLite pool checkout + JSON parse never stall the
+/// Tokio async runtime worker. `context` names the calling feature for error
+/// messages (e.g. "chat", "audio", "preflight").
+///
+/// Returns a hard error if the settings can't be read — a silent fallback to
+/// defaults would route requests to the wrong provider/model. Best-effort
+/// single-field reads (with explicit fallbacks) stay at their call sites.
+pub async fn load_app_config(
+    db: &std::sync::Arc<Database>,
+    context: &str,
+) -> AppResult<medical_core::types::settings::AppConfig> {
+    let db = std::sync::Arc::clone(db);
+    let context = context.to_string();
+    tokio::task::spawn_blocking(
+        move || -> AppResult<medical_core::types::settings::AppConfig> {
+            let conn = db
+                .conn()
+                .map_err(|e| AppError::Config(format!("Failed to load {context} settings: {e}")))?;
+            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                .map_err(|e| AppError::Config(format!("Failed to load {context} settings: {e}")))?;
+            cfg.migrate();
+            Ok(cfg)
+        },
+    )
+    .await
+    .map_err(join_err)?
+}
+
+/// Cancel the SSE subscriber task tracked by `slot` and install `new_token`
+/// in its place (or clear the slot when `None` — used when the sync gates
+/// fail, e.g. the user unpaired, so a previous subscriber doesn't keep
+/// reconnecting with stale credentials forever).
+pub fn swap_sse_cancel_token(
+    slot: &std::sync::Arc<std::sync::Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    label: &str,
+    new_token: Option<tokio_util::sync::CancellationToken>,
+) -> AppResult<()> {
+    let mut guard = slot
+        .lock()
+        .map_err(|e| AppError::MutexPoisoned(format!("{label}: {e}")))?;
+    if let Some(old) = guard.take() {
+        old.cancel();
+    }
+    *guard = new_token;
+    Ok(())
+}
+
 /// Resolve the recordings directory from settings.
 ///
 /// If the user has configured a custom `storage_path`, use it.
@@ -135,17 +186,18 @@ pub fn resolve_recordings_dir(db: &Database, data_dir: &Path) -> AppResult<PathB
 pub(super) fn unwrap_app_error_message(err: AppError) -> String {
     match err {
         AppError::Database { message: s, .. }
-        | AppError::Security(s)
-        | AppError::Audio(s)
-        | AppError::AiProvider(s)
-        | AppError::SttProvider(s)
-        | AppError::TtsProvider(s)
-        | AppError::Agent(s)
-        | AppError::Rag(s)
-        | AppError::Processing(s)
-        | AppError::Export(s)
-        | AppError::Translation(s)
+        | AppError::Security { message: s, .. }
+        | AppError::Audio { message: s, .. }
+        | AppError::AiProvider { message: s, .. }
+        | AppError::SttProvider { message: s, .. }
+        | AppError::TtsProvider { message: s, .. }
+        | AppError::Agent { message: s, .. }
+        | AppError::Rag { message: s, .. }
+        | AppError::Processing { message: s, .. }
+        | AppError::Export { message: s, .. }
+        | AppError::Translation { message: s, .. }
         | AppError::Config(s)
+        | AppError::InvalidInput(s)
         | AppError::MutexPoisoned(s)
         | AppError::HttpClient(s)
         | AppError::Other(s) => s,
@@ -165,17 +217,18 @@ pub(super) fn unwrap_app_error_message(err: AppError) -> String {
 pub(super) fn unwrap_app_error_message_ref(err: &AppError) -> String {
     match err {
         AppError::Database { message: s, .. }
-        | AppError::Security(s)
-        | AppError::Audio(s)
-        | AppError::AiProvider(s)
-        | AppError::SttProvider(s)
-        | AppError::TtsProvider(s)
-        | AppError::Agent(s)
-        | AppError::Rag(s)
-        | AppError::Processing(s)
-        | AppError::Export(s)
-        | AppError::Translation(s)
+        | AppError::Security { message: s, .. }
+        | AppError::Audio { message: s, .. }
+        | AppError::AiProvider { message: s, .. }
+        | AppError::SttProvider { message: s, .. }
+        | AppError::TtsProvider { message: s, .. }
+        | AppError::Agent { message: s, .. }
+        | AppError::Rag { message: s, .. }
+        | AppError::Processing { message: s, .. }
+        | AppError::Export { message: s, .. }
+        | AppError::Translation { message: s, .. }
         | AppError::Config(s)
+        | AppError::InvalidInput(s)
         | AppError::MutexPoisoned(s)
         | AppError::HttpClient(s)
         | AppError::Other(s) => s.clone(),
@@ -194,7 +247,7 @@ mod tests {
     #[test]
     fn unwrap_app_error_message_strips_all_category_prefixes() {
         assert_eq!(
-            unwrap_app_error_message(AppError::AiProvider("bad key".to_string())),
+            unwrap_app_error_message(AppError::ai_provider("bad key".to_string())),
             "bad key"
         );
         assert_eq!(
@@ -207,7 +260,7 @@ mod tests {
     #[test]
     fn unwrap_app_error_message_ref_strips_all_category_prefixes() {
         assert_eq!(
-            unwrap_app_error_message_ref(&AppError::AiProvider("bad key".to_string())),
+            unwrap_app_error_message_ref(&AppError::ai_provider("bad key".to_string())),
             "bad key"
         );
         assert_eq!(

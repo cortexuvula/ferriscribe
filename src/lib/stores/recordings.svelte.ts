@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { SyncSummary } from '../api/contentSync';
 import type { Recording, RecordingSummary } from '../types';
 import {
   listRecordings,
@@ -9,6 +10,7 @@ import {
   deleteAllRecordings,
 } from '../api/recordings';
 import { syncContentNow } from '../api/contentSync';
+import { latestTokensPerSecond } from '../utils/generationStats';
 
 /// Page size for the Recordings list. The list loads this many at a time and
 /// appends more on "Load more". A full page means there may be more; a short
@@ -27,22 +29,35 @@ class RecordingsStore {
   /// True while a content sync round-trip is in flight. UI uses this to show
   /// a syncing indicator and to avoid stacking concurrent syncs.
   syncing = $state(false);
+  /// True when a sync was requested while another sync was already running.
+  /// The queued request is replayed after the in-flight sync completes so
+  /// `content-changed` SSE notifications are never silently dropped.
+  syncPending = $state(false);
   /// Timestamp of the most recently completed sync cycle. Null until the first
   /// successful sync / `content-sync-complete` event.
   lastSyncedAt = $state<Date | null>(null);
+  /// Error message from the last failed sync, or null. `syncNow()` swallows
+  /// errors (callers like the SSE listener don't await safely), so this is
+  /// how UI callers distinguish a failed sync from a queued one (both return
+  /// null). Cleared at the start of each sync attempt.
+  lastSyncError = $state<string | null>(null);
 
   /// Load the first page, replacing the list. Called on mount and after
   /// mutations that change ordering (new recording, generation, etc.).
   async load(limit = PAGE_SIZE, offset = 0): Promise<void> {
+    // Request token: overlapping load/search calls must not resolve out of
+    // order — a stale response landing last would clobber the fresh list.
+    const token = ++this.listRequestId;
     this.loading = true;
     try {
       const items = await listRecordings(limit, offset);
+      if (token !== this.listRequestId) return;
       this.list = items;
       this.hasMore = items.length >= limit;
     } catch (err) {
       console.error('Failed to load recordings:', err);
     } finally {
-      this.loading = false;
+      if (token === this.listRequestId) this.loading = false;
     }
   }
 
@@ -69,14 +84,20 @@ class RecordingsStore {
 
   async search(query: string): Promise<void> {
     this.searchQuery = query;
+    // Same request-token discipline as load(): the SearchBar debounce means
+    // overlapping queries resolve in arbitrary order — only the latest
+    // issued request may write the list.
+    const token = ++this.listRequestId;
     this.loading = true;
     try {
       if (query.trim() === '') {
         const items = await listRecordings();
+        if (token !== this.listRequestId) return;
         this.list = items;
         this.hasMore = items.length >= PAGE_SIZE;
       } else {
         const results = await searchRecordings(query);
+        if (token !== this.listRequestId) return;
         // Map full Recording to RecordingSummary shape
         const summaries: RecordingSummary[] = results.map((r) => ({
           id: r.id,
@@ -92,6 +113,7 @@ class RecordingsStore {
           has_letter: r.letter !== null,
           has_peer_discussion: r.peer_discussion !== null,
           is_remote: r.metadata?.synced_from != null,
+          tokens_per_second: latestTokensPerSecond(r.metadata),
         }));
         this.list = summaries;
         // Search has its own (smaller) limit and no pagination — treat the
@@ -101,9 +123,12 @@ class RecordingsStore {
     } catch (err) {
       console.error('Failed to search recordings:', err);
     } finally {
-      this.loading = false;
+      if (token === this.listRequestId) this.loading = false;
     }
   }
+
+  /// Monotonic request id guarding list writes (see load/search).
+  listRequestId = 0;
 
   /** The most recently deleted summary, for undo. Cleared after restore or on next delete. */
   lastDeleted = $state<RecordingSummary | null>(null);
@@ -127,9 +152,10 @@ class RecordingsStore {
   async restore(id: string): Promise<void> {
     try {
       await restoreRecording(id);
-      // Re-insert the cached summary at its original position (front, since
-      // recordings are sorted newest-first and it was the most recent action).
-      if (this.lastDeleted) {
+      // Re-insert the cached summary ONLY if it matches the id being restored.
+      // Without this guard, undoing deletion A after deletion B (which
+      // overwrote lastDeleted) would insert B's summary where A should be.
+      if (this.lastDeleted && this.lastDeleted.id === id) {
         this.list = [this.lastDeleted, ...this.list];
         this.lastDeleted = null;
       }
@@ -157,22 +183,50 @@ class RecordingsStore {
   /// Sync with server (manual trigger or `content-changed` event). Sets the
   /// `syncing` flag for the duration, reloads the list afterwards so the UI
   /// reflects any merged changes, and stamps `lastSyncedAt`.
-  async syncNow(): Promise<void> {
+  ///
+  /// If called while a sync is already in flight (e.g. an SSE `content-changed`
+  /// event arrives mid-sync), the request is queued via `syncPending` and
+  /// replayed after the current sync completes. This prevents dropped
+  /// notifications when events fire during an in-flight sync.
+  async syncNow(): Promise<SyncSummary | null> {
     // Guard against concurrent syncs: stacked `content-changed` events would
-    // otherwise fire multiple overlapping round-trips (Bug M4).
-    if (this.syncing) return;
+    // otherwise fire multiple overlapping round-trips (Bug M4). Queue the
+    // request instead of dropping it so the missed event is replayed.
+    if (this.syncing) {
+      this.syncPending = true;
+      return null;
+    }
     this.syncing = true;
+    this.lastSyncError = null;
+    let summary: SyncSummary | null = null;
     try {
-      await invoke('sync_content_now');
-      await this.load();
-      this.lastSyncedAt = new Date();
+      summary = await invoke<SyncSummary>('sync_content_now');
+      if (!summary?.disabled) {
+        await this.load();
+        this.lastSyncedAt = new Date();
+      }
     } catch (err) {
       // Network failures and backend errors are logged here rather than
-      // propagating as unhandled promise rejections (Bug M4).
+      // propagating as unhandled promise rejections (Bug M4). Recorded on
+      // lastSyncError so UI callers (Sync Now) can distinguish failure from
+      // a queued sync — both return null.
       console.error('Content sync failed:', err);
+      this.lastSyncError = err instanceof Error ? err.message : String(err);
     } finally {
       this.syncing = false;
+      // If another sync was requested while we were busy, run it now. Fire
+      // and forget with a short delay to avoid deep recursion and to let the
+      // current finally block complete before re-entering.
+      if (this.syncPending) {
+        this.syncPending = false;
+        setTimeout(() => {
+          this.syncNow().catch((err) =>
+            console.error('Replay content sync failed:', err),
+          );
+        }, 100);
+      }
     }
+    return summary;
   }
 
   /// Debounce timer for batched `recording-updated` events. A sync pull
@@ -184,8 +238,12 @@ class RecordingsStore {
   /// affected recording is currently selected, re-fetch it so the open editor
   /// shows the merged content. The list reload is debounced (500ms) so
   /// batch sync updates only trigger one `load()` call.
+  ///
+  /// If a generation is in flight (syncing flag), skip re-selecting the
+  /// recording — the in-flight generation will refresh the data on completion.
+  /// This prevents a sync event from clobbering a freshly regenerated note.
   handleRemoteUpdate(recordingId: string): void {
-    if (this.selectedRecording?.id === recordingId) {
+    if (this.selectedRecording?.id === recordingId && !this.syncing) {
       // If the recording was remotely deleted, selectRecording will fail
       // (the row is now soft-deleted). Clear it so the editor doesn't
       // show a stale, now-deleted recording.
@@ -220,14 +278,14 @@ export function startBackgroundSync(): void {
       console.error('Background content sync failed:', err);
     }
   }, BG_SYNC_INTERVAL_MS);
-  console.info('Background content sync started (5 min interval)');
+  console.warn('Background content sync started (5 min interval)');
 }
 
 export function stopBackgroundSync(): void {
   if (bgSyncTimer) {
     clearInterval(bgSyncTimer);
     bgSyncTimer = null;
-    console.info('Background content sync stopped');
+    console.warn('Background content sync stopped');
   }
 }
 

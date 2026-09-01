@@ -1,5 +1,5 @@
 <script lang="ts">
-import { onMount, onDestroy } from 'svelte';
+import { onMount, onDestroy, untrack } from 'svelte';
 import { rsvp } from '../stores/rsvp.svelte';
 import { settings } from '../stores/settings.svelte';
 import {
@@ -16,6 +16,11 @@ let playing = $state(false);
 let timerHandle: ReturnType<typeof setTimeout> | null = null;
 let autoStartHandle: ReturnType<typeof setTimeout> | null = null;
 
+// Re-tokenize only when the reader (re)opens with new text. The
+// rsvp_auto_start read is untracked: settings.updateField replaces
+// settings.state wholesale, so tracking it would re-run this effect on
+// EVERY settings save — bumpWpm/toggleTheme below call updateField, which
+// used to reset the reader to word 0 mid-read.
 $effect(() => {
   if (!rsvp.state.reader.open) return;
   tokens = tokenize(rsvp.state.reader.text);
@@ -23,7 +28,7 @@ $effect(() => {
   playing = false;
   clearTimer();
   clearAutoStart();
-  if (settings.state.rsvp_auto_start) {
+  if (untrack(() => settings.state.rsvp_auto_start)) {
     autoStartHandle = setTimeout(() => {
       autoStartHandle = null;
       // Only kick off if the reader is still open and we haven't already started.
@@ -210,7 +215,7 @@ function formatEta(secs: number): string {
         {:else if index >= tokens.length}
           <span class="empty">Done.</span>
         {:else}
-          {#each currentWords() as tok, i}
+          {#each currentWords() as tok, i (i)}
             {#if i === Math.floor(currentWords().length / 2)}
               {@const parts = splitOrp(tok.word)}
               <span class="word orp-word">
@@ -267,7 +272,7 @@ function formatEta(secs: number): string {
         </label>
 
         <div class="chunk-group" title="Chunk size (1/2/3)">
-          {#each [1, 2, 3] as n}
+          {#each [1, 2, 3] as n (n)}
             <button
               class:active={settings.state.rsvp_chunk_size === n}
               onclick={() => setChunk(n)}

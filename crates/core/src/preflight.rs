@@ -236,6 +236,12 @@ fn build_ai_probe(
             settings.lmstudio_port,
             "/v1/models",
         ),
+        "omlx" => (
+            "oMLX",
+            settings.omlx_host.clone(),
+            settings.omlx_port,
+            "/v1/models",
+        ),
         _ => return None, // unknown provider: skip; caller will surface a config error
     };
     if is_loopback_host(&host) {
@@ -311,6 +317,10 @@ mod tests {
             "lmstudio" => {
                 cfg.lmstudio_host = host.into();
                 cfg.lmstudio_port = port;
+            }
+            "omlx" => {
+                cfg.omlx_host = host.into();
+                cfg.omlx_port = port;
             }
             _ => panic!("unknown ai_provider: {ai_provider}"),
         }

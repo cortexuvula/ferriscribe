@@ -1,6 +1,6 @@
 <script lang="ts">
   import { settings } from '../../stores/settings.svelte';
-  import { testLmStudioConnection, testOllamaConnection } from '../../api/settings';
+  import { testLmStudioConnection, testOllamaConnection, testOmlxConnection } from '../../api/settings';
   import { reinitProviders } from '../../api/chat';
   import { formatError } from '../../types/errors';
 
@@ -13,6 +13,8 @@
   let lmPort = $state(settings.state.lmstudio_port);
   let ollamaHost = $state(settings.state.ollama_host);
   let ollamaPort = $state(settings.state.ollama_port);
+  let omlxHost = $state(settings.state.omlx_host);
+  let omlxPort = $state(settings.state.omlx_port);
   let testStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
   let testError = $state<string | null>(null);
 
@@ -22,6 +24,8 @@
     try {
       if (provider === 'lmstudio') {
         await testLmStudioConnection(lmHost, lmPort, undefined);
+      } else if (provider === 'omlx') {
+        await testOmlxConnection(omlxHost, omlxPort, undefined);
       } else {
         await testOllamaConnection(ollamaHost, ollamaPort, undefined);
       }
@@ -38,19 +42,22 @@
     await settings.updateField('lmstudio_port', lmPort);
     await settings.updateField('ollama_host', ollamaHost);
     await settings.updateField('ollama_port', ollamaPort);
+    await settings.updateField('omlx_host', omlxHost);
+    await settings.updateField('omlx_port', omlxPort);
     try { await reinitProviders(); } catch (e) { console.error('reinit failed', e); }
     onNext();
   }
 </script>
 
 <h2>Set up your AI provider</h2>
-<p class="hint">FerriScribe needs Ollama or LM Studio running locally to generate clinical notes. Pick the one you have installed and test the connection.</p>
+<p class="hint">FerriScribe needs a local AI server (Ollama, LM Studio, or oMLX) running to generate clinical notes. Pick the one you have installed and test the connection.</p>
 
 <div class="field">
   <label for="ob-provider">Provider</label>
   <select id="ob-provider" bind:value={provider}>
     <option value="lmstudio">LM Studio</option>
     <option value="ollama">Ollama</option>
+    <option value="omlx">oMLX</option>
   </select>
 </div>
 
@@ -63,6 +70,17 @@
     <div class="field">
       <label for="ob-lm-port">Port</label>
       <input id="ob-lm-port" type="number" bind:value={lmPort} placeholder="1234" />
+    </div>
+  </div>
+{:else if provider === 'omlx'}
+  <div class="row">
+    <div class="field grow">
+      <label for="ob-omlx-host">Host</label>
+      <input id="ob-omlx-host" type="text" bind:value={omlxHost} placeholder="localhost" />
+    </div>
+    <div class="field">
+      <label for="ob-omlx-port">Port</label>
+      <input id="ob-omlx-port" type="number" bind:value={omlxPort} placeholder="8000" />
     </div>
   </div>
 {:else}

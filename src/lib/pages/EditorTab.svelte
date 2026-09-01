@@ -10,10 +10,10 @@
   import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { formatError } from '../types/errors';
-  import { extractIcdCodesValidated } from '../icd';
+  import { resolveIcdCodes, billingCodesLabel } from '../icd';
   import { icd9 as icd9Store } from '../stores/icd9.svelte';
   import { settings } from '../stores/settings.svelte';
-  import IcdChip from '../components/IcdChip.svelte';
+  import IcdCodeList from '../components/IcdCodeList.svelte';
   import { save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { exportAudio } from '../api/export';
   import { fetchAudioFromServer } from '../api/contentSync';
@@ -38,11 +38,21 @@
       : null
   );
 
-  // Extract and validate ICD codes from SOAP note content (only relevant for soap tab).
-  // Validation is against the BC MSP ICD-9 list; codes not on the list render as amber.
+  // Billing codes for the soap tab. New-format recordings carry them in
+  // `metadata.icd_codes` (the note body is code-free); legacy recordings
+  // fall back to mining the note text. Validation is against the BC MSP
+  // ICD-9 list; codes not on the list render as amber. Each row also
+  // carries its explaining title (the model-written description, with the
+  // official MSP description as fallback).
   const icdCodes = $derived(
-    tabId === 'soap' && content && typeof content === 'string'
-      ? extractIcdCodesValidated(content, icd9Store.codeSet, settings.state.icd_version)
+    tabId === 'soap' && content
+      ? resolveIcdCodes(
+          recordings.selectedRecording?.metadata ?? null,
+          content,
+          icd9Store.codeSet,
+          settings.state.icd_version,
+          icd9Store.descriptions,
+        )
       : []
   );
 
@@ -83,6 +93,12 @@
   let pendingValue: string | null = null;
 
   onDestroy(() => {
+    // Destroy fires whenever the user switches tabs (App renders exactly one
+    // EditorTab at a time) — flush the debounced edit so it is not silently
+    // dropped. The optimistic store update already made it look saved, so
+    // skipping this is invisible data loss.
+    flushPendingEdit();
+    disposed = true;
     if (saveTimer) clearTimeout(saveTimer);
     if (clearBadgeTimer) clearTimeout(clearBadgeTimer);
     if (copyBadgeTimer) clearTimeout(copyBadgeTimer);
@@ -91,15 +107,22 @@
 
   // Listener for remote `recording-updated` events (content sync merge). When
   // the currently-open recording is updated on the server and the user is NOT
-  // actively editing it (no pending debounced save / save in flight), reload it
-  // so the editor reflects the merged content and surface a subtle toast.
-  // Actively-edited recordings are left alone to avoid clobbering the user's
-  // in-progress edits — the next manual save round-trips their version.
+  // actively editing it (no pending debounced save / save in flight / failed
+  // save still showing), reload it so the editor reflects the merged content
+  // and surface a subtle toast. Actively-edited recordings are left alone to
+  // avoid clobbering the user's in-progress edits — the next manual save
+  // round-trips their version. A FAILED save also counts as dirty: the store
+  // still holds the optimistic value, so a remote reload would silently
+  // discard an edit that never persisted.
   let unlistenUpdate: (() => void) | null = null;
+
+  // Race guard: tab switches unmount this component constantly; a listen()
+  // resolving after unmount must unregister itself instead of leaking.
+  let disposed = false;
 
   onMount(async () => {
     try {
-      unlistenUpdate = await listen('recording-updated', (e) => {
+      const un = await listen('recording-updated', (e) => {
         const payload = e.payload as { id: string };
         // Read the underlying $state fields live inside the callback rather
         // than capturing the $derived values (isDirty / currentRecordingId),
@@ -107,7 +130,8 @@
         // the $state fields here gives the current values each invocation
         // (Bug C5).
         const recId = recordings.selectedRecording?.id ?? null;
-        const dirty = pendingValue !== null || saveStatus === 'saving';
+        const dirty =
+          pendingValue !== null || saveStatus === 'saving' || saveStatus === 'error';
         if (payload.id === recId && !dirty) {
           // Reload the recording to show the updated content. Voided — we
           // don't await here to avoid blocking the event loop.
@@ -119,6 +143,8 @@
           });
         }
       });
+      if (disposed) un();
+      else unlistenUpdate = un;
     } catch (err) {
       console.error('Failed to listen for recording-updated events:', err);
     }
@@ -132,10 +158,37 @@
     recordings.selectedRecording ? `${recordings.selectedRecording.id}::${String(config.field)}` : null
   );
 
+  // Flush a pending (debounced) edit as a fire-and-forget save, keyed to the
+  // (recording, field) it belongs to. Called when the key changes and from
+  // onDestroy — a failure is surfaced as a toast because the optimistic local
+  // update makes the edit look saved, so a silently dropped flush would be
+  // invisible data loss.
+  function flushPendingEdit() {
+    if (pendingValue === null || saveTimer === null) return;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    const value = pendingValue;
+    const prevKey = lastSeenKey;
+    pendingValue = null;
+    if (!prevKey) return;
+    const sep = prevKey.indexOf('::');
+    if (sep <= 0) return;
+    const recordingId = prevKey.slice(0, sep);
+    const field = prevKey.slice(sep + 2);
+    invoke('save_recording_field', { recordingId, field, value }).catch((e) => {
+      console.error('Failed to flush pending edit:', e);
+      toasts.error(
+        `Save failed — pending ${config.label} edit may be lost (${formatError(e)})`,
+      );
+    });
+  }
+
   $effect(() => {
     // Whenever the key changes (different recording or different tab),
     // reset debounce state to prevent cross-contamination.
     if (currentKey !== lastSeenKey) {
+      // Flush any pending edit before switching so it isn't lost.
+      flushPendingEdit();
       if (saveTimer !== null) {
         clearTimeout(saveTimer);
         saveTimer = null;
@@ -161,30 +214,76 @@
     };
 
     if (saveTimer !== null) clearTimeout(saveTimer);
+    // Capture the identity of the edit at schedule time. Resolving
+    // `recordings.selectedRecording`/`config.field` at fire time instead
+    // could (if the timer ever beats the key-change $effect's flush) save
+    // recording A's pending edit under recording B's id — cross-patient
+    // contamination.
+    const editRecordingId = recordings.selectedRecording.id;
+    const editField = String(config.field);
+    const editKey = currentKey;
     saveTimer = setTimeout(async () => {
       saveTimer = null;
       const value = pendingValue;
       pendingValue = null;
-      if (value === null || !recordings.selectedRecording) return;
+      if (value === null) return;
       saveStatus = 'saving';
       saveError = null;
       try {
         await invoke('save_recording_field', {
-          recordingId: recordings.selectedRecording.id,
-          field: String(config.field),
+          recordingId: editRecordingId,
+          field: editField,
           value,
         });
-        saveStatus = 'saved';
-        // Clear the "Saved" badge after 1.5 s.
-        clearBadgeTimer = setTimeout(() => {
-          clearBadgeTimer = null;
-          if (saveStatus === 'saved') saveStatus = 'idle';
-        }, 1500);
+        // Scope the completion writes to the edit's context: if the user
+        // switched recording/tab mid-save, the new context already reset
+        // these and a stale "Saved"/error badge would mislead.
+        if (editKey === currentKey) {
+          saveStatus = 'saved';
+          // Clear the "Saved" badge after 1.5 s.
+          clearBadgeTimer = setTimeout(() => {
+            clearBadgeTimer = null;
+            if (saveStatus === 'saved') saveStatus = 'idle';
+          }, 1500);
+        }
       } catch (e) {
-        saveStatus = 'error';
-        saveError = formatError(e);
+        if (editKey === currentKey) {
+          saveStatus = 'error';
+          saveError = formatError(e);
+        } else {
+          // The failed edit's context is gone; surface it as a toast so
+          // the (silently optimistic) edit isn't invisible data loss.
+          toasts.error(`Save failed — ${config.label} edit may be lost (${formatError(e)})`);
+        }
       }
     }, 1000); // 1 s debounce
+  }
+
+  // Retry a failed save. The optimistic store still holds the value (the
+  // backend never received it), so re-send the current editor content —
+  // without this there was no path back from saveStatus === 'error' short
+  // of editing again.
+  async function retrySave() {
+    if (!recordings.selectedRecording) return;
+    const value = content;
+    if (value === null) return;
+    saveStatus = 'saving';
+    saveError = null;
+    try {
+      await invoke('save_recording_field', {
+        recordingId: recordings.selectedRecording.id,
+        field: String(config.field),
+        value,
+      });
+      saveStatus = 'saved';
+      clearBadgeTimer = setTimeout(() => {
+        clearBadgeTimer = null;
+        if (saveStatus === 'saved') saveStatus = 'idle';
+      }, 1500);
+    } catch (e) {
+      saveStatus = 'error';
+      saveError = formatError(e);
+    }
   }
 
   async function handleCopy() {
@@ -275,6 +374,7 @@
         <span class="save-status saved">Saved</span>
       {:else if saveStatus === 'error'}
         <span class="save-status error" title={saveError ?? undefined}>Save failed</span>
+        <button class="btn-copy" onclick={() => void retrySave()}>Retry save</button>
       {/if}
       {#if content}
         <button class="btn-copy" onclick={handleSpeedRead} title="Speed Read (Cmd/Ctrl+Shift+R)">
@@ -313,14 +413,6 @@
             </button>
           {/if}
         {/if}
-        {#if icdCodes.length > 0}
-          <div class="icd-codes">
-            <span class="icd-label">ICD:</span>
-            {#each icdCodes as code}
-              <IcdChip code={code.raw} valid={code.valid} />
-            {/each}
-          </div>
-        {/if}
         {#if icd9Store.loadError && tabId === 'soap'}
           <button
             class="icd-validation-notice"
@@ -333,6 +425,12 @@
       {/if}
     </div>
   </div>
+
+  {#if icdCodes.length > 0}
+    <div class="icd-strip">
+      <IcdCodeList codes={icdCodes} label={billingCodesLabel(settings.state.icd_version)} />
+    </div>
+  {/if}
 
   {#if content === null}
     <div class="empty-state">
@@ -472,24 +570,11 @@
     color: var(--text-secondary);
   }
 
-  .icd-codes {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: 8px;
-    padding: 4px 8px;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
-    border-radius: var(--radius-sm);
-    flex-wrap: wrap;
-  }
-
-  .icd-label {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+  .icd-strip {
+    flex-shrink: 0;
+    padding: 8px 16px;
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
   }
 
   .icd-validation-notice {

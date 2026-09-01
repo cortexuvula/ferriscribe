@@ -19,6 +19,9 @@ pub mod m012_encryption_pending;
 pub mod m013_recording_updated_at;
 pub mod m014_field_revisions;
 pub mod m015_sync_state;
+pub mod m016_user_dictionary_sync;
+pub mod m017_condition_chip_use_count;
+pub mod m018_purge_ledger;
 
 use rusqlite::Connection;
 
@@ -117,6 +120,21 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 15,
             name: "sync_state",
             up: m015_sync_state::up,
+        },
+        Migration {
+            version: 16,
+            name: "user_dictionary_sync",
+            up: m016_user_dictionary_sync::up,
+        },
+        Migration {
+            version: 17,
+            name: "condition_chip_use_count",
+            up: m017_condition_chip_use_count::up,
+        },
+        Migration {
+            version: 18,
+            name: "purge_ledger",
+            up: m018_purge_ledger::up,
         },
     ]
 }

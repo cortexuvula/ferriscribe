@@ -29,8 +29,9 @@ pub mod endpoint_policy;
 pub mod error;
 pub mod http_error_body;
 pub mod icd9;
+pub mod net;
 pub mod preflight;
 pub mod traits;
 pub mod types;
 
-pub use error::{AppError, AppResult, ErrorContext, ErrorSeverity};
+pub use error::{AppError, AppResult};

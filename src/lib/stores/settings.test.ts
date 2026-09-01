@@ -120,3 +120,53 @@ describe('SettingsStore — save guard', () => {
     expect(mockSaveSettings).not.toHaveBeenCalled();
   });
 });
+
+describe('SettingsStore — updateField save-queue resurrection', () => {
+  beforeEach(() => {
+    mockGetSettings.mockReset();
+    mockSaveSettings.mockReset();
+    vi.clearAllMocks();
+    settings.loaded = false;
+    settings.loadError = false;
+  });
+
+  it('a queued updateField does not resurrect a sibling change whose save failed', async () => {
+    // Load a base config from the "server".
+    mockGetSettings.mockResolvedValue(sampleConfig);
+    await settings.load();
+
+    // First queued save fails; the post-failure reload returns the
+    // pristine server config (without the rejected change).
+    const saveA = settings.updateField('ollama_host', '10.0.0.9');
+    mockSaveSettings.mockRejectedValueOnce(new Error('save a failed'));
+    const saveB = settings.updateField('lmstudio_host', '10.0.0.10');
+
+    await expect(saveA).rejects.toThrow('save a failed');
+    await saveB;
+
+    expect(mockSaveSettings).toHaveBeenCalledTimes(2);
+    // B's payload must be derived from the ROLLED-BACK server state —
+    // A's rejected ollama_host must NOT ride along (the old behavior sent
+    // B's call-time optimistic snapshot, which contained it).
+    const payloadB = mockSaveSettings.mock.calls[1][0] as AppConfig;
+    expect(payloadB.ollama_host).toBe(sampleConfig.ollama_host);
+    expect(payloadB.lmstudio_host).toBe('10.0.0.10');
+  });
+
+  it('successful updateFields chain onto the persisted state', async () => {
+    mockGetSettings.mockResolvedValue(sampleConfig);
+    await settings.load();
+    mockSaveSettings.mockResolvedValue(undefined);
+
+    await settings.updateField('ollama_host', '10.0.0.9');
+    await settings.updateField('lmstudio_host', '10.0.0.10');
+
+    expect(mockSaveSettings).toHaveBeenCalledTimes(2);
+    const payloadA = mockSaveSettings.mock.calls[0][0] as AppConfig;
+    const payloadB = mockSaveSettings.mock.calls[1][0] as AppConfig;
+    expect(payloadA.ollama_host).toBe('10.0.0.9');
+    // B is A's persisted result + B's delta.
+    expect(payloadB.ollama_host).toBe('10.0.0.9');
+    expect(payloadB.lmstudio_host).toBe('10.0.0.10');
+  });
+});

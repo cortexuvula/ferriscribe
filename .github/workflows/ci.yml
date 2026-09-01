@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '24'
       - name: Verify version is in sync across Cargo.toml / package.json / tauri.conf.json
@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '24'
           cache: npm
@@ -43,6 +43,17 @@ jobs:
         run: npm run lint
       - name: Frontend tests (vitest)
         run: npx vitest run
+      - name: Coverage floors (vitest --coverage)
+        # Thresholds live in vitest.config.ts — floors calibrated to the
+        # 2026-08-25 baseline, ratcheted up as known gaps close. Fails the
+        # build on coverage erosion, not on low absolute numbers.
+        run: npm run test:coverage
+      - name: Production bundle smoke-build
+        # The only other place `vite build` runs is inside release.yml's
+        # tauri build at tag-push — bundling-only failures (asset resolution,
+        # import conditions that differ between vitest and rollup) would
+        # otherwise surface after tagging.
+        run: npm run build
 
   lint:
     runs-on: ubuntu-24.04
@@ -56,7 +67,11 @@ jobs:
       - name: Install Linux deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev pkg-config
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev pkg-config libspeechd-dev
+      - name: Stage backup sidecar (debug)
+        # tauri-build validates externalBin existence at COMPILE time;
+        # stage a debug build (reuses this job's dev artifacts).
+        run: node scripts/build-sidecar.mjs --debug
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy (-D warnings)
@@ -64,6 +79,13 @@ jobs:
         # aren't relevant to the workspace lint gate. `--all-targets` includes
         # tests/examples so we catch lint regressions in test code too.
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo clippy local-tts feature (-D warnings)
+        # The `local-tts` feature is off by default and pulled in by nothing,
+        # so the workspace-wide clippy pass never compiles it — it rotted
+        # unnoticed before this gate existed. On Linux the tts crate pulls in
+        # speech-dispatcher-sys, whose build script pkg-configs libspeechd —
+        # hence the libspeechd-dev apt above.
+        run: cargo clippy -p medical-tts-providers --all-targets --features local-tts -- -D warnings
 
   test:
     strategy:
@@ -90,6 +112,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev pkg-config
 
+      - name: Stage backup sidecar (debug)
+        # tauri-build validates externalBin existence at COMPILE time;
+        # stage a debug build (reuses this job's dev artifacts).
+        run: node scripts/build-sidecar.mjs --debug
       - name: Workspace lib tests
         run: cargo test --workspace --lib
 
@@ -100,9 +126,42 @@ jobs:
           FERRISCRIBE_MDNS_TEST: ${{ runner.os == 'Linux' && '1' || '0' }}
         run: cargo test -p medical-sharing
 
+      - name: DB integration tests
+        # medical-db's tests/ suite (condition_chips_sync, content_sync,
+        # encryption, recording_sync_merge) is not covered by --lib. Run it
+        # explicitly so a stale integration test can't slip onto master the
+        # way condition_chips_sync did after the increment_use signature change.
+        run: cargo test -p medical-db
+
   # Security advisory scan — catches RustSec advisories on the dependency
   # tree. For a HIPAA-adjacent app this is important: known CVEs in crypto,
   # network, or archive crates must not ship silently.
+  coverage:
+    # Line coverage of the workspace lib tests. Fails below a floor set just
+    # under the measured baseline (see --fail-under-lines) so erosion is
+    # caught, not absolute numbers judged. Needs the same Linux deps + sidecar
+    # staging as the test job (src-tauri must compile).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: llvm-tools-preview
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev pkg-config
+      - uses: taiki-e/install-action@17dfa9a7aa66ae804b5cbd9f505a33815221f967 # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
+      - name: Stage backup sidecar (debug)
+        # tauri-build validates externalBin existence at COMPILE time.
+        run: node scripts/build-sidecar.mjs --debug
+      - name: Workspace lib coverage
+        run: cargo llvm-cov --workspace --lib --summary-only --fail-under-lines 70
+
   security:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -110,23 +169,33 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: taiki-e/install-action@17dfa9a7aa66ae804b5cbd9f505a33815221f967 # cargo-audit
+        # `tool` defaults to cargo-audit when omitted — set explicitly so
+        # this job and the new coverage job can't silently cross-install.
+        with:
+          tool: cargo-audit
       - name: Cargo audit
         # cargo-audit exits non-zero on vulnerabilities (security holes) by
         # default, and exits zero on "unmaintained" warnings. We don't use
         # --deny warnings because unmaintained crates (GTK3 bindings from
         # Tauri's Linux webview, proc-macro-error, etc.) are transitive deps
-        # we can't control. Ignored advisories are all parse-only vectors in
-        # transitive deps we only use for writing (never parsing external input):
-        # - lopdf (RUSTSEC-2026-0187): PDF parse stack overflow — we only write.
-        # - quick-xml (RUSTSEC-2026-0194, 0195): XML parse DoS — only in
-        #   docx-rs (write) and plist/Tauri (internal config, not external).
-        # Tracked for dependency bumps (printpdf 0.7→0.9, docx-rs update).
+        # we can't control. Ignored advisories are parse-only vectors in
+        # transitive deps:
+        # - lopdf (RUSTSEC-2026-0187): PDF parse stack overflow via deeply
+        #   nested objects. FIXED at the exposure site (2026-08-25):
+        #   pdf-extract 0.12 — the only parser of USER-SUPPLIED PDFs — now
+        #   runs on patched lopdf 0.42. The flagged 0.31 copy remains only
+        #   via printpdf 0.7 (write-only PDF generation, never parses
+        #   untrusted input). Drop this ignore with the printpdf 0.9
+        #   migration.
+        # - quick-xml (RUSTSEC-2026-0194, 0195): XML parse DoS. Our direct
+        #   DOCX parsing (user-supplied files!) was on 0.36 — now bumped to
+        #   0.41, deduped with the docx-rs/plist copies. The remaining 0.31
+        #   copy comes via calamine, which parses user-supplied XLSX in OCR —
+        #   external input, but same accepted-risk profile: local, DoS-only,
+        #   no RCE, user explicitly dropped the file.
+        # Tracked for dependency bumps (printpdf 0.7→0.9, calamine→quick-xml 0.36+).
         # Expiry comments force a periodic revisit so ignores don't linger
         # after the upstream fix lands.
-        run: >
-          cargo audit
-          # TODO(review-by 2026-10-01): lopdf — revisit when printpdf 0.9 migration is done
-          --ignore RUSTSEC-2026-0187
-          # TODO(review-by 2026-10-01): quick-xml — revisit when docx-rs is updated
-          --ignore RUSTSEC-2026-0194
-          --ignore RUSTSEC-2026-0195
+        # TODO(review-by 2026-10-01): lopdf — drop ignore when printpdf 0.9 migration lands
+        # TODO(review-by 2026-10-01): quick-xml — revisit when calamine moves past 0.31
+        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195

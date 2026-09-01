@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { VocabularyEntry } from '../api/vocabulary';
+  import { formatError } from '../types/errors';
 
   interface Category { value: string; label: string; }
 
@@ -61,7 +62,7 @@
         enabled: formEnabled,
       });
     } catch (err) {
-      formError = String(err) || 'Failed to save entry.';
+      formError = formatError(err);
     }
   }
 </script>
@@ -86,7 +87,7 @@
     <label class="field">
       <span>Category</span>
       <select bind:value={formCategory}>
-        {#each categories as cat}
+        {#each categories as cat (cat.value)}
           <option value={cat.value}>{cat.label}</option>
         {/each}
       </select>

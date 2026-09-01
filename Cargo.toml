@@ -14,6 +14,7 @@ members = [
     "crates/processing",
     "crates/export",
     "crates/translation",
+    "crates/backup",
     "src-tauri",
 ]
 
@@ -71,14 +72,19 @@ bytemuck = { version = "1", features = ["derive"] }
 # Crates pinned at workspace level to keep one source of truth.
 # `dirs` was previously split (5 in sharing, 6 in src-tauri); unifying to 6
 # is the only real version dedup — the rest already match across crates.
-rand = "0.8"
+# `keyring` was previously declared identically in src-tauri, security and
+# sharing; hoisted here so the platform backends cannot drift between them.
+rand = "0.9"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.10"
+hmac = "0.12"
+axum = "0.8"
 regex = "1"
 hound = "3.5"
+libc = "0.2"
 urlencoding = "2"
 dirs = "6"
 tempfile = "3"
-proptest = "1"
 wiremock = "0.6"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }

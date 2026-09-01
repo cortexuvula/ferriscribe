@@ -4,5 +4,11 @@
 <dict>
     <key>com.apple.security.device.audio-input</key>
     <true/>
+    <!-- pdfium (scanned-PDF OCR) is downloaded into the app data dir at runtime
+         and ad-hoc signed there — outside the notarized bundle. Hardened Runtime
+         library validation would reject loading a non-Team-ID-signed dylib; this
+         entitlement permits loading it. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
 </dict>
 </plist>

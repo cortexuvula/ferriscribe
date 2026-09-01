@@ -58,7 +58,7 @@ async fn pair_and_proxy_round_trip() {
 
     let tmp = TempDir::new().unwrap();
     let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut key);
 
     // 1. Set up token store + pairing state.
     let store = Arc::new(TokenStore::open(tmp.path().join("tokens.db"), &key).unwrap());

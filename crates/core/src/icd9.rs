@@ -81,13 +81,33 @@ static CODE_SET: LazyLock<BTreeSet<String>> =
 static CODE_INDEX: LazyLock<HashMap<String, &'static Icd9Entry>> =
     LazyLock::new(|| ENTRIES.iter().map(|e| (e.code.clone(), e)).collect());
 
+/// HashMap index: code → entry index (usize), for O(1) position lookups.
+/// The selector needs the index (not the entry ref) to access parallel
+/// arrays like `DESC_TOKEN_SETS`. Without this, it had to do an O(7,122)
+/// linear scan per regex-matched code.
+static CODE_TO_IDX: LazyLock<HashMap<String, usize>> = LazyLock::new(|| {
+    ENTRIES
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.code.clone(), i))
+        .collect()
+});
+
 /// Pre-tokenized (lowercased) description token sets, one per entry.
+/// Enriched with medical synonyms so terse MSP descriptions match
+/// lay-language transcripts (e.g. "CERVICALGIA" gains "neck" and "pain").
 /// Avoids re-tokenizing all 7,122 descriptions on every SOAP generation.
 /// Allocated once; the selector reads these without allocation.
 static DESC_TOKEN_SETS: LazyLock<Vec<HashSet<String>>> = LazyLock::new(|| {
     ENTRIES
         .iter()
-        .map(|e| tokenize_desc(&e.description))
+        .map(|e| {
+            let mut tokens = tokenize_desc(&e.description);
+            // Inject synonyms based on the description text (case-insensitive).
+            let desc_lower = e.description.to_lowercase();
+            enrich_with_synonyms(&mut tokens, &desc_lower);
+            tokens
+        })
         .collect()
 });
 
@@ -120,6 +140,12 @@ pub fn code_index() -> &'static HashMap<String, &'static Icd9Entry> {
     &CODE_INDEX
 }
 
+/// Returns the code→index HashMap for O(1) position lookups.
+/// Used by the selector to avoid O(n) linear scans.
+pub fn code_to_idx() -> &'static HashMap<String, usize> {
+    &CODE_TO_IDX
+}
+
 /// Returns the pre-tokenized description token sets (one per entry,
 /// indexed in parallel with [`entries()`]).
 pub fn desc_token_sets() -> &'static [HashSet<String>] {
@@ -138,6 +164,70 @@ pub fn tokenize_desc(desc: &str) -> HashSet<String> {
         .filter(|s| s.len() >= 3)
         .map(|s| s.to_lowercase())
         .collect()
+}
+
+/// Add medical synonyms to a description's token set so terse MSP
+/// descriptions match lay-language clinical transcripts.
+///
+/// MSP descriptions are often single clinical terms (e.g. "CERVICALGIA")
+/// that a patient transcript would express as common words ("neck pain").
+/// Without enrichment, the inverted index never connects them.
+fn enrich_with_synonyms(tokens: &mut HashSet<String>, desc_lower: &str) {
+    // Each rule: if the description contains the trigger substring,
+    // inject the synonym tokens.
+    const SYNONYM_RULES: &[(&str, &[&str])] = &[
+        // Cervical / neck
+        ("cervical", &["neck"]),
+        ("cervicalgia", &["neck", "pain"]),
+        ("neck", &["cervical"]),
+        // Lumbar / lower back
+        ("lumbar", &["back", "lower"]),
+        ("lumbago", &["back", "lower", "pain"]),
+        ("backache", &["back", "pain"]),
+        // Thoracic
+        ("thoracic", &["chest", "spine"]),
+        // Cardiac
+        ("hypertension", &["blood", "pressure", "high"]),
+        ("myocardial", &["heart"]),
+        ("cardiac", &["heart"]),
+        // Metabolic
+        ("hyperlipidemia", &["cholesterol", "lipid"]),
+        ("diabetes", &["diabetic", "glucose", "blood", "sugar"]),
+        // Respiratory
+        ("bronchitis", &["cough", "respiratory"]),
+        ("asthma", &["wheeze", "respiratory", "breathing"]),
+        ("sinusitis", &["sinus", "nasal"]),
+        ("pharyngitis", &["throat"]),
+        ("nasopharyngitis", &["cold", "nasal", "throat"]),
+        // Gastrointestinal
+        ("esophagitis", &["heartburn", "reflux"]),
+        ("gastritis", &["stomach"]),
+        // Neurological
+        ("headache", &["cephalgia", "head"]),
+        ("migraine", &["headache", "head"]),
+        // Musculoskeletal
+        ("arthros", &["joint", "arthritis"]), // osteoarthrosis
+        ("osteoarthritis", &["joint", "arthritis"]),
+        ("arthropath", &["joint"]),
+        ("sprain", &["strain", "injury"]),
+        // Renal
+        ("cystitis", &["bladder", "urinary"]),
+        ("nephropath", &["kidney"]),
+        // Dermatological
+        ("dermatitis", &["skin", "rash"]),
+        ("eczema", &["skin", "rash"]),
+        // Mental health
+        ("depressive", &["depression"]),
+        ("anxiety", &["anxious", "worry"]),
+    ];
+
+    for (trigger, synonyms) in SYNONYM_RULES {
+        if desc_lower.contains(trigger) {
+            for &syn in *synonyms {
+                tokens.insert(syn.to_string());
+            }
+        }
+    }
 }
 
 /// Looks up a single entry by exact bare-code match (O(1) via the

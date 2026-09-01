@@ -4,9 +4,10 @@ import type { RecordingSummary } from '../types';
 
 // Mock the API layer so we control listRecordings output + pagination offsets.
 const mockListRecordings = vi.fn();
+const mockSearchRecordings = vi.fn();
 vi.mock('../api/recordings', () => ({
   listRecordings: (...args: unknown[]) => mockListRecordings(...args),
-  searchRecordings: vi.fn(async () => []),
+  searchRecordings: (...args: unknown[]) => mockSearchRecordings(...args),
 }));
 
 function makeSummary(id: string): RecordingSummary {
@@ -24,6 +25,7 @@ function makeSummary(id: string): RecordingSummary {
     has_letter: false,
     has_peer_discussion: false,
     is_remote: false,
+    tokens_per_second: null,
   };
 }
 
@@ -119,5 +121,29 @@ describe('RecordingsStore — pagination + dedup', () => {
 
     expect(recordings.hasMore).toBe(false);
     expect(recordings.list).toHaveLength(52);
+  });
+
+  it('a stale search response cannot clobber the latest results', async () => {
+    // The SearchBar debounce fires overlapping queries; without the
+    // request token the first query's response landing LAST would win.
+    const { recordings } = await freshStore();
+
+    // "smi" resolves slowly; "smith" (issued later) resolves immediately.
+    let resolveSlow: (v: ReturnType<typeof makeSummary>[]) => void = () => {};
+    mockSearchRecordings.mockImplementationOnce(
+      () => new Promise((res) => { resolveSlow = res; }),
+    );
+    mockSearchRecordings.mockResolvedValueOnce([makeSummary('smith-1')]);
+
+    const p1 = recordings.search('smi');
+    const p2 = recordings.search('smith');
+    await p2;
+    expect(recordings.list.map((r) => r.id)).toEqual(['smith-1']);
+
+    // The stale "smi" response arrives now — it must be discarded.
+    resolveSlow([makeSummary('stale-smi')]);
+    await p1;
+    expect(recordings.list.map((r) => r.id)).toEqual(['smith-1']);
+    expect(recordings.loading).toBe(false);
   });
 });

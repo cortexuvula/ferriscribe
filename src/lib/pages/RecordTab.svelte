@@ -4,10 +4,11 @@
   import { pipeline } from '../stores/pipeline.svelte';
   import { recordings } from '../stores/recordings.svelte';
   import { importAudioFile, getRecording } from '../api/recordings';
+  import type { Recording } from '../types';
   import { checkRecordingAudioLevels } from '../api/audio';
   import { copyWithStatus } from '../utils/clipboard';
   import { clampSidebarWidth } from '../utils/resize';
-  import { recordSidebar } from '../stores/recordSidebar.svelte.ts';
+  import { recordSidebar } from '../stores/recordSidebar.svelte';
   import RecordingHeader from '../components/RecordingHeader.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import RecordingStateCards from './record/RecordingStateCards.svelte';
@@ -18,10 +19,18 @@
   import { onMount, onDestroy } from 'svelte';
   import { contextTemplates } from '../stores/contextTemplates.svelte';
   import { toasts } from '../stores/toasts.svelte';
+  import { playSoapCompleteChime } from '../utils/notificationSound';
   import { rsvp } from '../stores/rsvp.svelte';
   import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
+  import { contextFromMetadata } from '../utils/recordingContext';
   import { generateSoap } from '../api/generation';
+  import { generation } from '../stores/generation.svelte';
+  import { latestTokensPerSecond } from '../utils/generationStats';
+  import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
+  import { useOcr } from '../composables/useOcr.svelte';
+  import { getBackupStatus, isProtected } from '../api/backup';
+  import { settingsNav } from '../stores/settingsNav.svelte';
 
   type Props = {
     onopenSettings?: (target: 'models' | 'audio') => void;
@@ -33,6 +42,43 @@
   let medicationsText = $state('');
   let allergiesText = $state('');
   let conditionsText = $state('');
+
+  // OCR state: shared composable (same logic as GenerateTab). Transient —
+  // cleared on new recording via ocr.clearOcr().
+  const ocr = useOcr();
+
+  /// Maximum context string length. Mirrors the backend MAX_CONTEXT_CHARS.
+  const MAX_CONTEXT_CHARS = 50_000;
+
+  // Clear OCR state when the active recording changes to prevent
+  // cross-patient PHI leakage (same guard as GenerateTab).
+  let lastOcrRecordingId: string | null = null;
+  $effect(() => {
+    const id = pipelineRecordingId;
+    if (id !== lastOcrRecordingId && lastOcrRecordingId !== null) {
+      ocr.clearOcr();
+    }
+    lastOcrRecordingId = id;
+  });
+
+  // Repopulate context fields from recording history when the user selects a
+  // different recording in the list — parity with GenerateTab. Without this,
+  // the Record tab's context fields were ephemeral (never loaded from saved
+  // metadata), so switching patients left the previous patient's meds visible
+  // and the upload-wipe bug had no self-healing path. The id-guard prevents
+  // the store refresh that follows generation from clobbering user edits.
+  let lastContextRecordingId: string | null = null;
+  $effect(() => {
+    const rec = recordings.selectedRecording;
+    const currentId = rec?.id ?? null;
+    if (currentId === lastContextRecordingId) return;
+    lastContextRecordingId = currentId;
+    const fields = contextFromMetadata(rec?.metadata);
+    contextText = fields.contextText;
+    medicationsText = fields.medicationsText;
+    allergiesText = fields.allergiesText;
+    conditionsText = fields.conditionsText;
+  });
 
   // Sidebar UI state — synced with the persisted recordSidebar store.
   let sidebarOpen = $state(true);
@@ -87,14 +133,46 @@
   onMount(() => {
     contextTemplates.load();
     window.addEventListener('keydown', handleGlobalKeydown);
+    // Best-effort off-machine-backup nudge for EXISTING users (the
+    // onboarding wizard only reaches new installs). Hidden on any status
+    // error — never nag based on a failed fetch.
+    if (!localStorage.getItem('ferriscribe-backup-nudge-dismissed')) {
+      getBackupStatus()
+        .then((s) => {
+          if (backupNudgeAlive && !isProtected(s)) backupNudgeVisible = true;
+        })
+        .catch(() => {});
+    }
   });
 
   onDestroy(() => {
+    backupNudgeAlive = false;
     window.removeEventListener('keydown', handleGlobalKeydown);
   });
 
   // Import flow state
   let importedRecordingId = $state<string | null>(null);
+  // Off-machine-backup nudge (existing users; dismissed is sticky via localStorage)
+  let backupNudgeVisible = $state(false);
+  // Guards the async status fetch against component teardown.
+  let backupNudgeAlive = true;
+
+  /** ✕ — permanent dismissal. The "Set up backup" action does NOT use
+   *  this: navigating to the pane isn't completing setup, and a sticky
+   *  dismissal there would kill the only existing-user reminder while
+   *  backup is still unconfigured. */
+  function dismissBackupNudge() {
+    backupNudgeVisible = false;
+    localStorage.setItem('ferriscribe-backup-nudge-dismissed', '1');
+  }
+
+  /** "Set up backup" — hide for this session only; the banner returns on
+   *  the next launch until backup is genuinely configured. */
+  function openBackupSettings() {
+    backupNudgeVisible = false;
+    settingsNav.navigateTo('backup');
+  }
+
   let importedFilename = $state<string | null>(null);
   let importing = $state(false);
   let importError = $state<string | null>(null);
@@ -105,17 +183,32 @@
   // SOAP note text for ICD code extraction — fetched when pipeline completes
   let soapNoteText = $state<string | null>(null);
 
+  // Recording metadata for the same fetch — carries the structured
+  // `icd_codes` (new-format recordings keep the note body code-free).
+  let pipelineMetadata = $state<Recording['metadata'] | null>(null);
+
+  // Throughput of the most recent AI generation for the pipeline's recording
+  // (from metadata.generation_stats), shown next to the elapsed time in
+  // PipelineStatus. Refreshed on pipeline completion and after Regenerate.
+  let pipelineTokensPerSecond = $state<number | null>(null);
+
   // Fetch SOAP note when pipeline completes
   $effect(() => {
     const current = pipeline.state.current;
     if (current?.stage === 'completed' && pipelineRecordingId) {
       getRecording(pipelineRecordingId).then((rec) => {
         soapNoteText = rec?.soap_note ?? null;
+        pipelineMetadata = rec?.metadata ?? null;
+        pipelineTokensPerSecond = rec ? latestTokensPerSecond(rec.metadata) : null;
       }).catch(() => {
         soapNoteText = null;
+        pipelineMetadata = null;
+        pipelineTokensPerSecond = null;
       });
     } else {
       soapNoteText = null;
+      pipelineMetadata = null;
+      pipelineTokensPerSecond = null;
     }
   });
 
@@ -132,6 +225,38 @@
     medicationsText = '';
     allergiesText = '';
     conditionsText = '';
+    ocr.clearOcr();
+  }
+
+  /** Combine notes + OCR text into the pipeline context string. */
+  function buildPipelineContext(): string | undefined {
+    const combined = [contextText.trim(), ocr.ocrTextDisplay.trim()]
+      .filter(Boolean)
+      .join('\n\n') || undefined;
+    if (combined && combined.length > MAX_CONTEXT_CHARS) {
+      toasts.error(
+        `Supporting context is ${combined.length.toLocaleString()} characters (max ${MAX_CONTEXT_CHARS.toLocaleString()}). Please trim the OCR preview or notes.`,
+      );
+      return undefined;
+    }
+    return combined;
+  }
+
+  /** Wait for in-flight OCR to finish (up to 60s) so its text is included
+   *  in the pipeline context. Prevents the race where recording stops while
+   *  OCR chips are still in 'loading' status. Shows a toast so the user
+   *  knows why the pipeline hasn't started yet. */
+  async function waitForOcrSettled(): Promise<void> {
+    if (!ocr.ocrLoading) return;
+    toasts.add({
+      message: 'Waiting for document OCR to complete before processing…',
+      type: 'success',
+      autoDismiss: true,
+    });
+    const deadline = Date.now() + 60_000;
+    while (ocr.ocrLoading && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
   }
 
   function handleStartRecording() {
@@ -163,6 +288,8 @@
   }
 
   async function maybeLaunchPipeline(recordingId: string) {
+    // Wait for any in-flight OCR to finish so its text is included.
+    await waitForOcrSettled();
     try {
       const levels = await checkRecordingAudioLevels(recordingId);
       if (levels.is_silent) {
@@ -174,7 +301,7 @@
     } catch (_e) {
       // If the silence check itself fails, don't block the pipeline.
     }
-    pipeline.launch(recordingId, contextText || undefined, undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
+    pipeline.launch(recordingId, buildPipelineContext(), undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
   }
 
   async function warnIfSilent(recordingId: string) {
@@ -196,7 +323,7 @@
     silenceDialogRecordingId = null;
     if (id) {
       pipelineRecordingId = id;
-      pipeline.launch(id, contextText || undefined, undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
+      pipeline.launch(id, buildPipelineContext(), undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
     }
   }
 
@@ -229,7 +356,7 @@
 
   function handleRetry() {
     if (!pipelineRecordingId) return;
-    pipeline.retry(pipelineRecordingId, contextText || undefined, undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
+    pipeline.retry(pipelineRecordingId, buildPipelineContext(), undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
   }
 
   // Regenerate the SOAP note using the current Patient Context, without
@@ -239,18 +366,30 @@
   let regenerating = $state(false);
   async function handleRegenerateSoap() {
     const rid = pipelineRecordingId;
-    if (!rid || regenerating) return;
+    if (!rid || regenerating || generation.state.generating) return;
     regenerating = true;
+    generation.startGenerating('soap');
     try {
-      const ctx = contextText.trim() || undefined;
+      const ctx = buildPipelineContext();
       const pc = buildPatientContext(medicationsText, allergiesText, conditionsText);
       await generateSoap(rid, undefined, ctx, pc);
       // Re-fetch so soapNoteText (and the editor) reflect the new note.
       const rec = await getRecording(rid);
       soapNoteText = rec?.soap_note ?? null;
+      pipelineMetadata = rec?.metadata ?? null;
+      pipelineTokensPerSecond = rec ? latestTokensPerSecond(rec.metadata) : null;
       await recordings.load();
+      generation.finish();
+      toasts.success('SOAP note generated');
+      if (settings.state.soap_notification_sound) {
+        playSoapCompleteChime();
+      }
     } catch (e) {
-      toasts.error(`Failed to regenerate SOAP note: ${formatError(e)}`);
+      if (e instanceof OfflineCancelled) {
+        generation.finish();
+        return;
+      }
+      generation.setError(formatError(e) || 'Failed to regenerate SOAP note');
     } finally {
       regenerating = false;
     }
@@ -264,6 +403,12 @@
   async function handleUploadAudio() {
     importError = null;
     try {
+      // Do NOT clear context here — the user typed these meds/conditions FOR
+      // this uploaded encounter. Clearing was a bug (handleUploadAudio ran
+      // before the file picker, wiping fields that maybeLaunchPipeline then
+      // read as empty → SOAP got no patient_context). A fresh recording has
+      // empty metadata, so the selectedRecording effect below leaves the
+      // current fields in place for the current encounter.
       const selected = await open({
         multiple: false,
         filters: [
@@ -360,6 +505,24 @@
 </script>
 
 <div class="record-tab">
+  {#if backupNudgeVisible}
+    <div class="backup-nudge" role="status">
+      <span>
+        Your recordings and notes currently exist only on this machine.
+        Set up an encrypted backup to a drive or server to survive a disk failure.
+      </span>
+      <button
+        class="nudge-action"
+        onclick={openBackupSettings}
+      >
+        Set up backup
+      </button>
+      <button class="nudge-dismiss" onclick={dismissBackupNudge} title="Dismiss" aria-label="Dismiss backup reminder">
+        ✕
+      </button>
+    </div>
+  {/if}
+
   <RecordingHeader
     {onopenSettings}
     onStart={handleStartRecording}
@@ -373,6 +536,8 @@
         <PipelineStatus
           bind:copyStatus
           soapNoteText={soapNoteText}
+          metadata={pipelineMetadata}
+          tokensPerSecond={pipelineTokensPerSecond}
           {regenerating}
           onCancel={handleCancelPipeline}
           onRetry={handleRetry}
@@ -404,6 +569,12 @@
       open={sidebarOpen}
       width={sidebarWidth}
       onToggle={toggleSidebar}
+      ocrFiles={ocr.ocrFiles}
+      ocrText={ocr.ocrTextDisplay}
+      ocrLoading={ocr.ocrLoading}
+      onOcrFilesSelected={ocr.handleOcrFilesSelected}
+      onOcrTextChange={ocr.handleOcrTextChange}
+      onRemoveOcrFile={ocr.handleRemoveOcrFile}
     />
   </div>
 </div>
@@ -420,6 +591,39 @@
 />
 
 <style>
+  .backup-nudge {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+    border: 1px solid var(--warning, #d97706);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--warning) 8%, transparent);
+    font-size: 13px;
+    color: var(--text-primary);
+  }
+  .backup-nudge span { flex: 1; }
+  .nudge-action {
+    flex-shrink: 0;
+    padding: 6px 14px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .nudge-dismiss {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 6px;
+  }
   .record-tab {
     flex: 1;
     display: flex;

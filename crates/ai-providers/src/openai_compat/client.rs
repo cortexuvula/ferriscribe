@@ -9,6 +9,7 @@ use medical_core::types::{
 
 use crate::http_client::RetryConfig;
 
+use super::think::strip_leading_think_block;
 use super::wire::{ApiFunction, ApiToolCall, ChatMessage, ChatRequest, ChatResponse};
 
 /// A client for any endpoint implementing the OpenAI chat-completions protocol.
@@ -158,6 +159,21 @@ impl OpenAiCompatibleClient {
                 tool_call_id: Some(tool_call_id.clone()),
                 tool_calls: None,
             },
+            MessageContent::Parts(parts) => {
+                let arr: Vec<serde_json::Value> = parts
+                    .iter()
+                    .map(|p| {
+                        serde_json::to_value(p)
+                            .expect("ContentPart is always serializable (String fields only)")
+                    })
+                    .collect();
+                ChatMessage {
+                    role: role.into(),
+                    content: Some(serde_json::Value::Array(arr)),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }
+            }
         }
     }
 
@@ -186,6 +202,7 @@ impl OpenAiCompatibleClient {
             stream: None,
             tools: None,
             stream_options: None,
+            reasoning_effort: request.reasoning_effort.clone(),
         }
     }
 
@@ -221,6 +238,11 @@ impl OpenAiCompatibleClient {
             .and_then(|c| c.message.as_ref())
             .and_then(|m| m.content.clone())
             .unwrap_or_default();
+        // Reasoning models that inline their thinking into `content` (rather
+        // than the separate reasoning field) prefix the answer with a
+        // `<think>…</think>` block — strip it so every consumer of
+        // `complete` sees only the answer.
+        let content = strip_leading_think_block(&content).to_string();
 
         if content.is_empty() && num_choices > 0 {
             warn!(
@@ -258,9 +280,23 @@ impl OpenAiCompatibleClient {
     /// Classify a reqwest error from a `send_with_retry` call into either a
     /// structured `EndpointOffline` (connectivity issue) or the existing
     /// `AiProvider(String)` shape (genuine application-layer error).
+    ///
+    /// Timeouts get their own actionable message first: a timeout means the
+    /// endpoint answered TCP but the model was still generating when the
+    /// wall-clock budget ran out — not an offline endpoint, and not worth
+    /// retrying (see `http_client::classify_error`).
     pub(crate) fn classify_send_error(&self, e: reqwest::Error) -> medical_core::error::AppError {
         use medical_core::error::ServiceKind;
         use medical_core::preflight::classify_reqwest_error;
+        if e.is_timeout() {
+            return medical_core::error::AppError::ai_provider(
+                "AI request timed out — the model was probably still generating. \
+                 Reasoning (\"thinking\") models can spend several minutes before \
+                 producing output. Retry, disable reasoning for this model in the \
+                 provider app, lower its context length, or pick a faster model."
+                    .to_string(),
+            );
+        }
         match classify_reqwest_error(&e) {
             Some(reason) => medical_core::error::AppError::EndpointOffline {
                 service: ServiceKind::AiProvider,
@@ -268,7 +304,7 @@ impl OpenAiCompatibleClient {
                 reason,
                 provider_name: self.provider_name.clone(),
             },
-            None => medical_core::error::AppError::AiProvider(format!("HTTP request failed: {e}")),
+            None => medical_core::error::AppError::ai_provider(format!("HTTP request failed: {e}")),
         }
     }
 
@@ -293,6 +329,18 @@ impl OpenAiCompatibleClient {
         }
         req
     }
+
+    /// Like [`Self::post_json`], but overrides the client-level total
+    /// timeout for this request. Streaming requests need a generous hard
+    /// cap instead of the short non-streamed budget.
+    pub(super) fn post_json_with_timeout<T: serde::Serialize>(
+        &self,
+        url: &str,
+        body: &T,
+        timeout: std::time::Duration,
+    ) -> reqwest::RequestBuilder {
+        self.post_json(url, body).timeout(timeout)
+    }
 }
 
 #[cfg(test)]
@@ -311,6 +359,41 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn timeout_surfaces_clear_error_not_offline_dialog() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Response never arrives within the client's 1s total timeout.
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(3)))
+            .mount(&server)
+            .await;
+
+        let mut client = make_client();
+        client.client = Client::builder()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("slow test client");
+        client.base_url = server.uri();
+
+        let err = client
+            .complete(&make_request())
+            .await
+            .expect_err("must time out");
+        assert!(
+            !matches!(err, medical_core::error::AppError::EndpointOffline { .. }),
+            "a timeout is not an offline endpoint, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timed out"),
+            "message should say timed out: {msg}"
+        );
+    }
+
     fn make_request() -> CompletionRequest {
         CompletionRequest {
             model: "gpt-4o".into(),
@@ -322,6 +405,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             system_prompt: Some("You are a helpful assistant.".into()),
+            reasoning_effort: None,
         }
     }
 
@@ -351,6 +435,25 @@ mod tests {
     }
 
     #[test]
+    fn build_request_maps_reasoning_effort_onto_wire() {
+        let c = make_client();
+        let mut req = make_request();
+        req.reasoning_effort = Some("none".into());
+        let chat_req = c.build_request(&req);
+        assert_eq!(chat_req.reasoning_effort.as_deref(), Some("none"));
+        let json = serde_json::to_value(&chat_req).expect("serialize");
+        assert_eq!(json["reasoning_effort"], "none");
+
+        // Neutral requests must not carry the field at all.
+        let neutral = c.build_request(&make_request());
+        let json = serde_json::to_value(&neutral).expect("serialize");
+        assert!(
+            json.get("reasoning_effort").is_none(),
+            "None reasoning_effort must be skipped: {json}"
+        );
+    }
+
+    #[test]
     fn parse_response_extracts_content() {
         let c = make_client();
         let resp = ChatResponse {
@@ -374,5 +477,32 @@ mod tests {
         assert_eq!(completion.model, "gpt-4o");
         assert_eq!(completion.usage.total_tokens, 15);
         assert!(completion.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn convert_message_parts_to_multipart_content() {
+        use medical_core::types::ai::{ContentPart, ImageUrlData};
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Describe this".to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrlData {
+                        url: "data:image/png;base64,abc=".to_string(),
+                    },
+                },
+            ]),
+            tool_calls: vec![],
+        };
+        let wire = OpenAiCompatibleClient::convert_message(&msg);
+        assert!(wire.content.is_some(), "content must be present for Parts");
+        let content = wire.content.as_ref().unwrap();
+        assert!(content.is_array(), "Parts must serialize to JSON array");
+        let arr = content.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[1]["type"], "image_url");
     }
 }

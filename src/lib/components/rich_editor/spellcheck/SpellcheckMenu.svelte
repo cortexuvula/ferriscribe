@@ -22,8 +22,32 @@
   const { editor, request, onClose }: Props = $props();
 
   let menuEl = $state<HTMLDivElement | null>(null);
+  let menuLeft = $state(0);
+  let menuTop = $state(0);
 
   const spell = getSpellchecker();
+
+  // Clamp the menu to the viewport after it mounts so it stays on-screen
+  // near edges. Runs after `menuEl` is bound.
+  $effect(() => {
+    if (!request) return;
+    // Start at cursor position.
+    menuLeft = request.clientX;
+    menuTop = request.clientY;
+    // Clamp after DOM measurement (next tick).
+    if (menuEl) {
+      const rect = menuEl.getBoundingClientRect();
+      const margin = 8;
+      if (menuLeft + rect.width > window.innerWidth - margin) {
+        menuLeft = window.innerWidth - rect.width - margin;
+      }
+      if (menuTop + rect.height > window.innerHeight - margin) {
+        menuTop = window.innerHeight - rect.height - margin;
+      }
+      menuLeft = Math.max(margin, menuLeft);
+      menuTop = Math.max(margin, menuTop);
+    }
+  });
 
   // Recompute suggestions when the request changes.
   const suggestions = $derived(
@@ -42,13 +66,17 @@
 
   async function addToDictionary() {
     if (!request) return;
-    await spell.addToUserDict(request.word);
-    // Re-scan all active editors so the squiggle clears everywhere.
-    requestSpellcheckRescan();
+    try {
+      await spell.addToUserDict(request.word);
+      // Re-scan all active editors so the squiggle clears everywhere.
+      requestSpellcheckRescan();
+    } catch (err) {
+      console.error('Failed to add word to dictionary:', err);
+    }
     onClose();
   }
 
-  function ignoreOnce() {
+  function ignoreForSession() {
     if (!request) return;
     spell.ignoreInSession(request.word);
     requestSpellcheckRescan();
@@ -81,7 +109,7 @@
   <div
     bind:this={menuEl}
     class="spellcheck-menu"
-    style="left: {request.clientX}px; top: {request.clientY}px"
+    style="left: {menuLeft}px; top: {menuTop}px"
     role="menu"
     aria-label="Spelling suggestions for {request.word}"
   >
@@ -98,7 +126,7 @@
     <button type="button" role="menuitem" onclick={addToDictionary}>
       Add &ldquo;{request.word}&rdquo; to dictionary
     </button>
-    <button type="button" role="menuitem" onclick={ignoreOnce}>Ignore</button>
+    <button type="button" role="menuitem" onclick={ignoreForSession}>Ignore (session)</button>
     <button type="button" role="menuitem" onclick={onClose}>Cancel</button>
   </div>
 {/if}

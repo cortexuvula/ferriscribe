@@ -65,7 +65,7 @@
       showExport = false;
       successMessage =
         `Exported ${pairs} pair${pairs === 1 ? '' : 's'} to ${dir}` +
-        (warnings > 0 ? ` (${warnings} redaction warning${warnings === 1 ? '' : 's'} — see manifest.json)` : '');
+        (warnings > 0 ? ` (${warnings} row${warnings === 1 ? '' : 's'} excluded for residual PHI — see manifest.json)` : '');
     }}
   />
 {/if}

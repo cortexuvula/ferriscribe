@@ -10,9 +10,11 @@ use medical_core::error::AppError;
 
 mod helpers;
 pub mod letter;
+pub mod letter_writer;
 pub mod peer_discussion;
 pub mod referral;
 pub mod soap;
+pub(super) mod stream;
 pub mod synopsis;
 #[cfg(test)]
 pub(super) mod test_helpers;
@@ -20,6 +22,10 @@ pub(super) mod test_helpers;
 // Re-exposed for `commands::pipeline`, which validates the same payload before
 // kicking off its own generation flow.
 pub(super) use helpers::validate_patient_context;
+
+// Re-exposed for `commands::ocr`, which needs to resolve the configured AI
+// provider before calling the OCR pipeline.
+pub(super) use helpers::resolve_provider;
 
 // ---------------------------------------------------------------------------
 // Input size bounds
@@ -49,6 +55,11 @@ pub(super) const MAX_TRANSCRIPT_CHARS: usize = 500_000;
 /// a sanity upper bound rather than an expected boundary.
 pub(super) const MAX_SOAP_NOTE_CHARS: usize = 500_000;
 
+/// Maximum size of a source document (e.g. OCR'd text) accepted by the
+/// standalone Letter Writer. Multi-page scans can run long, so this matches
+/// the SOAP/transcript headroom; it exists to reject pathological input.
+pub(super) const MAX_DOCUMENT_CHARS: usize = 500_000;
+
 // ---------------------------------------------------------------------------
 // Progress event payload
 // ---------------------------------------------------------------------------
@@ -59,6 +70,21 @@ pub(super) struct GenerationProgress {
     pub doc_type: String,
     pub status: String,
     pub recording_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<GenerationProgressStats>,
+}
+
+/// Live throughput stats for an in-flight streaming generation.
+/// Counts and durations only — never content (AGENTS.md PHI rule).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(super) struct GenerationProgressStats {
+    /// Approximate tokens streamed so far (one SSE delta ≈ one token;
+    /// the persisted generation stat remains exact via the usage chunk).
+    pub tokens: u64,
+    /// Ms since the first streamed chunk.
+    pub elapsed_ms: u64,
+    /// Tokens/sec since the first chunk.
+    pub tokens_per_second: f64,
 }
 
 /// Format an error for a `generation-progress` "failed" event. Falls back to a

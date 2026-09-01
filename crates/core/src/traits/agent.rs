@@ -40,8 +40,8 @@ pub trait Agent: Send + Sync {
     /// orchestration failure, or the underlying provider error if a
     /// tool call or completion fails.
     async fn execute(&self, _context: AgentContext) -> AppResult<AgentResponse> {
-        Err(crate::error::AppError::Agent(
-            "Use AgentOrchestrator::execute instead".into(),
+        Err(crate::error::AppError::agent(
+            "Use AgentOrchestrator::execute instead",
         ))
     }
 }

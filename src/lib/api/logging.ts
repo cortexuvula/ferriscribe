@@ -42,10 +42,12 @@ export const log = {
     frontendLog('warn', message, context).catch(() => {});
   },
   info(message: string, context?: Record<string, unknown>) {
+    // eslint-disable-next-line no-console -- info-level logging routed to backend log file
     console.info(`[FerriScribe] ${message}`, context ?? '');
     frontendLog('info', message, context).catch(() => {});
   },
   debug(message: string, context?: Record<string, unknown>) {
+    // eslint-disable-next-line no-console -- debug-level logging routed to backend log file
     console.debug(`[FerriScribe] ${message}`, context ?? '');
     frontendLog('debug', message, context).catch(() => {});
   },

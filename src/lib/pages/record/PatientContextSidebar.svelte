@@ -1,6 +1,7 @@
 <script lang="ts">
   import PatientContextStructuredTab from './PatientContextStructuredTab.svelte';
   import PatientContextNotesTab from './PatientContextNotesTab.svelte';
+  import OcrDropZone, { type OcrFileStatus } from '../../components/OcrDropZone.svelte';
 
   type Tab = 'structured' | 'notes';
 
@@ -12,6 +13,12 @@
     open: boolean;
     width: number;
     onToggle: () => void;
+    ocrFiles: OcrFileStatus[];
+    ocrText: string;
+    ocrLoading: boolean;
+    onOcrFilesSelected: (paths: string[]) => void;
+    onOcrTextChange: (text: string) => void;
+    onRemoveOcrFile: (id: string) => void;
   };
   let {
     contextText = $bindable(''),
@@ -21,6 +28,12 @@
     open,
     width,
     onToggle,
+    ocrFiles = [],
+    ocrText = '',
+    ocrLoading = false,
+    onOcrFilesSelected = () => {},
+    onOcrTextChange = () => {},
+    onRemoveOcrFile = () => {},
   }: Props = $props();
 
   let activeTab: Tab = $state('structured');
@@ -98,6 +111,17 @@
           <PatientContextNotesTab bind:contextText />
         </div>
       {/if}
+    </div>
+
+    <div class="sidebar-ocr">
+      <OcrDropZone
+        {ocrFiles}
+        {ocrText}
+        {ocrLoading}
+        {onOcrFilesSelected}
+        {onOcrTextChange}
+        {onRemoveOcrFile}
+      />
     </div>
   </aside>
 {:else}
@@ -199,6 +223,15 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
+  }
+
+  .sidebar-ocr {
+    padding: 0 12px 12px;
+    border-top: 1px solid var(--border);
+    margin-top: 8px;
+    overflow-y: auto;
+    flex: 0 1 auto;
+    max-height: 30%;
   }
 
   .panel {

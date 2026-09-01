@@ -118,7 +118,7 @@ impl AgentOrchestrator {
                     agent.name(),
                     MAX_ITERATIONS
                 );
-                return Err(AppError::Agent(format!(
+                return Err(AppError::agent(format!(
                     "max iterations ({}) reached without a final response",
                     MAX_ITERATIONS
                 )));
@@ -132,6 +132,7 @@ impl AgentOrchestrator {
                 temperature: Some(temperature),
                 max_tokens: Some(4096),
                 system_prompt: Some(agent.system_prompt().to_string()),
+                reasoning_effort: None,
             };
 
             debug!(

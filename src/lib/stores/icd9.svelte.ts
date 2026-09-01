@@ -5,6 +5,12 @@
  *
  * `codeSet` is `null` until the load resolves. Consumers treat `null`
  * as "can't validate" and render chips neutrally (no false warnings).
+ *
+ * `descriptions` (the official code → description map, via
+ * `get_icd9_descriptions`) is a separate best-effort load: it only
+ * supplies the billing-code list's explaining titles, so its failure
+ * never trips the validation-retry notice — rows fall back to the
+ * note's own description text.
  */
 import { invoke } from '@tauri-apps/api/core';
 
@@ -15,7 +21,11 @@ class Icd9Store {
   loaded = $state(false);
   /** True if the load failed; chips render neutrally when set. */
   loadError = $state(false);
+  /** Official code → description map for list titles, or null while
+   *  loading / after a failure (cosmetic fallback only). */
+  descriptions = $state<Map<string, string> | null>(null);
   private loadPromise: Promise<void> | null = null;
+  private descPromise: Promise<void> | null = null;
 
   /**
    * Triggers a load if one hasn't started (or the last one failed).
@@ -33,6 +43,36 @@ class Icd9Store {
   retry(): Promise<void> {
     this.loadPromise = null;
     return this.load();
+  }
+
+  /** Retries the description load after a failure (clears the guard). */
+  retryDescriptions(): Promise<void> {
+    this.descPromise = null;
+    return this.loadDescriptions();
+  }
+
+  /**
+   * Loads the official MSP code → description map (best-effort, deduped
+   * like `load`). Failures leave `descriptions` null — the billing-code
+   * list then shows only descriptions found in the note text. The guard
+   * is cleared on failure so a later call can retry.
+   */
+  loadDescriptions(): Promise<void> {
+    if (this.descPromise) return this.descPromise;
+    this.descPromise = this.doLoadDescriptions();
+    return this.descPromise;
+  }
+
+  private async doLoadDescriptions(): Promise<void> {
+    try {
+      const obj = await invoke<Record<string, string>>('get_icd9_descriptions');
+      this.descriptions = new Map(Object.entries(obj));
+    } catch (err) {
+      console.error('Failed to load ICD-9 descriptions:', err);
+      // Cosmetic only — code validation (codeSet) is unaffected. Leave
+      // descriptions null and clear the guard so a caller can retry.
+      this.descPromise = null;
+    }
   }
 
   private async doLoad(): Promise<void> {

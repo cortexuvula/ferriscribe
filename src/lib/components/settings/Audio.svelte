@@ -18,7 +18,7 @@
   let whisperModels = $state<WhisperModelInfo[]>([]);
   let pyannoteModels = $state<WhisperModelInfo[]>([]);
   let modelsRefreshing = $state(false);
-  let downloadingModel = $state<string | null>(null);
+  let downloadingModels = $state<Set<string>>(new Set());
   let downloadProgress = $state<Record<string, { downloaded: number; total: number }>>({});
   let sttMode = $state<'local' | 'remote'>((settings.state.stt_mode as 'local' | 'remote') ?? 'local');
   let progressUnlisten: UnlistenFn | null = null;
@@ -56,14 +56,18 @@
   }
 
   async function handleDownloadModel(modelId: string) {
-    downloadingModel = modelId;
+    if (downloadingModels.has(modelId)) return; // Already downloading
+    downloadingModels = new Set([...downloadingModels, modelId]);
     try {
       await downloadModel(modelId);
       await Promise.all([fetchWhisperModels(), fetchPyannoteModels()]);
     } catch (e) {
       console.error(`Failed to download model ${modelId}:`, e);
     } finally {
-      downloadingModel = null;
+      // eslint-disable-next-line svelte/prefer-svelte-reactivity -- transient local Set, not reactive state
+      const next = new Set(downloadingModels);
+      next.delete(modelId);
+      downloadingModels = next;
     }
   }
 
@@ -87,6 +91,12 @@
     await settings.updateField('whisper_model', modelId);
   }
 
+  // Race guard: settings panes mount/unmount on every dialog open. If the
+  // component unmounts before the async onMount's listen() resolves,
+  // onDestroy runs with progressUnlisten still null and the listener leaks
+  // (writing to dead state forever). A late resolution unregisters itself.
+  let disposed = false;
+
   onMount(async () => {
     const results = await Promise.allSettled([
       fetchAudioDevices(),
@@ -101,7 +111,7 @@
     }
 
     // Listen for model download progress events
-    progressUnlisten = await listen<{ model_id: string; downloaded_bytes: number; total_bytes: number }>(
+    const un = await listen<{ model_id: string; downloaded_bytes: number; total_bytes: number }>(
       'model-download-progress',
       (event) => {
         downloadProgress = {
@@ -113,9 +123,12 @@
         };
       }
     );
+    if (disposed) un();
+    else progressUnlisten = un;
   });
 
   onDestroy(() => {
+    disposed = true;
     progressUnlisten?.();
   });
 
@@ -162,7 +175,7 @@
     <WhisperLocalSection
       {whisperModels}
       {modelsRefreshing}
-      {downloadingModel}
+      downloadingModels={downloadingModels}
       {downloadProgress}
       onModelChange={handleWhisperModelChange}
       onDownload={handleDownloadModel}
@@ -175,7 +188,7 @@
 
   <DiarizationModelsSection
     {pyannoteModels}
-    {downloadingModel}
+    downloadingModels={downloadingModels}
     {downloadProgress}
     onDownload={handleDownloadModel}
     onDelete={handleDeleteModel}

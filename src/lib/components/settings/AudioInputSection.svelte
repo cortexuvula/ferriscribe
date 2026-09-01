@@ -27,7 +27,7 @@
       <option value="">Loading devices...</option>
     {:else}
       <option value="">System Default</option>
-      {#each audioDevices as device}
+      {#each audioDevices as device (device.name)}
         <option value={device.name}>
           {device.name}{device.is_default ? ' (Default)' : ''}
         </option>

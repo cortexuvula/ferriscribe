@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { settings } from '../../stores/settings.svelte';
   import { getDefaultPrompt, type DocType } from '../../api/prompts';
 
@@ -70,31 +70,49 @@
     if (promptStatusTimer) clearTimeout(promptStatusTimer);
   });
 
+  // Monotonic generation counter: increments on every prompt switch so a
+  // stale async load (or save/reset completion) can detect it no longer
+  // belongs to the active prompt and skip its state writes.
+  let promptLoadGen = 0;
+
   async function loadPromptEditor(docType: DocType) {
+    const gen = ++promptLoadGen;
     promptLoading = true;
     promptDirty = false;
     promptSaveStatus = 'idle';
     try {
       const info = PROMPT_TYPES.find((p) => p.key === docType)!;
-      const customValue = settings.state?.[info.configField] as string | null | undefined;
+      // untrack: the reload effect must depend on activePromptKey ONLY.
+      // settings.updateField replaces settings.state wholesale, so a
+      // tracked read here re-ran the effect on EVERY settings save —
+      // discarding in-progress prompt edits from any other pane.
+      const customValue = untrack(
+        () => settings.state?.[info.configField],
+      ) as string | null | undefined;
       if (customValue && customValue.length > 0) {
+        if (gen !== promptLoadGen) return; // user switched while loading
         promptEditorText = customValue;
         promptIsCustom = true;
       } else {
-        promptEditorText = await getDefaultPrompt(docType);
+        const defaultText = await getDefaultPrompt(docType);
+        if (gen !== promptLoadGen) return; // stale load — user moved on
+        promptEditorText = defaultText;
         promptIsCustom = false;
       }
     } catch (e) {
+      if (gen !== promptLoadGen) return;
       console.error('Failed to load prompt editor:', e);
       promptEditorText = '';
       promptIsCustom = false;
     } finally {
-      promptLoading = false;
+      if (gen === promptLoadGen) promptLoading = false;
     }
   }
 
   async function handlePromptSelect(docType: DocType) {
-    if (promptDirty) {
+    // Suppress the discard dialog while a save is in flight — the dirty flag
+    // will be cleared once the save resolves, so prompting mid-save is spurious.
+    if (promptDirty && promptSaveStatus !== 'saving') {
       const confirmed = confirm('You have unsaved changes. Discard them?');
       if (!confirmed) return;
     }
@@ -103,9 +121,14 @@
 
   async function handlePromptSave() {
     const info = PROMPT_TYPES.find((p) => p.key === activePromptKey)!;
+    const gen = promptLoadGen;
     promptSaveStatus = 'saving';
     try {
       await settings.updateField(info.configField, promptEditorText);
+      // The save itself landed for `info` regardless; only the shared
+      // editor flags belong to the CURRENTLY selected prompt — skip them
+      // if the user switched away mid-save.
+      if (gen !== promptLoadGen) return;
       promptIsCustom = true;
       promptDirty = false;
       promptSaveStatus = 'saved';
@@ -117,22 +140,25 @@
       }, 1500);
     } catch (e) {
       console.error('Failed to save custom prompt:', e);
-      promptSaveStatus = 'error';
+      if (gen === promptLoadGen) promptSaveStatus = 'error';
     }
   }
 
   async function handlePromptReset() {
     const info = PROMPT_TYPES.find((p) => p.key === activePromptKey)!;
+    const gen = promptLoadGen;
     if (promptIsCustom && !confirm('Clear the custom prompt and restore the default?')) return;
     try {
       await settings.updateField(info.configField, null);
-      promptEditorText = await getDefaultPrompt(activePromptKey);
+      const defaultText = await getDefaultPrompt(info.key);
+      if (gen !== promptLoadGen) return; // user switched mid-reset
+      promptEditorText = defaultText;
       promptIsCustom = false;
       promptDirty = false;
       promptSaveStatus = 'idle';
     } catch (e) {
       console.error('Failed to reset prompt:', e);
-      promptSaveStatus = 'error';
+      if (gen === promptLoadGen) promptSaveStatus = 'error';
     }
   }
 
@@ -150,7 +176,7 @@
 
   <div class="prompts-layout">
     <aside class="prompts-sidebar">
-      {#each PROMPT_TYPES as pt}
+      {#each PROMPT_TYPES as pt (pt.key)}
         <button
           class="prompts-nav-item"
           class:active={activePromptKey === pt.key}
@@ -180,7 +206,7 @@
           <details class="prompts-placeholders">
             <summary>Available placeholders</summary>
             <ul>
-              {#each info.placeholders as ph}
+              {#each info.placeholders as ph (ph.token)}
                 <li>
                   <code>{ph.token}</code> — {ph.description}
                 </li>

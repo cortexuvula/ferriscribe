@@ -17,7 +17,10 @@ reqwest = { workspace = true }
 tokio-stream = "0.1"
 # Local STT
 whisper-rs = "0.16"
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray", "download-binaries", "std", "tls-native"] }
+# Exact-pinned: rc.13 resolved through the lock despite the rc.12 requirement
+# (caret on a pre-release admits later pre-releases of the same 2.0.0 tuple);
+# rc.12 is the release this crate was validated against.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["ndarray", "download-binaries", "std", "tls-native"] }
 ndarray = "0.17"
 knf-rs = "0.3.2"
 rubato = "0.16"

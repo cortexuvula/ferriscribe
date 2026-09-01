@@ -27,7 +27,11 @@
 //! - The internal `file_lock` mutex serializes writes; reads are lock-free.
 //!   A poisoned mutex surfaces as `SecurityError::Other`.
 
-use aes_gcm::aead::rand_core::RngCore;
+// Two `RngCore` traits coexist in the dep graph: rand 0.9 (rand_core 0.9)
+// and aes_gcm's re-exported rand_core 0.6. We use `aes_gcm::aead::OsRng`
+// (0.6) for nonces, but `rand::rng()` (0.9) for salt generation, so both
+// traits must be in scope. The 0.6 trait is aliased to disambiguate.
+use aes_gcm::aead::rand_core::RngCore as AeadRngCore;
 use aes_gcm::{
     Aes256Gcm, Key, Nonce,
     aead::{Aead, KeyInit, OsRng},
@@ -36,6 +40,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::Utc;
 use pbkdf2::pbkdf2_hmac;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -245,7 +250,7 @@ impl KeyStorage {
     fn save_file(&self, key_file: &KeyFile) -> SecurityResult<()> {
         let json = serde_json::to_vec_pretty(key_file)
             .map_err(|e| SecurityError::Io(std::io::Error::other(e)))?;
-        std::fs::write(&self.storage_path, json)?;
+        atomic_write(&self.storage_path, &json)?;
         Ok(())
     }
 }
@@ -289,15 +294,84 @@ where
 }
 
 /// Load an existing salt or create and persist a new random one.
+///
+/// Creation is exclusive (`create_new`): if two first-time opens race,
+/// exactly one wins and the loser must ADOPT the winner's salt. A
+/// last-writer-wins overwrite would leave the loser deriving keys from a
+/// salt that no longer matches the one on disk — permanently
+/// undecryptable data.
 fn load_or_create_salt(config_dir: &Path) -> SecurityResult<Vec<u8>> {
     let path = config_dir.join(SALT_FILE_NAME);
+    // Fast path: the salt has existed since a previous run.
     if path.exists() {
         return Ok(std::fs::read(&path)?);
     }
     let mut salt = vec![0u8; SALT_LENGTH];
-    rand::thread_rng().fill_bytes(&mut salt);
-    std::fs::write(&path, &salt)?;
-    Ok(salt)
+    rand::rng().fill_bytes(&mut salt);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            std::io::Write::write_all(&mut file, &salt)?;
+            // Durable + visible before anyone can observe the file via
+            // the AlreadyExists branch below.
+            file.sync_all()?;
+            Ok(salt)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Lost a concurrent first-create (or the salt appeared since
+            // the exists() check): adopt the on-disk salt.
+            read_complete_salt_or_wait(&path)
+        }
+        Err(e) => Err(SecurityError::Io(e)),
+    }
+}
+
+/// Read the salt file, tolerating a concurrent winner that has created
+/// but not yet finished writing it. A file that stays incomplete is
+/// corruption — deriving keys from a wrong-length salt would silently
+/// break every existing key, so surface it as an error instead.
+fn read_complete_salt_or_wait(path: &Path) -> SecurityResult<Vec<u8>> {
+    const RETRIES: u8 = 50;
+    const SLEEP: std::time::Duration = std::time::Duration::from_millis(2);
+    for _ in 0..RETRIES {
+        let bytes = std::fs::read(path)?;
+        if bytes.len() == SALT_LENGTH {
+            return Ok(bytes);
+        }
+        std::thread::sleep(SLEEP);
+    }
+    Err(SecurityError::Other(format!(
+        "salt file is corrupt (expected {SALT_LENGTH} bytes)"
+    )))
+}
+
+/// Write `content` to `path` atomically by first writing a temp file in
+/// the same directory and then renaming it over the target.
+///
+/// Atomicity guarantees:
+/// - On POSIX, `rename(2)` is atomic: a crash mid-rename never leaves a
+///   partially-written target file. Readers either see the old file or the
+///   new file in its entirety.
+/// - On NTFS (same volume), `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`
+///   is likewise atomic.
+///
+/// The temp file lives next to the target (`.tmp` extension) so the
+/// rename is intra-directory and therefore same-volume — required for
+/// atomicity on both platforms. On any error after the temp file is
+/// created, we attempt to remove it so a crash-later retry doesn't pick
+/// up stale bytes.
+fn atomic_write(path: &Path, content: &[u8]) -> SecurityResult<()> {
+    let temp = path.with_extension("tmp");
+    std::fs::write(&temp, content)?;
+    if let Err(e) = std::fs::rename(&temp, path) {
+        // Cleanup the temp file on rename failure so it doesn't linger.
+        let _ = std::fs::remove_file(&temp);
+        return Err(SecurityError::Io(e));
+    }
+    Ok(())
 }
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
@@ -479,5 +553,43 @@ mod tests {
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
         // Known value: SHA-256("") starts with e3b0c442
         assert_eq!(hash, "e3b0c442");
+    }
+
+    /// Regression for the salt TOCTOU race: concurrent first-time opens
+    /// must all converge on ONE salt. With the old exists()-then-write
+    /// sequence, the loser kept its own in-memory salt while the winner's
+    /// landed on disk — every key the loser encrypted became permanently
+    /// undecryptable.
+    #[test]
+    fn concurrent_first_open_adopts_single_salt() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::sync::Barrier;
+
+        const RACERS: usize = 8;
+        let dir = TempDir::new().unwrap();
+        let config_dir = Arc::new(dir.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(RACERS));
+
+        let handles: Vec<_> = (0..RACERS)
+            .map(|_| {
+                let config_dir = Arc::clone(&config_dir);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    load_or_create_salt(&config_dir)
+                })
+            })
+            .collect();
+
+        let salts: HashSet<Vec<u8>> = handles
+            .into_iter()
+            .map(|h| h.join().expect("racer thread"))
+            .map(|r| r.expect("load_or_create_salt"))
+            .collect();
+        assert_eq!(salts.len(), 1, "all racers must adopt the same salt");
+        // And the disk holds that same salt for the next open.
+        let on_disk = load_or_create_salt(&config_dir).unwrap();
+        assert!(salts.contains(&on_disk));
     }
 }

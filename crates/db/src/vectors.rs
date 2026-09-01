@@ -48,6 +48,9 @@ pub struct EmbeddingVectorRecord {
 #[derive(Debug, Clone)]
 pub struct FtsResult {
     pub id: String,
+    /// Owning document for the chunk — lets BM25 results carry the same
+    /// document identity as vector results (used for chat citations).
+    pub document_id: String,
     pub content: String,
     pub rank: f64,
 }
@@ -284,7 +287,7 @@ impl VectorsRepo {
     /// field in [`FtsResult`] is negated so higher values = better matches.
     pub fn search_fts(conn: &Connection, query: &str, top_k: u32) -> DbResult<Vec<FtsResult>> {
         let mut stmt = conn.prepare(
-            "SELECT dc.id, dc.content, f.rank
+            "SELECT dc.id, dc.document_id, dc.content, f.rank
              FROM chunks_fts f
              JOIN document_chunks dc ON dc.rowid = f.rowid
              WHERE chunks_fts MATCH ?1
@@ -296,8 +299,9 @@ impl VectorsRepo {
             .query_map(params![query, top_k], |row| {
                 Ok(FtsResult {
                     id: row.get(0)?,
-                    content: row.get(1)?,
-                    rank: row.get(2)?,
+                    document_id: row.get(1)?,
+                    content: row.get(2)?,
+                    rank: row.get(3)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

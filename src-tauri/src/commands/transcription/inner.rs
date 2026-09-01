@@ -55,19 +55,7 @@ pub async fn transcribe_recording_inner(
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
 
     // Step 1: Load AppConfig (needed for pre-flight; no recording mutation yet).
-    let app_config = {
-        let db_cfg = Arc::clone(&state.db);
-        tokio::task::spawn_blocking(
-            move || -> AppResult<medical_core::types::settings::AppConfig> {
-                let conn = db_cfg.conn()?;
-                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)?;
-                cfg.migrate();
-                Ok(cfg)
-            },
-        )
-        .await
-        .map_err(|e| AppError::Other(format!("preflight config load join error: {e}")))??
-    };
+    let app_config = crate::commands::load_app_config(&state.db, "preflight").await?;
 
     // Step 2: Pre-flight — probe the remote STT endpoint before mutating the
     // recording's status. For local whisper users stt_remote_host is empty so
@@ -112,24 +100,33 @@ pub async fn transcribe_recording_inner(
                     );
                     // Persist the corrected path so future retries work directly.
                     recording.audio_path = candidate.clone();
-                    let conn = state.db.conn()?;
-                    RecordingsRepo::update(&conn, &recording)?;
+                    // Wrap the SQLite update in spawn_blocking so we never
+                    // block the async runtime worker.
+                    let rec_clone = recording.clone();
+                    let db = Arc::clone(&state.db);
+                    tokio::task::spawn_blocking(move || -> AppResult<()> {
+                        let conn = db.conn()?;
+                        RecordingsRepo::update(&conn, &rec_clone)?;
+                        Ok(())
+                    })
+                    .await
+                    .map_err(crate::commands::join_err)??;
                     candidate
                 } else {
                     let err_msg = format!("WAV file not found: {}", recording.audio_path.display());
-                    return Err(AppError::Processing(
+                    return Err(AppError::processing(
                         mark_recording_failed(&app, &state.db, recording, err_msg).await,
                     ));
                 }
             } else {
                 let err_msg = format!("WAV file not found: {}", recording.audio_path.display());
-                return Err(AppError::Processing(
+                return Err(AppError::processing(
                     mark_recording_failed(&app, &state.db, recording, err_msg).await,
                 ));
             }
         } else {
             let err_msg = format!("WAV file not found: {}", recording.audio_path.display());
-            return Err(AppError::Processing(
+            return Err(AppError::processing(
                 mark_recording_failed(&app, &state.db, recording, err_msg).await,
             ));
         }
@@ -142,7 +139,7 @@ pub async fn transcribe_recording_inner(
             Ok(Ok(audio)) => audio,
             Ok(Err(e)) => {
                 let err_msg = unwrap_app_error_message(e);
-                return Err(AppError::Processing(
+                return Err(AppError::processing(
                     mark_recording_failed(&app, &state.db, recording, err_msg).await,
                 ));
             }
@@ -192,7 +189,7 @@ pub async fn transcribe_recording_inner(
     if audio.samples.is_empty() {
         let err_msg = format!("WAV file contains no audio samples: {}", wav_path.display());
         tracing::error!("{err_msg}");
-        return Err(AppError::Processing(
+        return Err(AppError::processing(
             mark_recording_failed(&app, &state.db, recording.clone(), err_msg).await,
         ));
     }
@@ -231,7 +228,7 @@ pub async fn transcribe_recording_inner(
             None => {
                 let err_msg = "No STT provider configured. Download a Whisper model in Settings → Audio / STT.".to_string();
                 tracing::error!("{err_msg}");
-                return Err(AppError::SttProvider(
+                return Err(AppError::stt_provider(
                     mark_recording_failed(&app, &state.db, recording, err_msg).await,
                 ));
             }
@@ -249,7 +246,7 @@ pub async fn transcribe_recording_inner(
             }
             let err_msg = format!("Transcription failed: {e}");
             tracing::error!(error = %e, "STT transcription failed");
-            return Err(AppError::Processing(
+            return Err(AppError::processing(
                 mark_recording_failed(&app, &state.db, recording, err_msg).await,
             ));
         }
@@ -308,7 +305,7 @@ pub async fn transcribe_recording_inner(
             segments = transcript.segments.len(),
             "Rejecting likely Whisper hallucination from silent source"
         );
-        return Err(AppError::Processing(
+        return Err(AppError::processing(
             mark_recording_failed(&app, &state.db, recording, err_msg).await,
         ));
     }
@@ -323,7 +320,7 @@ pub async fn transcribe_recording_inner(
             segments = transcript.segments.len(),
             "{err_msg}"
         );
-        return Err(AppError::Processing(
+        return Err(AppError::processing(
             mark_recording_failed(&app, &state.db, recording, err_msg).await,
         ));
     }
@@ -341,10 +338,11 @@ pub async fn transcribe_recording_inner(
     //
     // When paired with an office server that exposes the vocab API, fetch
     // entries from there so corrections stay consistent across all paired
-    // clients. On failure (server unreachable, transient HTTP error), warn
-    // and fall through with no corrections rather than aborting the whole
-    // transcription — corrections are best-effort polish on top of the
-    // already-successful STT output.
+    // clients. On failure (server unreachable, transient HTTP error), fall
+    // back to the LOCAL rules (warned in the log) rather than aborting the
+    // whole transcription or shipping an uncorrected transcript —
+    // corrections are best-effort polish on top of the already-successful
+    // STT output.
     let vocab_enabled = {
         let db_settings = Arc::clone(&state.db);
         tokio::task::spawn_blocking(move || -> bool {
@@ -397,41 +395,52 @@ pub async fn transcribe_recording_inner(
         };
 
     let db_vocab = Arc::clone(&state.db);
-    let display_text = match tokio::task::spawn_blocking(move || {
+    let (display_text, transcript) = match tokio::task::spawn_blocking(move || {
         if !vocab_enabled {
-            return Ok::<String, AppError>(display_text);
+            return Ok::<_, AppError>((display_text, transcript));
         }
-        let entries = if let Some(remote) = remote_entries {
-            remote
-        } else {
-            // Local fallback: only when not paired or remote fetch failed
-            // and we want to use the local DB. When paired but remote
-            // failed, remote_entries is None and we skip rather than
-            // silently using stale local data.
-            if crate::state::load_paired_connection().is_some() {
-                return Ok(display_text);
+        let entries = match remote_entries {
+            Some(remote) => remote,
+            None => {
+                // Paired but the server rules are unavailable (fetch failed,
+                // or the server predates the vocab API). Fall back to the
+                // local rules rather than skipping — some corrections beat
+                // none — and log loudly so the staleness is visible.
+                if crate::state::load_paired_connection().is_some() {
+                    tracing::warn!(
+                        "vocabulary: server rules unavailable (fetch failed or server predates the vocab API) — falling back to local rules, which may be stale"
+                    );
+                }
+                let conn = db_vocab.conn()?;
+                VocabularyRepo::list_enabled(&conn)?
             }
-            let conn = db_vocab.conn()?;
-            VocabularyRepo::list_enabled(&conn)?
         };
         if entries.is_empty() {
-            return Ok(display_text);
+            return Ok((display_text, transcript));
         }
-        let result = vocabulary_corrector::apply_corrections(&display_text, &entries);
-        if result.total_replacements > 0 {
+        // Correct BOTH representations: each segment's text (the
+        // speaker-labeled editor view reads transcript_segments from
+        // metadata) AND the flat text — format_transcript_with_speakers
+        // falls back to the FLAT text whenever no segment carries a
+        // speaker label (diarization off / no speakers detected), and
+        // corrections applied to segments alone were silently discarded
+        // on that path.
+        let total_replacements = vocabulary_corrector::apply_to_transcript(&mut transcript, &entries);
+        if total_replacements > 0 {
             tracing::info!(
-                replacements = result.total_replacements,
+                replacements = total_replacements,
                 "Applied vocabulary corrections to transcript"
             );
         }
-        Ok(result.corrected_text)
+        let display_text = format_transcript_with_speakers(&transcript);
+        Ok((display_text, transcript))
     })
     .await
     {
-        Ok(Ok(text)) => text,
+        Ok(Ok(pair)) => pair,
         Ok(Err(e)) => {
             let err_msg = unwrap_app_error_message(e);
-            return Err(AppError::Processing(
+            return Err(AppError::processing(
                 mark_recording_failed(&app, &state.db, recording, err_msg).await,
             ));
         }

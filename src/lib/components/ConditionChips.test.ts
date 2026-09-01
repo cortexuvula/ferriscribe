@@ -36,13 +36,14 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/sv
 const mockListConditionChips = vi.fn();
 const mockAddConditionChip = vi.fn();
 const mockRemoveConditionChip = vi.fn();
-const mockReorderConditionChips = vi.fn();
+const mockIncrementConditionChipUse = vi.fn();
 
 vi.mock('../api/conditions', () => ({
   listConditionChips: (...args: unknown[]) => mockListConditionChips(...(args as [])),
   addConditionChip: (...args: unknown[]) => mockAddConditionChip(...(args as [string])),
   removeConditionChip: (...args: unknown[]) => mockRemoveConditionChip(...(args as [string])),
-  reorderConditionChips: (...args: unknown[]) => mockReorderConditionChips(...(args as [string[]])),
+  incrementConditionChipUse: (...args: unknown[]) =>
+    mockIncrementConditionChipUse(...(args as [string])),
 }));
 
 // The component now subscribes to a Tauri SSE event on mount. Mock the Tauri
@@ -82,15 +83,16 @@ const DEFAULT_CONDITIONS = [
   'Sleep apnea',
 ];
 
-/** Helper: a ConditionChip-shaped object as returned by the API. sort_order is
- *  assigned from insertion order so each chip in a list gets a distinct index. */
-function chip(text: string, sortOrder = 0) {
+/** Helper: a ConditionChip-shaped object as returned by the API. `useCount`
+ *  defaults to 0; pass it to simulate chips with prior usage for ordering tests. */
+function chip(text: string, sortOrder = 0, useCount = 0) {
   return {
     id: `id-${text}`,
     text,
     updated_at: '2026-01-01T00:00:00Z',
     deleted_at: null,
     sort_order: sortOrder,
+    use_count: useCount,
   };
 }
 
@@ -98,12 +100,12 @@ beforeEach(() => {
   mockListConditionChips.mockReset();
   mockAddConditionChip.mockReset();
   mockRemoveConditionChip.mockReset();
-  mockReorderConditionChips.mockReset();
+  mockIncrementConditionChipUse.mockReset();
   // Default: backend returns an empty list → component shows defaults.
   mockListConditionChips.mockResolvedValue([]);
   mockAddConditionChip.mockResolvedValue([]);
   mockRemoveConditionChip.mockResolvedValue([]);
-  mockReorderConditionChips.mockResolvedValue([]);
+  mockIncrementConditionChipUse.mockResolvedValue([]);
 
   // The component calls `listen('condition-chips-changed', …)` and
   // `invoke('subscribe_condition_chips')` on mount. Default both to no-ops so
@@ -112,15 +114,6 @@ beforeEach(() => {
   mockListen.mockResolvedValue(async () => {});
   mockInvoke.mockReset();
   mockInvoke.mockResolvedValue(undefined);
-
-  // jsdom doesn't implement pointer capture methods. Polyfill them as no-ops
-  // so the pointer-event-based DnD handlers don't throw.
-  if (!Element.prototype.setPointerCapture) {
-    Element.prototype.setPointerCapture = vi.fn();
-  }
-  if (!Element.prototype.releasePointerCapture) {
-    Element.prototype.releasePointerCapture = vi.fn();
-  }
 });
 
 // Vitest globals are not enabled in this project, so @testing-library/svelte's
@@ -139,12 +132,14 @@ describe('ConditionChips — render & load', () => {
     const group = screen.getByRole('group', { name: 'Common conditions quick-add' });
     expect(group).toBeTruthy();
 
-    // Every default condition should be present as a clickable chip.
-    for (const condition of DEFAULT_CONDITIONS) {
-      // Multiple buttons share the condition name (chip label), so we grab the
-      // role=name button which is the chip itself.
+    // The tray collapses to the first COLLAPSED_COUNT (8) chips with a
+    // "+N more" toggle for the rest. The first batch of default conditions
+    // should each be present as a clickable chip.
+    for (const condition of DEFAULT_CONDITIONS.slice(0, 8)) {
       expect(screen.getByRole('button', { name: condition })).toBeTruthy();
     }
+    // The remaining defaults are behind the toggle, surfaced as "+7 more".
+    expect(screen.getByRole('button', { name: '+7 more' })).toBeTruthy();
   });
 
   it('loads chips from backend on mount and renders custom chips', async () => {
@@ -285,8 +280,8 @@ describe('ConditionChips — remove flow', () => {
       expect(screen.getByRole('button', { name: 'Asthma' })).toBeTruthy();
     });
 
-    // Click the remove button for "Asthma" (aria-label="Remove Asthma").
-    const removeBtn = screen.getByRole('button', { name: 'Remove Asthma' });
+    // Click the remove button for "Asthma" (aria-label="Remove Asthma preset").
+    const removeBtn = screen.getByRole('button', { name: 'Remove Asthma preset' });
     await fireEvent.click(removeBtn);
 
     await waitFor(() => {
@@ -311,7 +306,7 @@ describe('ConditionChips — remove flow', () => {
       expect(screen.getByRole('button', { name: 'Asthma' })).toBeTruthy();
     });
 
-    const removeBtn = screen.getByRole('button', { name: 'Remove Asthma' });
+    const removeBtn = screen.getByRole('button', { name: 'Remove Asthma preset' });
     await fireEvent.click(removeBtn);
 
     await waitFor(() => {
@@ -325,28 +320,32 @@ describe('ConditionChips — remove flow', () => {
   });
 });
 
-describe('ConditionChips — drag-and-drop reorder', () => {
-  it('renders chips with data-index for pointer-event DnD support', async () => {
+describe('ConditionChips — frequency ordering & use-count tracking', () => {
+  it('renders chips in the order returned by the backend (frequency-sorted)', async () => {
+    // Backend returns chips already sorted by use_count DESC. The component is
+    // pure passthrough — it must NOT re-sort. Plantar fasciitis (used 50×)
+    // should render before Hypertension (used 2×), even though HTN is the
+    // usual first-listed default.
     mockListConditionChips.mockResolvedValue([
-      chip('Alpha', 0),
-      chip('Beta', 1),
+      chip('Plantar fasciitis', 0, 50),
+      chip('Hypertension', 1, 2),
     ]);
 
     render(ConditionChips, { onAdd: () => {} });
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Beta' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Plantar fasciitis' })).toBeTruthy();
     });
 
-    // Verify the chip wrappers have data-index attributes (used by pointer
-    // event hit-testing in the DnD handler).
-    const chipWrappers = document.querySelectorAll('[data-index]');
-    expect(chipWrappers.length).toBe(2);
-    expect(chipWrappers[0].getAttribute('data-index')).toBe('0');
-    expect(chipWrappers[1].getAttribute('data-index')).toBe('1');
+    // The first chip wrapper in DOM order is the most-used one.
+    const wrappers = document.querySelectorAll('.condition-chip-wrapper');
+    expect(wrappers[0].textContent).toContain('Plantar fasciitis');
+    expect(wrappers[1].textContent).toContain('Hypertension');
   });
 
-  it('does not crash when clicking chips (pointer events do not interfere with click)', async () => {
-    mockListConditionChips.mockResolvedValue([chip('Hypertension', 0)]);
+  it('increments use-count via incrementConditionChipUse when an inactive chip is added', async () => {
+    mockListConditionChips.mockResolvedValue([chip('Hypertension', 0, 0)]);
+    // The increment command returns the reordered list.
+    mockIncrementConditionChipUse.mockResolvedValue([chip('Hypertension', 0, 1)]);
     const onAdd = vi.fn();
 
     render(ConditionChips, { props: { onAdd } });
@@ -354,9 +353,65 @@ describe('ConditionChips — drag-and-drop reorder', () => {
       expect(screen.getByRole('button', { name: 'Hypertension' })).toBeTruthy();
     });
 
-    // A simple click (no drag movement) should call onAdd.
+    // Click the inactive chip → adds to the list AND bumps the use count.
     await fireEvent.click(screen.getByRole('button', { name: 'Hypertension' }));
     expect(onAdd).toHaveBeenCalledWith('Hypertension');
+    await waitFor(() => {
+      expect(mockIncrementConditionChipUse).toHaveBeenCalledWith('Hypertension');
+    });
+  });
+
+  it('does NOT increment when an active chip is clicked (toggle-off)', async () => {
+    mockListConditionChips.mockResolvedValue([chip('Hypertension', 0, 5)]);
+    const onAdd = vi.fn();
+    const onRemove = vi.fn();
+
+    render(ConditionChips, {
+      props: { onAdd, onRemove, selectedConditions: 'Hypertension\n' },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Hypertension' })).toBeTruthy();
+    });
+
+    // Hypertension is active (in the list) → clicking removes it, no count bump.
+    await fireEvent.click(screen.getByRole('button', { name: 'Hypertension' }));
+    expect(onRemove).toHaveBeenCalledWith('Hypertension');
+    expect(onAdd).not.toHaveBeenCalled();
+    // Give any pending microtasks a chance; the increment must never fire.
+    await tick();
+    expect(mockIncrementConditionChipUse).not.toHaveBeenCalled();
+  });
+
+  it('fresh-install fallback: empty backend shows DEFAULT_CHIPS and clicks still work', async () => {
+    // Simulates a brand-new install where condition_chips is empty (the m010
+    // seed only runs on upgrade). The component falls back to DEFAULT_CHIPS
+    // (id ''). Clicking one must still call onAdd synchronously, and the
+    // count bump fires (the backend upserts-on-miss). A recordUse rejection
+    // must NOT block the add — onAdd runs first.
+    mockListConditionChips.mockResolvedValue([]);
+    // Even if the increment fails (e.g. backend hiccup), the add must succeed.
+    mockIncrementConditionChipUse.mockRejectedValue(new Error('IPC failed'));
+    const onAdd = vi.fn();
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    render(ConditionChips, { props: { onAdd } });
+    // Fallback defaults render despite the empty backend list.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Hypertension' })).toBeTruthy();
+    });
+
+    // Click a default chip → onAdd fires (the invariant from Bug 2's comment).
+    await fireEvent.click(screen.getByRole('button', { name: 'Hypertension' }));
+    expect(onAdd).toHaveBeenCalledWith('Hypertension');
+    // recordUse was attempted (best-effort) and its error was logged, not thrown.
+    await waitFor(() => {
+      expect(mockIncrementConditionChipUse).toHaveBeenCalledWith('Hypertension');
+    });
+    expect(consoleSpy).toHaveBeenCalledWith(
+      'Failed to increment condition chip use:',
+      expect.any(Error),
+    );
+    consoleSpy.mockRestore();
   });
 });
 
@@ -393,5 +448,139 @@ describe('ConditionChips — realtime SSE sync', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Asthma' })).toBeTruthy();
     });
+  });
+});
+
+describe('ConditionChips — selection state (toggle)', () => {
+  it('marks a chip active and calls onRemove when its text is in selectedConditions', async () => {
+    mockListConditionChips.mockResolvedValue([chip('Hypertension', 0), chip('Asthma', 1)]);
+    const onAdd = vi.fn();
+    const onRemove = vi.fn();
+
+    render(ConditionChips, {
+      props: { onAdd, onRemove, selectedConditions: 'Hypertension\n' },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Hypertension' })).toBeTruthy();
+    });
+
+    // Hypertension matches a line → active (✓ prefix, aria-pressed true).
+    const htnBtn = screen.getByRole('button', { name: 'Hypertension' });
+    expect(htnBtn.getAttribute('aria-pressed')).toBe('true');
+    expect(htnBtn.textContent ?? '').toContain('✓');
+    expect(htnBtn.closest('.condition-chip-wrapper')?.classList.contains('selected')).toBe(true);
+
+    // Clicking the active chip removes it (toggles off).
+    await fireEvent.click(htnBtn);
+    expect(onRemove).toHaveBeenCalledWith('Hypertension');
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
+  it('keeps a chip inactive and calls onAdd when its text is NOT in selectedConditions', async () => {
+    mockListConditionChips.mockResolvedValue([chip('Hypertension', 0), chip('Asthma', 1)]);
+    const onAdd = vi.fn();
+    const onRemove = vi.fn();
+
+    render(ConditionChips, {
+      props: { onAdd, onRemove, selectedConditions: 'Hypertension\n' },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Asthma' })).toBeTruthy();
+    });
+
+    // Asthma is not in the list → inactive.
+    const asthmaBtn = screen.getByRole('button', { name: 'Asthma' });
+    expect(asthmaBtn.getAttribute('aria-pressed')).toBe('false');
+    expect(asthmaBtn.textContent ?? '').not.toContain('✓');
+    expect(asthmaBtn.closest('.condition-chip-wrapper')?.classList.contains('selected')).toBe(false);
+
+    // Clicking the inactive chip adds it (toggles on).
+    await fireEvent.click(asthmaBtn);
+    expect(onAdd).toHaveBeenCalledWith('Asthma');
+    expect(onRemove).not.toHaveBeenCalled();
+  });
+
+  it('matches case-insensitively and ignores surrounding whitespace', async () => {
+    mockListConditionChips.mockResolvedValue([chip('Hypertension')]);
+    const onRemove = vi.fn();
+
+    render(ConditionChips, {
+      props: { onAdd: () => {}, onRemove, selectedConditions: '  hypertension  \n' },
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Hypertension' })).toBeTruthy();
+    });
+
+    const htnBtn = screen.getByRole('button', { name: 'Hypertension' });
+    expect(htnBtn.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('treats an absent selectedConditions as no active chips (back-compat)', async () => {
+    mockListConditionChips.mockResolvedValue([chip('Hypertension')]);
+    const onAdd = vi.fn();
+
+    render(ConditionChips, { props: { onAdd } });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Hypertension' })).toBeTruthy();
+    });
+
+    const htnBtn = screen.getByRole('button', { name: 'Hypertension' });
+    expect(htnBtn.getAttribute('aria-pressed')).toBe('false');
+    expect(htnBtn.textContent ?? '').not.toContain('✓');
+
+    // Click still routes to onAdd (original add-only behavior).
+    await fireEvent.click(htnBtn);
+    expect(onAdd).toHaveBeenCalledWith('Hypertension');
+  });
+});
+
+describe('ConditionChips — collapsible tray', () => {
+  it('collapses to the first 8 chips with a "+N more" toggle, then expands on click', async () => {
+    // 10 chips → 8 visible, "+2 more".
+    const ten = Array.from({ length: 10 }, (_, i) => chip(`Cond${i + 1}`, i));
+    mockListConditionChips.mockResolvedValue(ten);
+
+    render(ConditionChips, { onAdd: () => {} });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Cond1' })).toBeTruthy();
+    });
+
+    // First eight are visible; the rest are behind the toggle.
+    for (let i = 1; i <= 8; i++) {
+      expect(screen.getByRole('button', { name: `Cond${i}` })).toBeTruthy();
+    }
+    expect(screen.queryByRole('button', { name: 'Cond9' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cond10' })).toBeNull();
+    expect(screen.getByRole('button', { name: '+2 more' })).toBeTruthy();
+
+    // Expand → all ten visible, toggle now reads "Show less".
+    await fireEvent.click(screen.getByRole('button', { name: '+2 more' }));
+    await tick();
+    expect(screen.getByRole('button', { name: 'Cond9' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Cond10' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Show less' })).toBeTruthy();
+
+    // Collapse again → back to eight.
+    await fireEvent.click(screen.getByRole('button', { name: 'Show less' }));
+    await tick();
+    expect(screen.queryByRole('button', { name: 'Cond9' })).toBeNull();
+    expect(screen.getByRole('button', { name: '+2 more' })).toBeTruthy();
+  });
+
+  it('renders all chips inline (no toggle) when count ≤ COLLAPSED_COUNT', async () => {
+    const eight = Array.from({ length: 8 }, (_, i) => chip(`Cond${i + 1}`, i));
+    mockListConditionChips.mockResolvedValue(eight);
+
+    render(ConditionChips, { onAdd: () => {} });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Cond8' })).toBeTruthy();
+    });
+
+    for (let i = 1; i <= 8; i++) {
+      expect(screen.getByRole('button', { name: `Cond${i}` })).toBeTruthy();
+    }
+    // No collapse toggle should be present (count == threshold).
+    expect(screen.queryByRole('button', { name: /more/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /show less/i })).toBeNull();
   });
 });

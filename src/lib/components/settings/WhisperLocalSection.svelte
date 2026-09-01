@@ -5,7 +5,7 @@
   interface Props {
     whisperModels: WhisperModelInfo[];
     modelsRefreshing: boolean;
-    downloadingModel: string | null;
+    downloadingModels: Set<string>;
     downloadProgress: Record<string, { downloaded: number; total: number }>;
     onModelChange: (modelId: string) => Promise<void>;
     onDownload: (modelId: string) => Promise<void>;
@@ -16,7 +16,7 @@
   const {
     whisperModels,
     modelsRefreshing,
-    downloadingModel,
+    downloadingModels,
     downloadProgress,
     onModelChange,
     onDownload,
@@ -33,7 +33,7 @@
     onchange={(e) => onModelChange((e.target as HTMLSelectElement).value)}
     disabled={modelsRefreshing}
   >
-    {#each whisperModels as model}
+    {#each whisperModels as model (model.id)}
       <option value={model.id}>
         {model.id} ({formatBytes(model.size_bytes)}) {model.downloaded ? '' : '- not downloaded'}
       </option>
@@ -45,7 +45,7 @@
 <div class="form-group">
   <span class="form-label">Model Management</span>
   <div class="model-list">
-    {#each whisperModels as model}
+    {#each whisperModels as model (model.id)}
       <div class="model-row">
         <div class="model-info">
           <span class="model-name">{model.id}</span>
@@ -63,7 +63,7 @@
             >
               Delete
             </button>
-          {:else if downloadingModel === model.id}
+          {:else if downloadingModels.has(model.id)}
             <span class="download-progress">
               {#if downloadProgress[model.id]}
                 {Math.round((downloadProgress[model.id].downloaded / (downloadProgress[model.id].total || 1)) * 100)}%
@@ -75,7 +75,7 @@
             <button
               class="btn-download-model"
               onclick={() => onDownload(model.id)}
-              disabled={downloadingModel !== null}
+              disabled={downloadingModels.size > 0}
             >
               Download
             </button>

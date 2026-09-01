@@ -1,6 +1,8 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { processRecording, cancelPipeline } from '../api/pipeline';
 import { recordings, selectRecording } from './recordings.svelte';
+import { settings } from './settings.svelte';
+import { playSoapCompleteChime } from '../utils/notificationSound';
 import { log } from '../api/logging';
 import { formatError } from '../types/errors';
 import { OfflineCancelled } from '../api/invokeWithOfflineHandling';
@@ -101,6 +103,12 @@ class PipelineStore {
             log.error('Pipeline failed', { recording_id, error: error ?? 'unknown' });
           } else {
             log.info('Pipeline completed', { recording_id });
+            // The pipeline's final stage is SOAP generation — this is the
+            // "stepped away while it processed" moment the chime exists for
+            // (the manual paths chime in RecordTab / GenerateTab).
+            if (settings.state.soap_notification_sound) {
+              playSoapCompleteChime();
+            }
           }
           recordings.load(); // Refresh recordings list
           // When the most-recently launched pipeline finishes, switch the UI
@@ -180,6 +188,12 @@ class PipelineStore {
 
     // Fire and forget — progress comes via events
     processRecording(recordingId, context, template, patientContext).catch((err) => {
+      // Run-fencing: if a NEWER launch for this recording replaced the
+      // active entry (rapid retry), this stale rejection belongs to the
+      // old run and must not clobber or delete the fresh run's entry.
+      const prior = this.state.active[recordingId];
+      if (prior && prior.startedAt !== startedAt) return;
+
       if (err instanceof OfflineCancelled) {
         // User dismissed the offline dialog (cancelled or opened Settings).
         // The dialog has already informed the user; remove the in-flight
@@ -195,12 +209,13 @@ class PipelineStore {
       }
       const message = formatError(err);
       log.error('Pipeline command failed', { recordingId, error: message });
-      const prior = this.state.active[recordingId];
       const errorEntry: PipelineEntry = {
         recordingId,
         stage: 'failed',
         error: message,
-        warning: null,
+        // Preserve a diarization warning carried on the prior entry (the
+        // progress handler does the same).
+        warning: prior?.warning ?? null,
         startedAt: prior?.startedAt ?? startedAt,
         finishedAt: Date.now(),
       };

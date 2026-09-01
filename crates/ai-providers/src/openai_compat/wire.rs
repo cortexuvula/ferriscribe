@@ -49,6 +49,11 @@ pub(super) struct ChatRequest {
     pub tools: Option<Vec<ApiTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
+    /// Reasoning/"thinking" effort hint (e.g. `"none"` disables thinking on
+    /// Ollama). Honored by Ollama's OpenAI-compatible endpoint; silently
+    /// dropped by LM Studio (as of 0.4.16+). Never serialized when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,6 +138,10 @@ pub(super) struct ChatResponseMessage {
 #[derive(Debug, Deserialize)]
 pub(super) struct ChatDelta {
     pub content: Option<String>,
+    /// Reasoning/"thinking" delta (LM Studio and friends). Used ONLY to
+    /// compute a length for progress counting — never surfaced as text.
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ApiToolCallDelta>>,
 }
 
@@ -207,6 +216,15 @@ mod tests {
         let delta = resp.choices[0].delta.as_ref().expect("delta present");
         assert_eq!(delta.content.as_deref(), Some("Hello"));
         assert!(resp.usage.is_none());
+    }
+
+    #[test]
+    fn deserialize_streaming_reasoning_delta() {
+        let raw = r#"{"choices":[{"delta":{"reasoning_content":"thinking hard"}}]}"#;
+        let resp: ChatResponse = serde_json::from_str(raw).expect("parse");
+        let delta = resp.choices[0].delta.as_ref().expect("delta present");
+        assert_eq!(delta.reasoning_content.as_deref(), Some("thinking hard"));
+        assert_eq!(delta.content, None);
     }
 
     #[test]

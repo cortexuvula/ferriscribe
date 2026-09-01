@@ -2,14 +2,15 @@
 
 use medical_core::error::{AppError, AppResult};
 use medical_processing::document_generator;
+use tauri::Emitter;
 use tracing::debug;
 
 use crate::state::AppState;
 
-use super::MAX_SOAP_NOTE_CHARS;
 use super::helpers::{
     build_completion_request, load_recording_and_settings, persist_recording, resolve_provider,
 };
+use super::{GenerationProgress, MAX_SOAP_NOTE_CHARS};
 
 /// Generate a brief synopsis from a recording's SOAP note.
 ///
@@ -17,13 +18,18 @@ use super::helpers::{
 /// (the `Recording` struct does not have a dedicated `synopsis` field).
 #[tauri::command]
 pub async fn generate_synopsis(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     recording_id: String,
 ) -> AppResult<String> {
-    generate_synopsis_inner(&state, &recording_id).await
+    generate_synopsis_inner(&state, Some(&app), &recording_id).await
 }
 
-async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppResult<String> {
+async fn generate_synopsis_inner(
+    state: &AppState,
+    app: Option<&tauri::AppHandle>,
+    recording_id: &str,
+) -> AppResult<String> {
     let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
 
@@ -43,13 +49,13 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            AppError::Processing(
+            AppError::processing(
                 "Recording has no SOAP note. Generate a SOAP note first.".to_string(),
             )
         })?;
 
     if soap_note.len() > MAX_SOAP_NOTE_CHARS {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "SOAP note too large: {} chars, limit is {}",
             soap_note.len(),
             MAX_SOAP_NOTE_CHARS
@@ -59,6 +65,7 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
     let (system_prompt, user_prompt) = document_generator::build_synopsis_prompt(
         soap_note,
         settings.custom_synopsis_prompt.as_deref(),
+        None,
     );
 
     debug!(
@@ -67,27 +74,48 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
         recording_id,
     );
 
+    let model_name = settings.model.clone();
     let request = build_completion_request(
         system_prompt,
         user_prompt,
-        settings.model,
+        model_name.clone(),
         settings.temperature,
         None,
     );
 
-    let response = provider.complete(request).await.map_err(|e| match e {
+    let generation_start = std::time::Instant::now();
+    let response = super::stream::stream_to_completion(
+        &provider,
+        |stats| {
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "generation-progress",
+                    GenerationProgress {
+                        doc_type: "synopsis".into(),
+                        status: "generating".into(),
+                        recording_id: recording_id.to_string(),
+                        progress: Some(*stats),
+                    },
+                );
+            }
+        },
+        request,
+    )
+    .await
+    .map_err(|e| match e {
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
         // For other errors, keep the existing nicer wrapping.
-        _ => AppError::AiProvider(format!(
+        _ => AppError::ai_provider(format!(
             "AI completion failed: {}",
             crate::commands::unwrap_app_error_message(e)
         )),
     })?;
+    let generation_elapsed = generation_start.elapsed();
 
     let synopsis_text = response.content;
     if synopsis_text.is_empty() {
-        return Err(AppError::AiProvider(
+        return Err(AppError::ai_provider(
             "AI returned an empty synopsis.".to_string(),
         ));
     }
@@ -102,6 +130,16 @@ async fn generate_synopsis_inner(state: &AppState, recording_id: &str) -> AppRes
             serde_json::Value::String(synopsis_text.clone()),
         );
     }
+
+    medical_core::types::recording::record_completion_stat(
+        &mut recording.metadata,
+        "synopsis",
+        provider.name(),
+        &model_name,
+        &response.usage,
+        generation_elapsed,
+    );
+
     persist_recording(&state.db, recording).await?;
 
     Ok(synopsis_text)
@@ -128,7 +166,7 @@ mod preflight_tests {
             build_test_state_with_recording(config, "Patient reports headache and fatigue.").await;
 
         let start = std::time::Instant::now();
-        let result = generate_synopsis_inner(&state, &recording_id).await;
+        let result = generate_synopsis_inner(&state, None, &recording_id).await;
         let elapsed = start.elapsed();
 
         let err = result.expect_err("must fail with offline error");
@@ -156,5 +194,63 @@ mod preflight_tests {
             elapsed < std::time::Duration::from_secs(8),
             "should have short-circuited at ~3s; took {elapsed:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
+    use super::*;
+    use medical_core::types::settings::AppConfig;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn generate_synopsis_records_generation_stats() {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+
+        let provider = Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Brief synopsis: tension headache, plan follow-up.",
+            32,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports headache and fatigue.",
+            provider,
+        )
+        .await;
+
+        // Synopsis generation reads recording.soap_note.
+        {
+            let uuid = uuid::Uuid::parse_str(&recording_id).expect("uuid");
+            let conn = state.db.conn().expect("conn");
+            let mut rec =
+                medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid).expect("recording");
+            rec.soap_note = Some("S: Headache.\nA: Tension headache.\nP: Follow up.".to_string());
+            medical_db::recordings::RecordingsRepo::update(&conn, &rec).expect("update");
+        }
+
+        let synopsis = generate_synopsis_inner(&state, None, &recording_id)
+            .await
+            .expect("synopsis generation succeeds");
+        assert!(!synopsis.is_empty());
+
+        let uuid = uuid::Uuid::parse_str(&recording_id).expect("uuid");
+        let conn = state.db.conn().expect("conn");
+        let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+            .expect("recording persisted");
+        assert_eq!(
+            rec.metadata["generation_stats"]["synopsis"]["completion_tokens"],
+            serde_json::json!(32)
+        );
+        assert_eq!(
+            rec.metadata["generation_stats"]["synopsis"]["model"],
+            serde_json::json!("llama3")
+        );
+        // The synopsis text itself stays where it always was.
+        assert!(rec.metadata["synopsis"].is_string());
     }
 }

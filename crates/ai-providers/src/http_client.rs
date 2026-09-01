@@ -7,7 +7,6 @@
 //!   clients with Bearer-token or custom-header authentication.
 //! - [`RetryConfig`] — exponential-backoff configuration with jitter,
 //!   constructible from user-facing [`AppConfig`] settings.
-//! - [`CircuitBreaker`] — simple failure-count circuit breaker.
 //! - [`send_with_retry`] — wraps any request factory with retry/backoff
 //!   logic, honoring `Retry-After` headers and classifying outcomes via
 //!   [`RetryDecision`].
@@ -19,20 +18,20 @@
 
 use rand::Rng;
 use reqwest::{Client, header};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::settings::AppConfig;
 
 /// Build a reqwest client with Bearer-token auth.
 ///
-/// Returns `Err(AppError::AiProvider(...))` if the API key contains characters
+/// Returns `Err(AppError::ai_provider(...))` if the API key contains characters
 /// that are invalid in HTTP header values (newlines, raw control bytes) or if
 /// reqwest's builder fails — the caller decides how to surface that.
 pub fn build_client(api_key: &str, timeout_secs: u64) -> AppResult<Client> {
     let mut auth_value =
         header::HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| {
-            AppError::AiProvider("API key contains characters invalid in HTTP headers".into())
+            AppError::ai_provider("API key contains characters invalid in HTTP headers")
         })?;
     auth_value.set_sensitive(true);
 
@@ -45,7 +44,7 @@ pub fn build_client(api_key: &str, timeout_secs: u64) -> AppResult<Client> {
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(timeout_secs))
         .build()
-        .map_err(|e| AppError::AiProvider(format!("Failed to build HTTP client: {e}")))
+        .map_err(|e| AppError::ai_provider(format!("Failed to build HTTP client: {e}")))
 }
 
 /// Build a reqwest client with a custom auth header.
@@ -55,10 +54,10 @@ pub fn build_client_custom_auth(
     timeout_secs: u64,
 ) -> AppResult<Client> {
     let header_name = header::HeaderName::from_bytes(header_name.as_bytes())
-        .map_err(|_| AppError::AiProvider(format!("Invalid auth header name: {header_name:?}")))?;
+        .map_err(|_| AppError::ai_provider(format!("Invalid auth header name: {header_name:?}")))?;
 
     let mut header_value = header::HeaderValue::from_str(api_key).map_err(|_| {
-        AppError::AiProvider("API key contains characters invalid in HTTP headers".into())
+        AppError::ai_provider("API key contains characters invalid in HTTP headers")
     })?;
     header_value.set_sensitive(true);
 
@@ -71,7 +70,7 @@ pub fn build_client_custom_auth(
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(timeout_secs))
         .build()
-        .map_err(|e| AppError::AiProvider(format!("Failed to build HTTP client: {e}")))
+        .map_err(|e| AppError::ai_provider(format!("Failed to build HTTP client: {e}")))
 }
 
 /// Configuration for exponential-backoff retry logic.
@@ -125,60 +124,9 @@ impl RetryConfig {
         if base.is_zero() {
             return base;
         }
-        let factor = rng.gen_range(0.75..=1.25);
+        let factor = rng.random_range(0.75..=1.25);
         let millis = (base.as_millis() as f64 * factor) as u64;
         Duration::from_millis(millis)
-    }
-}
-
-/// Simple circuit breaker.
-#[derive(Debug)]
-pub struct CircuitBreaker {
-    pub failure_count: u32,
-    pub failure_threshold: u32,
-    pub last_failure: Option<Instant>,
-    pub recovery_timeout: Duration,
-}
-
-impl CircuitBreaker {
-    /// Create a new circuit breaker with the given failure threshold and recovery timeout.
-    ///
-    /// The breaker starts in the closed (healthy) state. After `failure_threshold`
-    /// consecutive failures, it opens and rejects requests until `recovery_timeout`
-    /// has elapsed since the last failure.
-    pub fn new(failure_threshold: u32, recovery_timeout: Duration) -> Self {
-        Self {
-            failure_count: 0,
-            failure_threshold,
-            last_failure: None,
-            recovery_timeout,
-        }
-    }
-
-    /// Returns `true` when the breaker is open (circuit broken, reject requests).
-    ///
-    /// The breaker is open when `failure_count >= failure_threshold` **and**
-    /// less than `recovery_timeout` has elapsed since the last failure.
-    pub fn is_open(&self) -> bool {
-        if self.failure_count < self.failure_threshold {
-            return false;
-        }
-        match self.last_failure {
-            None => false,
-            Some(t) => t.elapsed() < self.recovery_timeout,
-        }
-    }
-
-    /// Record a successful request, resetting the failure count and closing the breaker.
-    pub fn record_success(&mut self) {
-        self.failure_count = 0;
-        self.last_failure = None;
-    }
-
-    /// Record a failed request, incrementing the failure count and potentially opening the breaker.
-    pub fn record_failure(&mut self) {
-        self.failure_count += 1;
-        self.last_failure = Some(Instant::now());
     }
 }
 
@@ -232,14 +180,19 @@ pub fn classify_status(
 ///
 /// Connection-refused (`is_connect()`) is treated as **Permanent** — the
 /// local provider isn't running, and retrying for 7 s won't change that.
-/// Read/connect timeouts and other transport errors are **Transient**.
+/// Timeouts are also **Permanent**: a timed-out completion usually means
+/// the model is still generating (reasoning/"thinking" models can spend
+/// many minutes before their first visible output). Re-issuing the request
+/// would start another full-length generation server-side while the client
+/// waits out the entire timeout again — strictly worse than failing fast
+/// with a clear error.
 /// Body/decode errors mean the server returned malformed data — Permanent.
 pub fn classify_error(err: &reqwest::Error) -> RetryDecision {
     if err.is_connect() {
         return RetryDecision::Permanent;
     }
     if err.is_timeout() {
-        return RetryDecision::Transient;
+        return RetryDecision::Permanent;
     }
     if err.is_body() || err.is_decode() {
         return RetryDecision::Permanent;
@@ -273,7 +226,7 @@ pub async fn send_with_retry<F>(
 where
     F: Fn() -> reqwest::RequestBuilder + Send,
 {
-    use rand::thread_rng;
+    use rand::rng;
 
     let mut attempt: u32 = 0;
     loop {
@@ -294,7 +247,7 @@ where
                 if attempt >= policy.max_retries {
                     return result;
                 }
-                policy.jittered(policy.delay_for_attempt(attempt), &mut thread_rng())
+                policy.jittered(policy.delay_for_attempt(attempt), &mut rng())
             }
             RetryDecision::TransientWithDelay(server_delay) => {
                 if attempt >= policy.max_retries {
@@ -338,32 +291,6 @@ mod tests {
         let cfg = RetryConfig::default();
         // attempt 10: 1 * 2^10 = 1024 s, capped at 30 s
         assert_eq!(cfg.delay_for_attempt(10), Duration::from_secs(30));
-    }
-
-    #[test]
-    fn cb_starts_closed() {
-        let cb = CircuitBreaker::new(3, Duration::from_secs(60));
-        assert!(!cb.is_open());
-    }
-
-    #[test]
-    fn cb_opens_after_threshold() {
-        let mut cb = CircuitBreaker::new(3, Duration::from_secs(60));
-        cb.record_failure();
-        cb.record_failure();
-        cb.record_failure();
-        assert!(cb.is_open());
-    }
-
-    #[test]
-    fn cb_resets_on_success() {
-        let mut cb = CircuitBreaker::new(3, Duration::from_secs(60));
-        cb.record_failure();
-        cb.record_failure();
-        cb.record_failure();
-        assert!(cb.is_open());
-        cb.record_success();
-        assert!(!cb.is_open());
     }
 
     #[test]
@@ -600,6 +527,35 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .expect("test client")
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_does_not_retry_timeouts() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        // Server holds the response far longer than the client's total
+        // timeout, forcing a reqwest timeout error on the first attempt.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(3_000)))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("test client");
+        let url = format!("{}/v1/chat", server.uri());
+        let policy = fast_policy(3);
+
+        let err = send_with_retry(&policy, || client.post(&url).body("hi"))
+            .await
+            .expect_err("must time out");
+        assert!(err.is_timeout(), "expected a timeout error, got: {err}");
+        // A timed-out completion must NOT be retried: the model is still
+        // generating server-side, and a retry would restart another
+        // full-length generation while waiting out the whole timeout again.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

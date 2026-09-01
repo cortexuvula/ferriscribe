@@ -1,5 +1,6 @@
 //! Recording and processing-status types.
 
+use super::ai::UsageInfo;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -15,7 +16,13 @@ use uuid::Uuid;
 /// freeform `context` (string) and structured `patient_context`
 /// ([`PatientContext`](super::agent::PatientContext) shape). New metadata
 /// keys are non-breaking.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # PHI note
+///
+/// Manual `Debug` impl redacts transcript, SOAP note, referral, letter,
+/// peer discussion, chat, and patient name — these are PHI and must never
+/// appear in logs or panic backtraces.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Recording {
     /// Unique identifier (UUIDv4, assigned at creation).
     pub id: Uuid,
@@ -57,6 +64,65 @@ pub struct Recording {
     /// delta filtering. Set to `created_at` on insert, bumped on every update.
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// Manual Debug impl that redacts PHI-bearing fields. Only logs structural
+/// metadata (id, filename, status, timestamps, provider names, sizes) —
+/// never transcript, SOAP note, referral, letter, chat, or patient name.
+impl std::fmt::Debug for Recording {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recording")
+            .field("id", &self.id)
+            .field("filename", &self.filename)
+            .field(
+                "transcript",
+                &self
+                    .transcript
+                    .as_ref()
+                    .map(|t| format!("<{} chars>", t.len())),
+            )
+            .field(
+                "soap_note",
+                &self
+                    .soap_note
+                    .as_ref()
+                    .map(|t| format!("<{} chars>", t.len())),
+            )
+            .field(
+                "referral",
+                &self
+                    .referral
+                    .as_ref()
+                    .map(|t| format!("<{} chars>", t.len())),
+            )
+            .field(
+                "letter",
+                &self.letter.as_ref().map(|t| format!("<{} chars>", t.len())),
+            )
+            .field(
+                "peer_discussion",
+                &self
+                    .peer_discussion
+                    .as_ref()
+                    .map(|t| format!("<{} chars>", t.len())),
+            )
+            .field(
+                "chat",
+                &self.chat.as_ref().map(|t| format!("<{} chars>", t.len())),
+            )
+            .field("patient_name", &"<redacted>")
+            .field("audio_path", &self.audio_path)
+            .field("duration_seconds", &self.duration_seconds)
+            .field("file_size_bytes", &self.file_size_bytes)
+            .field("stt_provider", &self.stt_provider)
+            .field("ai_provider", &self.ai_provider)
+            .field("tags", &self.tags)
+            .field("status", &self.status)
+            .field("created_at", &self.created_at)
+            .field("metadata", &"<redacted>")
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 impl Recording {
@@ -171,7 +237,12 @@ impl ProcessingStatus {
 /// Avoids loading full transcript/SOAP content. Use
 /// `RecordingSummary::from(&recording)` to derive from a full
 /// [`Recording`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # PHI note
+///
+/// Manual `Debug` impl redacts `patient_name`; the remaining fields are
+/// structural metadata safe to log.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RecordingSummary {
     /// Recording UUID.
     pub id: Uuid,
@@ -200,6 +271,34 @@ pub struct RecordingSummary {
     /// True if this recording was synced from a remote machine (metadata
     /// contains a `synced_from` key).
     pub is_remote: bool,
+    /// Throughput (tokens/sec) of the most recent AI generation for this
+    /// recording, from `metadata.generation_stats` — `None` when no
+    /// generation has recorded stats.
+    #[serde(default)]
+    pub tokens_per_second: Option<f64>,
+}
+
+/// Manual Debug impl that redacts the `patient_name` field. All other
+/// fields are structural metadata (no PHI) and are logged verbatim.
+impl std::fmt::Debug for RecordingSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordingSummary")
+            .field("id", &self.id)
+            .field("filename", &self.filename)
+            .field("patient_name", &"<redacted>")
+            .field("status", &self.status)
+            .field("duration_seconds", &self.duration_seconds)
+            .field("created_at", &self.created_at)
+            .field("tags", &self.tags)
+            .field("has_transcript", &self.has_transcript)
+            .field("has_soap_note", &self.has_soap_note)
+            .field("has_referral", &self.has_referral)
+            .field("has_letter", &self.has_letter)
+            .field("has_peer_discussion", &self.has_peer_discussion)
+            .field("is_remote", &self.is_remote)
+            .field("tokens_per_second", &self.tokens_per_second)
+            .finish()
+    }
 }
 
 impl From<&Recording> for RecordingSummary {
@@ -218,8 +317,144 @@ impl From<&Recording> for RecordingSummary {
             has_letter: r.letter.is_some(),
             has_peer_discussion: r.peer_discussion.is_some(),
             is_remote: r.metadata.get("synced_from").is_some(),
+            tokens_per_second: latest_tokens_per_second(&r.metadata),
         }
     }
+}
+
+/// Throughput metrics for a single LLM generation, persisted under
+/// `recording.metadata["generation_stats"][doc_type]`.
+///
+/// Contains only counts, durations, and provider/model names — no PHI
+/// (AGENTS.md: log counts and lengths, never content).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationStat {
+    /// Provider that produced the generation (e.g. `"ollama"`, `"lmstudio"`).
+    pub provider: String,
+    /// Model used for the generation.
+    pub model: String,
+    /// Tokens consumed by the prompt (input).
+    pub prompt_tokens: u32,
+    /// Tokens produced by the completion (output).
+    pub completion_tokens: u32,
+    /// Wall-clock duration of the completion call, in milliseconds (truncated;
+    /// a sub-millisecond call records 0).
+    pub duration_ms: u64,
+    /// Effective throughput: completion tokens divided by wall-clock seconds.
+    pub tokens_per_second: f64,
+    /// When the generation completed.
+    pub generated_at: DateTime<Utc>,
+}
+
+impl GenerationStat {
+    /// Compute a stat from a completion response's usage plus the
+    /// wall-clock time spent in `provider.complete()`.
+    ///
+    /// Returns `None` when no throughput can be derived (zero completion
+    /// tokens or zero elapsed time) — nothing should be recorded then.
+    pub fn from_completion(
+        provider: &str,
+        model: &str,
+        usage: &UsageInfo,
+        elapsed: std::time::Duration,
+    ) -> Option<Self> {
+        if usage.completion_tokens == 0 || elapsed.is_zero() {
+            return None;
+        }
+        let seconds = elapsed.as_secs_f64();
+        Some(Self {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            duration_ms: elapsed.as_millis() as u64,
+            tokens_per_second: usage.completion_tokens as f64 / seconds,
+            generated_at: Utc::now(),
+        })
+    }
+}
+
+/// Doc-type keys that may appear under `generation_stats`.
+pub const GENERATION_STAT_DOC_TYPES: [&str; 5] =
+    ["soap", "referral", "letter", "synopsis", "peer_discussion"];
+
+/// Merge `stat` into `metadata["generation_stats"][doc_type]`, creating the
+/// nested object when absent. Never touches any other metadata key.
+pub fn merge_generation_stat(
+    metadata: &mut serde_json::Value,
+    doc_type: &str,
+    stat: GenerationStat,
+) {
+    debug_assert!(
+        GENERATION_STAT_DOC_TYPES.contains(&doc_type),
+        "unknown generation-stats doc type: {doc_type}"
+    );
+    if !metadata.is_object() {
+        *metadata = serde_json::json!({});
+    }
+    let obj = metadata
+        .as_object_mut()
+        .expect("replaced with an object above");
+    let stats = obj
+        .entry("generation_stats".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !stats.is_object() {
+        *stats = serde_json::json!({});
+    }
+    let stats_obj = stats
+        .as_object_mut()
+        .expect("replaced with an object above");
+    stats_obj.insert(
+        doc_type.to_string(),
+        serde_json::to_value(stat).expect("GenerationStat serializes infallibly"),
+    );
+}
+
+/// The `tokens_per_second` of the most recent generation across doc types
+/// (newest `generated_at`), or `None` when no valid stats are recorded.
+/// Entries that fail to deserialize as [`GenerationStat`] are skipped.
+pub fn latest_tokens_per_second(metadata: &serde_json::Value) -> Option<f64> {
+    let stats = metadata.get("generation_stats")?;
+    let mut best: Option<(DateTime<Utc>, f64)> = None;
+    for key in GENERATION_STAT_DOC_TYPES {
+        let Some(raw) = stats.get(key) else { continue };
+        let Ok(stat) = serde_json::from_value::<GenerationStat>(raw.clone()) else {
+            continue;
+        };
+        if best.is_none_or(|(best_at, _)| stat.generated_at >= best_at) {
+            best = Some((stat.generated_at, stat.tokens_per_second));
+        }
+    }
+    best.map(|(_, tokens_per_second)| tokens_per_second)
+}
+
+/// Record a completion's throughput stat into `metadata` under `doc_type`:
+/// derive the [`GenerationStat`] (a no-op when no throughput can be
+/// computed), log it at debug level (counts and durations only — never
+/// content), and merge it. Best-effort by construction — never fails.
+pub fn record_completion_stat(
+    metadata: &mut serde_json::Value,
+    doc_type: &'static str,
+    provider: &str,
+    model: &str,
+    usage: &UsageInfo,
+    elapsed: std::time::Duration,
+) {
+    debug_assert!(
+        GENERATION_STAT_DOC_TYPES.contains(&doc_type),
+        "unknown generation-stats doc type: {doc_type}"
+    );
+    let Some(stat) = GenerationStat::from_completion(provider, model, usage, elapsed) else {
+        return;
+    };
+    tracing::debug!(
+        doc_type,
+        tokens_per_second = stat.tokens_per_second,
+        completion_tokens = stat.completion_tokens,
+        duration_ms = stat.duration_ms,
+        "generation throughput recorded"
+    );
+    merge_generation_stat(metadata, doc_type, stat);
 }
 
 #[cfg(test)]
@@ -318,6 +553,197 @@ mod tests {
         assert!(!summary.has_referral);
         assert!(!summary.has_letter);
         assert_eq!(summary.patient_name.as_deref(), Some("Jane Doe"));
+    }
+
+    #[test]
+    fn generation_stat_from_completion_computes_throughput() {
+        let usage = UsageInfo {
+            prompt_tokens: 1000,
+            completion_tokens: 200,
+            total_tokens: 1200,
+        };
+        let stat = GenerationStat::from_completion(
+            "ollama",
+            "llama3",
+            &usage,
+            std::time::Duration::from_millis(4000),
+        )
+        .expect("throughput is computable");
+        assert_eq!(stat.provider, "ollama");
+        assert_eq!(stat.model, "llama3");
+        assert_eq!(stat.prompt_tokens, 1000);
+        assert_eq!(stat.completion_tokens, 200);
+        assert_eq!(stat.duration_ms, 4000);
+        assert_eq!(stat.tokens_per_second, 50.0);
+    }
+
+    #[test]
+    fn generation_stat_from_completion_rejects_zero_completion_tokens() {
+        let usage = UsageInfo::default(); // completion_tokens == 0
+        assert!(
+            GenerationStat::from_completion(
+                "ollama",
+                "llama3",
+                &usage,
+                std::time::Duration::from_secs(1)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn generation_stat_from_completion_rejects_zero_elapsed() {
+        let usage = UsageInfo {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+        };
+        assert!(
+            GenerationStat::from_completion("ollama", "llama3", &usage, std::time::Duration::ZERO)
+                .is_none()
+        );
+    }
+
+    fn stat(tokens_per_second: f64, generated_at: chrono::DateTime<Utc>) -> GenerationStat {
+        GenerationStat {
+            provider: "ollama".to_string(),
+            model: "llama3".to_string(),
+            prompt_tokens: 10,
+            completion_tokens: 100,
+            duration_ms: 1000,
+            tokens_per_second,
+            generated_at,
+        }
+    }
+
+    #[test]
+    fn merge_generation_stat_overwrites_own_slot_only() {
+        let mut metadata = serde_json::json!({ "context": "visit notes" });
+        merge_generation_stat(&mut metadata, "soap", stat(20.0, Utc::now()));
+
+        assert_eq!(metadata["context"], serde_json::json!("visit notes"));
+        assert_eq!(
+            metadata["generation_stats"]["soap"]["tokens_per_second"],
+            serde_json::json!(20.0)
+        );
+
+        merge_generation_stat(&mut metadata, "referral", stat(150.0, Utc::now()));
+        merge_generation_stat(&mut metadata, "soap", stat(75.5, Utc::now()));
+
+        // soap slot overwritten by its newest write; referral slot preserved;
+        // unrelated metadata keys untouched.
+        assert_eq!(
+            metadata["generation_stats"]["soap"]["tokens_per_second"],
+            serde_json::json!(75.5)
+        );
+        assert_eq!(
+            metadata["generation_stats"]["referral"]["tokens_per_second"],
+            serde_json::json!(150.0)
+        );
+        assert_eq!(metadata["context"], serde_json::json!("visit notes"));
+    }
+
+    #[test]
+    fn merge_generation_stat_initializes_null_metadata() {
+        let mut metadata = serde_json::Value::Null;
+        merge_generation_stat(&mut metadata, "soap", stat(20.0, Utc::now()));
+        assert!(metadata["generation_stats"]["soap"].is_object());
+    }
+
+    #[test]
+    fn latest_tokens_per_second_picks_newest_generated_at() {
+        let older_at = Utc::now() - chrono::TimeDelta::hours(2);
+        let mut metadata = serde_json::json!({});
+        merge_generation_stat(&mut metadata, "soap", stat(20.0, older_at));
+        merge_generation_stat(&mut metadata, "letter", stat(75.5, Utc::now()));
+
+        assert_eq!(latest_tokens_per_second(&metadata), Some(75.5));
+    }
+
+    #[test]
+    fn latest_tokens_per_second_none_without_stats() {
+        assert_eq!(latest_tokens_per_second(&serde_json::Value::Null), None);
+        assert_eq!(
+            latest_tokens_per_second(&serde_json::json!({ "context": "x" })),
+            None
+        );
+    }
+
+    #[test]
+    fn record_completion_stat_writes_throughput() {
+        let mut metadata = serde_json::json!({ "context": "visit notes" });
+        let usage = UsageInfo {
+            prompt_tokens: 10,
+            completion_tokens: 50,
+            total_tokens: 60,
+        };
+        record_completion_stat(
+            &mut metadata,
+            "soap",
+            "ollama",
+            "llama3",
+            &usage,
+            std::time::Duration::from_millis(1000),
+        );
+        assert_eq!(
+            metadata["generation_stats"]["soap"]["tokens_per_second"],
+            serde_json::json!(50.0)
+        );
+        assert_eq!(metadata["context"], serde_json::json!("visit notes"));
+    }
+
+    #[test]
+    fn record_completion_stat_skips_zero_token_completions() {
+        let mut metadata = serde_json::json!({});
+        let usage = UsageInfo::default();
+        record_completion_stat(
+            &mut metadata,
+            "soap",
+            "ollama",
+            "llama3",
+            &usage,
+            std::time::Duration::from_secs(1),
+        );
+        assert!(metadata.get("generation_stats").is_none());
+    }
+
+    #[test]
+    fn latest_tokens_per_second_skips_malformed_entries() {
+        let metadata = serde_json::json!({
+            "generation_stats": {
+                "soap": { "tokens_per_second": 99.0 },
+                "referral": stat(40.0, Utc::now())
+            }
+        });
+        // "soap" is missing required fields → skipped; the valid referral
+        // entry wins despite the lower value.
+        assert_eq!(latest_tokens_per_second(&metadata), Some(40.0));
+    }
+
+    #[test]
+    fn summary_tokens_per_second_from_metadata() {
+        let mut rec = Recording::new("visit.wav", PathBuf::from("/audio/visit.wav"));
+        rec.transcript = Some("Hello".into());
+
+        // No stats recorded yet → None.
+        assert_eq!(RecordingSummary::from(&rec).tokens_per_second, None);
+
+        let older_at = Utc::now() - chrono::TimeDelta::hours(1);
+        merge_generation_stat(&mut rec.metadata, "soap", stat(50.0, older_at));
+        merge_generation_stat(&mut rec.metadata, "referral", stat(100.0, Utc::now()));
+
+        let summary = RecordingSummary::from(&rec);
+        assert_eq!(summary.tokens_per_second, Some(100.0));
+    }
+
+    #[test]
+    fn merge_generation_stat_resets_corrupt_stats_blob() {
+        let mut metadata = serde_json::json!({ "generation_stats": "corrupt" });
+        merge_generation_stat(&mut metadata, "soap", stat(20.0, Utc::now()));
+        assert_eq!(
+            metadata["generation_stats"]["soap"]["tokens_per_second"],
+            serde_json::json!(20.0)
+        );
     }
 
     #[test]

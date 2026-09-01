@@ -38,6 +38,32 @@ use medical_db::recordings::RecordingsRepo;
 use crate::commands::sharing::PairedConnection;
 use crate::state::{self, AppState};
 
+/// Advance a cursor timestamp by 1 microsecond past the batch boundary.
+///
+/// After a push/pull batch succeeds, the cursor is set to the batch's
+/// `max(updated_at)`. Because `changed_since` uses strict `>` comparison,
+/// two recordings sharing the same `updated_at` would silently lose the
+/// second one (its timestamp is not `>` the cursor). Advancing the cursor
+/// by 1 microsecond guarantees it is strictly greater than every timestamp
+/// in the batch while still including same-timestamp recordings that were
+/// not part of this batch.
+///
+/// Parses the RFC3339 timestamp, adds 1 microsecond, re-serializes. If the
+/// input fails to parse, it is returned unchanged (the raw `max_ts` is
+/// still a safe-enough cursor — the data-loss window only affects rows
+/// sharing that exact timestamp).
+fn advance_cursor(ts: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(ts) {
+        Ok(dt) => {
+            let advanced = dt
+                .checked_add_signed(chrono::Duration::microseconds(1))
+                .unwrap_or(dt);
+            advanced.to_rfc3339()
+        }
+        Err(_) => ts.to_string(),
+    }
+}
+
 /// Returns `Some((conn, bearer, http_client))` when content sync should route
 /// through the office server. Three gates must all pass:
 ///
@@ -51,18 +77,53 @@ use crate::state::{self, AppState};
 pub(crate) fn content_sync_target(
     state: &AppState,
 ) -> Option<(PairedConnection, String, Arc<reqwest::Client>)> {
+    content_sync_target_parts(&state.db, state.http_client.clone())
+}
+
+/// Same gates as [`content_sync_target`], split out for `spawn_blocking`
+/// call sites, which can't borrow `tauri::State` across the thread boundary.
+/// Blocking-safe: config load (SQLite) + keychain read happen here.
+pub(crate) fn content_sync_target_parts(
+    db: &Arc<medical_db::Database>,
+    http_client: Arc<reqwest::Client>,
+) -> Option<(PairedConnection, String, Arc<reqwest::Client>)> {
+    // Each gate logs WHY it failed at debug level, so a silently-zero sync is
+    // diagnosable from the logs instead of being indistinguishable from
+    // "synced, nothing changed". Debug (not info) because the per-edit push
+    // paths call this too and would spam when gates are down.
     // Gate 1: user opt-in.
-    let config = crate::commands::settings::load_config_sync(&state.db).ok()?;
+    let Ok(config) = crate::commands::settings::load_config_sync(db) else {
+        tracing::debug!("content sync skipped: could not load settings");
+        return None;
+    };
     if !config.sync_content {
+        tracing::debug!("content sync skipped: sync_content is disabled in settings");
         return None;
     }
     // Gate 2: paired connection with Tailscale + vocab port.
-    let conn = state::load_paired_connection()?;
-    conn.ports.vocab?;
-    conn.tailscale.as_ref()?;
+    let Some(conn) = state::load_paired_connection() else {
+        tracing::debug!("content sync skipped: not paired with an office server");
+        return None;
+    };
+    if conn.ports.vocab.is_none() {
+        tracing::debug!(
+            "content sync skipped: paired connection has no vocab port (server predates content sync?)"
+        );
+        return None;
+    }
+    if conn.tailscale.is_none() {
+        tracing::debug!(
+            "content sync skipped: paired connection has no Tailscale address \
+             (re-pair, or ensure the server advertises Tailscale)"
+        );
+        return None;
+    }
     // Gate 3: bearer token.
-    let bearer = state::load_sharing_bearer()?;
-    Some((conn, bearer, state.http_client.clone()))
+    let Some(bearer) = state::load_sharing_bearer() else {
+        tracing::debug!("content sync skipped: no sharing bearer token (unpaired?)");
+        return None;
+    };
+    Some((conn, bearer, http_client))
 }
 
 /// Build a sparse [`SyncRecording`] from a local recording row + its field
@@ -144,12 +205,32 @@ fn build_sparse_fields(
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| rec.created_at.to_rfc3339());
 
+    // Field wire timestamp = max(revision, row write). Writers that bump
+    // only the row (transcription/generation completion via
+    // `RecordingsRepo::update`) leave stale revisions from a pre-edit sync
+    // round-trip; shipping the stale revision timestamp ties against the
+    // server's copy and the merge's Equal arm silently drops the newer
+    // value. Parsed comparison — string comparison is wrong across the two
+    // stored timestamp formats. When the row is newer the origin device is
+    // unknown (the row bump doesn't carry one).
+    let field_ts = |rev: Option<&FieldRevision>| -> (String, Option<String>) {
+        match rev {
+            Some(r) => {
+                if medical_db::content_sync::cmp_lww_timestamps(&r.updated_at, &row_ts)
+                    == std::cmp::Ordering::Less
+                {
+                    (row_ts.clone(), None)
+                } else {
+                    (r.updated_at.clone(), r.origin_device.clone())
+                }
+            }
+            None => (row_ts.clone(), None),
+        }
+    };
+
     let mut push_text = |name: &str, val: Option<&str>| {
         if let Some(s) = val {
-            let (ts, device) = rev_map
-                .get(name)
-                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
-                .unwrap_or_else(|| (row_ts.clone(), None));
+            let (ts, device) = field_ts(rev_map.get(name).copied());
             fields.insert(
                 name.to_string(),
                 SyncFieldValue {
@@ -171,10 +252,7 @@ fn build_sparse_fields(
 
     let mut push_json = |name: &str, val: &serde_json::Value| {
         if !val.is_null() {
-            let (ts, device) = rev_map
-                .get(name)
-                .map(|r| (r.updated_at.clone(), r.origin_device.clone()))
-                .unwrap_or_else(|| (row_ts.clone(), None));
+            let (ts, device) = field_ts(rev_map.get(name).copied());
             fields.insert(
                 name.to_string(),
                 SyncFieldValue {
@@ -211,10 +289,31 @@ fn build_sparse_fields(
 /// propagated so the caller can decide whether to surface them.
 async fn run_sync(
     db: Arc<Database>,
+    data_dir: &std::path::Path,
     remote: &crate::content_remote::ContentRemote<'_>,
     app: &tauri::AppHandle,
 ) -> AppResult<SyncSummary> {
     let mut summary = SyncSummary::default();
+
+    // ── Backfill NULL updated_at ───────────────────────────────────────
+    // The migration that adds updated_at (m013) backfills existing rows,
+    // but edge cases (interrupted migration, direct DB edits) can leave
+    // NULLs. NULL updated_at rows are excluded by `changed_since`'s strict
+    // `>` comparison, so they'd be invisible to incremental sync. Backfill
+    // them here so they're visible to both pull and push.
+    {
+        let backfill_db = Arc::clone(&db);
+        let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = backfill_db.conn()?;
+            conn.execute(
+                "UPDATE recordings SET updated_at = created_at WHERE updated_at IS NULL",
+                [],
+            )
+            .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+            Ok(())
+        })
+        .await;
+    }
 
     // ── Pull loop ───────────────────────────────────────────────────────
     loop {
@@ -245,41 +344,48 @@ async fn run_sync(
             .max()
             .map(|s| s.to_string());
 
+        // Purge notifications travel on the same response; they are applied
+        // on the same connection right after a successful merge (below).
+        // Destructured out of `batch` so the merge closure can own both.
+        let batch_recordings = batch.recordings;
+        let batch_purged = batch.purged;
+        let batch_purged_count = batch_purged.len();
+
         let merge_db = Arc::clone(&db);
-        let merge_result = tokio::task::spawn_blocking(move || {
-            let conn = merge_db.conn()?;
-            ContentSyncRepo::merge_incoming(&conn, &batch.recordings).map_err(AppError::from)
-        })
+        let merged = tokio::task::spawn_blocking(
+            move || -> AppResult<(medical_db::content_sync::MergeResult, AppResult<()>)> {
+                let conn = merge_db.conn()?;
+                let result = ContentSyncRepo::merge_incoming(&conn, &batch_recordings)
+                    .map_err(AppError::from)?;
+                // Only reached after a successful merge. Tombstone any stale
+                // LOCAL LIVE copy of a server-purged recording so this
+                // machine converges with the practice-wide deletion. The
+                // outcome is returned separately: the caller must hold the
+                // cursor when it fails (see below) rather than treat it as
+                // a merge failure.
+                let purged_apply = ContentSyncRepo::apply_purged_refs(&conn, &batch_purged)
+                    .map_err(AppError::from);
+                Ok((result, purged_apply))
+            },
+        )
         .await
         .map_err(crate::commands::join_err)?;
 
-        // If the merge failed, advance the cursor past this batch and
-        // continue to the push loop. Don't abort the entire sync —
-        // local pushes must still go through even if one pull batch
-        // had a bad recording.
-        let merge_result = match merge_result {
+        // If the merge failed, do NOT advance the cursor — break out of the
+        // pull loop so the next sync cycle retries the same batch from the
+        // same cursor position. Advancing past a failed merge would
+        // permanently skip the failed batch (data loss).
+        let (merge_result, purged_apply) = match merged {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     batch_count,
-                    "sync: pull merge failed, advancing cursor past batch"
+                    "sync: pull merge failed — NOT advancing cursor, will retry next cycle"
                 );
-                // Advance cursor to skip this batch
-                if let Some(ref nc) = next_cursor {
-                    let cursor_db = Arc::clone(&db);
-                    let nc = nc.clone();
-                    let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
-                        let conn = cursor_db.conn()?;
-                        ContentSyncRepo::set_cursor(&conn, Some(&nc)).map_err(AppError::from)
-                    })
-                    .await
-                    .map_err(crate::commands::join_err);
-                }
-                if !has_more || batch_count == 0 {
-                    break;
-                }
-                continue;
+                // Exit pull loop; cursor stays at pre-batch position so the
+                // failed batch is retried on the next sync cycle.
+                break;
             }
         };
 
@@ -291,10 +397,28 @@ async fn run_sync(
             let _ = app.emit("recording-updated", serde_json::json!({ "id": id }));
         }
 
+        // Purge application is best-effort for the SYNC (a failure never
+        // fails the round), but it must hold the cursor: the next cursor is
+        // the batch's max `updated_at`, which can exceed the failed refs'
+        // `purged_at` — advancing would make the server consider them
+        // already seen and they would never be re-delivered. Break without
+        // advancing so the next cycle unconditionally retries both the
+        // batch (idempotent re-merge) and the refs (idempotent no-ops on
+        // already-tombstoned rows).
+        if let Err(e) = purged_apply {
+            tracing::warn!(
+                purged_count = batch_purged_count,
+                batch_count,
+                error = %e,
+                "sync: failed to apply purge notifications — NOT advancing cursor, will retry next cycle"
+            );
+            break;
+        }
+
         // Advance the cursor if we made progress.
         if let Some(ref nc) = next_cursor {
             let cursor_db = Arc::clone(&db);
-            let nc = nc.clone();
+            let nc = advance_cursor(nc);
             tokio::task::spawn_blocking(move || {
                 let conn = cursor_db.conn()?;
                 ContentSyncRepo::set_cursor(&conn, Some(&nc)).map_err(AppError::from)
@@ -326,6 +450,7 @@ async fn run_sync(
                 whisper: 0,
                 pairing: 0,
                 lmstudio: None,
+                omlx: None,
                 vocab: Some(vp),
             },
             label: String::new(),
@@ -342,7 +467,7 @@ async fn run_sync(
                 move || -> AppResult<Vec<String>> {
                     let conn = db.conn()?;
                     let mut stmt = conn.prepare(
-                        "SELECT id FROM recordings WHERE audio_path = '' AND deleted_at IS NULL LIMIT 10",
+                        "SELECT id FROM recordings WHERE audio_path = '' AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 10",
                     ).map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
                     let ids = stmt.query_map([], |row| row.get::<_, String>(0))
                         .map_err(|e| AppError::from(medical_db::DbError::from(e)))?
@@ -362,36 +487,48 @@ async fn run_sync(
                         let db2 = Arc::clone(&audio_fetch_db);
                         let rec_id_owned = rec_id.clone();
                         let plaintext_bytes = plaintext;
+                        let data_dir_owned = data_dir.to_path_buf();
                         match tokio::task::spawn_blocking(move || -> AppResult<String> {
                             let conn = db2.conn()?;
-                            let data_dir = crate::commands::resolve_recordings_dir(&db2, &std::path::PathBuf::new())?;
-                            let target = data_dir.join(format!("{rec_id_owned}.enc"));
+                            let recordings_dir =
+                                crate::commands::resolve_recordings_dir(&db2, &data_dir_owned)?;
+                            let target = recordings_dir.join(format!("{rec_id_owned}.enc"));
                             if target.exists() {
                                 // File already exists (race with manual fetch).
                                 // Still update the DB audio_path since it was
                                 // empty when we selected this row.
-                                let uuid = uuid::Uuid::parse_str(&rec_id_owned)
-                                    .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-                                if let Ok(mut rec) = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid) {
+                                let uuid = uuid::Uuid::parse_str(&rec_id_owned).map_err(|e| {
+                                    AppError::Other(format!("invalid recording id: {e}"))
+                                })?;
+                                if let Ok(mut rec) =
+                                    medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+                                {
                                     rec.audio_path = target.clone();
-                                    rec.file_size_bytes = Some(std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0));
-                                    let _ = medical_db::recordings::RecordingsRepo::update(&conn, &rec);
+                                    rec.file_size_bytes = Some(
+                                        std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0),
+                                    );
+                                    let _ =
+                                        medical_db::recordings::RecordingsRepo::update(&conn, &rec);
                                 }
                                 return Ok(target.to_string_lossy().into_owned());
                             }
+                            // Encrypt in memory before anything touches disk —
+                            // a crash between write and encrypt would
+                            // otherwise leave plaintext PHI in a .tmp file
+                            // that no sweep cleans.
                             let tmp = target.with_extension("tmp");
-                            std::fs::write(&tmp, &plaintext_bytes)?;
-                            medical_security::file_crypto::encrypt_file_in_place(&tmp)
+                            medical_security::file_crypto::encrypt_file(&tmp, &plaintext_bytes)
                                 .map_err(|e| {
                                     let _ = std::fs::remove_file(&tmp);
-                                    AppError::Security(format!("audio re-encrypt failed: {e}"))
+                                    AppError::security(format!("audio re-encrypt failed: {e}"))
                                 })?;
                             std::fs::rename(&tmp, &target)?;
                             // Update DB.
                             let uuid = uuid::Uuid::parse_str(&rec_id_owned)
                                 .map_err(|e| AppError::Other(format!("invalid id: {e}")))?;
-                            let mut rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
-                                .map_err(AppError::from)?;
+                            let mut rec =
+                                medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+                                    .map_err(AppError::from)?;
                             rec.audio_path = target.clone();
                             rec.file_size_bytes = Some(byte_count as u64);
                             medical_db::recordings::RecordingsRepo::update(&conn, &rec)
@@ -429,8 +566,9 @@ async fn run_sync(
         let push_result = tokio::task::spawn_blocking(move || {
             let conn = push_db.conn()?;
             let push_cursor = ContentSyncRepo::get_push_cursor(&conn).map_err(AppError::from)?;
-            let (ids, has_more) = ContentSyncRepo::changed_since(&conn, push_cursor.as_deref(), 200)
-                .map_err(AppError::from)?;
+            let (ids, has_more) =
+                ContentSyncRepo::changed_since(&conn, push_cursor.as_deref(), 200)
+                    .map_err(AppError::from)?;
             let mut out = Vec::with_capacity(ids.len());
             for id in &ids {
                 match build_sync_recording(&conn, id) {
@@ -451,9 +589,8 @@ async fn run_sync(
             let skip_cursor = if out.is_empty() && !ids.is_empty() {
                 // Query the max updated_at of the IDs that failed to build.
                 let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let sql = format!(
-                    "SELECT MAX(updated_at) FROM recordings WHERE id IN ({placeholders})"
-                );
+                let sql =
+                    format!("SELECT MAX(updated_at) FROM recordings WHERE id IN ({placeholders})");
                 let params: Vec<&dyn rusqlite::ToSql> =
                     ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
                 conn.query_row(&sql, params.as_slice(), |row| {
@@ -486,24 +623,15 @@ async fn run_sync(
             let push_resp = match remote.push(batch).await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    // Don't abort the entire sync on push failure. Advance
-                    // the push cursor past this batch so it's not retried
-                    // every cycle, and continue to the next iteration.
-                    tracing::warn!(error = %e, push_count, "sync: push batch failed, advancing cursor");
-                    if let Some(ts) = max_ts {
-                        let pc_db = Arc::clone(&db);
-                        let ts_owned = ts.clone();
-                        let _ = tokio::task::spawn_blocking(move || -> AppResult<()> {
-                            let conn = pc_db.conn()?;
-                            ContentSyncRepo::set_push_cursor(&conn, &ts_owned).map_err(AppError::from)
-                        })
-                        .await
-                        .map_err(crate::commands::join_err);
-                    }
-                    if !has_more {
-                        break;
-                    }
-                    continue;
+                    tracing::warn!(
+                        error = %e,
+                        batch_count = push_count,
+                        "sync: push batch failed — NOT advancing cursor, will retry next cycle"
+                    );
+                    // Exit push loop; cursor stays at pre-batch position so the
+                    // failed batch is retried on the next sync cycle instead of
+                    // being permanently skipped.
+                    break;
                 }
             };
             summary.pushed += push_count;
@@ -511,6 +639,7 @@ async fn run_sync(
             // Advance the push cursor so we don't re-push these next time.
             if let Some(ts) = max_ts {
                 let pc_db = Arc::clone(&db);
+                let ts = advance_cursor(&ts);
                 tokio::task::spawn_blocking(move || -> AppResult<()> {
                     let conn = pc_db.conn()?;
                     ContentSyncRepo::set_push_cursor(&conn, &ts).map_err(AppError::from)
@@ -524,33 +653,51 @@ async fn run_sync(
             for rec_id in pushed_ids.iter().take(10) {
                 let upload_db = Arc::clone(&db);
                 let rec_id_owned = rec_id.clone();
-                let plaintext_result = tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
-                    let conn = upload_db.conn()?;
-                    let uuid = uuid::Uuid::parse_str(&rec_id_owned)
-                        .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-                    let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
-                        .map_err(AppError::from)?;
-                    let path = &rec.audio_path;
-                    if path.as_os_str().is_empty() || !path.exists() {
-                        return Err(AppError::Other("no local audio".into()));
-                    }
-                    match medical_security::file_crypto::decrypt_file(path) {
-                        Ok(p) => Ok(p),
-                        Err(medical_security::file_crypto::FileCryptoError::NotEncrypted) => {
-                            std::fs::read(path).map_err(|e| AppError::Other(format!("audio read failed: {e}")))
+                let plaintext_result =
+                    tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
+                        let conn = upload_db.conn()?;
+                        let uuid = uuid::Uuid::parse_str(&rec_id_owned)
+                            .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+                        let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+                            .map_err(AppError::from)?;
+                        let path = &rec.audio_path;
+                        if path.as_os_str().is_empty() || !path.exists() {
+                            return Err(AppError::Other("no local audio".into()));
                         }
-                        Err(e) => Err(AppError::Security(format!("audio decrypt failed: {e}"))),
-                    }
-                })
-                .await
-                .map_err(crate::commands::join_err);
+                        match medical_security::file_crypto::decrypt_file(path) {
+                            Ok(p) => Ok(p),
+                            Err(medical_security::file_crypto::FileCryptoError::NotEncrypted) => {
+                                std::fs::read(path)
+                                    .map_err(|e| AppError::Other(format!("audio read failed: {e}")))
+                            }
+                            Err(e) => Err(AppError::security(format!("audio decrypt failed: {e}"))),
+                        }
+                    })
+                    .await
+                    .map_err(crate::commands::join_err);
                 match plaintext_result {
                     Ok(Ok(plaintext)) => {
                         if let Err(e) = remote.upload_audio(rec_id, plaintext).await {
-                            tracing::debug!(error = %e, "sync: audio upload failed (may already exist)");
+                            tracing::debug!(error = %e, "sync: audio upload failed");
                         }
                     }
-                    Ok(Err(_)) | Err(_) => { /* no local audio — skip */ }
+                    Ok(Err(e)) => {
+                        // At-rest corruption or a keychain failure — the
+                        // audio silently never reaches the partner, so make
+                        // it diagnosable (ids/errors only, no PHI).
+                        tracing::warn!(
+                            error = %e,
+                            recording_id = %rec_id,
+                            "sync: audio upload skipped — local audio unreadable"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            recording_id = %rec_id,
+                            "sync: audio upload skipped — read task failed"
+                        );
+                    }
                 }
             }
         } else if let Some(ts) = skip_cursor {
@@ -558,7 +705,7 @@ async fn run_sync(
             // cursor past them so they're not retried on every sync.
             tracing::warn!(cursor = %ts, "content sync push: advancing cursor past unreadable recordings");
             let pc_db = Arc::clone(&db);
-            let ts_owned = ts;
+            let ts_owned = advance_cursor(&ts);
             tokio::task::spawn_blocking(move || -> AppResult<()> {
                 let conn = pc_db.conn()?;
                 ContentSyncRepo::set_push_cursor(&conn, &ts_owned).map_err(AppError::from)
@@ -609,16 +756,28 @@ pub async fn sync_content_now(
     }
 
     let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
-        return Ok(SyncSummaryPayload::default());
+        tracing::warn!(
+            "content sync skipped: gates failed (see preceding debug logs for the reason)"
+        );
+        return Ok(SyncSummaryPayload {
+            disabled: true,
+            ..Default::default()
+        });
     };
     let remote = match crate::content_remote::ContentRemote::from(&conn, Some(bearer), http_client)
     {
         Some(r) => r,
-        None => return Ok(SyncSummaryPayload::default()),
+        None => {
+            tracing::warn!("content sync skipped: transport setup failed after gates passed");
+            return Ok(SyncSummaryPayload {
+                disabled: true,
+                ..Default::default()
+            });
+        }
     };
     // Serialize sync rounds to prevent cursor races (H3).
     let _guard = state.content_sync_lock.lock().await;
-    let summary = run_sync(Arc::clone(&state.db), &remote, &app).await?;
+    let summary = run_sync(Arc::clone(&state.db), &state.data_dir, &remote, &app).await?;
     let payload = SyncSummaryPayload::from(summary);
     let _ = app.emit("content-sync-complete", payload);
     Ok(payload)
@@ -641,7 +800,11 @@ pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
     // sync_content_now. This is critical: without it, two concurrent sync
     // rounds could read the same cursor, double-merge, and interleave
     // writes at the SQLite level.
-    let sync_lock = app.state::<crate::state::AppState>().content_sync_lock.clone();
+    let sync_lock = app
+        .state::<crate::state::AppState>()
+        .content_sync_lock
+        .clone();
+    let data_dir = app.state::<crate::state::AppState>().data_dir.clone();
     let _guard = sync_lock.lock().await;
 
     // Re-evaluate the gates without an AppState: load config + pairing from
@@ -681,7 +844,7 @@ pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
         Some(r) => r,
         None => return,
     };
-    match run_sync(db, &remote, &app).await {
+    match run_sync(db, &data_dir, &remote, &app).await {
         Ok(summary) => {
             tracing::info!(
                 pulled = summary.pulled,
@@ -703,6 +866,11 @@ pub struct SyncSummaryPayload {
     pub pushed: usize,
     pub merge_conflicts: usize,
     pub push_conflicts: usize,
+    /// True when the sync was skipped entirely because a gate failed
+    /// (sync disabled, missing Tailscale address, unpaired, no token).
+    /// Distinguishes "couldn't sync" from "synced, nothing changed" — the
+    /// two were previously indistinguishable in the UI.
+    pub disabled: bool,
 }
 
 impl From<SyncSummary> for SyncSummaryPayload {
@@ -712,6 +880,8 @@ impl From<SyncSummary> for SyncSummaryPayload {
             pushed: s.pushed,
             merge_conflicts: s.merge_conflicts,
             push_conflicts: s.push_conflicts,
+            // A real sync round is by definition not gate-disabled.
+            disabled: false,
         }
     }
 }
@@ -735,22 +905,23 @@ pub async fn subscribe_content_sync(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> AppResult<()> {
+    // When the gates fail (unpaired / sync disabled), cancel any existing
+    // subscriber rather than leaving it reconnecting with stale credentials.
     let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
-        return Ok(());
+        return crate::commands::swap_sse_cancel_token(
+            &state.content_sse_cancel,
+            "content_sse_cancel",
+            None,
+        );
     };
 
     // Cancel any existing SSE subscriber task before spawning a new one (H1).
     let cancel_token = tokio_util::sync::CancellationToken::new();
-    {
-        let mut guard = state
-            .content_sse_cancel
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("content_sse_cancel: {e}")))?;
-        if let Some(old) = guard.take() {
-            old.cancel();
-        }
-        *guard = Some(cancel_token.clone());
-    }
+    crate::commands::swap_sse_cancel_token(
+        &state.content_sse_cancel,
+        "content_sse_cancel",
+        Some(cancel_token.clone()),
+    )?;
 
     let mut backoff = Duration::from_secs(5);
     let conn_owned = conn;
@@ -782,9 +953,25 @@ pub async fn subscribe_content_sync(
                     // the split halves would never match and notifications
                     // would be silently dropped.
                     let mut sse_buffer = String::new();
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(bytes) => {
+                    loop {
+                        // Cancellation must interrupt a healthy stream too —
+                        // the server keep-alives the SSE connection
+                        // indefinitely, so a reconnect-boundary check alone
+                        // never fires.
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            chunk = stream.next() => {
+                                let bytes = match chunk {
+                                    Some(Ok(b)) => b,
+                                    Some(Err(e)) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "content SSE chunk error"
+                                        );
+                                        break;
+                                    }
+                                    None => break,
+                                };
                                 sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
                                 // Normalize CRLF to LF so the \n\n split works
                                 // regardless of whether intermediaries
@@ -804,13 +991,6 @@ pub async fn subscribe_content_sync(
                                     }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "content SSE chunk error"
-                                );
-                                break;
-                            }
                         }
                     }
                     tracing::info!("content SSE stream ended, reconnecting");
@@ -820,7 +1000,10 @@ pub async fn subscribe_content_sync(
                     "content SSE subscription failed, reconnecting"
                 ),
             }
-            tokio::time::sleep(backoff).await;
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                _ = tokio::time::sleep(backoff) => {}
+            }
             backoff = (backoff * 2).min(Duration::from_secs(30));
         }
     });
@@ -867,21 +1050,20 @@ pub async fn fetch_audio_from_server(
     let plaintext = remote.fetch_audio(&recording_id).await?;
     let byte_count = plaintext.len();
 
-    // Re-encrypt + write to disk + update DB audio_path, all on the blocking
-    // pool. We write to a temp file, encrypt in place, then atomically rename
-    // so plaintext PHI is never persisted.
+    // Encrypt + write to disk + update DB audio_path, all on the blocking
+    // pool. `encrypt_file` encrypts in memory and writes ciphertext
+    // atomically (temp + rename), so plaintext PHI is never persisted even
+    // if the process dies mid-write.
     let db2 = Arc::clone(&state.db);
     let target_for_task = target_path.clone();
     let rec_id_for_task = recording_id.clone();
     let path_str = tokio::task::spawn_blocking(move || -> AppResult<String> {
         let tmp_path =
             target_for_task.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&tmp_path, &plaintext)?;
-        medical_security::file_crypto::encrypt_file_in_place(&tmp_path).map_err(|e| {
-            // Clean up the temp plaintext on failure — never leave
-            // unencrypted PHI on disk.
+        medical_security::file_crypto::encrypt_file(&tmp_path, &plaintext).map_err(|e| {
+            // Clean up on failure — never leave PHI on disk.
             let _ = std::fs::remove_file(&tmp_path);
-            AppError::Security(format!("audio re-encrypt failed: {e}"))
+            AppError::security(format!("audio re-encrypt failed: {e}"))
         })?;
         if let Err(e) = std::fs::rename(&tmp_path, &target_for_task) {
             let _ = std::fs::remove_file(&tmp_path);
@@ -948,7 +1130,7 @@ pub async fn upload_audio_to_server(
                 // Legacy plaintext file — read as-is.
                 std::fs::read(path).map_err(|e| AppError::Other(format!("audio read failed: {e}")))
             }
-            Err(e) => Err(AppError::Security(format!("audio decrypt failed: {e}"))),
+            Err(e) => Err(AppError::security(format!("audio decrypt failed: {e}"))),
         }
     })
     .await
@@ -962,3 +1144,159 @@ pub async fn upload_audio_to_server(
 // documents which fields participate in sync.
 #[allow(dead_code)]
 const _: &[&str] = SYNCABLE_FIELDS;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use medical_core::types::recording::Recording;
+    use medical_db::Database;
+    use medical_db::recordings::RecordingsRepo;
+
+    #[test]
+    fn advance_cursor_adds_exactly_one_microsecond() {
+        // Strict-`>` cursors lose same-timestamp rows; the +1µs advance is
+        // what guarantees the second of two rows sharing max(updated_at) is
+        // still picked up on the next pull.
+        let out = advance_cursor("2026-01-02T03:04:05.123456Z");
+        let dt = chrono::DateTime::parse_from_rfc3339(&out).expect("advanced parses");
+        assert_eq!(dt.to_rfc3339(), "2026-01-02T03:04:05.123457+00:00");
+        let orig = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05.123456Z")
+            .expect("orig parses");
+        assert_eq!(
+            dt.signed_duration_since(orig).num_microseconds(),
+            Some(1),
+            "exactly one microsecond added"
+        );
+    }
+
+    #[test]
+    fn advance_cursor_passthrough_on_unparseable_input() {
+        // An unparseable batch max is still a safe-enough cursor — the raw
+        // value must come back unchanged rather than empty or zeroed.
+        assert_eq!(advance_cursor("not-a-timestamp"), "not-a-timestamp");
+    }
+
+    /// Seed a recording with two populated content fields plus a metadata
+    /// blob carrying the local-only `synced_from` marker, and a revision row
+    /// for the transcript.
+    fn seed_recording(conn: &rusqlite::Connection) -> uuid::Uuid {
+        let mut rec = Recording::new("visit.wav", std::path::PathBuf::from("/audio/visit.wav"));
+        rec.transcript = Some("patient transcript text".to_string());
+        rec.soap_note = Some("subjective objective assessment plan".to_string());
+        rec.patient_name = Some("Doe".to_string());
+        rec.metadata = serde_json::json!({
+            "synced_from": "office-server-machine",
+            "context": "freeform context"
+        });
+        // Row write OLDER than the revision below, so the revision wins the
+        // max(revision, row) stamp and its assertions below hold. (The
+        // opposite direction — newer row beating a stale revision — is
+        // covered by build_sparse_fields_row_timestamp_wins_over_stale_revision.)
+        rec.updated_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-05-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        RecordingsRepo::insert(conn, &rec).expect("insert recording");
+
+        ContentSyncRepo::upsert_revision(
+            conn,
+            &rec.id,
+            "transcript",
+            "2026-06-01T10:00:00Z",
+            Some("laptop-a"),
+        )
+        .expect("upsert transcript revision");
+        rec.id
+    }
+
+    #[test]
+    fn build_sync_recording_is_sparse_and_strips_synced_from() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let id = seed_recording(&conn);
+
+        let sync = build_sync_recording(&conn, &id.to_string()).expect("build sync recording");
+
+        // Sparse: populated fields present, absent fields omitted entirely.
+        assert!(sync.fields.contains_key("transcript"));
+        assert!(sync.fields.contains_key("soap_note"));
+        assert!(sync.fields.contains_key("patient_name"));
+        assert!(
+            !sync.fields.contains_key("referral"),
+            "absent fields must not participate in the merge"
+        );
+
+        // The revision row wins over the row-level timestamp, and carries the
+        // origin device through to the wire payload.
+        let transcript = &sync.fields["transcript"];
+        assert_eq!(transcript.updated_at, "2026-06-01T10:00:00Z");
+        assert_eq!(transcript.origin_device.as_deref(), Some("laptop-a"));
+
+        // Fields without a revision fall back to the row-level timestamp.
+        let soap = &sync.fields["soap_note"];
+        assert_ne!(soap.updated_at, "2026-06-01T10:00:00Z");
+        assert!(soap.origin_device.is_none());
+
+        // The local-only synced_from marker must not round-trip to the origin
+        // machine, but other metadata keys survive.
+        let metadata = sync.fields["metadata"]
+            .value
+            .as_object()
+            .expect("metadata obj");
+        assert!(
+            !metadata.contains_key("synced_from"),
+            "synced_from must be stripped before push"
+        );
+        assert_eq!(metadata["context"], "freeform context");
+    }
+
+    #[test]
+    fn build_sync_recording_rejects_invalid_id() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let err = build_sync_recording(&conn, "not-a-uuid").expect_err("must reject bad id");
+        assert!(
+            err.to_string().contains("invalid recording id"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn build_sparse_fields_row_timestamp_wins_over_stale_revision() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let mut rec = medical_core::types::recording::Recording::new(
+            "rider.wav",
+            std::path::PathBuf::from("/audio/rider.wav"),
+        );
+        rec.soap_note = Some("regenerated soap".to_string());
+        let row_time = chrono::Utc::now();
+        rec.updated_at = Some(row_time);
+        RecordingsRepo::insert(&conn, &rec).expect("insert");
+        // Stale revision from a pre-regeneration sync round-trip.
+        ContentSyncRepo::upsert_revision(&conn, &rec.id, "soap_note", "2020-01-01T00:00:00Z", None)
+            .expect("seed stale revision");
+
+        let sync = build_sync_recording(&conn, &rec.id.to_string()).expect("build");
+        let soap = &sync.fields["soap_note"];
+        assert_ne!(
+            soap.updated_at, "2020-01-01T00:00:00Z",
+            "stale revision must not mask the newer row-level write"
+        );
+        assert_eq!(soap.updated_at, row_time.to_rfc3339());
+        assert!(
+            soap.origin_device.is_none(),
+            "row-derived stamp carries no device"
+        );
+
+        // Newer revision still wins over the row.
+        let newer_rev = (row_time + chrono::TimeDelta::seconds(60)).to_rfc3339();
+        ContentSyncRepo::upsert_revision(&conn, &rec.id, "soap_note", &newer_rev, Some("desk-a"))
+            .expect("seed newer revision");
+        let sync2 = build_sync_recording(&conn, &rec.id.to_string()).expect("build 2");
+        let soap2 = &sync2.fields["soap_note"];
+        assert_eq!(soap2.updated_at, newer_rev, "newer revision wins");
+        assert_eq!(soap2.origin_device.as_deref(), Some("desk-a"));
+    }
+}

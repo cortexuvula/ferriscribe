@@ -24,8 +24,14 @@ use crate::state::{AppState, CurrentRecording, SendCaptureHandle};
 /// Returns device metadata (name, channels, sample rate) for the audio
 /// device picker in the settings UI.
 #[tauri::command]
-pub fn list_audio_devices() -> AppResult<Vec<AudioDevice>> {
-    list_input_devices().map_err(|e| AppError::Audio(e.to_string()))
+pub async fn list_audio_devices() -> AppResult<Vec<AudioDevice>> {
+    // cpal enumeration can block on busy/virtual hardware (the same reason
+    // the audio device tests are env-gated) — never run it on the main
+    // thread or an async worker.
+    tokio::task::spawn_blocking(list_input_devices)
+        .await
+        .map_err(super::join_err)?
+        .map_err(|e| AppError::audio_with_source(e.to_string(), e))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -50,7 +56,7 @@ pub async fn start_recording(
         let mut active = state.recording_active.lock().await;
         if *active {
             warn!("Attempted to start recording while another is in progress");
-            return Err(AppError::Audio(
+            return Err(AppError::audio(
                 "A recording is already in progress".to_string(),
             ));
         }
@@ -82,10 +88,8 @@ pub async fn start_recording(
 
     // Read the configured input device and sample rate from settings.
     let (input_device_name, sample_rate) = try_or_reset!(state, {
-        let conn = state.db.conn()?;
-        let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
-        config.migrate();
-        Ok::<_, AppError>((
+        let config = crate::commands::load_app_config(&state.db, "audio").await?;
+        AppResult::Ok((
             config.input_device.filter(|s| !s.is_empty()),
             config.sample_rate,
         ))
@@ -109,36 +113,37 @@ pub async fn start_recording(
     std::thread::spawn(move || {
         let result = (|| {
             let device = get_input_device(input_device_name.as_deref())
-                .map_err(|e| AppError::Audio(e.to_string()))?;
+                .map_err(|e| AppError::audio_with_source(e.to_string(), e))?;
             let config = CaptureConfig {
                 sample_rate,
                 ..CaptureConfig::default()
             };
             let (handle, waveform_rx) =
                 medical_audio::capture::start_capture(&device, config, &wav_path_clone)
-                    .map_err(|e| AppError::Audio(e.to_string()))?;
+                    .map_err(|e| AppError::audio_with_source(e.to_string(), e))?;
             Ok((SendCaptureHandle(Some(handle)), waveform_rx))
         })();
         let _ = tx.send(result);
     });
 
+    // Receive the capture result on a blocking thread so we don't stall
+    // the Tokio async runtime worker while waiting for audio device init.
     let (send_handle, waveform_rx) = try_or_reset!(
         state,
-        rx.recv()
-            .map_err(|_| AppError::Audio("Audio capture thread panicked".to_string()))
-            .and_then(|r| r)
+        tokio::task::spawn_blocking(move || {
+            rx.recv()
+                .map_err(|_| AppError::audio("Audio capture thread panicked".to_string()))
+                .and_then(|r| r)
+        })
+        .await
+        .map_err(|e| AppError::audio(format!("capture join: {e}")))?
     );
 
-    // Store capture handle in AppState.
-    {
-        let mut handle_lock = state
-            .capture_handle
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
-        *handle_lock = send_handle;
-    }
-
-    // Store current recording info.
+    // Store current recording info BEFORE storing the capture handle: the
+    // handle is the "publish" point for stop/cancel (see
+    // take_capture_handle_for_stop below). Once the handle is visible, the
+    // recording info must already be there, or a racing stop would take the
+    // handle and then find no duration/path to finalize.
     {
         let mut rec_lock = state
             .current_recording
@@ -151,6 +156,16 @@ pub async fn start_recording(
             paused_at: None,
             accumulated_pause: std::time::Duration::ZERO,
         });
+    }
+
+    // Store capture handle in AppState — the last step, publishing the
+    // recording as stoppable/cancelable.
+    {
+        let mut handle_lock = state
+            .capture_handle
+            .lock()
+            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
+        *handle_lock = send_handle;
     }
 
     info!(
@@ -186,6 +201,58 @@ pub async fn start_recording(
 // 3. stop_recording
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Take the capture handle for stop/cancel, waiting out an in-flight
+/// `start_recording`.
+///
+/// `start_recording` publishes `recording_active = true` before the capture
+/// handle exists (device init can take seconds). A stop/cancel arriving in
+/// that window used to read the missing handle as "nothing running", clear
+/// the flag, and error — after which start finished with a live capture but
+/// `active == false`, and the next start overwrote `capture_handle`,
+/// dropping a `CaptureHandle` on an async worker and orphaning the WAV.
+///
+/// Instead: while the flag is set but the handle hasn't landed, a start is
+/// in flight — poll until it resolves.
+///
+/// Returns `Ok(None)` when nothing is running (flag false, no handle), or
+/// `Err` if startup is still unresolved after `MAX_WAIT` (cleared flag +
+/// retry-later error, so a wedged start can't lock the user out forever —
+/// same anti-lockout tradeoff the old immediate-clear made, just 15 s
+/// later).
+async fn take_capture_handle_for_stop(state: &AppState) -> AppResult<Option<SendCaptureHandle>> {
+    const POLL_MS: u64 = 25;
+    const MAX_WAIT_SECS: u64 = 15;
+    let deadline = Instant::now() + std::time::Duration::from_secs(MAX_WAIT_SECS);
+    loop {
+        // Wrap the taken handle immediately: the bare Option<CaptureHandle>
+        // is !Send and must never live across the awaits below.
+        let wrapper = {
+            let mut handle_lock = state
+                .capture_handle
+                .lock()
+                .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
+            SendCaptureHandle(handle_lock.0.take())
+        };
+        if wrapper.0.is_some() {
+            return Ok(Some(wrapper));
+        }
+        // No handle: nothing running at all, or a start still in flight?
+        if !*state.recording_active.lock().await {
+            return Ok(None);
+        }
+        if Instant::now() >= deadline {
+            warn!(
+                "stop/cancel waited out the startup window with no capture handle; clearing the flag"
+            );
+            *state.recording_active.lock().await = false;
+            return Err(AppError::audio(
+                "Recording startup is taking unusually long; try stopping again".to_string(),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+    }
+}
+
 /// Stop the active recording and finalize the WAV file.
 ///
 /// Drains the audio buffer, closes the capture stream, and updates the
@@ -197,24 +264,10 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
     // Take the CaptureHandle out of AppState as a SendCaptureHandle (which is
     // Send+Sync).  We must NOT hold a bare CaptureHandle across an .await
     // because CaptureHandle is !Send.
-    let wrapper = {
-        let mut handle_lock = state
-            .capture_handle
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
-        let inner = handle_lock.0.take();
-        SendCaptureHandle(inner)
+    let wrapper = match take_capture_handle_for_stop(&state).await? {
+        Some(wrapper) => wrapper,
+        None => return Err(AppError::audio("No active recording to stop".to_string())),
     };
-
-    if wrapper.0.is_none() {
-        // Desync safety: clear the active flag too, otherwise a stale `true`
-        // leaves the user permanently locked out of starting a new recording.
-        {
-            let mut active = state.recording_active.lock().await;
-            *active = false;
-        }
-        return Err(AppError::Audio("No active recording to stop".to_string()));
-    }
 
     // Drop the wrapper on a blocking worker so CaptureHandle::drop (which
     // joins the drain thread) doesn't block the async runtime.
@@ -238,7 +291,7 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
     };
 
     let current =
-        current.ok_or_else(|| AppError::Audio("No current recording info found".to_string()))?;
+        current.ok_or_else(|| AppError::audio("No current recording info found".to_string()))?;
 
     // Compute duration excluding paused time.
     let total_pause = current.accumulated_pause
@@ -277,22 +330,62 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
     recording.file_size_bytes = Some(file_size);
     recording.status = ProcessingStatus::Pending;
 
-    // Insert into DB.
-    let conn = state.db.conn()?;
-    RecordingsRepo::insert(&conn, &recording)?;
-
-    // Mark encryption as pending BEFORE spawning the task, so the row is in
-    // the correct state by the time the background task (and any startup
-    // sweep) sees it. If we spawned first, the task could finish and call
-    // set_encryption_done on a not-yet-inserted row (a no-op), then this
-    // UPDATE would wrongly re-flag an already-encrypted recording as
-    // pending — the sweep would then re-encrypt ciphertext and corrupt it.
+    // Insert into DB and mark encryption_pending in a single spawn_blocking
+    // task so both SQLite writes happen on the same blocking worker thread
+    // (never on the Tokio async runtime).
+    //
+    // Marking encryption_pending BEFORE spawning the background encryption
+    // task is load-bearing: if we spawned first, the task could finish and
+    // call set_encryption_done on a not-yet-inserted row (a no-op), then
+    // this UPDATE would wrongly re-flag an already-encrypted recording as
+    // pending — the startup sweep would then re-encrypt ciphertext and
+    // corrupt it. Doing insert + flag atomically here closes that race.
+    //
+    // The insert + UPDATE run inside a single transaction so that if the
+    // UPDATE fails (e.g. SQLite busy/disk error) the row insert is rolled
+    // back — otherwise we'd have committed a row whose encryption_pending
+    // flag is stuck at 0 and the startup sweep would miss it, leaving
+    // plaintext on disk.
     if file_size > 0 {
-        conn.execute(
-            "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
-            [&recording_uuid.to_string()],
-        )
-        .map_err(medical_db::DbError::from)?;
+        let db = Arc::clone(&state.db);
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db.conn()?;
+            conn.execute_batch("BEGIN")
+                .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+            let result: AppResult<()> = (|| {
+                RecordingsRepo::insert(&conn, &recording)?;
+                conn.execute(
+                    "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+                    [&recording_uuid.to_string()],
+                )
+                .map_err(medical_db::DbError::from)?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    conn.execute_batch("COMMIT")
+                        .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
+    } else {
+        // No file (empty recording): still insert the row, but skip the
+        // encryption_pending flag since there's nothing to encrypt.
+        let db = Arc::clone(&state.db);
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db.conn()?;
+            RecordingsRepo::insert(&conn, &recording)?;
+            Ok(())
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
     }
 
     // Spawn background encryption — don't block stop_recording.
@@ -340,33 +433,22 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
 /// Cancel the current recording, discarding the audio file without saving.
 #[tauri::command]
 pub async fn cancel_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
-    // Take the CaptureHandle out of AppState.
-    let wrapper = {
-        let mut handle_lock = state
-            .capture_handle
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
-        let inner = handle_lock.0.take();
-        SendCaptureHandle(inner)
-    };
-
-    if wrapper.0.is_none() {
-        // Clear the active flag even on the no-op path so a desynced `true`
-        // doesn't leave the user locked out.
-        {
-            let mut active = state.recording_active.lock().await;
-            *active = false;
-        }
-        // Also clear any stale current_recording slot.
-        {
+    // Take the CaptureHandle out of AppState (waiting out an in-flight
+    // start — see take_capture_handle_for_stop).
+    let wrapper = match take_capture_handle_for_stop(&state).await? {
+        Some(wrapper) => wrapper,
+        None => {
+            // Nothing running. Also clear any stale current_recording slot
+            // (e.g. a start that failed between storing the recording info
+            // and publishing the handle).
             let mut rec_lock = state
                 .current_recording
                 .lock()
                 .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
             *rec_lock = None;
+            return Err(AppError::audio("No active recording to cancel".to_string()));
         }
-        return Err(AppError::Audio("No active recording to cancel".to_string()));
-    }
+    };
 
     // Drop the capture handle on a blocking worker so its drop (which joins
     // the drain thread) doesn't stall the async runtime.
@@ -413,7 +495,7 @@ pub fn pause_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
         .lock()
         .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
     if handle_lock.0.is_none() {
-        return Err(AppError::Audio("No active recording to pause".to_string()));
+        return Err(AppError::audio("No active recording to pause".to_string()));
     }
     if let Some(handle) = &handle_lock.0 {
         handle.pause();
@@ -440,7 +522,7 @@ pub fn resume_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
         .lock()
         .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
     if handle_lock.0.is_none() {
-        return Err(AppError::Audio("No active recording to resume".to_string()));
+        return Err(AppError::audio("No active recording to resume".to_string()));
     }
     if let Some(handle) = &handle_lock.0 {
         handle.resume();
@@ -579,7 +661,7 @@ fn compute_audio_levels(path: &std::path::Path) -> AppResult<RecordingAudioLevel
             let mut count: u64 = 0;
             for sample in reader.into_samples::<f32>() {
                 let s =
-                    sample.map_err(|e| AppError::Processing(format!("Corrupt WAV sample: {e}")))?;
+                    sample.map_err(|e| AppError::processing(format!("Corrupt WAV sample: {e}")))?;
                 let abs = s.abs();
                 if abs > peak {
                     peak = abs;
@@ -596,7 +678,7 @@ fn compute_audio_levels(path: &std::path::Path) -> AppResult<RecordingAudioLevel
             let mut count: u64 = 0;
             for sample in reader.into_samples::<i32>() {
                 let raw =
-                    sample.map_err(|e| AppError::Processing(format!("Corrupt WAV sample: {e}")))?;
+                    sample.map_err(|e| AppError::processing(format!("Corrupt WAV sample: {e}")))?;
                 let s = raw as f32 / max_val;
                 let abs = s.abs();
                 if abs > peak {

@@ -4,21 +4,25 @@ use std::sync::Arc;
 
 use medical_core::error::{AppError, AppResult};
 use medical_core::traits::AiProvider;
-use medical_core::types::recording::Recording;
-use medical_core::types::settings::{AppConfig, SoapTemplate};
+use medical_core::types::recording::{Recording, record_completion_stat};
+use medical_core::types::settings::{AppConfig, IcdVersion, SoapTemplate};
 use medical_core::types::{CompletionRequest, Message, MessageContent, PatientContext, Role};
 use medical_db::recordings::RecordingsRepo;
+use tauri::Emitter;
 use uuid::Uuid;
 
 use crate::state::AppState;
 
-use super::{MAX_CONTEXT_CHARS, PATIENT_CTX_MAX_ITEM_CHARS, PATIENT_CTX_MAX_ITEMS_PER_LIST};
+use super::{
+    GenerationProgress, MAX_CONTEXT_CHARS, MAX_SOAP_NOTE_CHARS, PATIENT_CTX_MAX_ITEM_CHARS,
+    PATIENT_CTX_MAX_ITEMS_PER_LIST, format_progress_error,
+};
 
 /// Loaded settings needed for generation.
 pub(super) struct GenerationSettings {
     pub model: String,
     pub temperature: f32,
-    pub icd_version: String,
+    pub icd_version: IcdVersion,
     pub ai_provider: String,
     pub custom_soap_prompt: Option<String>,
     pub custom_referral_prompt: Option<String>,
@@ -41,7 +45,7 @@ pub(super) async fn load_recording_and_settings(
     recording_id: &str,
 ) -> AppResult<(Recording, GenerationSettings, AppConfig)> {
     let uuid = Uuid::parse_str(recording_id)
-        .map_err(|e| AppError::Other(format!("Invalid recording ID: {e}")))?;
+        .map_err(|e| AppError::InvalidInput(format!("Invalid recording ID: {e}")))?;
     let db = Arc::clone(db);
 
     tokio::task::spawn_blocking(move || {
@@ -52,15 +56,10 @@ pub(super) async fn load_recording_and_settings(
         let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
         config.migrate();
 
-        let icd = match config.icd_version {
-            medical_core::types::settings::IcdVersion::Icd9 => "ICD-9".to_string(),
-            medical_core::types::settings::IcdVersion::Icd10 => "ICD-10".to_string(),
-            medical_core::types::settings::IcdVersion::Both => "both".to_string(),
-        };
         let settings = GenerationSettings {
             model: config.ai_model.clone(),
             temperature: config.temperature,
-            icd_version: icd,
+            icd_version: config.icd_version.clone(),
             ai_provider: config.ai_provider.clone(),
             custom_soap_prompt: config.custom_soap_prompt.clone(),
             custom_referral_prompt: config.custom_referral_prompt.clone(),
@@ -75,8 +74,19 @@ pub(super) async fn load_recording_and_settings(
     .map_err(crate::commands::join_err)?
 }
 
+/// Load the full `AppConfig` from the DB on a blocking worker, without a
+/// recording. Used by commands that don't operate on a recording (e.g. the
+/// standalone Letter Writer, which generates from OCR'd text).
+pub(super) async fn load_config(db: &Arc<medical_db::Database>) -> AppResult<AppConfig> {
+    crate::commands::load_app_config(db, "generation").await
+}
+
 /// Resolve the AI provider from the registry using the settings provider name.
-pub(super) async fn resolve_provider(
+///
+/// `pub` so it can be re-exported from `generation::mod` for `commands::ocr`;
+/// the `helpers` module itself is private to `generation`, so this does not
+/// widen the public surface beyond the crate.
+pub async fn resolve_provider(
     state: &AppState,
     provider_name: &str,
 ) -> AppResult<Arc<dyn AiProvider>> {
@@ -85,8 +95,8 @@ pub(super) async fn resolve_provider(
         .get_arc(provider_name)
         .or_else(|| registry.get_active_arc())
         .ok_or_else(|| {
-            AppError::AiProvider(
-                "No AI provider configured. Check LM Studio / Ollama settings.".to_string(),
+            AppError::ai_provider(
+                "No AI provider configured. Check LM Studio / Ollama / oMLX settings.".to_string(),
             )
         })
 }
@@ -105,6 +115,204 @@ pub(super) async fn persist_recording(
     .map_err(crate::commands::join_err)?
 }
 
+/// Runs a generation command with the standard progress-event lifecycle:
+/// validates context size, emits "started", calls the inner function,
+/// then emits "completed" or "failed".
+///
+/// `doc_type` is the string literal sent to the frontend in progress events
+/// (e.g. `"letter"`, `"referral"`). `context` is the user-supplied freeform
+/// context, validated against [`MAX_CONTEXT_CHARS`] before any work begins.
+pub(super) async fn run_generation_command(
+    app: &tauri::AppHandle,
+    recording_id: &str,
+    doc_type: &str,
+    context: Option<&str>,
+    inner: impl std::future::Future<Output = AppResult<String>>,
+) -> AppResult<String> {
+    // Validate context size before emitting started (fail fast, consistent with SOAP).
+    if let Some(ctx) = context
+        && ctx.len() > MAX_CONTEXT_CHARS
+    {
+        return Err(AppError::InvalidInput(format!(
+            "Context too large: {} chars, limit is {}",
+            ctx.len(),
+            MAX_CONTEXT_CHARS
+        )));
+    }
+
+    let _ = app.emit(
+        "generation-progress",
+        GenerationProgress {
+            doc_type: doc_type.into(),
+            status: "started".into(),
+            recording_id: recording_id.to_string(),
+            progress: None,
+        },
+    );
+
+    let result = inner.await;
+
+    match &result {
+        Ok(_) => {
+            let _ = app.emit(
+                "generation-progress",
+                GenerationProgress {
+                    doc_type: doc_type.into(),
+                    status: "completed".into(),
+                    recording_id: recording_id.to_string(),
+                    progress: None,
+                },
+            );
+        }
+        Err(err) => {
+            let _ = app.emit(
+                "generation-progress",
+                GenerationProgress {
+                    doc_type: doc_type.into(),
+                    status: format_progress_error(err),
+                    recording_id: recording_id.to_string(),
+                    progress: None,
+                },
+            );
+        }
+    }
+
+    result
+}
+
+/// Shared inner logic for document types generated from a SOAP note (referral,
+/// letter, synopsis). Handles: preflight, resolve provider, validate SOAP note,
+/// build completion request, stream the completion from the provider (emitting
+/// live `generation-progress` stats through `app` when present), strip
+/// markdown, check empty, persist.
+///
+/// The recording, settings, and config must already be loaded by the caller
+/// (via [`load_recording_and_settings`]); this keeps the loading I/O to a
+/// single DB round-trip and lets callers (e.g. `generate_letter`) do extra
+/// DB work between the load and the generation.
+///
+/// The unique per-call pieces are passed in:
+/// - `command_kind` / `config`: forwarded to `preflight_for_command`.
+/// - `doc_type_label`: human-readable name used in the "empty response" error
+///   and the success debug log (e.g. `"letter"`, `"referral letter"`).
+/// - `stats_key`: canonical key under metadata.generation_stats (e.g. "referral").
+/// - `build_prompt`: closure `(soap_note, &settings) -> (system_prompt,
+///   user_prompt)`.
+/// - `set_field`: closure `(&mut Recording, String)` that assigns the
+///   generated text to the right recording field.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn generate_from_soap<F, S>(
+    state: &AppState,
+    app: Option<&tauri::AppHandle>,
+    recording: &mut Recording,
+    settings: &GenerationSettings,
+    config: &AppConfig,
+    command_kind: medical_core::preflight::CommandKind,
+    doc_type_label: &str,
+    stats_key: &'static str,
+    build_prompt: F,
+    set_field: S,
+) -> AppResult<String>
+where
+    F: FnOnce(&str, &GenerationSettings) -> (String, String),
+    S: FnOnce(&mut Recording, String),
+{
+    use medical_processing::document_generator;
+
+    // Pre-flight: probe the remote AI endpoint before doing any work.
+    // Skipped for loopback hosts; returns EndpointOffline on failure
+    // without ever invoking the provider.
+    medical_core::preflight::preflight_for_command(command_kind, config).await?;
+
+    let provider = resolve_provider(state, &settings.ai_provider).await?;
+
+    let soap_note = recording
+        .soap_note
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::processing(
+                "Recording has no SOAP note. Generate a SOAP note first.".to_string(),
+            )
+        })?;
+
+    if soap_note.len() > MAX_SOAP_NOTE_CHARS {
+        return Err(AppError::InvalidInput(format!(
+            "SOAP note too large: {} chars, limit is {}",
+            soap_note.len(),
+            MAX_SOAP_NOTE_CHARS
+        )));
+    }
+
+    let (system_prompt, user_prompt) = build_prompt(soap_note, settings);
+
+    tracing::debug!(
+        doc_type = doc_type_label,
+        provider = %provider.name(),
+        recording_id = %recording.id,
+        "generating document from SOAP note"
+    );
+
+    let request = build_completion_request(
+        system_prompt,
+        user_prompt,
+        settings.model.clone(),
+        settings.temperature,
+        None,
+    );
+
+    let recording_id_str = recording.id.to_string();
+    let generation_start = std::time::Instant::now();
+    let response = super::stream::stream_to_completion(
+        &provider,
+        |stats| {
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "generation-progress",
+                    GenerationProgress {
+                        doc_type: stats_key.into(),
+                        status: "generating".into(),
+                        recording_id: recording_id_str.clone(),
+                        progress: Some(*stats),
+                    },
+                );
+            }
+        },
+        request,
+    )
+    .await
+    .map_err(|e| match e {
+        // Preserve EndpointOffline as-is so the frontend dialog can fire.
+        AppError::EndpointOffline { .. } => e,
+        // For other errors, keep the existing nicer wrapping.
+        _ => AppError::ai_provider(format!(
+            "AI completion failed: {}",
+            crate::commands::unwrap_app_error_message(e)
+        )),
+    })?;
+    let generation_elapsed = generation_start.elapsed();
+
+    let text = document_generator::strip_markdown(&response.content);
+    if text.trim().is_empty() {
+        return Err(AppError::ai_provider(format!(
+            "AI returned an empty {doc_type_label}."
+        )));
+    }
+
+    set_field(recording, text.clone());
+
+    record_completion_stat(
+        &mut recording.metadata,
+        stats_key,
+        provider.name(),
+        &settings.model,
+        &response.usage,
+        generation_elapsed,
+    );
+
+    Ok(text)
+}
+
 /// Parse a template string into the `SoapTemplate` enum.
 pub(super) fn parse_soap_template(s: &str) -> SoapTemplate {
     match s.to_lowercase().as_str() {
@@ -114,6 +322,21 @@ pub(super) fn parse_soap_template(s: &str) -> SoapTemplate {
         "pediatric" => SoapTemplate::Pediatric,
         "geriatric" => SoapTemplate::Geriatric,
         _ => SoapTemplate::FollowUp, // default
+    }
+}
+
+/// Resolve the effective SOAP template: an explicit request wins, otherwise
+/// the user's stored preference (`AppConfig.soap_template`).
+///
+/// This lives here — not in the pipeline command — so that EVERY caller
+/// which passes no template (Generate tab, Regenerate, the pipeline) honors
+/// the stored setting. Previously only the pipeline did its own settings
+/// lookup, and a silent error there (or a direct `generate_soap` call)
+/// fell back to FollowUp regardless of the user's configured template.
+pub(super) fn resolve_soap_template(template: Option<&str>, config: &AppConfig) -> SoapTemplate {
+    match template {
+        Some(t) => parse_soap_template(t),
+        None => config.soap_template.clone(),
     }
 }
 
@@ -135,6 +358,10 @@ pub(super) fn build_completion_request(
         temperature: Some(temperature),
         max_tokens,
         system_prompt: Some(system_prompt),
+        // Thinking control is applied provider-side (Ollama forces
+        // reasoning_effort; LM Studio injects a think-block prefill), so the
+        // generation layer always leaves the request neutral here.
+        reasoning_effort: None,
     }
 }
 
@@ -154,7 +381,7 @@ pub(crate) fn validate_patient_context(pc: &PatientContext) -> AppResult<()> {
     let mut total: usize = 0;
     for (label, items) in lists {
         if items.len() > PATIENT_CTX_MAX_ITEMS_PER_LIST {
-            return Err(AppError::Other(format!(
+            return Err(AppError::InvalidInput(format!(
                 "Too many {label} entries: {} (limit is {})",
                 items.len(),
                 PATIENT_CTX_MAX_ITEMS_PER_LIST
@@ -162,7 +389,7 @@ pub(crate) fn validate_patient_context(pc: &PatientContext) -> AppResult<()> {
         }
         for item in items {
             if item.len() > PATIENT_CTX_MAX_ITEM_CHARS {
-                return Err(AppError::Other(format!(
+                return Err(AppError::InvalidInput(format!(
                     "Patient context entry too long in {label}: {} chars (limit is {})",
                     item.len(),
                     PATIENT_CTX_MAX_ITEM_CHARS
@@ -173,7 +400,7 @@ pub(crate) fn validate_patient_context(pc: &PatientContext) -> AppResult<()> {
     }
 
     if total > MAX_CONTEXT_CHARS {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "Patient context too large: {total} chars (limit is {MAX_CONTEXT_CHARS})"
         )));
     }
@@ -191,6 +418,46 @@ pub(super) fn patient_context_is_empty(pc: &PatientContext) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_soap_template_falls_back_to_stored_preference() {
+        // The bug this pins: a caller passing no template must get the
+        // user's configured template, not a silent FollowUp default.
+        let mut config = AppConfig::default();
+        config.soap_template = SoapTemplate::Pediatric;
+        assert_eq!(
+            resolve_soap_template(None, &config),
+            SoapTemplate::Pediatric
+        );
+    }
+
+    #[test]
+    fn resolve_soap_template_explicit_request_wins() {
+        let mut config = AppConfig::default();
+        config.soap_template = SoapTemplate::Pediatric;
+        assert_eq!(
+            resolve_soap_template(Some("telehealth"), &config),
+            SoapTemplate::Telehealth
+        );
+    }
+
+    #[test]
+    fn resolve_soap_template_unparseable_string_defaults_to_follow_up() {
+        let mut config = AppConfig::default();
+        config.soap_template = SoapTemplate::Geriatric;
+        assert_eq!(
+            resolve_soap_template(Some("not-a-template"), &config),
+            SoapTemplate::FollowUp
+        );
+    }
+
+    #[test]
+    fn resolve_soap_template_default_config_is_follow_up() {
+        assert_eq!(
+            resolve_soap_template(None, &AppConfig::default()),
+            SoapTemplate::FollowUp
+        );
+    }
 
     fn pc(meds: &[&str], allergies: &[&str], conditions: &[&str]) -> PatientContext {
         PatientContext {

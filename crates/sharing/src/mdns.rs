@@ -59,6 +59,9 @@ pub struct ServerPorts {
     pub whisper: Option<u16>,
     /// LM Studio auth proxy port (absent when LM Studio wasn't detected).
     pub lmstudio: Option<u16>,
+    /// oMLX auth proxy port (absent when oMLX wasn't detected).
+    #[serde(default)]
+    pub omlx: Option<u16>,
     /// Pairing HTTP service port.
     pub pairing: Option<u16>,
     /// Vocabulary CRUD HTTP API port.
@@ -114,6 +117,9 @@ impl MdnsAdvertiser {
         if let Some(p) = ports.lmstudio {
             props.insert("lmstudio".into(), p.to_string());
         }
+        if let Some(p) = ports.omlx {
+            props.insert("omlx".into(), p.to_string());
+        }
         if let Some(p) = ports.pairing {
             props.insert("pairing".into(), p.to_string());
         }
@@ -155,11 +161,7 @@ impl MdnsAdvertiser {
     /// The cached Tailscale DNS name is preserved across re-registrations;
     /// pass `tailscale_override` to update it (e.g. if it was discovered
     /// after the initial `start`).
-    pub fn update_ports(
-        mut self,
-        ports: &ServerPorts,
-        tailscale_override: Option<&str>,
-    ) -> Self {
+    pub fn update_ports(mut self, ports: &ServerPorts, tailscale_override: Option<&str>) -> Self {
         if let Some(ts) = tailscale_override {
             self.tailscale = Some(ts.to_string());
         }
@@ -181,6 +183,9 @@ impl MdnsAdvertiser {
         }
         if let Some(p) = ports.lmstudio {
             props.insert("lmstudio".into(), p.to_string());
+        }
+        if let Some(p) = ports.omlx {
+            props.insert("omlx".into(), p.to_string());
         }
         if let Some(p) = ports.pairing {
             props.insert("pairing".into(), p.to_string());
@@ -256,9 +261,8 @@ pub fn browse(timeout: Duration) -> crate::Result<mpsc::Receiver<DiscoveredServe
                     // Read the server-advertised Tailscale DNS name from the
                     // TXT record so LAN-discovered clients can populate their
                     // `tailscale` slot without a separate Tailscale probe.
-                    let tailscale_addresses = prop("tailscale")
-                        .map(|ts| vec![ts])
-                        .unwrap_or_default();
+                    let tailscale_addresses =
+                        prop("tailscale").map(|ts| vec![ts]).unwrap_or_default();
                     let server = DiscoveredServer {
                         instance_name: info.get_fullname().to_string(),
                         host: info.get_hostname().trim_end_matches('.').to_string(),
@@ -268,6 +272,7 @@ pub fn browse(timeout: Duration) -> crate::Result<mpsc::Receiver<DiscoveredServe
                             ollama: parse_port("ollama"),
                             whisper: parse_port("whisper"),
                             lmstudio: parse_port("lmstudio"),
+                            omlx: parse_port("omlx"),
                             pairing: parse_port("pairing"),
                             vocab: parse_port("vocab"),
                         },
@@ -300,6 +305,7 @@ mod tests {
             ollama: Some(11435),
             whisper: Some(8081),
             lmstudio: None,
+            omlx: None,
             pairing: Some(11436),
             vocab: Some(11437),
         };
@@ -330,6 +336,7 @@ mod tests {
             ollama: Some(11435),
             whisper: Some(8081),
             lmstudio: None,
+            omlx: None,
             pairing: Some(11436),
             vocab: Some(11437),
         };
@@ -337,6 +344,7 @@ mod tests {
             ollama: Some(11435),
             whisper: Some(8081),
             lmstudio: Some(1235), // LM Studio came online
+            omlx: Some(8001),     // oMLX came online
             pairing: Some(11436),
             vocab: Some(11437),
         };
@@ -361,6 +369,11 @@ mod tests {
             d.ports.lmstudio,
             Some(1235),
             "lmstudio port must appear after update_ports"
+        );
+        assert_eq!(
+            d.ports.omlx,
+            Some(8001),
+            "omlx port must appear after update_ports"
         );
     }
 }

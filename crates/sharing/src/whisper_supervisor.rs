@@ -17,13 +17,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 const MANIFEST: &str = include_str!("../whisper-manifest.json");
+
+/// Upper bound on a decompressed whisper-server binary during extraction.
+/// Guards against zip/gzip bombs in a corrupted or tampered archive; the
+/// shipped whisper-server binaries are well under this size.
+const MAX_EXTRACTED_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -201,19 +205,17 @@ impl WhisperSupervisor {
                 "sha256 hash missing for binary {binary_name}; refusing to download without verification"
             ))
         })?;
-        let bytes = reqwest::get(url)
+        // Shared verified-download helper: explicit connect/total timeouts
+        // (a stalled CDN must not hang start() forever — the default reqwest
+        // client has none) + SHA-256 verification before extraction.
+        let bytes = medical_core::net::download_bytes(url, Some(expected))
             .await
-            .map_err(|e| WhisperError::Download(e.to_string()))?
-            .bytes()
-            .await
-            .map_err(|e| WhisperError::Download(e.to_string()))?;
-        let got = hex::encode(Sha256::digest(&bytes));
-        if got != expected {
-            return Err(WhisperError::HashMismatch {
-                expected: expected.to_string(),
-                got,
-            });
-        }
+            .map_err(|e| match e {
+                medical_core::net::DownloadError::HashMismatch { expected, got } => {
+                    WhisperError::HashMismatch { expected, got }
+                }
+                other => WhisperError::Download(other.to_string()),
+            })?;
         // The extract + chmod are synchronous CPU/disk work (full archive
         // decompression, metadata read, permission set). Running them inline
         // stalls the tokio worker thread for the whole duration — noticeable
@@ -358,26 +360,45 @@ impl WhisperSupervisor {
             tokio::select! {
                 _ = c.wait() => {
                     info!("whisper-server exited; restarting in {:?}", backoff);
-                    // Wait for the backoff period, but bail immediately if stop fires.
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
-                        _ = self.stop.notified() => { return; }
-                    }
-                    // Re-check `stopped` after the backoff sleep — stop() may have
-                    // been called while we were sleeping (notify_waiters was used
-                    // as a best-effort signal only).
-                    if self.stopped.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
-                    let bin = match self.binary_dir.read_dir() {
-                        Ok(_) => self.binary_dir.join(self.binary_name_for_platform()),
-                        Err(_) => return,
-                    };
-                    if let Ok(child) = self.spawn_once_at(&bin).await {
-                        *self.child.lock().await = Some(child);
-                    } else {
-                        return;
+                    // Respawn with backoff. A failed respawn is logged and
+                    // retried (backoff climbs to the 60 s cap) rather than
+                    // silently ending supervision — a single transient spawn
+                    // failure must not permanently kill local whisper with
+                    // no trace in the log.
+                    loop {
+                        // Wait for the backoff period, but bail immediately if stop fires.
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = self.stop.notified() => { return; }
+                        }
+                        // Re-check `stopped` after the backoff sleep — stop() may have
+                        // been called while we were sleeping (notify_waiters was used
+                        // as a best-effort signal only).
+                        if self.stopped.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        backoff = (backoff * 2).min(Duration::from_secs(60));
+                        if let Err(e) = self.binary_dir.read_dir() {
+                            warn!(
+                                error = %e,
+                                "whisper binary dir unreadable; cannot respawn yet"
+                            );
+                            continue;
+                        }
+                        let bin = self.binary_dir.join(self.binary_name_for_platform());
+                        match self.spawn_once_at(&bin).await {
+                            Ok(child) => {
+                                *self.child.lock().await = Some(child);
+                                break;
+                            }
+                            Err(e) => {
+                                error!(
+                                    error = %e,
+                                    retry_in_secs = backoff.as_secs(),
+                                    "whisper-server respawn failed; will retry"
+                                );
+                            }
+                        }
                     }
                 }
                 _ = self.stop.notified() => {
@@ -498,13 +519,32 @@ fn extract_zip(bytes: &[u8], out_dir: &Path, binary_name: &str) -> Result<()> {
     let mut zip =
         zip::ZipArchive::new(cursor).map_err(|e| WhisperError::Manifest(e.to_string()))?;
     for i in 0..zip.len() {
-        let mut file = zip
+        let file = zip
             .by_index(i)
             .map_err(|e| WhisperError::Manifest(e.to_string()))?;
         let name = file.name().to_string();
         if Path::new(&name).file_name().and_then(|s| s.to_str()) == Some(binary_name) {
+            // The entry's declared size is untrusted zip metadata: refuse
+            // oversized entries up front, then bound the actual decompressed
+            // stream too, so a corrupted or tampered archive can't OOM the
+            // app via a huge allocation. The archive's SHA-256 is verified
+            // before extraction runs; this is belt-and-suspenders.
+            if file.size() > MAX_EXTRACTED_BINARY_BYTES {
+                return Err(WhisperError::Manifest(format!(
+                    "zip entry '{name}' declares {} bytes; over the {}-byte extraction cap",
+                    file.size(),
+                    MAX_EXTRACTED_BINARY_BYTES
+                )));
+            }
             let mut buf = Vec::with_capacity(file.size() as usize);
-            std::io::Read::read_to_end(&mut file, &mut buf)?;
+            let mut limited = std::io::Read::take(file, MAX_EXTRACTED_BINARY_BYTES + 1);
+            let n = std::io::Read::read_to_end(&mut limited, &mut buf)?;
+            if n as u64 > MAX_EXTRACTED_BINARY_BYTES {
+                return Err(WhisperError::Manifest(format!(
+                    "zip entry '{name}' decompressed to {n} bytes; over the {}-byte extraction cap",
+                    MAX_EXTRACTED_BINARY_BYTES
+                )));
+            }
             std::fs::write(out_dir.join(binary_name), buf)?;
             return Ok(());
         }
@@ -519,11 +559,20 @@ fn extract_tar_gz(bytes: &[u8], out_dir: &Path, binary_name: &str) -> Result<()>
     let gz = flate2::read::GzDecoder::new(cursor);
     let mut ar = tar::Archive::new(gz);
     for entry in ar.entries()? {
-        let mut e = entry?;
+        let e = entry?;
         let path = e.path()?.to_path_buf();
         if path.file_name().and_then(|s| s.to_str()) == Some(binary_name) {
+            // Bound the decompressed size — same gzip-bomb defense as the
+            // zip path.
             let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut e, &mut buf)?;
+            let mut limited = std::io::Read::take(e, MAX_EXTRACTED_BINARY_BYTES + 1);
+            let n = std::io::Read::read_to_end(&mut limited, &mut buf)?;
+            if n as u64 > MAX_EXTRACTED_BINARY_BYTES {
+                return Err(WhisperError::Manifest(format!(
+                    "tar entry '{binary_name}' decompressed to {n} bytes; over the {}-byte extraction cap",
+                    MAX_EXTRACTED_BINARY_BYTES
+                )));
+            }
             std::fs::write(out_dir.join(binary_name), buf)?;
             return Ok(());
         }
@@ -552,27 +601,47 @@ async fn pids_on_port(port: u16) -> Vec<u32> {
         Err(_) => return Vec::new(),
     };
     let text = String::from_utf8_lossy(&out.stdout);
-    let mut pids = Vec::new();
-    if cfg!(target_os = "windows") {
-        // netstat -ano output lines look like:
-        //   TCP    127.0.0.1:8080     0.0.0.0:0     LISTENING    1234
-        for line in text.lines() {
-            if !line.contains(&format!(":{port}")) {
-                continue;
-            }
-            if let Some(pid) = line
-                .split_whitespace()
-                .last()
-                .and_then(|s| s.parse::<u32>().ok())
-            {
-                pids.push(pid);
-            }
-        }
+    let mut pids = if cfg!(target_os = "windows") {
+        parse_netstat_listening_pids(&text, port)
     } else {
-        for line in text.lines() {
-            if let Ok(pid) = line.trim().parse::<u32>() {
-                pids.push(pid);
-            }
+        text.lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .collect()
+    };
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// Extract PIDs of processes LISTENING on exactly `port` from `netstat -ano`
+/// output. Strictly column-based: only the LOCAL address column's port is
+/// matched (exact string compare after the last `:`, so `:80` never matches
+/// `:8080`), and only rows in the LISTENING state — a substring scan over
+/// whole lines would otherwise match REMOTE endpoints of unrelated outbound
+/// connections and force-kill innocent processes (`kill_pid` uses
+/// `taskkill /F`). Pure so it is unit-testable off-Windows.
+fn parse_netstat_listening_pids(text: &str, port: u16) -> Vec<u32> {
+    let port_str = port.to_string();
+    let mut pids = Vec::new();
+    for line in text.lines() {
+        // Rows: `TCP  <local>  <remote>  <state>  <pid>` (state omitted on
+        // some rows — those are not listeners and are skipped by the column
+        // count check).
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() != 5 || cols[0] != "TCP" {
+            continue;
+        }
+        let (local, state, pid) = (cols[1], cols[3], cols[4]);
+        if state != "LISTENING" {
+            continue;
+        }
+        // Local may be `127.0.0.1:8080` or IPv6 `[::]:8080` — the port is
+        // always after the last colon.
+        if local.rsplit_once(':').map(|(_, p)| p) != Some(port_str.as_str()) {
+            continue;
+        }
+        if let Ok(pid) = pid.parse::<u32>() {
+            pids.push(pid);
         }
     }
     pids.sort_unstable();
@@ -801,5 +870,31 @@ mod tests {
             }
             other => panic!("expected Err(Download) for missing sha256; got {other:?}"),
         }
+    }
+
+    #[test]
+    fn netstat_parser_matches_only_exact_listening_port() {
+        let crlf = "\r\n";
+        let text = concat!(
+            "\r\n\r\n Active Connections\r\n\r\n",
+            "  Proto  Local Address          Foreign Address        State           PID\r\n",
+            // The listener we want.
+            "  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       4242\r\n",
+            // Same port on IPv6 — same PID, must parse fine.
+            "  TCP    [::]:8080              [::]:0                 LISTENING       4242\r\n",
+            // Substring trap: port 80 must NOT match :8080, and vice versa.
+            "  TCP    127.0.0.1:80            0.0.0.0:0              LISTENING       5150\r\n",
+            // Outbound connection whose REMOTE endpoint is :8080 — must be
+            // excluded (this is the force-kill-innocent-process bug).
+            "  TCP    192.168.1.9:53214       93.184.216.34:8080     ESTABLISHED     7300\r\n",
+            // Established with LOCAL :8080 — excluded by the state filter.
+            "  TCP    127.0.0.1:8080          127.0.0.1:53215        ESTABLISHED     8100\r\n",
+            // TIME_WAIT rows carry no PID column (4 cols) — skipped.
+            "  TCP    127.0.0.1:8080          127.0.0.1:53216        TIME_WAIT\r\n",
+        );
+        assert_eq!(parse_netstat_listening_pids(text, 8080), vec![4242]);
+        assert_eq!(parse_netstat_listening_pids(text, 80), vec![5150]);
+        assert_eq!(parse_netstat_listening_pids(text, 8081), Vec::<u32>::new());
+        let _ = crlf;
     }
 }

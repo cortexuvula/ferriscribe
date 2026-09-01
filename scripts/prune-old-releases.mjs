@@ -26,14 +26,14 @@ const SHELL_SAFE = /^[a-zA-Z0-9._-]+$/;
 // Validate KEEP: must be a positive integer. A bad value (e.g. "abc") would
 // produce NaN, and slice(0, NaN) === [] → every release deleted.
 let KEEP;
-const KEEP_RAW = parseInt(process.env.KEEP ?? '5', 10);
-if (!Number.isFinite(KEEP_RAW) || KEEP_RAW < 1) {
+const KEEP_RAW = process.env.KEEP ?? '5';
+if (!/^\d+$/.test(KEEP_RAW) || Number(KEEP_RAW) < 1) {
   console.error(
     `Invalid KEEP value: "${process.env.KEEP}". Must be a positive integer. Defaulting to 5.`,
   );
   KEEP = 5;
 } else {
-  KEEP = KEEP_RAW;
+  KEEP = Number(KEEP_RAW);
 }
 
 const DRY_RUN = process.argv.includes('--dry-run');
@@ -53,22 +53,68 @@ function ghOk(...args) {
   }
 }
 
+/**
+ * Full semver precedence comparison (semver.org §11) for the tag shapes
+ * this repo uses: vX.Y.Z and vX.Y.Z-prerelease (dot-separated identifiers).
+ *
+ * The previous parseInt-based comparator coerced prerelease identifiers to
+ * 0, which ranked v1.0.0-beta.1 ABOVE v1.0.0 — exactly backwards — and so
+ * pruned the stable release while keeping its beta.
+ *
+ * Returns a negative number when a has LOWER precedence than b.
+ */
+function compareSemver(a, b) {
+  const pa = a.replace(/^v/, '');
+  const pb = b.replace(/^v/, '');
+  const [coreA, preA = ''] = pa.split('-', 2);
+  const [coreB, preB = ''] = pb.split('-', 2);
+  const numsA = coreA.split('.').map(Number);
+  const numsB = coreB.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const d = (numsA[i] ?? 0) - (numsB[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  // Equal cores: a version WITHOUT a prerelease has HIGHER precedence.
+  const hasPreA = preA.length > 0;
+  const hasPreB = preB.length > 0;
+  if (!hasPreA && !hasPreB) return 0;
+  if (!hasPreA) return 1;
+  if (!hasPreB) return -1;
+  // Compare prerelease identifiers: numeric < alphanumeric, numerics
+  // numerically, alphanumerics lexically (ASCII); fewer identifiers is
+  // lower when all preceding are equal.
+  const idsA = preA.split('.');
+  const idsB = preB.split('.');
+  for (let i = 0; i < Math.max(idsA.length, idsB.length); i++) {
+    const x = idsA[i];
+    const y = idsB[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const xNum = /^\d+$/.test(x);
+    const yNum = /^\d+$/.test(y);
+    if (xNum && yNum) {
+      const d = Number(x) - Number(y);
+      if (d !== 0) return d;
+    } else if (xNum) {
+      return -1; // numeric identifiers have lower precedence
+    } else if (yNum) {
+      return 1;
+    } else {
+      const d = x < y ? -1 : x > y ? 1 : 0;
+      if (d !== 0) return d;
+    }
+  }
+  return 0;
+}
+
 // 1. List all releases as JSON, sorted newest-first by semver tag.
 const raw = gh('release', 'list', '--limit', '200', '--json', 'tagName');
 const tags = JSON.parse(raw)
   .map((r) => r.tagName)
   // Only FerriScribe version tags (vX.Y.Z or vX.Y.Z-beta.N), fully anchored.
   .filter((t) => VERSION_RE.test(t))
-  // Semver-aware sort: split into numeric parts, compare descending.
-  .sort((a, b) => {
-    const pa = a.replace(/^v/, '').split(/[.-]/).map((x) => parseInt(x, 10) || 0);
-    const pb = b.replace(/^v/, '').split(/[.-]/).map((x) => parseInt(x, 10) || 0);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-      const d = (pb[i] ?? 0) - (pa[i] ?? 0);
-      if (d !== 0) return d;
-    }
-    return 0;
-  });
+  // Semver-aware sort, highest precedence first.
+  .sort((a, b) => compareSemver(a, b) * -1);
 
 const keep = tags.slice(0, KEEP);
 const delete_ = tags.slice(KEEP);
@@ -84,6 +130,7 @@ if (DRY_RUN) {
 }
 
 let deleted = 0;
+let tagOnly = 0;
 let failed = 0;
 for (const tag of delete_) {
   // Defense in depth: skip any tag that slipped past the regex but contains
@@ -97,10 +144,14 @@ for (const tag of delete_) {
     deleted++;
     console.log(`  deleted: ${tag}`);
   } else {
-    // Retry: release may already be gone but tag lingers.
+    // Retry: release may already be gone but tag lingers. This is a
+    // PARTIAL outcome — the release page/assets may still exist (e.g. a
+    // transient release-delete failure); counted separately so it is not
+    // reported as a clean delete. It is retried on the next prune run
+    // because enumeration is by release, not by tag.
     if (ghOk('api', '-X', 'DELETE', `repos/:owner/:repo/git/refs/tags/${tag}`)) {
-      deleted++;
-      console.log(`  deleted (tag-only): ${tag}`);
+      tagOnly++;
+      console.log(`  deleted tag only (release may remain): ${tag}`);
     } else {
       failed++;
       console.log(`  FAILED: ${tag}`);
@@ -108,4 +159,4 @@ for (const tag of delete_) {
   }
 }
 
-console.log(`\nDone: ${deleted} deleted, ${failed} failed.`);
+console.log(`\nDone: ${deleted} deleted, ${tagOnly} tag-only (release may remain), ${failed} failed.`);

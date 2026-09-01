@@ -4,6 +4,11 @@ import {
   normalizedForms,
   validateIcdCode,
   extractIcdCodesValidated,
+  extractIcdDescriptions,
+  billingCodesLabel,
+  icdCodeMetadataEntries,
+  icdCodesFromMetadata,
+  resolveIcdCodes,
 } from './icd';
 
 describe('stripIcdPrefix', () => {
@@ -206,5 +211,268 @@ describe('extractIcdCodesValidated', () => {
     const text = 'ICD-9 Code: 401.9\nICD-10 Code: I10';
     const result = extractIcdCodesValidated(text, mspSet, 'icd10');
     expect(result.every((r) => r.valid === null)).toBe(true);
+  });
+});
+
+describe('extractIcdDescriptions', () => {
+  it('captures the per-line "code — description" form the SOAP prompt emits', () => {
+    const text = 'Assessment: back pain\n\nICD-9 Code: 847.2 — Sprain of lumbar\nICD-9 Code: 724.5 — Lumbago';
+    const map = extractIcdDescriptions(text);
+    expect(map.get('847.2')).toBe('Sprain of lumbar');
+    expect(map.get('724.5')).toBe('Lumbago');
+  });
+
+  it('accepts a plain hyphen as the code/description separator', () => {
+    const map = extractIcdDescriptions('ICD-9 - 847.2 - Sprain of lumbar');
+    expect(map.get('847.2')).toBe('Sprain of lumbar');
+  });
+
+  it('accepts the colon-less "ICD9 847.2 — desc" variant', () => {
+    const map = extractIcdDescriptions('ICD9 847.2 — Sprain of lumbar');
+    expect(map.get('847.2')).toBe('Sprain of lumbar');
+  });
+
+  it('skips description-less code lines (inline mentions)', () => {
+    // Inline "(ICD-9: 250.0)" and bare "ICD-9 Code: 401.9" lines carry no
+    // description — they must not seed the map with junk.
+    const map = extractIcdDescriptions('(ICD-9: 250.0)\nICD-9 Code: 401.9');
+    expect(map.size).toBe(0);
+  });
+
+  it('keeps the first description when a code line repeats', () => {
+    const map = extractIcdDescriptions(
+      'ICD-9 Code: 847.2 — Sprain of lumbar\nICD-9 Code: 847.2 — Duplicate',
+    );
+    expect(map.get('847.2')).toBe('Sprain of lumbar');
+    expect(map.size).toBe(1);
+  });
+
+  it('does not treat ordinary dashed prose lines as code descriptions', () => {
+    const map = extractIcdDescriptions('1. Ibuprofen 400 mg — take with food');
+    expect(map.size).toBe(0);
+  });
+
+  it('returns an empty map for empty text', () => {
+    expect(extractIcdDescriptions('').size).toBe(0);
+  });
+});
+
+describe('extractIcdCodesValidated — bare code + explaining title', () => {
+  const mspSet = new Set(['847.2', '001.0']);
+  const mspDescs = new Map([
+    ['847.2', 'LUMBAR'],
+    ['001.0', 'CHOLERA DUE TO VIBRIO CHOLERAE'],
+    ['V70.0', 'ROUTINE GENERAL MEDICAL EXAMINATION'],
+  ]);
+
+  it('exposes the bare (prefix-stripped) code for chip display', () => {
+    const result = extractIcdCodesValidated('ICD-9 Code: 847.2', mspSet);
+    expect(result[0].bare).toBe('847.2');
+    expect(result[0].raw).toBe('ICD-9 Code: 847.2');
+  });
+
+  it('uses the note description when the note carries one', () => {
+    const text = 'ICD-9 Code: 847.2 — Sprain of lumbar';
+    const result = extractIcdCodesValidated(text, mspSet, 'icd9', mspDescs);
+    expect(result[0].description).toBe('Sprain of lumbar');
+  });
+
+  it('falls back to the official MSP description, softened to title case', () => {
+    // No " — description" in the note; the MSP map is ALL-CAPS.
+    const result = extractIcdCodesValidated('(ICD-9: 847.2)', mspSet, 'icd9', mspDescs);
+    expect(result[0].description).toBe('Lumbar');
+  });
+
+  it('note description wins over the MSP description', () => {
+    const text = 'ICD-9 Code: 847.2 — Sprain of lumbar';
+    const result = extractIcdCodesValidated(text, mspSet, 'icd9', mspDescs);
+    expect(result[0].description).toBe('Sprain of lumbar');
+  });
+
+  it('MSP fallback matches the zero-padded form of a trimmed code', () => {
+    // Note emits "1.0", the MSP map keys "001.0" — description must still
+    // resolve (normalizedForms lookup).
+    const result = extractIcdCodesValidated('ICD-9 Code: 1.0', mspSet, 'icd9', mspDescs);
+    expect(result[0].description).toBe('Cholera Due To Vibrio Cholerae');
+  });
+
+  it('description is null when neither source has the code', () => {
+    const result = extractIcdCodesValidated('ICD-9 Code: 999.99', mspSet, 'icd9', mspDescs);
+    expect(result[0].description).toBeNull();
+  });
+
+  it('description is null for a no-description ICD-10 code (no bundled list)', () => {
+    const result = extractIcdCodesValidated('ICD-10 Code: Z00.00', mspSet, 'both', mspDescs);
+    expect(result[0].description).toBeNull();
+  });
+
+  it('works without an MSP map (note descriptions only)', () => {
+    const result = extractIcdCodesValidated('ICD-9 Code: 847.2 — Sprain of lumbar', mspSet);
+    expect(result[0].description).toBe('Sprain of lumbar');
+    const bare = extractIcdCodesValidated('(ICD-9: 847.2)', mspSet);
+    expect(bare[0].description).toBeNull();
+  });
+
+  it('title-case softening keeps alphanumerics like B12 intact', () => {
+    const descs = new Map([['266.2', 'OTHER B-COMPLEX DEFICIENCIES']]);
+    const result = extractIcdCodesValidated('ICD-9 Code: 266.2', null, 'icd9', descs);
+    expect(result[0].description).toBe('Other B-Complex Deficiencies');
+  });
+});
+
+describe('billingCodesLabel', () => {
+  it('labels the list for each ICD mode', () => {
+    expect(billingCodesLabel('icd9')).toBe('Billing codes (ICD-9)');
+    expect(billingCodesLabel('icd10')).toBe('Billing codes (ICD-10)');
+    expect(billingCodesLabel('both')).toBe('Billing codes (ICD-9/ICD-10)');
+  });
+
+  it('defaults to the BC MSP ICD-9 label', () => {
+    expect(billingCodesLabel()).toBe('Billing codes (ICD-9)');
+  });
+});
+
+describe('icdCodeMetadataEntries — metadata.icd_codes type guard', () => {
+  it('returns the entries for a new-format recording', () => {
+    const metadata = {
+      icd_codes: [
+        { code: '847.2', description: 'Sprain of lumbar', kind: 'icd9' },
+        { code: 'Z00.00', description: null, kind: 'icd10' },
+      ],
+    };
+    const entries = icdCodeMetadataEntries(metadata);
+    expect(entries).not.toBeNull();
+    expect(entries).toHaveLength(2);
+    expect(entries?.[0].code).toBe('847.2');
+  });
+
+  it('returns null when the key is absent (legacy recording)', () => {
+    expect(icdCodeMetadataEntries({ context: 'prior visit' })).toBeNull();
+  });
+
+  it('treats an empty array as present (zero-code new-format recording)', () => {
+    // The backend writes [] even when no codes were selected — that must
+    // NOT fall through to mining a (code-free) note.
+    expect(icdCodeMetadataEntries({ icd_codes: [] })).toEqual([]);
+  });
+
+  it('returns null for absent or non-array payloads (legacy fallback)', () => {
+    expect(icdCodeMetadataEntries(null)).toBeNull();
+    expect(icdCodeMetadataEntries('nope')).toBeNull();
+    expect(icdCodeMetadataEntries({ icd_codes: '847.2' })).toBeNull();
+    expect(icdCodeMetadataEntries({ context: 'prior' })).toBeNull();
+  });
+
+  it('drops malformed entries instead of crashing or rejecting the array', () => {
+    // Regression (bug review 2026-08-31): a non-string `description` used
+    // to reach `description?.trim()` in the mapper and crash the render.
+    // `(5)?.trim()` throws — optional chaining only guards null/undefined.
+    expect(icdCodeMetadataEntries({ icd_codes: [{ code: 847 }] })).toEqual([]);
+    expect(icdCodeMetadataEntries({ icd_codes: [null] })).toEqual([]);
+    expect(icdCodeMetadataEntries({ icd_codes: [{ code: '847.2', description: 5 }] })).toEqual([]);
+    // Valid siblings survive alongside dropped entries.
+    expect(
+      icdCodeMetadataEntries({
+        icd_codes: [
+          { code: '847.2', description: 5 },        // bad description → dropped
+          { code: 'wrong', kind: 'garbage' },        // bad kind → dropped
+          { code: '' },                              // empty code → dropped
+          { code: '724.5', description: 'Lumbago', kind: 'icd9' },
+        ],
+      }),
+    ).toEqual([{ code: '724.5', description: 'Lumbago', kind: 'icd9' }]);
+  });
+
+  it('accepts null/absent descriptions and kinds', () => {
+    expect(
+      icdCodeMetadataEntries({ icd_codes: [{ code: 'Z00.00', description: null, kind: 'icd10' }] }),
+    ).toEqual([{ code: 'Z00.00', description: null, kind: 'icd10' }]);
+    expect(icdCodeMetadataEntries({ icd_codes: [{ code: '847.2' }] })).toEqual([
+      { code: '847.2', description: undefined, kind: undefined },
+    ]);
+  });
+});
+
+describe('icdCodesFromMetadata — structured codes to list rows', () => {
+  const mspSet = new Set(['847.2', 'V70.0']);
+  const mspDescs = new Map([
+    ['847.2', 'LUMBAR'],
+    ['V70.0', 'ROUTINE GENERAL MEDICAL EXAMINATION'],
+  ]);
+
+  it('validates icd9 entries against the MSP set and keeps their titles', () => {
+    const rows = icdCodesFromMetadata(
+      [{ code: '847.2', description: 'Sprain of lumbar', kind: 'icd9' }],
+      mspSet,
+      'icd9',
+      mspDescs,
+    );
+    expect(rows[0].bare).toBe('847.2');
+    expect(rows[0].valid).toBe(true);
+    expect(rows[0].description).toBe('Sprain of lumbar');
+  });
+
+  it('flags off-list icd9 codes as invalid (amber)', () => {
+    const rows = icdCodesFromMetadata([{ code: '999.99', kind: 'icd9' }], mspSet, 'icd9');
+    expect(rows[0].valid).toBe(false);
+  });
+
+  it('renders icd10 entries neutral (no bundled list)', () => {
+    const rows = icdCodesFromMetadata([{ code: 'Z00.00', kind: 'icd10' }], mspSet, 'both');
+    expect(rows[0].valid).toBeNull();
+  });
+
+  it('does not validate icd9 entries in pure icd10 mode (wrong-set guard)', () => {
+    const rows = icdCodesFromMetadata([{ code: '847.2', kind: 'icd9' }], mspSet, 'icd10');
+    expect(rows[0].valid).toBeNull();
+  });
+
+  it('falls back to the soft MSP description when the entry has none', () => {
+    const rows = icdCodesFromMetadata([{ code: '847.2', kind: 'icd9' }], mspSet, 'icd9', mspDescs);
+    expect(rows[0].description).toBe('Lumbar');
+  });
+
+  it('missing kind defaults to icd9 treatment', () => {
+    const rows = icdCodesFromMetadata([{ code: '847.2' }], mspSet, 'icd9');
+    expect(rows[0].valid).toBe(true);
+    expect(rows[0].raw).toBe('ICD-9 Code: 847.2');
+  });
+
+  it('valid=null when the set is not loaded', () => {
+    const rows = icdCodesFromMetadata([{ code: '847.2', kind: 'icd9' }], null, 'icd9');
+    expect(rows[0].valid).toBeNull();
+  });
+});
+
+describe('resolveIcdCodes — metadata first, note text fallback', () => {
+  const mspSet = new Set(['847.2']);
+
+  it('uses metadata codes when present, ignoring the (code-free) note', () => {
+    const metadata = {
+      icd_codes: [{ code: '847.2', description: 'Sprain of lumbar', kind: 'icd9' }],
+    };
+    const rows = resolveIcdCodes(metadata, 'Subjective:\n- back pain', mspSet, 'icd9');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].bare).toBe('847.2');
+    expect(rows[0].description).toBe('Sprain of lumbar');
+  });
+
+  it('mines the note text for legacy recordings without the metadata key', () => {
+    const note = 'ICD-9 Code: 847.2 — Sprain of lumbar\n\nSubjective:\n- pain';
+    const rows = resolveIcdCodes({ context: 'prior' }, note, mspSet, 'icd9');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].bare).toBe('847.2');
+    expect(rows[0].description).toBe('Sprain of lumbar');
+  });
+
+  it('empty metadata array wins over note mining (new-format marker)', () => {
+    const note = 'ICD-9 Code: 847.2 — Sprain of lumbar';
+    const rows = resolveIcdCodes({ icd_codes: [] }, note, mspSet, 'icd9');
+    expect(rows).toEqual([]);
+  });
+
+  it('returns [] with neither source', () => {
+    expect(resolveIcdCodes(null, null, mspSet, 'icd9')).toEqual([]);
+    expect(resolveIcdCodes({}, null, mspSet, 'icd9')).toEqual([]);
   });
 });

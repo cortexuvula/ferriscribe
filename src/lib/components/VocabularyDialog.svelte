@@ -123,8 +123,9 @@
   });
 
   $effect(() => {
-    filterCategory;
-    if (open) loadEntries();
+    // Reload whenever the dialog is open; reading `filterCategory` here
+    // makes this effect re-run when the category filter changes.
+    if (open && filterCategory !== undefined) loadEntries();
   });
 </script>
 
@@ -143,7 +144,7 @@
       <div class="vocab-toolbar">
         <select class="filter-select" bind:value={filterCategory}>
           <option value="all">All Categories</option>
-          {#each CATEGORIES as cat}
+          {#each CATEGORIES as cat (cat.value)}
             <option value={cat.value}>{cat.label}</option>
           {/each}
         </select>

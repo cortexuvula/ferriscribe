@@ -19,6 +19,7 @@
 //! 5. Sort by score desc, dedupe, cap at [`MAX_CANDIDATES`].
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use medical_core::icd9::{self, Icd9Entry};
 use medical_core::types::PatientContext;
@@ -28,19 +29,76 @@ use medical_core::types::PatientContext;
 /// transcript-scored matches.
 const MAX_CANDIDATES: usize = 40;
 
+/// Compiled once — matches code-like substrings (dotted numeric or V/E codes)
+/// in the lowercased source text. Previously recompiled on every SOAP generation.
+static CODE_LIKE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?:\d{3}\.\d+[a-z]?|[ve]\d+\.\d+)").expect("code-like regex compiles")
+});
+
+/// Single alternation regex matching any clinical abbreviation with word
+/// boundaries, case-insensitive — "mi", "MI", "Mi" all expand. One pass over
+/// the source replaces all 20 abbreviations at once (the previous
+/// per-abbreviation loop copied the full source once per pattern — ~20 ×
+/// source-length allocations).
+static ABBREV_ALTERNATION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    let alts: Vec<String> = CLINICAL_ABBREVIATIONS
+        .iter()
+        .map(|(abbr, _)| regex::escape(abbr))
+        .collect();
+    regex::Regex::new(&format!(r"(?i)\b({})\b", alts.join("|")))
+        .expect("abbreviation alternation compiles")
+});
+
+/// Lowercased abbreviation → expansion lookup used by the alternation's
+/// replacement closure.
+static ABBREV_EXPANSIONS: LazyLock<HashMap<String, &'static str>> = LazyLock::new(|| {
+    CLINICAL_ABBREVIATIONS
+        .iter()
+        .map(|(abbr, exp)| (abbr.to_lowercase(), *exp))
+        .collect()
+});
+
+/// Clinical abbreviations expanded before tokenization so the selector can
+/// match them against ICD-9 description tokens. These are common 1-2 letter
+/// abbreviations that the <3-char token filter would otherwise drop.
+const CLINICAL_ABBREVIATIONS: &[(&str, &str)] = &[
+    ("MI", "myocardial infarction"),
+    ("CP", "chest pain"),
+    ("DM", "diabetes mellitus"),
+    ("UTI", "urinary tract infection"),
+    ("GERD", "gastroesophageal reflux"),
+    ("COPD", "chronic obstructive pulmonary disease"),
+    ("CHF", "congestive heart failure"),
+    ("CKD", "chronic kidney disease"),
+    ("AKI", "acute kidney injury"),
+    ("AFib", "atrial fibrillation"),
+    ("BPH", "benign prostatic hypertrophy"),
+    ("DVT", "deep venous thrombosis"),
+    ("PE", "pulmonary embolism"),
+    ("TIA", "transient ischemic attack"),
+    ("OA", "osteoarthritis"),
+    ("MSK", "musculoskeletal"),
+    ("URI", "upper respiratory infection"),
+    ("PUD", "peptic ulcer disease"),
+    ("IBS", "irritable bowel syndrome"),
+    ("IBD", "inflammatory bowel disease"),
+];
+
 /// High-frequency BC primary-care codes, always included as a floor so
-/// the selector never blanks out common presentations or the routine-
-/// encounter fallback.
+/// the selector never blanks out common presentations.
 ///
 /// Verified against the bundled MSP list — these codes all exist. Where
 /// the MSP list uses parent codes without trailing zeros (e.g. `786.5`
 /// not `786.50`), the MSP form is used.
 ///
-/// Kept to **25 entries** so the guaranteed slots never overflow
+/// Kept to **29 entries** so the guaranteed slots never overflow
 /// [`MAX_CANDIDATES`] and leave room for transcript-scored additions.
 ///
 /// **Clinical review note:** curated for a BC family-practice context.
-/// Adjust if the deployment context changes.
+/// V70.0 (routine exam) is intentionally NOT in the baseline — MSP
+/// prefers specific codes. Screening/preventive codes are included
+/// instead so the selector surfaces them for wellness visits. Adjust
+/// if the deployment context changes.
 const PRIMARY_CARE_BASELINE: &[&str] = &[
     // Cardiovascular / metabolic
     "401.9", // Essential hypertension, unspecified
@@ -55,6 +113,7 @@ const PRIMARY_CARE_BASELINE: &[&str] = &[
     "496",   // Chronic airways obstruction (COPD)
     "786.2", // Cough
     // Musculoskeletal
+    "723.1", // Cervicalgia (neck pain)
     "724.5", // Backache, unspecified
     "724.2", // Lumbago
     "847.2", // Sprain of lumbar (back strain)
@@ -72,11 +131,17 @@ const PRIMARY_CARE_BASELINE: &[&str] = &[
     // Mental health
     "311",   // Depressive disorder, NEC
     "300.0", // Anxiety states
-    // Encounter / administrative
-    "V70.0", // Routine general medical examination
+    // Screening / preventive (V70.0 intentionally omitted — MSP prefers
+    // specific codes; these surface for wellness/screening visits)
+    "V77.0", // Special screening for thyroid disorders
+    "V77.1", // Special screening for diabetes mellitus
+    "V16.0", // Family history of malignant neoplasm, GI tract
+    "V17.3", // Family history of ischaemic heart disease
 ];
 
 /// English stopwords excluded from tokenization.
+/// Note: "back", "side", "left", "right" are intentionally KEPT — they
+/// carry clinical meaning (back pain, right-sided weakness, left arm).
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "that", "this", "with", "from", "have", "has", "was", "were", "are",
     "been", "not", "but", "his", "her", "she", "him", "you", "your", "they", "their", "will",
@@ -85,8 +150,9 @@ const STOPWORDS: &[&str] = &[
     "three", "also", "just", "like", "what", "when", "where", "which", "how", "who", "whom",
     "patient", "doctor", "today", "visit", "come", "came", "going", "get", "got", "yes", "yeah",
     "okay", "ok", "well", "know", "think", "feel", "feeling", "really", "very", "kind", "sort",
-    "bit", "lot", "stuff", "thing", "things", "here", "there", "right", "left", "back", "side",
-    "been", "being", "had",
+    "bit", "lot", "stuff", "thing", "things", "here", "there",
+    // "right", "left", "back", "side" intentionally KEPT — clinically meaningful
+    "being", "had",
 ];
 
 /// Selects a relevant subset of ICD-9 codes for the SOAP prompt.
@@ -114,9 +180,13 @@ pub fn select_icd9_candidates(
         }
     }
 
-    let source_tokens = tokenize(&source);
-    let source_set: HashSet<String> = source_tokens.into_iter().collect();
+    // Single lowercased buffer feeds everything downstream: tokenization
+    // (the abbreviation regex is (?i) and tokens are lowercased anyway),
+    // the bounded-run set for code mentions, and the code-like scan. No
+    // second full-source copy.
     let source_lower = source.to_lowercase();
+    let source_set: HashSet<String> = tokenize(&source_lower).into_iter().collect();
+    let mentioned_runs = extract_bounded_runs(&source_lower);
 
     // 2. Score entries using the pre-computed inverted index (token → entry
     //    indices). Instead of iterating all 7,122 entries and re-tokenizing
@@ -141,20 +211,11 @@ pub fn select_icd9_candidates(
     // Add entries whose code appears verbatim in the source. The
     // tokenization splits dotted codes (786.5 → "786" + "5"), so we scan
     // the source for code-like substrings directly and look them up in
-    // the O(1) code index. Only distinctive codes (dotted or alpha) are
-    // worth checking — bare 3-digit codes collide with lab values.
-    let code_index = icd9::code_index();
-    // Extract code-like tokens: substrings matching \d{3}\.\d or [VE]\d+\.\d
-    // from the lowercased source. This is a lightweight scan, not the full
-    // per-entry code_mentioned regex.
-    for m in regex::Regex::new(r"(?P<code>(?:\d{3}\.\d+[a-z]?|[ve]\d+\.\d+))")
-        .expect("code-like regex compiles")
-        .find_iter(&source_lower)
-    {
+    // the O(1) code→index map.
+    let code_to_idx = icd9::code_to_idx();
+    for m in CODE_LIKE_RE.find_iter(&source_lower) {
         let code = m.as_str().to_uppercase();
-        if let Some(entry) = code_index.get(&code)
-            && let Some(idx) = entries.iter().position(|e| std::ptr::eq(e, *entry))
-        {
+        if let Some(&idx) = code_to_idx.get(&code) {
             candidate_indices.insert(idx);
         }
     }
@@ -165,25 +226,30 @@ pub fn select_icd9_candidates(
         let desc_set = &desc_sets[idx];
 
         let overlap = source_set.intersection(desc_set).count();
-        let mut score = overlap;
+        let mut score = overlap as i32;
 
         // Bonus: the bare code is mentioned verbatim in the source text.
         // Use a word-boundary match so bare 3-digit numeric codes (130, 250,
         // 401) don't false-positive on lab/dose values (e.g. "glucose 130").
         // Dotted codes (786.5) and V/alpha codes (V70.0, 01A) are
         // distinctive enough that a boundary match is reliable.
-        if code_mentioned(&entry.code, &source_lower) {
+        if code_mentioned(&entry.code, &mentioned_runs) {
             score += 3;
         }
 
+        // Specificity adjustment: MSP billing prefers specific codes.
+        // Boost specific codes (4-5 digit, V-screening) and penalize
+        // non-specific codes (V70.x routine exam) so they rank lower.
+        score += specificity_adjustment(&entry.code);
+
         if score > 0 {
-            scored.push((score, entry));
+            scored.push((score as usize, entry));
         }
     }
 
     // 3. Always-include baseline — these survive the cap regardless of
-    //    score, so a paperwork visit always has a valid code (V70.0) and
-    //    common presentations are never blanked out by incidental noise.
+    //    score, so common presentations are never blanked out by
+    //    incidental noise.
     let baseline_floor = 1;
     let mut baseline: Vec<(usize, &'static Icd9Entry)> = Vec::new();
     let mut seen_codes: HashSet<String> = HashSet::new();
@@ -227,11 +293,30 @@ pub fn select_icd9_candidates(
 
 /// Lowercase alphanumeric tokenization with stopword + short-token removal.
 ///
+/// Before tokenizing, expands common clinical abbreviations (MI → myocardial
+/// infarction, CP → chest pain, etc.) so 1-2 letter abbreviations that the
+/// <3-char filter would drop can still match ICD-9 descriptions.
+///
 /// Returns owned lowercased strings so the resulting sets can be compared
 /// case-insensitively — MSP descriptions are stored ALL UPPERCASE while
 /// transcripts are mixed-case, so both sides must be normalized to match.
 fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
+    // Expand clinical abbreviations in a single pass before tokenizing.
+    // This replaces short tokens like "MI" with their full form so the
+    // <3-char filter doesn't drop them and they can match description
+    // tokens. The single-alternation regex borrows the input when nothing
+    // matches — no per-pattern full-source copies.
+    let expanded = ABBREV_ALTERNATION.replace_all(text, |caps: &regex::Captures| {
+        // The alternation only matches listed abbreviations, so the lookup
+        // always succeeds; the identity fallback is purely defensive.
+        ABBREV_EXPANSIONS
+            .get(caps[1].to_lowercase().as_str())
+            .map(|expansion| expansion.to_string())
+            .unwrap_or_else(|| caps[1].to_string())
+    });
+
+    expanded
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|s| {
             if s.len() < 3 {
                 return false;
@@ -245,14 +330,49 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Extract every maximal `[A-Za-z0-9.]+` run from the lowercased source,
+/// with leading/trailing `.` trimmed, lowercased.
+///
+/// This is exactly the set of strings that can occur in the source with
+/// non-word characters on both sides — i.e. everything the previous
+/// per-candidate substring+boundary scan in [`code_mentioned`] could ever
+/// find. Building it once per generation turns the candidate loop's
+/// membership check from O(candidates × source_length) scans into O(1)
+/// set lookups. Dots stay INSIDE runs (a dotted code like `786.5` must not
+/// be split) but are trimmed at the edges, mirroring the old boundary rule
+/// where `.` counts as a non-word character.
+fn extract_bounded_runs(source_lower: &str) -> HashSet<String> {
+    fn flush(current: &mut String, runs: &mut HashSet<String>) {
+        let trimmed = current.trim_matches('.');
+        if !trimmed.is_empty() {
+            runs.insert(trimmed.to_string());
+        }
+        current.clear();
+    }
+
+    let mut runs = HashSet::new();
+    let mut current = String::new();
+    for ch in source_lower.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '.' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            flush(&mut current, &mut runs);
+        }
+    }
+    if !current.is_empty() {
+        flush(&mut current, &mut runs);
+    }
+    runs
+}
+
 /// Tests whether the bare ICD-9 code appears as a word-boundary match in
-/// the lowercased source text.
+/// the source text, via the pre-extracted [`extract_bounded_runs`] set.
 ///
 /// This guards against false positives where a bare 3-digit numeric code
 /// (e.g. `130` = toxoplasmosis) would match lab/dose values like
 /// "glucose 130" or "metformin 250 mg". Even with word boundaries, a
-/// bare 3-digit number is indistinguishable from a clinical value, so
-/// the bonus is only applied to codes that are **distinctive enough**
+/// bare 3-digit number is indistinguishable from a clinical value, so the
+/// bonus is only applied to codes that are **distinctive enough**
 /// to be unambiguous when mentioned verbatim:
 /// - ≥4 characters, OR
 /// - contains a dot (`786.5`, `401.9`), OR
@@ -260,7 +380,7 @@ fn tokenize(text: &str) -> Vec<String> {
 ///
 /// Bare 3-digit codes (130, 250, 401) never get the bonus — they rely
 /// entirely on description-token overlap for scoring.
-fn code_mentioned(code: &str, source_lower: &str) -> bool {
+fn code_mentioned(code: &str, mentioned: &HashSet<String>) -> bool {
     if code.is_empty() {
         return false;
     }
@@ -272,38 +392,110 @@ fn code_mentioned(code: &str, source_lower: &str) -> bool {
     if !(has_dot || has_letter || long_enough) {
         return false;
     }
-    let code_lower = code.to_lowercase();
-    // Word-boundary match without compiling a regex per call. Find the
-    // code in the source, then check the chars before/after are
-    // non-alphanumeric (or string boundaries).
-    let mut search_from = 0;
-    while let Some(pos) = source_lower[search_from..].find(&code_lower) {
-        let abs = search_from + pos;
-        let before_ok = abs == 0
-            || !source_lower
-                .as_bytes()
-                .get(abs - 1)
-                .is_some_and(is_word_char);
-        let after = abs + code_lower.len();
-        let after_ok = after >= source_lower.len()
-            || !source_lower.as_bytes().get(after).is_some_and(is_word_char);
-        if before_ok && after_ok {
-            return true;
-        }
-        search_from = abs + 1;
-    }
-    false
+    mentioned.contains(&code.to_lowercase())
 }
 
-/// Returns true if the byte is an alphanumeric "word" character (for the
-/// word-boundary check in [`code_mentioned`]).
-fn is_word_char(b: &u8) -> bool {
-    b.is_ascii_alphanumeric()
+/// Specificity scoring adjustment for MSP billing preference.
+///
+/// MSP prefers specific codes over vague ones. This function returns a
+/// small bonus or penalty:
+/// - **+1** for 4-5 digit codes (e.g. 250.40, 401.9) — more specific
+/// - **+1** for V-screening / family-history codes (V77.x, V16.x, V17.x,
+///   V18.x, V20.x) — preferred for wellness visits over V70.x
+/// - **-1** for V70.x codes — routine exam, MSP's least preferred
+/// - **0** for everything else (3-digit unspecified, other V/E codes)
+fn specificity_adjustment(code: &str) -> i32 {
+    if code.starts_with("V70.") || code == "V70" {
+        return -1; // Non-specific routine exam
+    }
+    // V-screening / family-history codes get a boost
+    if code.starts_with("V81.")
+        || code.starts_with("V77.")
+        || code.starts_with("V16.")
+        || code.starts_with("V17.")
+        || code.starts_with("V18.")
+        || code.starts_with("V20.")
+    {
+        return 1;
+    }
+    // 4-5 digit numeric codes (has a dot and at least 2 digits after)
+    let dot_count = code.matches('.').count();
+    if dot_count == 1 {
+        let after_dot = code.split('.').nth(1).unwrap_or("");
+        if after_dot.len() >= 2 {
+            return 1; // e.g. 250.40, 401.90
+        }
+    }
+    0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the exact boundary semantics of `code_mentioned` — written
+    /// against the original substring-scan implementation before the
+    /// HashSet rewrite; the rewrite must keep every row green.
+    #[test]
+    fn code_mentioned_boundary_semantics() {
+        let cases: &[(&str, &str, bool)] = &[
+            // Plain verbatim mention (dotted code).
+            ("786.5", "chest pain 786.5 today", true),
+            // Case-insensitive.
+            ("V70.0", "routine v70.0 exam", true),
+            // Adjacent punctuation is a valid boundary.
+            ("786.5", "(786.5)", true),
+            // Trailing period — still a mention ('.' is a non-word char).
+            ("786.50", "code 786.50.", true),
+            // Leading period — still a mention.
+            ("786.5", ".786.5", true),
+            // Longer run — NOT a mention (word char adjacent).
+            ("786.5", "reading 786.50 today", false),
+            // Substring of a longer alphanumeric run — not a mention.
+            ("70.0", "code V70.0 here", false),
+            // Double dot — not a mention.
+            ("786.5", "786..5", false),
+            // Bare 3-digit numeric codes are gate-blocked (lab/dose values).
+            ("250", "glucose 250 mg", false),
+            ("401", "BP 401?", false),
+            // Dotted 3-digit root passes the gate and matches.
+            ("250.0", "glucose 250.0 documented", true),
+            // Short alpha code passes the gate via its letter.
+            ("01A", "code 01A.", true),
+            // Not present at all.
+            ("786.5", "no codes here", false),
+        ];
+        for (code, source, expected) in cases {
+            assert_eq!(
+                code_mentioned(code, &extract_bounded_runs(&source.to_lowercase())),
+                *expected,
+                "code {code:?} in {source:?}"
+            );
+        }
+    }
+
+    /// The single-alternation abbreviation expansion is equivalent to the
+    /// old sequential per-pattern replacement only while no expansion
+    /// contains another abbreviation as a whole word (otherwise the old
+    /// loop could cascade: expansion A's output re-matched by pattern B).
+    /// Future edits to `CLINICAL_ABBREVIATIONS` must keep this property.
+    #[test]
+    fn clinical_abbreviations_have_no_cascading_expansions() {
+        for (abbr, expansion) in CLINICAL_ABBREVIATIONS {
+            let expansion_lower = expansion.to_lowercase();
+            let expansion_words: std::collections::HashSet<&str> = expansion_lower
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .collect();
+            for (other, _) in CLINICAL_ABBREVIATIONS {
+                assert!(
+                    !expansion_words.contains(other.to_lowercase().as_str()),
+                    "expansion of {abbr} ({expansion:?}) contains abbreviation {other} \
+                     as a whole word — single-pass expansion would differ from sequential"
+                );
+            }
+        }
+    }
 
     fn pc(conditions: &[&str]) -> PatientContext {
         PatientContext {
@@ -340,21 +532,9 @@ mod tests {
     }
 
     #[test]
-    fn always_includes_routine_exam_v700() {
-        // Even with an empty/irrelevant transcript, V70.0 must appear
-        // via the baseline so a paperwork visit has a valid code.
-        let selected = select_icd9_candidates("nothing relevant here xyzzy", None, None);
-        let codes: Vec<&str> = selected.iter().map(|e| e.code.as_str()).collect();
-        assert!(
-            codes.contains(&"V70.0"),
-            "V70.0 must always be in selection"
-        );
-    }
-
-    #[test]
     fn empty_transcript_returns_baseline_only() {
         let selected = select_icd9_candidates("", None, None);
-        // Baseline has 25 entries, all guaranteed slots under the 40 cap;
+        // Baseline has 29 entries, all guaranteed slots under the 40 cap;
         // with no transcript matches nothing else is added.
         assert_eq!(
             selected.len(),
@@ -500,15 +680,23 @@ mod tests {
     fn baseline_codes_survive_cap_under_heavy_transcript_scoring() {
         // A transcript that scores many non-baseline entries must NOT push
         // baseline codes out of the 40-slot result. The baseline is the
-        // billing-critical floor (V70.0 etc. must always be available).
+        // billing-critical floor (screening / family-history V-codes must
+        // always be available).
         let transcript = "fever headache cough sore throat sinus pain congestion wheeze dyspnea chest pain abdominal pain nausea rash itching dizziness fatigue malaise myalgia arthralgia back pain";
         let selected = select_icd9_candidates(transcript, None, None);
         let codes: HashSet<&str> = selected.iter().map(|e| e.code.as_str()).collect();
-        // V70.0 is the last baseline entry by file order and the most likely
-        // to be starved if the cap logic regresses.
+        // V16.0 (family hx GI cancer) and V77.0 (thyroid screening) are
+        // late baseline entries and the most likely to be starved if the
+        // cap logic regresses — they never match this acute-symptom
+        // transcript, so they survive only via the baseline floor.
         assert!(
-            codes.contains("V70.0"),
-            "V70.0 must survive the cap even under heavy scoring: {:?}",
+            codes.contains("V16.0"),
+            "V16.0 must survive the cap even under heavy scoring: {:?}",
+            codes
+        );
+        assert!(
+            codes.contains("V77.0"),
+            "V77.0 must survive the cap even under heavy scoring: {:?}",
             codes
         );
         // Spot-check a few other high-frequency baselines.
@@ -593,6 +781,24 @@ mod tests {
         assert!(
             tokens.iter().any(|t| t.contains("hypertension")),
             "ASCII terms kept"
+        );
+    }
+
+    #[test]
+    fn neck_pain_transcript_surfaces_cervicalgia() {
+        // Regression: a "neck pain" transcript must surface 723.1
+        // (CERVICALGIA) in the candidates. Previously this failed because
+        // the description "CERVICALGIA" is a single token that doesn't
+        // match "neck" or "pain" in the transcript.
+        let selected = select_icd9_candidates(
+            "Patient reports left-sided neck pain. Previously had right neck pain.",
+            None,
+            None,
+        );
+        let codes: Vec<&str> = selected.iter().map(|e| e.code.as_str()).collect();
+        assert!(
+            codes.contains(&"723.1"),
+            "723.1 (CERVICALGIA) must be in candidates for a neck-pain transcript. Got: {codes:?}"
         );
     }
 }

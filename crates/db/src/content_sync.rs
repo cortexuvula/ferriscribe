@@ -31,6 +31,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DbError, DbResult};
 
+/// Parse a stored timestamp for LWW decisions. Accepts both legitimate
+/// stored formats: RFC 3339 (with any offset) and SQLite's space-separated
+/// `datetime('now')` format. Returns `None` for anything else.
+fn parse_lww_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+/// Chronological comparison for LWW decisions. String comparison is wrong
+/// across the two stored formats (`' '` < `T`, `Z` vs `+00:00`), so both
+/// sides are parsed. Unparseable timestamps sort as the OLDEST value —
+/// legacy or corrupt data must not win delete/restore decisions.
+pub fn cmp_lww_timestamps(a: &str, b: &str) -> std::cmp::Ordering {
+    match (parse_lww_timestamp(a), parse_lww_timestamp(b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+    }
+}
+
 /// The set of recording fields that participate in per-field LWW sync.
 ///
 /// Each name maps directly to a column on the `recordings` table. The
@@ -139,6 +164,18 @@ pub struct MergeResult {
     pub changed_recording_ids: Vec<String>,
 }
 
+/// A purge notification travelling on the pull response: the server
+/// permanently deleted this recording; clients holding a stale live copy
+/// tombstone it locally. Carries the recording id and purge timestamp only
+/// — never content (HIPAA).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PurgedRef {
+    /// Recording UUID as a string.
+    pub id: String,
+    /// When the server purged the recording (RFC 3339 UTC string).
+    pub purged_at: String,
+}
+
 /// Repository for content-sync operations.
 ///
 /// Stateles, associated-function style matching the other repos in this crate.
@@ -245,20 +282,27 @@ impl ContentSyncRepo {
         // "row exists but value is NULL" (first run). Using `row.get`
         // on a NULL column returns InvalidColumnType, so we use
         // `row.get::<_, Option<String>>` which maps NULL → None.
-        let cursor: Option<String> = conn
-            .query_row(
-                "SELECT value FROM sync_state WHERE key = 'content_sync_cursor'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .unwrap_or(None);
-        let last_pull: Option<String> = conn
-            .query_row(
-                "SELECT value FROM sync_state WHERE key = 'content_sync_last_pull'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .unwrap_or(None);
+        //
+        // QueryResultNoRows (row missing entirely) is treated as first run.
+        // Other errors (SQLITE_BUSY, disk I/O, corruption) are propagated.
+        let cursor: Option<String> = match conn.query_row(
+            "SELECT value FROM sync_state WHERE key = 'content_sync_cursor'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(DbError::from(e)),
+        };
+        let last_pull: Option<String> = match conn.query_row(
+            "SELECT value FROM sync_state WHERE key = 'content_sync_last_pull'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(DbError::from(e)),
+        };
         Ok(SyncCursor { cursor, last_pull })
     }
 
@@ -293,14 +337,17 @@ impl ContentSyncRepo {
         // One-time reset: clear any stale push cursor left by earlier
         // versions that conflated pull and push cursors. Uses a versioned
         // sentinel key so each version bump can trigger a fresh full re-push.
-        let needs_reset: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sync_state WHERE key = 'content_sync_push_v3_reset'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-            == 0;
+        let needs_reset: bool = match conn.query_row(
+            "SELECT COUNT(*) FROM sync_state WHERE key = 'content_sync_push_v3_reset'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(0) => true,
+            Ok(_) => false,
+            // Row should always exist (COUNT always returns a row), but if
+            // something goes wrong, skip the reset rather than failing.
+            Err(_) => false,
+        };
         if needs_reset {
             conn.execute(
                 "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('content_sync_push_v3_reset', '1')",
@@ -314,13 +361,15 @@ impl ContentSyncRepo {
             return Ok(None);
         }
 
-        let cursor: Option<String> = conn
-            .query_row(
-                "SELECT value FROM sync_state WHERE key = 'content_sync_push_cursor'",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .unwrap_or(None);
+        let cursor: Option<String> = match conn.query_row(
+            "SELECT value FROM sync_state WHERE key = 'content_sync_push_cursor'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(DbError::from(e)),
+        };
         Ok(cursor)
     }
 
@@ -379,6 +428,56 @@ impl ContentSyncRepo {
         Ok((out, has_more))
     }
 
+    /// Ledger entries with `purged_at > since` (all entries when `since`
+    /// is `None` — a fresh client's first pull), ordered by `purged_at`.
+    ///
+    /// The comparison is a plain string `>` on `purged_at`. That is safe
+    /// here even though [`cmp_lww_timestamps`] exists, because every row in
+    /// `purged_recordings` is written by the purge path in `recordings.rs`
+    /// (`purge_soft_deleted_with_ledger`) with a single-format
+    /// `to_rfc3339()` timestamp (T-format, `+00:00` offset), so the table
+    /// compares consistently with itself. The cursor is *normally* the
+    /// client's `advance_cursor` output (the same format), but a legacy
+    /// space-format value passes through `advance_cursor` unchanged — and
+    /// in string comparison `' '` sorts before `'T'`, so such a cursor can
+    /// only make the filter select MORE entries than strictly-newer, never
+    /// fewer. Over-selection is harmless: re-delivering an already-applied
+    /// purge ref is an idempotent no-op in [`Self::apply_purged_refs`]
+    /// (already-tombstoned rows keep their `deleted_at`). The dangerous
+    /// direction — under-selection, which would silently drop a purge
+    /// notification — has no reachable cause: a `Z`-offset cursor never
+    /// reaches this comparison because `advance_cursor` normalizes every
+    /// RFC 3339-parseable timestamp to `to_rfc3339()`'s `+00:00` output,
+    /// and the only non-T-format value that survives it (space format) can
+    /// only make the cursor compare as older — which over-selects.
+    pub fn purged_since(conn: &Connection, since: Option<&str>) -> DbResult<Vec<PurgedRef>> {
+        let refs = if let Some(since) = since {
+            let mut stmt = conn.prepare(
+                "SELECT id, purged_at FROM purged_recordings
+                 WHERE purged_at > ?1
+                 ORDER BY purged_at",
+            )?;
+            stmt.query_map([since], |r| {
+                Ok(PurgedRef {
+                    id: r.get(0)?,
+                    purged_at: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            let mut stmt =
+                conn.prepare("SELECT id, purged_at FROM purged_recordings ORDER BY purged_at")?;
+            stmt.query_map([], |r| {
+                Ok(PurgedRef {
+                    id: r.get(0)?,
+                    purged_at: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(refs)
+    }
+
     // -----------------------------------------------------------------
     // Merge
     // -----------------------------------------------------------------
@@ -396,178 +495,264 @@ impl ContentSyncRepo {
         let mut conflicts: Vec<MergeConflict> = Vec::new();
         let mut changed: Vec<String> = Vec::new();
 
-        conn.execute_batch("BEGIN")?;
-        let result: DbResult<()> = (|| {
-            for remote in remotes {
-                let id_str = &remote.id;
-                let id = match uuid::Uuid::parse_str(id_str) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        return Err(DbError::UuidParse(
-                            e.to_string(),
-                            format!("SyncRecording.id = {id_str}"),
-                        ));
-                    }
-                };
+        // Whole batch inside one transaction; a failure rolls back all writes
+        // so the local store is never left half-merged. `unchecked_transaction`
+        // rolls back on drop, and `Transaction` derefs to `Connection` so the
+        // merge body below uses `conn` unchanged.
+        let tx = conn.unchecked_transaction()?;
+        let conn: &Connection = &tx;
+        for remote in remotes {
+            let id_str = &remote.id;
+            let id = match uuid::Uuid::parse_str(id_str) {
+                Ok(u) => u,
+                Err(e) => {
+                    return Err(DbError::UuidParse(
+                        e.to_string(),
+                        format!("SyncRecording.id = {id_str}"),
+                    ));
+                }
+            };
 
-                let local_exists = local_recording_exists(conn, id_str)?;
+            let local_exists = local_recording_exists(conn, id_str)?;
 
-                // ----- Deletion handling (whole-row tombstone) -----
-                if let Some(remote_deleted) = &remote.deleted_at {
-                    if local_exists {
-                        let local_deleted: Option<String> = conn
-                            .query_row(
-                                "SELECT deleted_at FROM recordings WHERE id = ?1",
-                                [id_str],
-                                |row| row.get(0),
-                            )
-                            .ok()
-                            .flatten();
-                        match local_deleted {
-                            None => {
-                                // Local live, remote deleted → propagate deletion.
-                                conn.execute(
-                                    "UPDATE recordings SET deleted_at = ?1, updated_at = ?1
-                                     WHERE id = ?2",
-                                    params![remote_deleted, id_str],
-                                )?;
+            // ----- Deletion handling (whole-row tombstone) -----
+            if let Some(remote_deleted) = &remote.deleted_at {
+                if local_exists {
+                    let (local_deleted, local_updated): (Option<String>, Option<String>) =
+                        match conn.query_row(
+                            "SELECT deleted_at, updated_at FROM recordings WHERE id = ?1",
+                            [id_str],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        ) {
+                            Ok(v) => v,
+                            // Unreachable in practice (`local_exists` was
+                            // checked inside this same transaction) — treat as
+                            // nothing-to-do rather than failing the whole batch.
+                            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                            Err(e) => return Err(DbError::from(e)),
+                        };
+                    match local_deleted {
+                        None => {
+                            // Local live, remote tombstoned → timestamped LWW.
+                            // A remote deletion at or after the local edit
+                            // tombstones the row (ties go to the tombstone —
+                            // deletions win ties); a strictly newer local edit
+                            // keeps the row live and will be pushed back to the
+                            // deleting peer. A NULL local `updated_at` sorts
+                            // oldest, so a legacy row never outlives a real
+                            // deletion.
+                            if cmp_lww_timestamps(
+                                remote_deleted,
+                                local_updated.as_deref().unwrap_or(""),
+                            ) != std::cmp::Ordering::Less
+                            {
+                                Self::sync_tombstone(conn, id_str, remote_deleted)?;
                                 changed.push(id_str.clone());
                                 tracing::info!(
                                     recording_id = %id_str,
-                                    deleted_at = %remote_deleted,
-                                    "sync: propagated remote deletion"
+                                    "sync: applied remote tombstone (deletion at or after local edit)"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    recording_id = %id_str,
+                                    "sync: local edit newer than remote tombstone; keeping row live"
                                 );
                             }
-                            Some(local_ts) => {
-                                // Both deleted — earliest (smallest timestamp) wins.
-                                if remote_deleted < &local_ts {
-                                    conn.execute(
-                                        "UPDATE recordings SET deleted_at = ?1, updated_at = ?1
-                                         WHERE id = ?2",
-                                        params![remote_deleted, id_str],
-                                    )?;
-                                    changed.push(id_str.clone());
-                                }
+                        }
+                        Some(local_ts) => {
+                            // Both deleted — nothing to reconcile; the local
+                            // tombstone always stands (even when the remote
+                            // one is later). Any UPDATE here would fire the
+                            // FTS update trigger's 'delete' against absent
+                            // index state (tombstoned rows are de-indexed
+                            // from `recordings_fts` → SQLITE_CORRUPT), so
+                            // this is deliberately a conservative no-op:
+                            // keeping the local timestamp just means purge
+                            // waits a little longer, and peers converge —
+                            // any peer holding the other tombstone keeps it
+                            // by the same rule.
+                            if cmp_lww_timestamps(remote_deleted, &local_ts)
+                                == std::cmp::Ordering::Less
+                            {
+                                tracing::debug!(
+                                    recording_id = %id_str,
+                                    "sync: both sides deleted; peer holds an earlier tombstone (FTS-safe no-op)"
+                                );
                             }
                         }
-                        // Once deleted, skip field-level merge for this recording.
-                        continue;
-                    } else {
-                        // Remote is a tombstone for a recording we don't have —
-                        // insert it as a tombstone so the deletion is durable.
-                        Self::insert_remote_recording(conn, remote)?;
-                        changed.push(id_str.clone());
+                    }
+                    // Once deleted, skip field-level merge for this recording.
+                    continue;
+                } else {
+                    // Remote is a tombstone for a recording we don't have —
+                    // insert it as a tombstone so the deletion is durable,
+                    // unless the purge ledger already records this id: the
+                    // ledger row itself makes the deletion durable, and
+                    // re-inserting would resurrect a purged recording's row.
+                    if Self::purge_ledger_refuses(conn, id_str) {
+                        tracing::warn!(
+                            recording_id = %id_str,
+                            "sync: refused tombstone insert of purged recording"
+                        );
                         continue;
                     }
-                }
-
-                // ----- New recording (no local row) → insert + all revisions -----
-                if !local_exists {
                     Self::insert_remote_recording(conn, remote)?;
-                    for (field, value) in &remote.fields {
-                        Self::apply_field(conn, id_str, field, &value.value)?;
+                    changed.push(id_str.clone());
+                    continue;
+                }
+            }
+
+            // ----- New recording (no local row) → insert + all revisions -----
+            if !local_exists {
+                if Self::purge_ledger_refuses(conn, id_str) {
+                    tracing::warn!(recording_id = %id_str,
+                        "sync: refused re-insert of purged recording (stale copy from a machine that missed the deletion)");
+                    continue;
+                }
+                Self::insert_remote_recording(conn, remote)?;
+                for (field, value) in &remote.fields {
+                    Self::apply_field(conn, id_str, field, &value.value)?;
+                    Self::upsert_revision(
+                        conn,
+                        &id,
+                        field,
+                        &value.updated_at,
+                        value.origin_device.as_deref(),
+                    )?;
+                }
+                // Stamp the synced_from marker AFTER the field merge loop,
+                // so it survives even if the sender's metadata field
+                // overwrites the initial value set by insert_remote_recording.
+                // Non-fatal: the badge is cosmetic and must never block
+                // the data sync from completing.
+                if let Err(e) = Self::stamp_synced_origin(conn, id_str, remote) {
+                    tracing::warn!(
+                        recording_id = %id_str,
+                        error = %e,
+                        "sync: stamp_synced_origin failed (non-fatal, badge will be missing)"
+                    );
+                }
+                changed.push(id_str.clone());
+                continue;
+            }
+
+            // ----- Existing recording → restore check, then per-field LWW -----
+            // A local tombstone guards every field write (`apply_field`'s
+            // `deleted_at IS NULL`), so a live incoming row must first beat
+            // the tombstone's timestamp to matter: a strictly newer live row
+            // means a peer restored the recording — revive it (FTS-safe) and
+            // fall through so the field loop below can apply the peer's
+            // edits. An older live row is a pre-delete copy — the tombstone
+            // stands and the row is skipped entirely (fields stay guarded,
+            // and we don't emit the apply_field 0-rows warning per field).
+            let local_deleted: Option<String> = match conn.query_row(
+                "SELECT deleted_at FROM recordings WHERE id = ?1",
+                [id_str],
+                |r| r.get(0),
+            ) {
+                Ok(v) => v,
+                // Defensive: `local_exists` was checked inside this same
+                // transaction, so a missing row here is a vanishing edge —
+                // skip it rather than failing the whole batch. Real DB errors
+                // (I/O, busy) are propagated; swallowing them would silently
+                // skip a legitimate restore while the cursor advances.
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(e) => return Err(DbError::from(e)),
+            };
+            if let Some(local_del) = &local_deleted {
+                if cmp_lww_timestamps(&remote.updated_at, local_del) == std::cmp::Ordering::Greater
+                {
+                    Self::sync_restore(conn, id_str, &remote.updated_at)?;
+                    changed.push(id_str.clone());
+                    tracing::info!(
+                        recording_id = %id_str,
+                        "sync: remote live row newer than local tombstone; restored"
+                    );
+                    // Fall through: the field loop is now unblocked.
+                } else {
+                    tracing::debug!(
+                        recording_id = %id_str,
+                        "sync: local tombstone newer than remote live row; staying deleted"
+                    );
+                    continue;
+                }
+            }
+
+            let local_revisions = Self::revisions_for(conn, &id)?;
+            let local_map: HashMap<&str, &FieldRevision> = local_revisions
+                .iter()
+                .map(|r| (r.field.as_str(), r))
+                .collect();
+
+            let mut row_changed = false;
+            for (field, remote_value) in &remote.fields {
+                match local_map.get(field.as_str()) {
+                    None => {
+                        // No local revision → remote wins by default.
+                        Self::apply_field(conn, id_str, field, &remote_value.value)?;
                         Self::upsert_revision(
                             conn,
                             &id,
                             field,
-                            &value.updated_at,
-                            value.origin_device.as_deref(),
+                            &remote_value.updated_at,
+                            remote_value.origin_device.as_deref(),
                         )?;
+                        row_changed = true;
                     }
-                    // Stamp the synced_from marker AFTER the field merge loop,
-                    // so it survives even if the sender's metadata field
-                    // overwrites the initial value set by insert_remote_recording.
-                    // Non-fatal: the badge is cosmetic and must never block
-                    // the data sync from completing.
-                    if let Err(e) = Self::stamp_synced_origin(conn, id_str, remote) {
-                        tracing::warn!(
-                            recording_id = %id_str,
-                            error = %e,
-                            "sync: stamp_synced_origin failed (non-fatal, badge will be missing)"
-                        );
-                    }
-                    changed.push(id_str.clone());
-                    continue;
-                }
-
-                // ----- Existing recording → per-field LWW -----
-                let local_revisions = Self::revisions_for(conn, &id)?;
-                let local_map: HashMap<&str, &FieldRevision> = local_revisions
-                    .iter()
-                    .map(|r| (r.field.as_str(), r))
-                    .collect();
-
-                let mut row_changed = false;
-                for (field, remote_value) in &remote.fields {
-                    match local_map.get(field.as_str()) {
-                        None => {
-                            // No local revision → remote wins by default.
-                            Self::apply_field(conn, id_str, field, &remote_value.value)?;
-                            Self::upsert_revision(
-                                conn,
-                                &id,
-                                field,
-                                &remote_value.updated_at,
-                                remote_value.origin_device.as_deref(),
-                            )?;
-                            row_changed = true;
-                        }
-                        Some(local_rev) => {
-                            match remote_value.updated_at.cmp(&local_rev.updated_at) {
-                                std::cmp::Ordering::Greater => {
-                                    // Remote newer → remote wins.
-                                    Self::apply_field(conn, id_str, field, &remote_value.value)?;
-                                    Self::upsert_revision(
-                                        conn,
-                                        &id,
-                                        field,
-                                        &remote_value.updated_at,
-                                        remote_value.origin_device.as_deref(),
-                                    )?;
-                                    row_changed = true;
-                                }
-                                std::cmp::Ordering::Less => {
-                                    // Local newer → local wins, report conflict.
-                                    conflicts.push(MergeConflict {
-                                        field: field.clone(),
-                                        local_updated_at: local_rev.updated_at.clone(),
-                                        remote_updated_at: remote_value.updated_at.clone(),
-                                    });
-                                }
-                                std::cmp::Ordering::Equal => {
-                                    // Tie — keep local, no conflict.
-                                }
+                    Some(local_rev) => {
+                        // `cmp_lww_timestamps`, not raw `.cmp()`: stored
+                        // timestamps legitimately exist in both RFC-3339 and
+                        // SQLite formats, and lexicographic compare orders
+                        // them wrongly (' ' < 'T') — a stale side could win.
+                        match cmp_lww_timestamps(&remote_value.updated_at, &local_rev.updated_at) {
+                            std::cmp::Ordering::Greater => {
+                                // Remote newer → remote wins.
+                                Self::apply_field(conn, id_str, field, &remote_value.value)?;
+                                Self::upsert_revision(
+                                    conn,
+                                    &id,
+                                    field,
+                                    &remote_value.updated_at,
+                                    remote_value.origin_device.as_deref(),
+                                )?;
+                                row_changed = true;
+                            }
+                            std::cmp::Ordering::Less => {
+                                // Local newer → local wins, report conflict.
+                                conflicts.push(MergeConflict {
+                                    field: field.clone(),
+                                    local_updated_at: local_rev.updated_at.clone(),
+                                    remote_updated_at: remote_value.updated_at.clone(),
+                                });
+                            }
+                            std::cmp::Ordering::Equal => {
+                                // Tie — keep local, no conflict.
                             }
                         }
                     }
                 }
-                if row_changed {
-                    // Bump the row's updated_at so the next delta pull sees it.
-                    let max_ts = remote
-                        .fields
-                        .values()
-                        .map(|v| v.updated_at.as_str())
-                        .max()
-                        .unwrap_or(&remote.updated_at);
-                    conn.execute(
-                        "UPDATE recordings SET updated_at = ?1 WHERE id = ?2 AND ?1 > updated_at",
-                        params![max_ts, id_str],
-                    )?;
-                    changed.push(id_str.clone());
-                }
             }
-            Ok(())
-        })();
-
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
+            if row_changed {
+                // Bump the row's updated_at so the next delta pull sees it.
+                // `deleted_at IS NULL` keeps this an FTS-safe no-op on
+                // locally-trashed rows (a local tombstone wins over peer
+                // field edits — see `apply_field`).
+                let max_ts = remote
+                    .fields
+                    .values()
+                    .map(|v| v.updated_at.as_str())
+                    .max()
+                    .unwrap_or(&remote.updated_at);
+                conn.execute(
+                    "UPDATE recordings SET updated_at = ?1
+                         WHERE id = ?2 AND deleted_at IS NULL AND ?1 > updated_at",
+                    params![max_ts, id_str],
+                )?;
+                changed.push(id_str.clone());
             }
         }
+
+        tx.commit()?;
 
         tracing::info!(
             remote_count = remotes.len(),
@@ -582,6 +767,27 @@ impl ContentSyncRepo {
         })
     }
 
+    /// True when the purge ledger records ANY row for this id.
+    ///
+    /// Id-only by design: a machine that was offline across the deletion can
+    /// EDIT its stale copy, giving it a fresh `updated_at` that would pierce
+    /// a `purged_at >= updated_at` comparison. Genuinely re-created content
+    /// always gets a NEW UUID, so same-UUID + a ledger hit is always a stale
+    /// copy of a recording the practice deleted and the server purged.
+    ///
+    /// COUNT always returns exactly one row, so the `unwrap_or(0)` below only
+    /// fires on a genuinely broken ledger read — which falls OPEN (allow the
+    /// insert): data availability wins over blocking sync on a ledger hiccup.
+    fn purge_ledger_refuses(conn: &Connection, id: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+            [id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    }
+
     /// Write a single field value to the `recordings` table.
     ///
     /// Dispatches on the field name to build a targeted UPDATE. Text fields
@@ -589,6 +795,13 @@ impl ContentSyncRepo {
     /// store the JSON value directly (their columns are JSON text). Unknown
     /// field names are a no-op (logged) so a newer server field doesn't
     /// break an older client.
+    ///
+    /// The UPDATE is guarded with `deleted_at IS NULL`: a local tombstone
+    /// wins over a peer's field edit (the recording is deleted locally, so
+    /// the skipped edit is correct), and — critically — an UPDATE on a
+    /// soft-deleted row would fire the `recordings_fts_update` trigger
+    /// against a de-indexed row (SQLITE_CORRUPT). The guard makes the edit
+    /// a clean no-op; the sync cursor still advances.
     fn apply_field(
         conn: &Connection,
         recording_id: &str,
@@ -631,13 +844,14 @@ impl ContentSyncRepo {
             }
         };
 
-        let sql = format!("UPDATE recordings SET {column} = ?1 WHERE id = ?2");
+        let sql =
+            format!("UPDATE recordings SET {column} = ?1 WHERE id = ?2 AND deleted_at IS NULL");
         let changed = conn.execute(&sql, params![text_value, recording_id])?;
         if changed == 0 {
             tracing::warn!(
                 recording_id = %recording_id,
                 field = %field,
-                "sync: apply_field updated 0 rows"
+                "sync: apply_field updated 0 rows (recording missing, or locally trashed — tombstone wins)"
             );
         }
         Ok(())
@@ -659,10 +873,7 @@ impl ContentSyncRepo {
             .get("processing_status")
             .map(|v| v.value.to_string())
             .filter(|s| {
-                serde_json::from_str::<
-                    medical_core::types::recording::ProcessingStatus,
-                >(s)
-                .is_ok()
+                serde_json::from_str::<medical_core::types::recording::ProcessingStatus>(s).is_ok()
             })
             .unwrap_or_else(|| serde_json::json!({"status": "pending"}).to_string());
         // Stamp metadata with a synced_from marker so the receiving machine
@@ -703,6 +914,30 @@ impl ContentSyncRepo {
                 remote.deleted_at,
             ],
         )?;
+
+        // The INSERT above fires `recordings_fts_insert` unconditionally, so
+        // a row inserted AS a tombstone (the insert-as-tombstone path in
+        // `merge_incoming`) would otherwise sit indexed while tombstoned. A
+        // later `sync_restore` would re-index the already-indexed row and
+        // leave a duplicate posting — a single FTS 'delete' then removes
+        // only one copy. De-index immediately with the just-inserted values
+        // (exactly what the trigger indexed), mirroring `sync_tombstone`'s
+        // guarded de-index. Non-fatal to match its discipline: an FTS hiccup
+        // must not fail the whole sync batch.
+        if remote.deleted_at.is_some()
+            && let Err(e) = conn.execute(
+                "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT 'delete', rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1",
+                [&remote.id],
+            )
+        {
+            tracing::warn!(
+                recording_id = %remote.id,
+                error = %e,
+                "insert_remote_recording: failed to de-index inserted tombstone row"
+            );
+        }
         Ok(())
     }
 
@@ -729,7 +964,9 @@ impl ContentSyncRepo {
             meta = serde_json::json!({ "original": meta });
         }
         // After the above guards, meta is guaranteed to be a JSON object.
-        let obj = meta.as_object_mut().expect("metadata is object after guards");
+        let obj = meta
+            .as_object_mut()
+            .expect("metadata is object after guards");
         if !obj.contains_key("synced_from") {
             let origin = remote
                 .fields
@@ -743,6 +980,129 @@ impl ContentSyncRepo {
             "UPDATE recordings SET metadata = ?1 WHERE id = ?2",
             params![updated, id],
         )?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Sync-driven tombstone / restore primitives
+    // -----------------------------------------------------------------
+
+    /// Tombstone a live local row from a sync peer's deletion, with a
+    /// caller-supplied timestamp (the deletion's own `deleted_at`). Mirrors
+    /// `RecordingsRepo::soft_delete`'s FTS discipline: UPDATE first, then
+    /// remove the FTS row with the *currently indexed* column values.
+    /// Missing row / already-tombstoned → clean no-op.
+    pub fn sync_tombstone(conn: &Connection, id: &str, deleted_at: &str) -> DbResult<()> {
+        let changed = conn.execute(
+            "UPDATE recordings SET deleted_at = ?1, updated_at = ?1
+             WHERE id = ?2 AND deleted_at IS NULL",
+            params![deleted_at, id],
+        )?;
+        // Only de-index when the UPDATE actually tombstoned the row. Unlike
+        // `soft_delete` (which errors out on 0 rows and can therefore assume
+        // it runs on live rows), the no-op case here must NOT fire the FTS
+        // 'delete': the row was never indexed (missing) or is already
+        // de-indexed (tombstoned), and a 'delete' against absent index state
+        // corrupts the external-content index (SQLITE_CORRUPT on the next
+        // FTS operation).
+        if changed > 0
+            && let Err(e) = conn.execute(
+                "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT 'delete', rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1",
+                [id],
+            )
+        {
+            tracing::warn!(error = %e, "sync_tombstone: failed to remove recording from FTS index");
+        }
+        Ok(())
+    }
+
+    /// Apply purge notifications from a pull response: tombstone any LOCAL
+    /// LIVE copy (FTS-safe) so a machine that missed the practice-wide
+    /// deletion converges. Unlike the LWW tombstone path in
+    /// [`Self::merge_incoming`], a purge notification tombstones
+    /// unconditionally — the server already hard-deleted the row, so there
+    /// is no newer-local-edit case to honour. Already-tombstoned and
+    /// unknown ids are no-ops: the former keeps its own `deleted_at` (the
+    /// local 30-day sweeper finishes it), and the latter never existed
+    /// here (the ledger also refuses any later stale re-insert).
+    pub fn apply_purged_refs(conn: &Connection, purged: &[PurgedRef]) -> DbResult<()> {
+        for p in purged {
+            // EXISTS always returns exactly one row; an error here is a
+            // genuine DB failure and is propagated (the caller treats the
+            // whole application as best-effort and warns).
+            let live: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM recordings WHERE id = ?1 AND deleted_at IS NULL)",
+                [&p.id],
+                |r| r.get(0),
+            )?;
+            if live {
+                Self::sync_tombstone(conn, &p.id, &p.purged_at)?;
+                tracing::info!(
+                    recording_id = %p.id,
+                    "sync: tombstoned local copy of purged recording"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Revive a tombstoned local row from a sync peer's newer restore, with
+    /// the restore's `updated_at`. Mirrors `RecordingsRepo::restore`'s FTS
+    /// discipline: re-index BEFORE the UPDATE (the update trigger fires a
+    /// 'delete' for the old values that must match indexed state). Does NOT
+    /// stamp `retention_exempt` — the origin machine's restore stamped it
+    /// and it travels in the synced `metadata` field. Missing / live row →
+    /// clean no-op.
+    pub fn sync_restore(conn: &Connection, id: &str, updated_at: &str) -> DbResult<()> {
+        // EXISTS always returns exactly one row, so any error here is a
+        // genuine DB failure — propagate it. Swallowing it as "not
+        // tombstoned" (.unwrap_or(false)) would silently skip the restore
+        // while the sync cursor advances, permanently losing the peer's
+        // restore.
+        let tombstoned: bool = match conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL)",
+            [id],
+            |r| r.get(0),
+        ) {
+            Ok(v) => v,
+            // Theoretically unreachable (EXISTS always yields a row); treat
+            // it as not-tombstoned rather than failing the sync batch.
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(e) => return Err(DbError::from(e)),
+        };
+        if !tombstoned {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+             SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+             FROM recordings WHERE id = ?1",
+            [id],
+        )?;
+        let changed = conn.execute(
+            "UPDATE recordings SET deleted_at = NULL, updated_at = ?1
+             WHERE id = ?2 AND deleted_at IS NOT NULL",
+            params![updated_at, id],
+        )?;
+        // Close the probe→UPDATE TOCTOU. If the row flipped to live or was
+        // purged between the EXISTS probe and this UPDATE (0 rows changed),
+        // the re-insert above either added a duplicate index entry (row went
+        // live: it was already indexed) or inserted nothing (row gone).
+        // Remove exactly one entry with the mirror 'delete' so a concurrent
+        // flip can't leave a duplicate; it is a no-op when nothing was
+        // inserted.
+        if changed == 0
+            && let Err(e) = conn.execute(
+                "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT 'delete', rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1",
+                [id],
+            )
+        {
+            tracing::warn!(error = %e, "sync_restore: failed to roll back stray FTS re-index");
+        }
         Ok(())
     }
 }
@@ -839,5 +1199,224 @@ mod tests {
         let conn = db.conn().expect("conn");
         let map = ContentSyncRepo::revisions_for_batch(&conn, &[]).expect("batch");
         assert!(map.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod lww_ts_tests {
+    use super::cmp_lww_timestamps;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn rfc3339_offsets_compare_chronologically() {
+        // String comparison would order these wrongly (Z vs +00:00).
+        assert_eq!(
+            cmp_lww_timestamps("2026-01-02T03:04:05Z", "2026-01-02T03:04:05+00:00"),
+            Ordering::Equal
+        );
+        assert_eq!(
+            cmp_lww_timestamps("2026-01-02T03:04:05.500Z", "2026-01-02T03:04:05Z"),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn legacy_space_format_compares_chronologically() {
+        // ' ' (0x20) < 'T' (0x54): string comparison puts the LATER
+        // space-format timestamp before the earlier RFC one on the same day.
+        assert_eq!(
+            cmp_lww_timestamps("2026-01-02 05:00:00", "2026-01-02T03:04:05Z"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            cmp_lww_timestamps("2026-01-02 01:00:00", "2026-01-02T03:04:05Z"),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn unparseable_sorts_oldest() {
+        assert_eq!(
+            cmp_lww_timestamps("garbage", "2026-01-02T03:04:05Z"),
+            Ordering::Less
+        );
+        assert_eq!(
+            cmp_lww_timestamps("2026-01-02T03:04:05Z", "garbage"),
+            Ordering::Greater
+        );
+        assert_eq!(cmp_lww_timestamps("", ""), Ordering::Equal);
+    }
+}
+
+/// Tests for the FTS-disciplined sync tombstone/restore helpers.
+///
+/// **HIPAA note:** assertions touch only ids, counts, and timestamps;
+/// fixture filenames are synthetic.
+#[cfg(test)]
+mod sync_tombstone_tests {
+    use super::*;
+    use crate::Database;
+    use crate::recordings::RecordingsRepo;
+    use medical_core::types::recording::Recording;
+
+    fn seed(conn: &Connection, filename: &str) -> Recording {
+        let rec = Recording::new(
+            filename,
+            std::path::PathBuf::from(format!("/audio/{filename}")),
+        );
+        RecordingsRepo::insert(conn, &rec).expect("seed");
+        rec
+    }
+
+    fn deleted_at_raw(conn: &Connection, id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT deleted_at FROM recordings WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .expect("query deleted_at")
+    }
+
+    fn updated_at_raw(conn: &Connection, id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT updated_at FROM recordings WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .expect("query updated_at")
+    }
+
+    /// `recordings_fts` is an external-content FTS5 table
+    /// (`content='recordings'`): plain SELECTs read column values from the
+    /// content table, so `WHERE id = ?` always "finds" the row and never
+    /// observes de-indexing. Index membership must be probed with a MATCH
+    /// on a token unique to the fixture — its filename stem.
+    fn fts_row_present(conn: &Connection, filename_stem: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM recordings_fts WHERE recordings_fts MATCH ?1",
+            [format!("filename:{filename_stem}")],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    /// Assert the external-content FTS index is internally consistent.
+    /// A 'delete' issued against absent/mismatched index state corrupts the
+    /// index; this fails loudly instead of letting it surface later as
+    /// SQLITE_CORRUPT on an unrelated query.
+    fn assert_fts_healthy(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO recordings_fts(recordings_fts) VALUES('integrity-check')",
+            [],
+        )
+        .expect("FTS integrity-check must pass");
+    }
+
+    #[test]
+    fn sync_tombstone_hides_row_and_deindexes_fts() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let rec = seed(&conn, "tqz.wav");
+        assert!(fts_row_present(&conn, "tqz"));
+        ContentSyncRepo::sync_tombstone(&conn, &rec.id.to_string(), "2026-06-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(
+            deleted_at_raw(&conn, &rec.id.to_string()).as_deref(),
+            Some("2026-06-01T00:00:00Z")
+        );
+        assert!(
+            !fts_row_present(&conn, "tqz"),
+            "tombstoned row must leave the FTS index"
+        );
+        assert_fts_healthy(&conn);
+    }
+
+    #[test]
+    fn sync_restore_revives_row_and_reindexes_fts() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let rec = seed(&conn, "revx.wav");
+        assert!(fts_row_present(&conn, "revx"));
+        RecordingsRepo::soft_delete(&conn, &rec.id).unwrap();
+        assert!(!fts_row_present(&conn, "revx"));
+        ContentSyncRepo::sync_restore(&conn, &rec.id.to_string(), "2026-06-02T00:00:00Z").unwrap();
+        assert_eq!(deleted_at_raw(&conn, &rec.id.to_string()), None);
+        assert_eq!(
+            updated_at_raw(&conn, &rec.id.to_string()).as_deref(),
+            Some("2026-06-02T00:00:00Z"),
+            "sync_restore must stamp updated_at with the caller-supplied value"
+        );
+        assert!(
+            fts_row_present(&conn, "revx"),
+            "restored row must be searchable again"
+        );
+        assert_fts_healthy(&conn);
+    }
+
+    #[test]
+    fn sync_tombstone_on_missing_or_deleted_row_is_noop() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        ContentSyncRepo::sync_tombstone(
+            &conn,
+            "00000000-0000-0000-0000-000000000000",
+            "2026-06-01T00:00:00Z",
+        )
+        .unwrap();
+        let rec = seed(&conn, "noopn.wav");
+        RecordingsRepo::soft_delete(&conn, &rec.id).unwrap();
+        // second tombstone with a different timestamp is a no-op (row already
+        // deleted). Critically it must not re-fire the FTS 'delete' against
+        // already-de-indexed state (index corruption).
+        ContentSyncRepo::sync_tombstone(&conn, &rec.id.to_string(), "2027-01-01T00:00:00Z")
+            .unwrap();
+        assert_ne!(
+            deleted_at_raw(&conn, &rec.id.to_string()).as_deref(),
+            Some("2027-01-01T00:00:00Z")
+        );
+        assert!(
+            !fts_row_present(&conn, "noopn"),
+            "double tombstone must not resurrect the row"
+        );
+        assert_fts_healthy(&conn);
+        // exercise the index further: restore + search round-trip
+        ContentSyncRepo::sync_restore(&conn, &rec.id.to_string(), "2027-02-02T00:00:00Z").unwrap();
+        assert!(
+            fts_row_present(&conn, "noopn"),
+            "restore after double tombstone must re-index"
+        );
+        assert_eq!(
+            updated_at_raw(&conn, &rec.id.to_string()).as_deref(),
+            Some("2027-02-02T00:00:00Z")
+        );
+        assert_fts_healthy(&conn);
+    }
+
+    #[test]
+    fn sync_restore_on_missing_or_live_row_is_noop() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        ContentSyncRepo::sync_restore(
+            &conn,
+            "00000000-0000-0000-0000-000000000000",
+            "2026-06-02T00:00:00Z",
+        )
+        .unwrap();
+        let rec = seed(&conn, "livel.wav");
+        let before = deleted_at_raw(&conn, &rec.id.to_string());
+        let before_updated = updated_at_raw(&conn, &rec.id.to_string());
+        ContentSyncRepo::sync_restore(&conn, &rec.id.to_string(), "2026-06-02T00:00:00Z").unwrap();
+        assert_eq!(deleted_at_raw(&conn, &rec.id.to_string()), before);
+        assert_eq!(
+            updated_at_raw(&conn, &rec.id.to_string()),
+            before_updated,
+            "no-op restore must not bump updated_at (would cause spurious delta re-sync)"
+        );
+        assert!(
+            fts_row_present(&conn, "livel"),
+            "live row keeps its FTS entry"
+        );
+        assert_fts_healthy(&conn);
     }
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ValidatedIcdCode } from '../icd';
-  import IcdChip from './IcdChip.svelte';
+  import IcdCodeList from './IcdCodeList.svelte';
 
   interface Props {
     title: string;
@@ -12,6 +12,11 @@
     done: boolean;
     copyStatus: 'idle' | 'copying' | 'copied' | undefined;
     icdCodes?: ValidatedIcdCode[];
+    /** Heading for the billing-code list (mode-aware, e.g. "Billing codes (ICD-9)"). */
+    icdLabel?: string;
+    generatedText?: string | null;
+    progressText?: string | null;
+    failed?: boolean;
     onGenerate: () => void;
     onCopy: () => void;
     onSpeedRead?: () => void;
@@ -27,13 +32,17 @@
     done,
     copyStatus,
     icdCodes,
+    icdLabel = 'Billing codes (ICD-9)',
+    generatedText = null,
+    progressText = null,
+    failed = false,
     onGenerate,
     onCopy,
     onSpeedRead,
   }: Props = $props();
 </script>
 
-<div class="generate-item">
+<div class="generate-item" class:failed>
   {#if icon}<span class="item-icon" aria-hidden="true">{icon}</span>{/if}
   <div class="item-info">
     <div class="item-title">{title}</div>
@@ -42,14 +51,18 @@
   </div>
   <div class="item-action">
     {#if generating}
-      <button class="btn-generate" disabled>
+      <button class="btn-generate" type="button" disabled>
         <span class="spinner"></span> Generating...
       </button>
+      {#if progressText}
+        <span class="progress-phase" role="status" aria-live="polite">{progressText}</span>
+      {/if}
     {:else if done}
       <div class="done-group">
         <span class="done-badge">Done</span>
         <button
           class="btn-copy"
+          type="button"
           class:copied={copyStatus === 'copied'}
           onclick={onCopy}
           disabled={copyStatus === 'copying' || copyStatus === 'copied'}
@@ -59,6 +72,7 @@
         {#if onSpeedRead}
           <button
             class="btn-copy"
+            type="button"
             onclick={onSpeedRead}
             title="Speed Read (Cmd/Ctrl+Shift+R)"
           >
@@ -67,23 +81,17 @@
         {/if}
         <button
           class="btn-regenerate"
+          type="button"
           onclick={onGenerate}
           disabled={anyGenerating}
         >
           Regenerate
         </button>
       </div>
-      {#if icdCodes && icdCodes.length > 0}
-        <div class="icd-codes">
-          <span class="icd-label">ICD Codes:</span>
-          {#each icdCodes as code}
-            <IcdChip code={code.raw} valid={code.valid} />
-          {/each}
-        </div>
-      {/if}
     {:else}
       <button
         class="btn-generate"
+        type="button"
         onclick={onGenerate}
         disabled={anyGenerating}
       >
@@ -91,11 +99,23 @@
       </button>
     {/if}
   </div>
+  {#if done && icdCodes && icdCodes.length > 0}
+    <div class="icd-list-row">
+      <IcdCodeList codes={icdCodes} label={icdLabel} />
+    </div>
+  {/if}
+  {#if done && generatedText}
+    <details class="generated-preview">
+      <summary>Preview</summary>
+      <pre class="preview-text">{generatedText}</pre>
+    </details>
+  {/if}
 </div>
 
 <style>
   .generate-item {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 16px;
     padding: 16px;
@@ -240,17 +260,48 @@
     background-color: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
   }
 
-  .icd-codes {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  .icd-list-row {
+    width: 100%;
     margin-top: 8px;
-    flex-wrap: wrap;
   }
 
-  .icd-label {
+  .generated-preview {
+    width: 100%;
+    margin-top: 8px;
+  }
+
+  .generated-preview summary {
+    cursor: pointer;
     font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+
+  .preview-text {
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 12px;
+    background-color: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: inherit;
+    margin: 0;
+  }
+
+  .progress-phase {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-style: italic;
+    margin-top: 4px;
+  }
+
+  .generate-item.failed {
+    border-left: 3px solid var(--danger, #ef4444);
+    padding-left: 8px;
   }
 </style>

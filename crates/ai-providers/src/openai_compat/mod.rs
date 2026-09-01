@@ -15,6 +15,8 @@
 //!   conversion, request building, and response parsing.
 //! - `methods` — the four public methods: `list_models`, `complete`,
 //!   `complete_stream`, `complete_with_tools`.
+//! - `think` — stripping of inlined `<think>…</think>` reasoning blocks from
+//!   responses and streams (non-streaming helper + streaming filter).
 //!
 //! # Wire protocol coverage
 //!
@@ -29,6 +31,8 @@
 
 mod client;
 mod methods;
+mod think;
 mod wire;
 
 pub use client::OpenAiCompatibleClient;
+pub use think::strip_leading_think_block;

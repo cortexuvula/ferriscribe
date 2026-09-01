@@ -68,14 +68,14 @@ impl WhisperTranscriber {
         let ctx = WhisperContext::new_with_params(
             self.model_path
                 .to_str()
-                .ok_or_else(|| AppError::SttProvider("Model path is not valid UTF-8".into()))?,
+                .ok_or_else(|| AppError::stt_provider("Model path is not valid UTF-8"))?,
             WhisperContextParameters::default(),
         )
-        .map_err(|e| AppError::SttProvider(format!("Failed to load Whisper model: {e}")))?;
+        .map_err(|e| AppError::stt_provider(format!("Failed to load Whisper model: {e}")))?;
 
         let mut state = ctx
             .create_state()
-            .map_err(|e| AppError::SttProvider(format!("Failed to create Whisper state: {e}")))?;
+            .map_err(|e| AppError::stt_provider(format!("Failed to create Whisper state: {e}")))?;
 
         // Greedy decoding is more resistant to repetition loops than BeamSearch.
         // Beam search explores multiple paths and picks the highest cumulative
@@ -133,7 +133,7 @@ impl WhisperTranscriber {
 
         state
             .full(params, audio_16k_mono)
-            .map_err(|e| AppError::SttProvider(format!("Whisper inference failed: {e}")))?;
+            .map_err(|e| AppError::stt_provider(format!("Whisper inference failed: {e}")))?;
 
         let num_segments = state.full_n_segments();
         let mut segments = Vec::with_capacity(num_segments as usize);
@@ -141,10 +141,10 @@ impl WhisperTranscriber {
         for i in 0..num_segments {
             let segment = state
                 .get_segment(i)
-                .ok_or_else(|| AppError::SttProvider(format!("Segment {i} out of bounds")))?;
+                .ok_or_else(|| AppError::stt_provider(format!("Segment {i} out of bounds")))?;
 
             let text = segment.to_str_lossy().map_err(|e| {
-                AppError::SttProvider(format!("Failed to get segment {i} text: {e}"))
+                AppError::stt_provider(format!("Failed to get segment {i} text: {e}"))
             })?;
 
             // whisper.cpp timestamps are in centiseconds.

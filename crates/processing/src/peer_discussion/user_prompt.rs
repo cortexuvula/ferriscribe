@@ -15,6 +15,8 @@ use chrono::Local;
 use regex::Regex;
 use tracing::{debug, warn};
 
+use crate::document_generator::inject_context;
+
 /// Compiled dangerous patterns — built once at first access, reused thereafter.
 static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     let patterns = &[
@@ -79,6 +81,8 @@ pub fn sanitize_prompt(text: &str) -> String {
 /// 1. Sanitize transcript (no truncation)
 /// 2. Prepend current date/time to the transcript
 /// 3. Append physician context (specialty, reason)
+/// 4. If `context` is provided and non-empty, prepend a "Supporting Documents"
+///    section before the assembled prompt.
 ///
 /// # Parameters
 ///
@@ -86,11 +90,14 @@ pub fn sanitize_prompt(text: &str) -> String {
 /// - `physician_name` — name of the consulting physician
 /// - `specialty` — specialty of the consulting physician
 /// - `reason` — reason for the peer discussion
+/// - `context` — optional supporting documents text (e.g. OCR'd text) prepended
+///   as a "## Supporting Documents" section
 pub fn build_user_prompt(
     transcript: &str,
     physician_name: &str,
     specialty: &str,
     reason: &str,
+    context: Option<&str>,
 ) -> String {
     let clean_transcript = sanitize_prompt(transcript);
     let clean_physician = sanitize_prompt(physician_name);
@@ -123,7 +130,7 @@ pub fn build_user_prompt(
 
     parts.push("Peer Discussion Note:".to_string());
 
-    parts.join("\n\n")
+    inject_context(&parts.join("\n\n"), context)
 }
 
 #[cfg(test)]
@@ -137,6 +144,7 @@ mod tests {
             "Smith",
             "Cardiology",
             "chest pain",
+            None,
         );
         assert!(prompt.contains("Time"));
         assert!(prompt.contains("Date"));
@@ -150,6 +158,7 @@ mod tests {
             "Dr. Jones",
             "Neurology",
             "headache evaluation",
+            None,
         );
         assert!(prompt.contains("Dr. Jones"));
         assert!(prompt.contains("Neurology"));
@@ -189,6 +198,7 @@ mod tests {
             "Smith",
             "Cardiology",
             "chest pain",
+            None,
         );
         let pos_physician = prompt.find("Consulting physician").unwrap();
         let pos_transcript = prompt.find("TRANSCRIPT_BODY_MARKER").unwrap();
@@ -196,6 +206,30 @@ mod tests {
             pos_physician < pos_transcript,
             "Physician context must appear before transcript"
         );
+    }
+
+    #[test]
+    fn user_prompt_with_context_prepends_supporting_documents() {
+        let prompt = build_user_prompt(
+            "transcript body",
+            "Smith",
+            "Cardiology",
+            "chest pain",
+            Some("Prior ECG: sinus rhythm"),
+        );
+        assert!(
+            prompt.contains("## Supporting Documents"),
+            "should contain Supporting Documents section: {prompt}"
+        );
+        assert!(prompt.contains("Prior ECG: sinus rhythm"));
+        assert!(prompt.contains("transcript body"));
+    }
+
+    #[test]
+    fn user_prompt_without_context_omits_supporting_documents() {
+        let prompt =
+            build_user_prompt("transcript body", "Smith", "Cardiology", "chest pain", None);
+        assert!(!prompt.contains("Supporting Documents"));
     }
 
     #[test]

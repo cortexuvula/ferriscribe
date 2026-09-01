@@ -23,7 +23,123 @@ use crate::state::AppState;
 /// memory. 200k chars is roughly 50k tokens — well above any sane
 /// per-conversation size and below the 128k/200k context windows of modern
 /// models.
+use super::chat_docs;
+
 const MAX_HISTORY_CHARS: usize = 200_000;
+
+/// Per-request cap on conversation history actually SENT (~15k tokens at
+/// 4 chars/token). [`trim_history`] keeps the newest whole messages within
+/// this budget; documents are re-attached fresh every turn, so dropping
+/// ancient turns degrades gracefully instead of tripping the model's
+/// context limit mid-session (previously a loud context-exceeded error at
+/// hour two of a long chart review).
+const HISTORY_TRIM_CHARS: usize = 60_000;
+
+/// Sliding-window history trim: whole-message granularity, newest kept,
+/// the current (last) message always survives even if it alone exceeds the
+/// budget — the hard caps and the provider's context-exceeded error remain
+/// the backstop for that case. Pure; unit-tested.
+fn trim_history(messages: Vec<ChatMessageInput>) -> Vec<ChatMessageInput> {
+    let total: usize = messages.iter().map(|m| m.content.len()).sum();
+    if total <= HISTORY_TRIM_CHARS {
+        return messages;
+    }
+    let mut kept: Vec<ChatMessageInput> = Vec::new();
+    let mut budget: usize = HISTORY_TRIM_CHARS;
+    for m in messages.into_iter().rev() {
+        let cost = m.content.len();
+        if !kept.is_empty() && cost > budget {
+            break;
+        }
+        budget = budget.saturating_sub(cost);
+        kept.push(m);
+    }
+    kept.reverse();
+    kept
+}
+
+/// Default system prompt for the chat tab, applied when the caller sends
+/// none (the live UI path). Establishes the clinical-support role and the
+/// hardened anti-fabrication stance used across the app's generators —
+/// before this, chat ran the raw model with zero medical framing. Static
+/// text only, no patient content (PHI rule); a caller-provided prompt
+/// replaces it wholesale. The documents-drop feature (phase 1+) will append
+/// its grounding section on top of this.
+const DEFAULT_CHAT_SYSTEM_PROMPT: &str = "\
+You are a clinical documentation assistant inside a local, offline medical records \
+application used by healthcare professionals. The user may paste or drop patient \
+material into this conversation; treat everything as confidential clinical information.
+
+Rules:
+- Ground every answer in the information provided in this conversation. Never \
+fabricate facts, findings, values, dates, medications, or citations.
+- If the conversation's material does not contain the answer, say so plainly. You \
+may then offer well-established general medical knowledge, but clearly label it as \
+background rather than as coming from the user's material.
+- Keep what the user's material states and your own inferences visibly separate.
+- You are clinical decision support, not a substitute for professional judgment. \
+All outputs must be reviewed by a licensed healthcare provider before clinical use.";
+
+/// Caller prompt wins; otherwise the default grounding prompt applies.
+fn resolve_system_prompt(user: Option<String>) -> Option<String> {
+    Some(user.unwrap_or_else(|| DEFAULT_CHAT_SYSTEM_PROMPT.to_string()))
+}
+
+/// A document attached to the conversation by the chat UI (OCR'd on the
+/// frontend, passed verbatim). `name` is the source filename; `content` is
+/// the extracted text.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChatDocumentInput {
+    pub name: String,
+    pub content: String,
+}
+
+/// Hard ceiling on total document text per request — same value as the
+/// Letter Writer's source-document cap. The frontend additionally enforces
+/// a much tighter token budget for its context-stuffing mode; this is the
+/// backend's fail-safe against a misbehaving client.
+const MAX_CHAT_DOCUMENT_CHARS: usize = 500_000;
+
+/// Build the "Provided documents" prompt section. None when there are no
+/// documents. Content is embedded verbatim — it never appears in logs
+/// (PHI); only lengths are safe to log.
+fn build_document_section(docs: &[ChatDocumentInput]) -> Option<String> {
+    if docs.is_empty() {
+        return None;
+    }
+    let mut section = String::from(
+        "\n\n## Provided documents\n\n\
+         The user attached the following documents to this conversation. Ground \
+         answers in them, cite the document name when quoting or paraphrasing, and \
+         say plainly when they do not contain the answer.\n\n",
+    );
+    for d in docs {
+        section.push_str(&format!("--- Document: {} ---\n{}\n\n", d.name, d.content));
+    }
+    Some(section)
+}
+
+/// Resolve the final system prompt: caller prompt (or the default grounding
+/// prompt) plus the documents section when documents are attached. Enforces
+/// the total document size cap.
+fn compose_system_prompt(
+    user: Option<String>,
+    documents: Option<&[ChatDocumentInput]>,
+) -> AppResult<String> {
+    let mut prompt = resolve_system_prompt(user).expect("resolver always returns Some");
+    if let Some(docs) = documents {
+        let total: usize = docs.iter().map(|d| d.name.len() + d.content.len()).sum();
+        if total > MAX_CHAT_DOCUMENT_CHARS {
+            return Err(AppError::Other(format!(
+                "Chat documents too large: {total} chars, limit is {MAX_CHAT_DOCUMENT_CHARS}. Trim or remove documents."
+            )));
+        }
+        if let Some(section) = build_document_section(docs) {
+            prompt.push_str(&section);
+        }
+    }
+    Ok(prompt)
+}
 
 // ---------------------------------------------------------------------------
 // Input / output types
@@ -58,24 +174,6 @@ struct ErrorPayload {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Load the full `AppConfig` from the DB synchronously.
-///
-/// Returns a hard error if the settings can't be read — a silent fallback to a
-/// hardcoded model (previously `"gpt-4o"`) would route requests to the wrong
-/// provider for any user configured for Anthropic/Ollama/etc.
-fn load_app_config(
-    state: &tauri::State<'_, AppState>,
-) -> AppResult<medical_core::types::settings::AppConfig> {
-    let conn = state
-        .db
-        .conn()
-        .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-    let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-        .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-    cfg.migrate();
-    Ok(cfg)
-}
 
 /// Convert a frontend role string to the core `Role` enum.
 fn parse_role(s: &str) -> Role {
@@ -139,16 +237,7 @@ async fn chat_send_inner(
     system_prompt: Option<String>,
 ) -> AppResult<String> {
     // Load full config for pre-flight (also provides model/temperature).
-    let cfg = {
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-        let mut c = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-        c.migrate();
-        c
-    };
+    let cfg = crate::commands::load_app_config(&state.db, "chat").await?;
     let settings_model = cfg.ai_model.clone();
     let settings_temp = cfg.temperature;
 
@@ -165,7 +254,7 @@ async fn chat_send_inner(
         let registry = state.ai_providers.lock().await;
         registry.get_active_arc()
     }
-    .ok_or_else(|| AppError::AiProvider("No active AI provider configured".to_string()))?;
+    .ok_or_else(|| AppError::ai_provider("No active AI provider configured".to_string()))?;
 
     let core_messages = convert_messages(messages);
 
@@ -174,7 +263,8 @@ async fn chat_send_inner(
         messages: core_messages,
         temperature: Some(settings_temp),
         max_tokens: Some(4096),
-        system_prompt,
+        system_prompt: resolve_system_prompt(system_prompt),
+        reasoning_effort: None,
     };
 
     debug!("chat_send: calling provider '{}'", provider.name());
@@ -183,7 +273,7 @@ async fn chat_send_inner(
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
         // For other errors, keep the existing nicer wrapping.
-        _ => AppError::AiProvider(format!(
+        _ => AppError::ai_provider(format!(
             "AI completion failed: {}",
             super::unwrap_app_error_message(e)
         )),
@@ -220,11 +310,12 @@ pub async fn chat_stream(
     messages: Vec<ChatMessageInput>,
     model: Option<String>,
     system_prompt: Option<String>,
+    documents: Option<Vec<ChatDocumentInput>>,
 ) -> AppResult<()> {
     check_history_size(&messages)?;
 
     // Load full config for pre-flight (also provides model/temperature).
-    let cfg = load_app_config(&state)?;
+    let cfg = crate::commands::load_app_config(&state.db, "chat").await?;
     let settings_model = cfg.ai_model.clone();
     let settings_temp = cfg.temperature;
 
@@ -241,16 +332,54 @@ pub async fn chat_stream(
         let registry = state.ai_providers.lock().await;
         registry.get_active_arc()
     }
-    .ok_or_else(|| AppError::AiProvider("No active AI provider configured".to_string()))?;
+    .ok_or_else(|| AppError::ai_provider("No active AI provider configured".to_string()))?;
 
+    // Retrieval query for chart-review mode — composed BEFORE `messages`
+    // is consumed. Includes a slice of the preceding turn so follow-ups
+    // keep their conversational referents (see compose_retrieval_query).
+    let retrieval_query = chat_docs::compose_retrieval_query(&messages);
+    // Sliding-window trim keeps the request inside realistic context
+    // budgets on long sessions.
+    let messages = trim_history(messages);
     let core_messages = convert_messages(messages);
+
+    // Document mode: stuff whole documents when they fit the context
+    // budget; retrieve cited excerpts when they don't (chart-review
+    // scale — 300-600 page drops). See commands/chat_docs.rs.
+    let doc_chars = documents
+        .as_deref()
+        .map(chat_docs::documents_total_chars)
+        .unwrap_or(0);
+    let resolved_system = if doc_chars > chat_docs::STUFFING_CHAR_LIMIT {
+        if doc_chars > chat_docs::MAX_RETRIEVAL_CHAR_LIMIT {
+            return Err(AppError::Other(format!(
+                "Chat documents too large: {doc_chars} chars, limit is {}. Split the chart into smaller drops.",
+                chat_docs::MAX_RETRIEVAL_CHAR_LIMIT
+            )));
+        }
+        let base = resolve_system_prompt(system_prompt).expect("resolver always returns Some");
+        let mut slot = state.chat_doc_index.lock().await;
+        let docs = documents.as_deref().expect("non-empty checked above");
+        if slot.as_ref().is_none_or(|i| !i.matches(docs)) {
+            let embeddings = chat_docs::embeddings_for_config(&cfg)?;
+            *slot = Some(chat_docs::ChatDocIndex::build(docs, embeddings).await?);
+        }
+        let index = slot.as_ref().expect("just built or reused");
+        let excerpts = index.retrieve(&retrieval_query).await?;
+        let mut prompt = base;
+        prompt.push_str(&chat_docs::build_excerpt_section(&excerpts));
+        prompt
+    } else {
+        compose_system_prompt(system_prompt, documents.as_deref())?
+    };
 
     let request = CompletionRequest {
         model: model.unwrap_or(settings_model),
         messages: core_messages,
         temperature: Some(settings_temp),
         max_tokens: Some(4096),
-        system_prompt,
+        system_prompt: Some(resolved_system),
+        reasoning_effort: None,
     };
 
     debug!("chat_stream: calling provider '{}'", provider.name());
@@ -262,7 +391,7 @@ pub async fn chat_stream(
             // Preserve EndpointOffline as-is so the frontend dialog can fire.
             AppError::EndpointOffline { .. } => e,
             // For other errors, keep the existing nicer wrapping.
-            _ => AppError::AiProvider(format!(
+            _ => AppError::ai_provider(format!(
                 "Failed to start streaming: {}",
                 super::unwrap_app_error_message(e)
             )),
@@ -275,6 +404,12 @@ pub async fn chat_stream(
     // spinning forever.
     let worker_app = app.clone();
     let worker = tokio::spawn(async move {
+        // Tracks whether the worker has already emitted a terminal `chat-done`
+        // event. If the provider closes the SSE stream without ever sending a
+        // `Usage` or `Done` chunk (e.g. a server crash mid-stream), the loop
+        // below exits normally and `emitted_done` stays false — in which case
+        // we emit a `chat-done` ourselves so the frontend spinner doesn't hang.
+        let mut emitted_done = false;
         while let Some(result) = stream.next().await {
             match result {
                 Ok(chunk) => match chunk {
@@ -284,6 +419,9 @@ pub async fn chat_stream(
                     StreamChunk::ToolCallDelta { .. } => {
                         // Tool-call deltas are not surfaced in the basic chat stream.
                     }
+                    StreamChunk::ReasoningDelta { .. } => {
+                        // Reasoning deltas carry only a length; nothing to emit.
+                    }
                     StreamChunk::Usage(usage) => {
                         let _ = worker_app.emit(
                             "chat-done",
@@ -292,6 +430,7 @@ pub async fn chat_stream(
                                 finish_reason: Some("stop".to_string()),
                             },
                         );
+                        emitted_done = true;
                     }
                     StreamChunk::Done => {
                         let _ = worker_app.emit(
@@ -301,6 +440,7 @@ pub async fn chat_stream(
                                 finish_reason: Some("stop".to_string()),
                             },
                         );
+                        emitted_done = true;
                     }
                 },
                 Err(e) => {
@@ -309,6 +449,18 @@ pub async fn chat_stream(
                     return Err(e);
                 }
             }
+        }
+        // If the provider closed the SSE stream without sending a terminal
+        // chunk, emit `chat-done` so the frontend stops its spinner.
+        if !emitted_done {
+            error!("chat_stream: stream ended without a usage/Done chunk; emitting chat-done");
+            let _ = worker_app.emit(
+                "chat-done",
+                DonePayload {
+                    usage: None,
+                    finish_reason: Some("stream ended".to_string()),
+                },
+            );
         }
         Ok::<(), AppError>(())
     });
@@ -353,13 +505,13 @@ async fn chat_with_agent_inner(
     conversation_history: Option<Vec<ChatMessageInput>>,
 ) -> AppResult<serde_json::Value> {
     let agent = get_agent_by_name(&agent_name)
-        .ok_or_else(|| AppError::Agent(format!("Unknown agent: '{agent_name}'")))?;
+        .ok_or_else(|| AppError::agent(format!("Unknown agent: '{agent_name}'")))?;
 
     let provider = {
         let registry = state.ai_providers.lock().await;
         registry.get_active_arc()
     }
-    .ok_or_else(|| AppError::AiProvider("No active AI provider configured".to_string()))?;
+    .ok_or_else(|| AppError::ai_provider("No active AI provider configured".to_string()))?;
 
     let history = conversation_history
         .map(convert_messages)
@@ -376,17 +528,8 @@ async fn chat_with_agent_inner(
     let cancel = CancellationToken::new();
 
     // Load full config so we can pass it to pre-flight (model/temperature are
-    // also read from here, replacing the separate load_chat_settings call).
-    let cfg = {
-        let conn = state
-            .db
-            .conn()
-            .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-        let mut c = medical_db::settings::SettingsRepo::load_config(&conn)
-            .map_err(|e| AppError::Config(format!("Failed to load chat settings: {e}")))?;
-        c.migrate();
-        c
-    };
+    // also read from here).
+    let cfg = crate::commands::load_app_config(&state.db, "chat").await?;
     let model = cfg.ai_model.clone();
     let temperature = cfg.temperature;
 
@@ -401,7 +544,7 @@ async fn chat_with_agent_inner(
     .map_err(|e| match e {
         // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
-        other => AppError::Agent(format!(
+        other => AppError::agent(format!(
             "Pre-flight check failed: {}",
             super::unwrap_app_error_message(other)
         )),
@@ -426,7 +569,7 @@ async fn chat_with_agent_inner(
         .map_err(|e| match e {
             // Preserve EndpointOffline as-is so the frontend dialog can fire.
             AppError::EndpointOffline { .. } => e,
-            other => AppError::Agent(format!(
+            other => AppError::agent(format!(
                 "Agent execution failed: {}",
                 super::unwrap_app_error_message(other)
             )),
@@ -496,8 +639,129 @@ pub async fn list_models(
         }
     };
     let provider = provider
-        .ok_or_else(|| AppError::AiProvider("Provider not found or not configured".to_string()))?;
+        .ok_or_else(|| AppError::ai_provider("Provider not found or not configured".to_string()))?;
     provider.available_models().await
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn default_grounding_prompt_applies_when_caller_sends_none() {
+        let resolved = resolve_system_prompt(None).expect("always Some");
+        assert!(
+            resolved.contains("Never fabricate"),
+            "anti-fabrication rule"
+        );
+        assert!(
+            resolved.contains("licensed healthcare provider"),
+            "guardrail"
+        );
+        // No PHI-shaped content in the static prompt itself.
+        assert!(!resolved.contains("patient_name"));
+    }
+
+    #[test]
+    fn caller_prompt_replaces_default_wholesale() {
+        assert_eq!(
+            resolve_system_prompt(Some("custom".into())).as_deref(),
+            Some("custom")
+        );
+    }
+
+    fn doc(name: &str, content: &str) -> ChatDocumentInput {
+        ChatDocumentInput {
+            name: name.into(),
+            content: content.into(),
+        }
+    }
+
+    #[test]
+    fn documents_section_appended_after_grounding_prompt() {
+        let prompt = compose_system_prompt(None, Some(&[doc("consult.pdf", "Cardiology says hi")]))
+            .expect("compose");
+        assert!(
+            prompt.contains("Never fabricate"),
+            "grounding base retained"
+        );
+        assert!(prompt.contains("## Provided documents"));
+        assert!(prompt.contains("--- Document: consult.pdf ---"));
+        assert!(prompt.contains("Cardiology says hi"));
+        // Grounding text comes first, documents after.
+        assert!(prompt.find("Never fabricate") < prompt.find("consult.pdf"));
+    }
+
+    #[test]
+    fn trim_history_passes_short_conversations_through_untouched() {
+        let msgs = vec![
+            ChatMessageInput {
+                role: "user".into(),
+                content: "hi".into(),
+            },
+            ChatMessageInput {
+                role: "assistant".into(),
+                content: "hello".into(),
+            },
+        ];
+        let trimmed = trim_history(msgs.clone());
+        assert_eq!(trimmed.len(), 2);
+        assert_eq!(trimmed[0].content, "hi");
+    }
+
+    #[test]
+    fn trim_history_drops_oldest_whole_messages_keeps_newest() {
+        let big = "x".repeat(30_000); // 3 messages x 30k = 90k > 60k budget
+        let msgs = vec![
+            ChatMessageInput {
+                role: "user".into(),
+                content: big.clone(),
+            },
+            ChatMessageInput {
+                role: "assistant".into(),
+                content: big.clone(),
+            },
+            ChatMessageInput {
+                role: "user".into(),
+                content: "keep me".into(),
+            },
+            ChatMessageInput {
+                role: "assistant".into(),
+                content: "final".into(),
+            },
+        ];
+        let trimmed = trim_history(msgs);
+        // Oldest (30k) message is dropped; the newest three fit the budget.
+        assert_eq!(trimmed.len(), 3);
+        assert_eq!(trimmed.first().unwrap().content, big);
+        assert_eq!(trimmed.last().unwrap().content, "final");
+    }
+
+    #[test]
+    fn trim_history_always_keeps_the_current_message() {
+        let msgs = vec![ChatMessageInput {
+            role: "user".into(),
+            content: "y".repeat(HISTORY_TRIM_CHARS + 10_000),
+        }];
+        let trimmed = trim_history(msgs);
+        assert_eq!(trimmed.len(), 1, "the current question always survives");
+    }
+
+    #[test]
+    fn no_documents_leaves_prompt_unchanged() {
+        let with_none = compose_system_prompt(None, None).expect("compose");
+        assert_eq!(with_none, DEFAULT_CHAT_SYSTEM_PROMPT);
+        let with_empty = compose_system_prompt(None, Some(&[])).expect("compose");
+        assert_eq!(with_empty, DEFAULT_CHAT_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn oversized_documents_are_rejected() {
+        let big = "x".repeat(MAX_CHAT_DOCUMENT_CHARS + 1);
+        let err =
+            compose_system_prompt(None, Some(&[doc("big.pdf", &big)])).expect_err("must reject");
+        assert!(err.to_string().contains("too large"));
+    }
 }
 
 #[cfg(test)]
@@ -575,6 +839,7 @@ mod preflight_tests {
             ai_providers: Arc::new(Mutex::new(registry)),
             stt_providers: Arc::new(Mutex::new(None)),
             orchestrator,
+            chat_doc_index: Arc::new(tokio::sync::Mutex::new(None)),
             capture_handle: Arc::new(std::sync::Mutex::new(crate::state::SendCaptureHandle(None))),
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -582,10 +847,13 @@ mod preflight_tests {
             vocab_api: RwLock::new(None),
             ollama_provider: RwLock::new(None),
             lmstudio_provider: RwLock::new(None),
+            omlx_provider: RwLock::new(None),
             remote_stt_provider: RwLock::new(None),
             http_client,
             content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             content_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
+            condition_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
+            dict_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
         };
 
         (state, tmp)

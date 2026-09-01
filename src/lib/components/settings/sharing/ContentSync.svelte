@@ -8,8 +8,13 @@
 
   type Props = {
     visible: boolean;
+    /** True when this machine is the office server. The server is the sync
+     *  hub — clients push/pull to it — so "Sync Now" is meaningless here and
+     *  would otherwise report "skipped" (it has no paired connection, by
+     *  design). We show an explanatory hint instead of the button. */
+    isServer?: boolean;
   };
-  let { visible }: Props = $props();
+  let { visible, isServer = false }: Props = $props();
 
   // Listen for sync-complete events so lastSyncedAt updates even when the
   // sync was triggered by startup or background timer (not the Sync Now
@@ -31,17 +36,24 @@
   });
 
   async function onChange(e: Event) {
-    const checked = (e.target as HTMLInputElement).checked;
-    settings.updateField('sync_content', checked);
+    const target = e.target as HTMLInputElement;
+    const checked = target.checked;
     if (checked) {
       try {
         await syncContentNow();
         await subscribeContentSync();
+        // Persist the toggle only after setup completed; the $effect below
+        // will start background sync in response to the settings change.
+        settings.updateField('sync_content', true);
         startBackgroundSync();
       } catch (err) {
-        console.error('Initial content sync failed:', err);
+        // Rollback: sync setup failed, don't persist the toggle.
+        target.checked = false;
+        console.error('Failed to enable content sync:', err);
+        toasts.error('Could not enable content sync. Check your connection.');
       }
     } else {
+      settings.updateField('sync_content', false);
       stopBackgroundSync();
     }
   }
@@ -57,8 +69,29 @@
 
   async function handleSyncNow() {
     try {
-      await syncContentNow();
-      toasts.success('Content sync complete');
+      const summary = await recordings.syncNow();
+      if (!summary) {
+        // null = queued behind an in-flight sync OR the sync threw (the
+        // store swallows errors; lastSyncError distinguishes the two).
+        if (recordings.lastSyncError) {
+          toasts.error(`Sync failed: ${recordings.lastSyncError}`);
+        }
+        return;
+      }
+      if (summary.disabled) {
+        toasts.error(
+          'Content sync skipped — check that sync is enabled, the pairing has a Tailscale address, and a token is present. See the logs for the specific reason.',
+        );
+      } else if (summary.pulled > 0 || summary.pushed > 0) {
+        toasts.success(
+          `Content sync complete — pulled ${summary.pulled}, pushed ${summary.pushed}` +
+            (summary.merge_conflicts + summary.push_conflicts > 0
+              ? `, ${summary.merge_conflicts + summary.push_conflicts} conflict(s)`
+              : ''),
+        );
+      } else {
+        toasts.success('Content sync complete (no changes)');
+      }
     } catch (err) {
       toasts.error(`Sync failed: ${err}`);
     }
@@ -99,16 +132,28 @@
 
     {#if settings.state.sync_content}
       <div class="sync-controls">
-        <button
-          class="btn-sync-now"
-          onclick={handleSyncNow}
-          disabled={recordings.syncing}
-        >
-          {recordings.syncing ? 'Syncing…' : 'Sync Now'}
-        </button>
-        <span class="last-synced">
-          Last synced: {formatLastSynced(recordings.lastSyncedAt)}
-        </span>
+        {#if isServer}
+          <span class="last-synced">
+            This machine is the office server — client recordings sync here
+            automatically as clients connect. There is nothing to sync out.
+          </span>
+        {:else}
+          <button
+            class="btn-sync-now"
+            onclick={handleSyncNow}
+            disabled={recordings.syncing}
+          >
+            {#if recordings.syncing}
+              <span class="sync-spinner"></span>
+              Syncing…
+            {:else}
+              Sync Now
+            {/if}
+          </button>
+          <span class="last-synced">
+            Last synced: {formatLastSynced(recordings.lastSyncedAt)}
+          </span>
+        {/if}
       </div>
     {/if}
   </div>
@@ -147,6 +192,22 @@
   .btn-sync-now:disabled {
     opacity: 0.6;
     cursor: wait;
+  }
+
+  .sync-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--text-muted, #888);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: sync-spin 0.6s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+
+  @keyframes sync-spin {
+    to { transform: rotate(360deg); }
   }
 
   .last-synced {

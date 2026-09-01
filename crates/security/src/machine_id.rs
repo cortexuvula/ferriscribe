@@ -152,9 +152,13 @@ pub fn fallback_id() -> String {
                 return trimmed;
             }
         }
-        // Generate a new random ID and persist it.
+        // Generate a new random ID and persist it. A path with no parent
+        // component can't be persisted to — return the in-memory ID rather
+        // than panicking.
         let random_id = uuid::Uuid::new_v4().to_string();
-        if std::fs::create_dir_all(id_file.parent().unwrap()).is_ok() {
+        if let Some(parent) = id_file.parent()
+            && std::fs::create_dir_all(parent).is_ok()
+        {
             let _ = std::fs::write(&id_file, &random_id);
         }
         return random_id;

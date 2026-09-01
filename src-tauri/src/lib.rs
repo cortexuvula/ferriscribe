@@ -40,6 +40,7 @@ mod content_remote;
 pub mod corpus_export;
 mod sharing_vocab_api;
 mod state;
+mod sweeps;
 mod templates_remote;
 mod user_dict_remote;
 mod vocab_remote;
@@ -223,7 +224,7 @@ pub fn run() {
                     if let Err(e) = crate::commands::sharing::start_sharing_inner(
                         &state,
                         cfg.friendly_name,
-                        Some(app_handle.clone()),
+                        app_handle.clone(),
                     )
                     .await
                     {
@@ -255,12 +256,22 @@ pub fn run() {
             // Auto-stop sharing when the main window closes, so the
             // whisper-server child process is killed instead of becoming an
             // orphan zombie on app quit. Best-effort: failures are logged.
+            //
+            // The close is PREVENTED and re-issued after the stop finishes:
+            // the spawned task races the run loop otherwise, and the window
+            // can be torn down before the whisper-server child is killed —
+            // the exact orphan this handler exists to prevent. destroy()
+            // (not close()) closes without re-firing CloseRequested, so
+            // this cannot re-enter.
             use tauri::Manager;
             let close_handle = app.handle().clone();
             if let Some(window) = app.get_webview_window("main") {
+                let close_window = window.clone();
                 window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
                         let handle = close_handle.clone();
+                        let window = close_window.clone();
                         tauri::async_runtime::spawn(async move {
                             let state = handle.state::<crate::state::AppState>();
                             if let Err(e) =
@@ -268,10 +279,16 @@ pub fn run() {
                             {
                                 tracing::warn!(error = %e, "auto-stop sharing on close failed");
                             }
+                            let _ = window.destroy();
                         });
                     }
                 });
             }
+
+            // Note: the pdfium renderer for scanned-PDF OCR is initialized
+            // lazily by the `ocr_documents` command (it downloads the library
+            // into the app data dir on first use), so there's nothing to do
+            // here at startup.
 
             Ok(())
         });
@@ -303,10 +320,19 @@ pub fn run() {
             commands::export::export_docx,
             commands::export::export_fhir,
             commands::export::export_audio,
+            commands::backup::backup_status,
+            commands::backup::backup_escrow_init,
+            commands::backup::backup_escrow_verify,
+            commands::backup::backup_install_schedule,
+            commands::backup::backup_uninstall_schedule,
+            commands::backup::backup_run_now,
+            commands::backup::backup_test_destination,
+            commands::backup::backup_test_agent,
             commands::providers::reinit_providers,
             commands::providers::test_lmstudio_connection,
             commands::providers::test_stt_remote_connection,
             commands::providers::test_ollama_connection,
+            commands::providers::test_omlx_connection,
             commands::providers::probe_endpoint_reachable,
             commands::audio::list_audio_devices,
             commands::audio::start_recording,
@@ -318,6 +344,7 @@ pub fn run() {
             commands::audio::get_recording_state,
             commands::chat::chat_send,
             commands::chat::chat_stream,
+            commands::chat_docs::chat_clear_documents,
             commands::chat::chat_with_agent,
             commands::chat::list_ai_providers,
             commands::chat::set_active_provider,
@@ -329,16 +356,19 @@ pub fn run() {
             commands::generation::soap::generate_soap,
             commands::generation::referral::generate_referral,
             commands::generation::letter::generate_letter,
+            commands::generation::letter_writer::generate_letter_from_document,
             commands::letter_audiences::list_letter_audiences,
             commands::letter_audiences::upsert_letter_audience,
             commands::letter_audiences::delete_letter_audience,
             commands::generation::synopsis::generate_synopsis,
             commands::generation::peer_discussion::generate_peer_discussion,
             commands::icd::get_icd9_code_set,
+            commands::icd::get_icd9_descriptions,
             commands::models::list_whisper_models,
             commands::models::list_pyannote_models,
             commands::models::download_model,
             commands::models::delete_model,
+            commands::ocr::ocr_documents,
             commands::logging::get_log_path,
             commands::logging::get_recent_logs,
             commands::logging::frontend_log,
@@ -383,11 +413,13 @@ pub fn run() {
             commands::user_dictionary::user_dict_list,
             commands::user_dictionary::user_dict_add,
             commands::user_dictionary::user_dict_remove,
+            commands::user_dictionary::sync_user_dictionary_cmd,
+            commands::user_dictionary::subscribe_user_dictionary,
             commands::conditions::list_condition_chips,
             commands::conditions::add_condition_chip,
             commands::conditions::remove_condition_chip,
             commands::conditions::sync_condition_chips_cmd,
-            commands::conditions::reorder_condition_chips,
+            commands::conditions::increment_condition_chip_use,
             commands::conditions::subscribe_condition_chips,
             commands::content_sync::sync_content_now,
             commands::content_sync::subscribe_content_sync,

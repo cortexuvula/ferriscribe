@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { endpointOfflineStore } from './endpointOffline.svelte.ts';
+import { endpointOfflineStore } from './endpointOffline.svelte';
 import type { EndpointOfflinePayload } from '../api/invokeWithOfflineHandling';
 
 const samplePayload: EndpointOfflinePayload = {

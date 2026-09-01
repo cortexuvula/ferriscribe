@@ -96,48 +96,93 @@ pub enum AppError {
     },
 
     /// A security boundary was violated (PHI leak attempt, auth failure).
-    #[error("Security error: {0}")]
-    Security(String),
+    #[error("Security error: {message}")]
+    Security {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// Audio capture or playback failed.
-    #[error("Audio error: {0}")]
-    Audio(String),
+    #[error("Audio error: {message}")]
+    Audio {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// An AI completion provider returned an error.
-    #[error("AI provider error: {0}")]
-    AiProvider(String),
+    #[error("AI provider error: {message}")]
+    AiProvider {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A speech-to-text provider returned an error.
-    #[error("STT provider error: {0}")]
-    SttProvider(String),
+    #[error("STT provider error: {message}")]
+    SttProvider {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A text-to-speech provider returned an error.
-    #[error("TTS provider error: {0}")]
-    TtsProvider(String),
+    #[error("TTS provider error: {message}")]
+    TtsProvider {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// An agent orchestration step failed.
-    #[error("Agent error: {0}")]
-    Agent(String),
+    #[error("Agent error: {message}")]
+    Agent {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A RAG retrieval or indexing operation failed.
-    #[error("RAG error: {0}")]
-    Rag(String),
+    #[error("RAG error: {message}")]
+    Rag {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A background processing task (queue / batch) failed.
-    #[error("Processing error: {0}")]
-    Processing(String),
+    #[error("Processing error: {message}")]
+    Processing {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A document export operation failed.
-    #[error("Export error: {0}")]
-    Export(String),
+    #[error("Export error: {message}")]
+    Export {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A translation operation failed.
-    #[error("Translation error: {0}")]
-    Translation(String),
+    #[error("Translation error: {message}")]
+    Translation {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// Configuration is invalid or could not be migrated.
     #[error("Configuration error: {0}")]
     Config(String),
+
+    /// User-supplied input failed validation (e.g. missing required field,
+    /// oversized context, invalid recording ID).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 
     /// An endpoint URL was rejected by the local-only endpoint policy.
     #[error(
@@ -178,28 +223,54 @@ pub enum AppError {
     Other(String),
 }
 
+/// Generate the plain + source-preserving constructor pair for a domain
+/// variant. All domain variants share the `{ message, source }` shape so a
+/// typed library error crossing the crate boundary can keep its
+/// `Error::source()` chain — medical-core cannot name those types directly
+/// (it sits at the bottom of the workspace dependency graph), so the source
+/// is type-erased into `Box<dyn Error + Send + Sync>`.
+macro_rules! domain_error_ctor {
+    ($plain:ident, $with_source:ident, $variant:ident) => {
+        /// Create this error from a plain message (no source preserved).
+        pub fn $plain(message: impl Into<String>) -> Self {
+            AppError::$variant {
+                message: message.into(),
+                source: None,
+            }
+        }
+
+        /// Create this error with a source error preserved for
+        /// `Error::source()` chain inspection (logs / debugging).
+        pub fn $with_source(
+            message: impl Into<String>,
+            source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+        ) -> Self {
+            AppError::$variant {
+                message: message.into(),
+                source: Some(source.into()),
+            }
+        }
+    };
+}
+
 impl AppError {
     /// Stable machine-readable discriminant for this error variant.
-    ///
-    /// Returns the variant name as a `&'static str` (e.g. `"Database"`,
-    /// `"EndpointOffline"`). Used by the custom `Serialize` impl and by
-    /// the Tauri command layer to produce consistent error `kind` fields
-    /// for the frontend.
     pub fn kind_str(&self) -> &'static str {
         match self {
             AppError::Database { .. } => "Database",
             AppError::EndpointOffline { .. } => "EndpointOffline",
-            AppError::Security(_) => "Security",
-            AppError::Audio(_) => "Audio",
-            AppError::AiProvider(_) => "AiProvider",
-            AppError::SttProvider(_) => "SttProvider",
-            AppError::TtsProvider(_) => "TtsProvider",
-            AppError::Agent(_) => "Agent",
-            AppError::Rag(_) => "Rag",
-            AppError::Processing(_) => "Processing",
-            AppError::Export(_) => "Export",
-            AppError::Translation(_) => "Translation",
+            AppError::Security { .. } => "Security",
+            AppError::Audio { .. } => "Audio",
+            AppError::AiProvider { .. } => "AiProvider",
+            AppError::SttProvider { .. } => "SttProvider",
+            AppError::TtsProvider { .. } => "TtsProvider",
+            AppError::Agent { .. } => "Agent",
+            AppError::Rag { .. } => "Rag",
+            AppError::Processing { .. } => "Processing",
+            AppError::Export { .. } => "Export",
+            AppError::Translation { .. } => "Translation",
             AppError::Config(_) => "Config",
+            AppError::InvalidInput(_) => "InvalidInput",
             AppError::InvalidEndpoint { .. } => "InvalidEndpoint",
             AppError::Io(_) => "Io",
             AppError::Serialization(_) => "Serialization",
@@ -229,6 +300,17 @@ impl AppError {
             source: None,
         }
     }
+
+    domain_error_ctor!(security, security_with_source, Security);
+    domain_error_ctor!(audio, audio_with_source, Audio);
+    domain_error_ctor!(ai_provider, ai_provider_with_source, AiProvider);
+    domain_error_ctor!(stt_provider, stt_provider_with_source, SttProvider);
+    domain_error_ctor!(tts_provider, tts_provider_with_source, TtsProvider);
+    domain_error_ctor!(agent, agent_with_source, Agent);
+    domain_error_ctor!(rag, rag_with_source, Rag);
+    domain_error_ctor!(processing, processing_with_source, Processing);
+    domain_error_ctor!(export, export_with_source, Export);
+    domain_error_ctor!(translation, translation_with_source, Translation);
 }
 
 impl serde::Serialize for AppError {
@@ -313,80 +395,6 @@ impl AppError {
 /// Every fallible function in the workspace returns this type.
 pub type AppResult<T> = Result<T, AppError>;
 
-/// Severity level for error logging and UI display.
-///
-/// Used inside [`ErrorContext`] to classify how urgently an error needs
-/// attention. The frontend maps these to toast styling and log filters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ErrorSeverity {
-    /// The application cannot continue — data loss or crash.
-    Critical,
-    /// A user-visible operation failed but the app remains functional.
-    Error,
-    /// Something unexpected happened but the operation succeeded.
-    Warning,
-    /// Informational — no action required.
-    Info,
-}
-
-/// Structured error context for logging and debugging.
-///
-/// Builder pattern: start with [`ErrorContext::new`], then chain
-/// [`with_severity`](ErrorContext::with_severity) and
-/// [`with_code`](ErrorContext::with_code). Serializes to JSON for
-/// structured logging and frontend consumption.
-///
-/// # Example
-///
-/// ```ignore
-/// let ctx = ErrorContext::new("save_recording", "disk full")
-///     .with_severity(ErrorSeverity::Critical)
-///     .with_code("DISK_FULL");
-/// ```
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ErrorContext {
-    /// The operation that was being attempted (e.g. `"save_recording"`).
-    pub operation: String,
-    /// Human-readable error description.
-    pub error: String,
-    /// How severe this error is.
-    pub severity: ErrorSeverity,
-    /// Optional machine-readable error code (e.g. `"DISK_FULL"`).
-    pub error_code: Option<String>,
-    /// UTC timestamp when the error was created.
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// Arbitrary extra context (defaults to `null`).
-    pub additional_info: serde_json::Value,
-}
-
-impl ErrorContext {
-    /// Create a new context with [`ErrorSeverity::Error`] and the current
-    /// UTC timestamp. Chain [`with_severity`](Self::with_severity) and
-    /// [`with_code`](Self::with_code) to customize.
-    pub fn new(operation: impl Into<String>, error: impl Into<String>) -> Self {
-        Self {
-            operation: operation.into(),
-            error: error.into(),
-            severity: ErrorSeverity::Error,
-            error_code: None,
-            timestamp: chrono::Utc::now(),
-            additional_info: serde_json::Value::Null,
-        }
-    }
-
-    /// Override the default severity level.
-    pub fn with_severity(mut self, severity: ErrorSeverity) -> Self {
-        self.severity = severity;
-        self
-    }
-
-    /// Attach a machine-readable error code.
-    pub fn with_code(mut self, code: impl Into<String>) -> Self {
-        self.error_code = Some(code.into());
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,30 +436,33 @@ mod tests {
     }
 
     #[test]
-    fn error_context_builder() {
-        let ctx = ErrorContext::new("save_recording", "disk full")
-            .with_severity(ErrorSeverity::Critical)
-            .with_code("DISK_FULL");
-        assert_eq!(ctx.operation, "save_recording");
-        assert_eq!(ctx.severity, ErrorSeverity::Critical);
-        assert_eq!(ctx.error_code.as_deref(), Some("DISK_FULL"));
-    }
-
-    #[test]
-    fn error_context_serializes_to_json() {
-        let ctx = ErrorContext::new("test_op", "test_err");
-        let json = serde_json::to_value(&ctx).unwrap();
-        assert_eq!(json["operation"], "test_op");
-        assert_eq!(json["error"], "test_err");
-        assert!(json["timestamp"].is_string());
-    }
-
-    #[test]
     fn app_error_serializes_with_kind_and_message() {
-        let err = AppError::AiProvider("bad API key".into());
+        let err = AppError::ai_provider("bad API key");
         let json = serde_json::to_value(&err).expect("serialize");
         assert_eq!(json["kind"], "AiProvider");
         assert_eq!(json["message"], "AI provider error: bad API key");
+    }
+
+    #[test]
+    fn domain_error_with_source_preserves_chain() {
+        // The *_with_source constructors must preserve the source chain the
+        // same way database_with_source does — this is what stops typed
+        // library errors from being flattened to a bare string at the
+        // crate boundary.
+        let io_err = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "truncated wav");
+        let app_err = AppError::audio_with_source("capture failed", io_err);
+        assert_eq!(app_err.kind_str(), "Audio");
+        assert!(app_err.to_string().contains("capture failed"));
+        let source = std::error::Error::source(&app_err);
+        assert!(
+            source.is_some_and(|s| s.to_string().contains("truncated wav")),
+            "source chain must survive the boundary, got: {:?}",
+            source.map(|s| s.to_string())
+        );
+        // The plain constructor serializes exactly like the old tuple
+        // variant did: kind + message, nothing else.
+        let json = serde_json::to_value(&app_err).expect("serialize");
+        assert_eq!(json["kind"], "Audio");
     }
 
     #[test]

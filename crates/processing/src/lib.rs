@@ -8,7 +8,7 @@
 //!
 //! | Module | Purpose |
 //! |---|---|
-//! | [`pipeline`] | Per-recording processing pipeline with step-level progress events. |
+//! | [`pipeline`] | Pipeline configuration and step/progress vocabulary types. |
 //! | [`batch`] | Multi-recording batch job state tracker. |
 //! | [`soap_generator`] | SOAP note system/user prompts and AI-output post-processing. |
 //! | [`document_generator`] | Prompt builders for referrals, letters, and synopses. |
@@ -35,6 +35,10 @@
 pub mod batch;
 pub mod document_generator;
 pub mod edit_distance;
+// Private: contract documentation + anti-drift tests for the two markdown
+// strippers (document_generator::strip_markdown vs postprocess::clean_text).
+mod markdown;
+pub mod ocr;
 pub mod peer_discussion;
 pub mod pipeline;
 pub mod prompt_resolver;

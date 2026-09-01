@@ -243,3 +243,54 @@ impl VocabularyRepo {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_entry(find_text: &str) -> VocabularyEntry {
+        VocabularyEntry {
+            id: Uuid::new_v4(),
+            find_text: find_text.to_string(),
+            replacement: format!("replacement for {find_text}"),
+            category: VocabularyCategory::from_str("general"),
+            case_sensitive: false,
+            priority: 0,
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn duplicate_insert_is_flagged_as_unique_violation() {
+        let db = crate::Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+
+        VocabularyRepo::insert(&conn, &test_entry("htn")).expect("first insert");
+        let err =
+            VocabularyRepo::insert(&conn, &test_entry("htn")).expect_err("duplicate rejected");
+        assert!(
+            err.is_unique_violation(),
+            "duplicate find_text must map to a unique violation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn non_unique_constraint_violations_are_not_duplicates() {
+        // NOT NULL shares the primary ConstraintViolation code with UNIQUE;
+        // only the extended code distinguishes them. A NOT NULL failure must
+        // NOT be reported to the user as "already exists".
+        let db = crate::Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+
+        let err = conn
+            .execute("INSERT INTO vocabulary_entries (id) VALUES (NULL)", [])
+            .expect_err("NOT NULL violation");
+        let err = crate::DbError::from(err);
+        assert!(
+            !err.is_unique_violation(),
+            "NOT NULL failure misclassified as duplicate: {err}"
+        );
+    }
+}

@@ -1,6 +1,6 @@
 [package]
 name = "rust-medical-assistant"
-version = "0.30.28"
+version = "0.62.0"
 description = "FerriScribe"
 authors = []
 edition = "2024"
@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+fs2 = "0.4"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-deep-link = "2"
@@ -37,6 +38,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 
 rusqlite = { workspace = true }
+medical-backup = { path = "../crates/backup" }
 medical-core = { path = "../crates/core" }
 medical-db = { path = "../crates/db" }
 medical-security = { path = "../crates/security" }
@@ -53,7 +55,7 @@ medical-sharing = { path = "../crates/sharing" }
 rand = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { workspace = true }
 axum = "0.8"
 async-stream = "0.3"
 urlencoding = { workspace = true }
@@ -62,6 +64,12 @@ urlencoding = { workspace = true }
 tempfile = { workspace = true }
 filetime = "0.2"
 wiremock = { workspace = true }
+async-trait = { workspace = true }
+tokio-stream = { workspace = true }
+# mock_app() for route tests (build_router needs an AppHandle)
+tauri = { version = "2", features = ["test"] }
+# ServiceExt::oneshot to drive the axum router without binding a port
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

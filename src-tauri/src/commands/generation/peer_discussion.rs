@@ -11,7 +11,7 @@ use crate::state::AppState;
 use super::helpers::{
     build_completion_request, load_recording_and_settings, persist_recording, resolve_provider,
 };
-use super::{GenerationProgress, MAX_TRANSCRIPT_CHARS, format_progress_error};
+use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_TRANSCRIPT_CHARS, format_progress_error};
 
 /// Generate a peer discussion note from a recording's transcript.
 ///
@@ -25,14 +25,26 @@ pub async fn generate_peer_discussion(
     physician_name: String,
     specialty: String,
     reason: String,
+    context: Option<String>,
 ) -> AppResult<String> {
     if physician_name.trim().is_empty() {
-        return Err(AppError::Other("Physician name is required.".to_string()));
+        return Err(AppError::InvalidInput(
+            "Physician name is required.".to_string(),
+        ));
     }
     if reason.trim().is_empty() {
         return Err(AppError::Other(
             "Reason for discussion is required.".to_string(),
         ));
+    }
+    if let Some(ref ctx) = context
+        && ctx.len() > MAX_CONTEXT_CHARS
+    {
+        return Err(AppError::InvalidInput(format!(
+            "Context too large: {} chars, limit is {}",
+            ctx.len(),
+            MAX_CONTEXT_CHARS
+        )));
     }
 
     let _ = app.emit(
@@ -41,12 +53,20 @@ pub async fn generate_peer_discussion(
             doc_type: "peer_discussion".into(),
             status: "started".into(),
             recording_id: recording_id.clone(),
+            progress: None,
         },
     );
 
-    let result =
-        generate_peer_discussion_inner(&state, &recording_id, &physician_name, &specialty, &reason)
-            .await;
+    let result = generate_peer_discussion_inner(
+        &state,
+        Some(&app),
+        &recording_id,
+        &physician_name,
+        &specialty,
+        &reason,
+        context.as_deref(),
+    )
+    .await;
 
     match &result {
         Ok(_) => {
@@ -56,6 +76,7 @@ pub async fn generate_peer_discussion(
                     doc_type: "peer_discussion".into(),
                     status: "completed".into(),
                     recording_id: recording_id.clone(),
+                    progress: None,
                 },
             );
         }
@@ -66,6 +87,7 @@ pub async fn generate_peer_discussion(
                     doc_type: "peer_discussion".into(),
                     status: format_progress_error(err),
                     recording_id: recording_id.clone(),
+                    progress: None,
                 },
             );
         }
@@ -76,10 +98,12 @@ pub async fn generate_peer_discussion(
 
 async fn generate_peer_discussion_inner(
     state: &AppState,
+    app: Option<&tauri::AppHandle>,
     recording_id: &str,
     physician_name: &str,
     specialty: &str,
     reason: &str,
+    context: Option<&str>,
 ) -> AppResult<String> {
     let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
@@ -97,13 +121,13 @@ async fn generate_peer_discussion_inner(
         .as_deref()
         .filter(|t| !t.is_empty())
         .ok_or_else(|| {
-            AppError::Processing(
+            AppError::processing(
                 "Recording has no transcript. Run transcription first.".to_string(),
             )
         })?;
 
     if transcript.len() > MAX_TRANSCRIPT_CHARS {
-        return Err(AppError::Other(format!(
+        return Err(AppError::InvalidInput(format!(
             "Transcript too large: {} chars, limit is {}",
             transcript.len(),
             MAX_TRANSCRIPT_CHARS
@@ -128,7 +152,7 @@ async fn generate_peer_discussion_inner(
 
     let system_prompt = peer_discussion::build_peer_discussion_prompt(&prompt_config);
     let user_prompt =
-        peer_discussion::build_user_prompt(transcript, physician_name, specialty, reason);
+        peer_discussion::build_user_prompt(transcript, physician_name, specialty, reason, context);
 
     debug!(
         "generate_peer_discussion: provider='{}', recording='{}'",
@@ -136,25 +160,48 @@ async fn generate_peer_discussion_inner(
         recording_id,
     );
 
+    let model_name = settings.model.clone();
     let request = build_completion_request(
         system_prompt,
         user_prompt,
-        settings.model,
+        model_name.clone(),
         settings.temperature,
         None,
     );
 
-    let response = provider.complete(request).await.map_err(|e| match e {
+    let generation_start = std::time::Instant::now();
+    let response = super::stream::stream_to_completion(
+        &provider,
+        |stats| {
+            if let Some(app) = app {
+                let _ = app.emit(
+                    "generation-progress",
+                    GenerationProgress {
+                        doc_type: "peer_discussion".into(),
+                        status: "generating".into(),
+                        recording_id: recording_id.to_string(),
+                        progress: Some(*stats),
+                    },
+                );
+            }
+        },
+        request,
+    )
+    .await
+    .map_err(|e| match e {
+        // Preserve EndpointOffline as-is so the frontend dialog can fire.
         AppError::EndpointOffline { .. } => e,
-        _ => AppError::AiProvider(format!(
+        // For other errors, keep the existing nicer wrapping.
+        _ => AppError::ai_provider(format!(
             "AI completion failed: {}",
             crate::commands::unwrap_app_error_message(e)
         )),
     })?;
+    let generation_elapsed = generation_start.elapsed();
 
     let discussion_text = response.content;
     if discussion_text.is_empty() {
-        return Err(AppError::AiProvider(
+        return Err(AppError::ai_provider(
             "AI returned an empty peer discussion note.".to_string(),
         ));
     }
@@ -172,6 +219,15 @@ async fn generate_peer_discussion_inner(
             }),
         );
     }
+
+    medical_core::types::recording::record_completion_stat(
+        &mut recording.metadata,
+        "peer_discussion",
+        provider.name(),
+        &model_name,
+        &response.usage,
+        generation_elapsed,
+    );
 
     recording.peer_discussion = Some(discussion_text.clone());
     persist_recording(&state.db, recording).await?;
@@ -200,10 +256,12 @@ mod preflight_tests {
         let start = std::time::Instant::now();
         let result = generate_peer_discussion_inner(
             &state,
+            None, // app — no AppHandle in tests
             &recording_id,
             "Smith",
             "Cardiology",
             "chest pain evaluation",
+            None, // context
         )
         .await;
         let elapsed = start.elapsed();
@@ -233,5 +291,60 @@ mod preflight_tests {
             elapsed < std::time::Duration::from_secs(8),
             "should have short-circuited at ~3s; took {elapsed:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
+    use super::*;
+    use medical_core::types::settings::AppConfig;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn generate_peer_discussion_records_generation_stats() {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+
+        let provider = Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Discussed the case with cardiology; agreed on outpatient workup.",
+            48,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports headache and fatigue.",
+            provider,
+        )
+        .await;
+
+        let text = generate_peer_discussion_inner(
+            &state,
+            None, // app — no AppHandle in tests
+            &recording_id,
+            "Smith",
+            "Cardiology",
+            "chest pain evaluation",
+            None,
+        )
+        .await
+        .expect("peer discussion generation succeeds");
+        assert!(!text.is_empty());
+
+        let uuid = uuid::Uuid::parse_str(&recording_id).expect("uuid");
+        let conn = state.db.conn().expect("conn");
+        let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+            .expect("recording persisted");
+        assert_eq!(
+            rec.metadata["generation_stats"]["peer_discussion"]["completion_tokens"],
+            serde_json::json!(48)
+        );
+        assert_eq!(
+            rec.metadata["generation_stats"]["peer_discussion"]["model"],
+            serde_json::json!("llama3")
+        );
+        assert!(rec.metadata["peer_discussion_context"].is_object());
     }
 }

@@ -114,7 +114,7 @@ pub async fn list_condition_chips(
 /// sync push of the resulting active list so the server converges. The push
 /// is best-effort; a failure is retried on the next pull (list).
 #[tauri::command]
-#[instrument(skip(state), name = "conditions::add")]
+#[instrument(skip(state, text), name = "conditions::add")]
 pub async fn add_condition_chip(
     state: tauri::State<'_, AppState>,
     text: String,
@@ -170,7 +170,7 @@ pub async fn add_condition_chip(
 /// `list_active`) is essential — otherwise the tombstone would never reach the
 /// server and the chip would ghost-resurface on other machines.
 #[tauri::command]
-#[instrument(skip(state), name = "conditions::remove")]
+#[instrument(skip(state, text), name = "conditions::remove")]
 pub async fn remove_condition_chip(
     state: tauri::State<'_, AppState>,
     text: String,
@@ -290,62 +290,40 @@ pub async fn sync_condition_chips_cmd(
     .map_err(crate::commands::join_err)?
 }
 
-/// Reorder condition chips.
+/// Increment the use count of a condition chip (frequency tracking).
 ///
-/// Writes the new `sort_order` locally first (instant UI), then fires a
-/// best-effort background sync push of the FULL list (including tombstones
-/// and the new sort_order values) so the server converges. The push is
-/// best-effort; a failure is retried on the next pull (list).
-///
-/// `ordered_ids` defines the new sequence; chips not in the list keep their
-/// existing sort_order.
+/// Called when a user adds the condition to a note via the chip. Writes
+/// locally first (instant UI + reorder), then fires a best-effort background
+/// sync push so the count propagates. Cross-machine reconciliation to `MAX`
+/// happens in `merge_incoming`, so a count bump here can never clobber a
+/// larger count on another machine. The push is best-effort; a failure is
+/// retried on the next pull (list).
 #[tauri::command]
-#[instrument(skip(state), name = "conditions::reorder")]
-pub async fn reorder_condition_chips(
+#[instrument(skip(state, text), name = "conditions::increment_use")]
+pub async fn increment_condition_chip_use(
     state: tauri::State<'_, AppState>,
-    ordered_ids: Vec<String>,
+    text: String,
 ) -> AppResult<Vec<ConditionChip>> {
     let now = now_iso();
 
-    // 1. Update local DB immediately (instant UI feedback).
+    // 1. Increment locally (returns the active list, now reordered by use_count).
+    //    `increment_use` upserts-on-miss, so this also self-heals fresh installs
+    //    whose default chips were never seeded.
     let db = Arc::clone(&state.db);
     let local_list = tokio::task::spawn_blocking(move || {
         let conn = db.conn()?;
-        medical_db::condition_chips::ConditionChipsRepo::reorder(&conn, &ordered_ids, &now)
+        medical_db::condition_chips::ConditionChipsRepo::increment_use(&conn, &text, &now)
             .map_err(AppError::from)
     })
     .await
     .map_err(crate::commands::join_err)??;
 
-    // 2. Best-effort background sync — push ALL chips (including tombstones)
-    //    so the server sees the new sort_order values. The owned
-    //    `PairedConnection` is moved into the task and `ConditionsRemote`
-    //    borrows it there.
+    // 2. Best-effort background sync push (non-blocking). The increment only
+    //    touches an active chip, so pushing the active list is sufficient.
     if let Some((conn, bearer)) = paired_conditions_target(&state) {
         let http_client = state.http_client.clone();
-        let db2 = Arc::clone(&state.db);
+        let chips_to_push = local_list.clone();
         tokio::spawn(async move {
-            // Load the full local list (incl. tombstones) on the blocking pool.
-            let all_chips = match tokio::task::spawn_blocking(move || {
-                let conn = db2.conn()?;
-                medical_db::condition_chips::ConditionChipsRepo::list_all(&conn)
-                    .map_err(AppError::from)
-            })
-            .await
-            {
-                Ok(Ok(chips)) => chips,
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "failed to load chips for sync push (reorder)");
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "task join error loading chips for sync push (reorder)"
-                    );
-                    return;
-                }
-            };
             let remote = match crate::conditions_remote::ConditionsRemote::from(
                 &conn,
                 Some(bearer),
@@ -353,15 +331,15 @@ pub async fn reorder_condition_chips(
             ) {
                 Some(r) => r,
                 None => {
-                    tracing::warn!("condition chip sync push (reorder) target unavailable");
+                    tracing::warn!("condition chip sync push (increment_use) target unavailable");
                     return;
                 }
             };
-            match remote.sync(all_chips).await {
-                Ok(_) => tracing::debug!("condition chip sync push (reorder) succeeded"),
+            match remote.sync(chips_to_push).await {
+                Ok(_) => tracing::debug!("condition chip sync push (increment_use) succeeded"),
                 Err(e) => tracing::warn!(
                     error = %e,
-                    "condition chip sync push (reorder) failed (will retry on next pull)"
+                    "condition chip sync push (increment_use) failed (will retry on next pull)"
                 ),
             }
         });
@@ -393,15 +371,34 @@ pub async fn subscribe_condition_chips(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<()> {
     // Gate the same way the other condition commands do: only subscribe when
-    // paired + sync enabled. When not paired, return quietly (the frontend
-    // relies on the 30s poll only).
+    // paired + sync enabled. When not paired, also cancel any existing
+    // subscriber — the user may have just unpaired, and the old task must
+    // not keep reconnecting with stale credentials.
     let Some((conn, bearer)) = paired_conditions_target(&state) else {
-        return Ok(());
+        return crate::commands::swap_sse_cancel_token(
+            &state.condition_sse_cancel,
+            "condition_sse_cancel",
+            None,
+        );
     };
+
+    // Replace any previous subscriber: the frontend subscribes on every
+    // mount of ConditionChips, so without this each mount leaks an eternal
+    // reconnect loop holding its own SSE connection.
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    crate::commands::swap_sse_cancel_token(
+        &state.condition_sse_cancel,
+        "condition_sse_cancel",
+        Some(cancel_token.clone()),
+    )?;
+
     let http_client = state.http_client.clone();
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(5);
         loop {
+            if cancel_token.is_cancelled() {
+                break;
+            }
             // `conn` and `bearer` are owned by this task; `ConditionsRemote`
             // borrows `conn` from within the task scope (cannot borrow from the
             // calling frame because `tokio::spawn` requires `'static`).
@@ -413,7 +410,10 @@ pub async fn subscribe_condition_chips(
                 Some(r) => r,
                 None => {
                     tracing::warn!("condition chip SSE subscription target unavailable, retrying");
-                    tokio::time::sleep(backoff).await;
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => break,
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
                     backoff = (backoff * 2).min(Duration::from_secs(30));
                     continue;
                 }
@@ -425,8 +425,19 @@ pub async fn subscribe_condition_chips(
                     // The stream from `filter_map` is `!Unpin`; pin it on the
                     // stack so `StreamExt::next` can borrow it mutably.
                     tokio::pin!(stream);
-                    while let Some(()) = stream.next().await {
-                        let _ = app.emit("condition-chips-changed", ());
+                    loop {
+                        // Cancellation must interrupt a healthy stream too —
+                        // an SSE connection stays open indefinitely, so a
+                        // top-of-loop check alone never fires.
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            item = stream.next() => match item {
+                                Some(()) => {
+                                    let _ = app.emit("condition-chips-changed", ());
+                                }
+                                None => break,
+                            },
+                        }
                     }
                     tracing::info!("condition chip SSE stream ended, reconnecting");
                 }
@@ -435,7 +446,10 @@ pub async fn subscribe_condition_chips(
                     "condition chip SSE subscription failed, reconnecting"
                 ),
             }
-            tokio::time::sleep(backoff).await;
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                _ = tokio::time::sleep(backoff) => {}
+            }
             backoff = (backoff * 2).min(Duration::from_secs(30));
         }
     });

@@ -3,6 +3,7 @@
   import { requestSpellcheckRescan } from './rich_editor/spellcheck/spellcheck_extension';
   import { listUserDict } from '../api/userDictionary';
   import { toasts } from '../stores/toasts.svelte';
+  import { formatError } from '../types/errors';
   import { onEscape } from '../actions/onEscape';
 
   interface Props {
@@ -27,7 +28,7 @@
       words = await listUserDict();
     } catch (err) {
       console.error('Failed to load user dictionary:', err);
-      toasts.error(`Failed to load dictionary: ${err}`);
+      toasts.error(`Failed to load dictionary: ${formatError(err)}`);
     } finally {
       loading = false;
     }
@@ -48,7 +49,7 @@
       requestSpellcheckRescan();
     } catch (err) {
       console.error('Failed to add word:', err);
-      addError = String(err) || 'Failed to add word.';
+      addError = formatError(err) || 'Failed to add word.';
     }
   }
 
@@ -59,7 +60,7 @@
       requestSpellcheckRescan();
     } catch (err) {
       console.error('Failed to remove word:', err);
-      toasts.error(`Failed to remove word: ${err}`);
+      toasts.error(`Failed to remove word: ${formatError(err)}`);
     }
   }
 
