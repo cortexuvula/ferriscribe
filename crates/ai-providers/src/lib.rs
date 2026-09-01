@@ -17,9 +17,14 @@
 //!
 //! - [`ProviderRegistry`] — holds registered [`AiProvider`] instances keyed
 //!   by name, tracks the active provider. Used by `src-tauri` to switch
-//!   between Ollama and LM Studio at runtime.
-//! - [`ollama::OllamaProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed at
-//!   an Ollama server (default `http://localhost:11434/v1`).
+//!   between the local providers at runtime.
+//! - [`local_openai`] — the shared implementation every local provider
+//!   delegates to: endpoint policy, LAN/Tailscale resolution with a 30s
+//!   cache, bearer propagation, thinking-model control, and the full
+//!   [`AiProvider`] surface, parameterized by a static
+//!   [`local_openai::ProviderMeta`].
+//! - [`ollama::OllamaProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed
+//!   at an Ollama server (default `http://localhost:11434/v1`).
 //! - [`lmstudio::LmStudioProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed
 //!   at an LM Studio server (default `http://localhost:1234/v1`).
 //! - [`openai_compat::OpenAiCompatibleClient`] — generic HTTP client for any
@@ -34,6 +39,7 @@
 
 pub mod http_client;
 pub mod lmstudio;
+pub mod local_openai;
 pub mod ollama;
 pub mod openai_compat;
 pub mod sse;
