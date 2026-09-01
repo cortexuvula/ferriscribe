@@ -414,8 +414,8 @@ mod tests {
     use crate::lmstudio;
     use crate::ollama;
 
-    fn all_metas() -> [&'static ProviderMeta; 2] {
-        [&ollama::META, &lmstudio::META]
+    fn all_metas() -> [&'static ProviderMeta; 3] {
+        [&ollama::META, &lmstudio::META, &crate::omlx::META]
     }
 
     #[test]
@@ -898,7 +898,11 @@ mod offline_tests {
     async fn resolve_failure_returns_endpoint_offline() {
         let port = dead_port();
 
-        for m in [&crate::ollama::META, &crate::lmstudio::META] {
+        for m in [
+            &crate::ollama::META,
+            &crate::lmstudio::META,
+            &crate::omlx::META,
+        ] {
             let p = LocalOpenAiProvider::new(m, None, false, None, RetryConfig::default())
                 .expect("build");
             p.set_endpoint(
@@ -942,7 +946,11 @@ mod offline_tests {
         let port = dead_port();
         let host = format!("http://127.0.0.1:{port}");
 
-        for m in [&crate::ollama::META, &crate::lmstudio::META] {
+        for m in [
+            &crate::ollama::META,
+            &crate::lmstudio::META,
+            &crate::omlx::META,
+        ] {
             // No endpoint set — uses static_base_url pointing at dead port.
             let policy = RetryConfig {
                 max_retries: 0,

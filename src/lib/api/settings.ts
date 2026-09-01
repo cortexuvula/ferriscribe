@@ -40,6 +40,14 @@ export async function testOllamaConnection(
   return invoke('test_ollama_connection', { host, port, apiKey: apiKey ?? null });
 }
 
+export async function testOmlxConnection(
+  host: string,
+  port: number,
+  apiKey?: string | null,
+): Promise<string> {
+  return invoke('test_omlx_connection', { host, port, apiKey: apiKey ?? null });
+}
+
 export async function setApiKey(provider: string, key: string): Promise<void> {
   return invoke('set_api_key', { provider, key });
 }

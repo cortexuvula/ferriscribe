@@ -1,6 +1,6 @@
 //! Local AI provider integration for FerriScribe.
 //!
-//! This crate provides Ollama and LM Studio connectivity via the
+//! This crate provides Ollama, LM Studio, and oMLX connectivity via the
 //! OpenAI-compatible chat-completions wire protocol, with streaming (SSE),
 //! tool calling, automatic retry with exponential backoff, and LAN/Tailscale
 //! endpoint resolution.
@@ -27,6 +27,8 @@
 //!   at an Ollama server (default `http://localhost:11434/v1`).
 //! - [`lmstudio::LmStudioProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed
 //!   at an LM Studio server (default `http://localhost:1234/v1`).
+//! - [`omlx::OmlxProvider`] — wraps [`openai_compat::OpenAiCompatibleClient`] pointed
+//!   at an oMLX server (default `http://localhost:8000/v1`).
 //! - [`openai_compat::OpenAiCompatibleClient`] — generic HTTP client for any
 //!   endpoint implementing the OpenAI chat-completions protocol.
 //! - [`http_client`] — retry infrastructure: [`RetryConfig`],
@@ -41,6 +43,7 @@ pub mod http_client;
 pub mod lmstudio;
 pub mod local_openai;
 pub mod ollama;
+pub mod omlx;
 pub mod openai_compat;
 pub mod sse;
 

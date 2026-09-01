@@ -1,9 +1,10 @@
 # medical-ai-providers
 
 Local AI provider integration crate for FerriScribe — a Tauri desktop medical
-transcription app. This crate provides Ollama and LM Studio connectivity via
-the OpenAI-compatible chat-completions wire protocol, with streaming (SSE),
-tool calling, automatic retry, and LAN/Tailscale endpoint resolution.
+transcription app. This crate provides Ollama, LM Studio, and oMLX
+connectivity via the OpenAI-compatible chat-completions wire protocol, with
+streaming (SSE), tool calling, automatic retry, and LAN/Tailscale endpoint
+resolution.
 
 > **Hard constraint:** only local and LAN-accessible AI providers are supported.
 > Hosted APIs (OpenAI, Anthropic, Google, etc.) are intentionally **not**
@@ -16,7 +17,7 @@ tool calling, automatic retry, and LAN/Tailscale endpoint resolution.
 
 ```
 ┌──────────────┐      ┌──────────────────────┐      ┌──────────────────────┐
-│  src-tauri   │─────>│  medical-ai-providers │─────>│  Ollama / LM Studio  │
+│  src-tauri   │─────>│  medical-ai-providers │─────>│ Ollama/LM Studio/oMLX│
 │  (commands)  │      │  (this crate)         │ HTTP │  (local AI servers)  │
 └──────────────┘      └──────────────────────┘      └──────────────────────┘
                               │
@@ -44,7 +45,7 @@ tool calling, automatic retry, and LAN/Tailscale endpoint resolution.
 
 | Type | Purpose |
 |------|---------|
-| `ProviderRegistry` | Holds registered `Arc<dyn AiProvider>` instances keyed by name. Tracks the active provider. Used by `src-tauri` to switch between Ollama and LM Studio at runtime. |
+| `ProviderRegistry` | Holds registered `Arc<dyn AiProvider>` instances keyed by name. Tracks the active provider. Used by `src-tauri` to switch between the local providers at runtime. |
 
 ### Providers
 
@@ -52,14 +53,18 @@ tool calling, automatic retry, and LAN/Tailscale endpoint resolution.
 |------|---------|
 | `OllamaProvider` | Wraps `OpenAiCompatibleClient` pointed at an Ollama server (default `http://localhost:11434/v1`). Supports `RemoteEndpoint` for LAN/Tailscale resolution. |
 | `LmStudioProvider` | Wraps `OpenAiCompatibleClient` pointed at an LM Studio server (default `http://localhost:1234/v1`). Same `RemoteEndpoint` support. |
+| `OmlxProvider` | Wraps `OpenAiCompatibleClient` pointed at an oMLX server (default `http://localhost:8000/v1`). Not wired into office-sharing pairing — local or direct LAN host only. |
 
-Both implement `medical_core::traits::AiProvider`.
+All three implement `medical_core::traits::AiProvider` by delegating to
+`local_openai::LocalOpenAiProvider`, the shared machinery (endpoint policy,
+LAN/Tailscale resolution + cache, bearer propagation, thinking control)
+parameterized by a static `ProviderMeta`.
 
 ### OpenAI-Compatible Client
 
 | Type | Purpose |
 |------|---------|
-| `OpenAiCompatibleClient` | Generic HTTP client for any endpoint implementing the OpenAI chat-completions protocol. Handles request building, response parsing, streaming, and tool calls. Shared by both providers. |
+| `OpenAiCompatibleClient` | Generic HTTP client for any endpoint implementing the OpenAI chat-completions protocol. Handles request building, response parsing, streaming, and tool calls. Shared by all providers. |
 
 ### HTTP Infrastructure
 
@@ -123,9 +128,11 @@ complete_stream(request)
 
 ### Endpoint Resolution (LAN/Tailscale)
 
-Both providers support `RemoteEndpoint` for multi-network deployments — e.g.,
+The providers support `RemoteEndpoint` for multi-network deployments — e.g.,
 a clinic where the AI server runs on a LAN machine but the clinician's laptop
-connects via Tailscale when working remotely.
+connects via Tailscale when working remotely. (oMLX is not wired into
+office-sharing pairing, so in practice it is reachable locally or via a
+directly configured LAN host.)
 
 1. If a `RemoteEndpoint` is configured, `current_base_url()` probes LAN first,
    then Tailscale, using `RemoteEndpoint::resolve_base_url()`.
@@ -134,19 +141,21 @@ connects via Tailscale when working remotely.
    the new bearer token into the inner HTTP client.
 4. If no endpoint is configured, the static `base_url` from construction is used.
 
-### How Ollama and LM Studio Differ
+### How the Providers Differ
 
-| Aspect | Ollama | LM Studio |
-|--------|--------|-----------|
-| Default port | 11434 | 1234 |
-| Base URL suffix | `/v1` | `/v1` |
-| Model listing | `/v1/models` (OpenAI-compat) | `/v1/models` (OpenAI-compat) |
-| Fallback model | `llama3` | `default` |
-| Provider name | `"ollama"` | `"lmstudio"` |
+| Aspect | Ollama | LM Studio | oMLX |
+|--------|--------|-----------|------|
+| Default port | 11434 | 1234 | 8000 |
+| Base URL suffix | `/v1` | `/v1` | `/v1` |
+| Model listing | `/v1/models` (OpenAI-compat) | `/v1/models` (OpenAI-compat) | `/v1/models` (OpenAI-compat) |
+| Fallback model | `llama3` | `default` | `default` |
+| Provider name | `"ollama"` | `"lmstudio"` | `"omlx"` |
+| Thinking disable | `reasoning_effort: "none"` | `<think>`-prefill | `<think>`-prefill |
 
-Both use the identical `OpenAiCompatibleClient` under the hood. The providers
-differ only in defaults, naming, and the endpoint-policy field name
-(`ollama_host` vs `lmstudio_host`).
+All three use the identical `OpenAiCompatibleClient` under the hood. The
+providers differ only in defaults, naming, the endpoint-policy field name
+(`ollama_host` vs `lmstudio_host` vs `omlx_host`), and the thinking-control
+strategy (see `local_openai::ThinkingControl`).
 
 ## Examples
 
@@ -267,7 +276,7 @@ would still carry the old (revoked) token, causing 401 errors.
 
 ### Mutex Contention on the Client
 
-Both providers wrap `OpenAiCompatibleClient` in a `tokio::sync::Mutex`. The
+Each provider wraps `OpenAiCompatibleClient` in a `tokio::sync::Mutex`. The
 lock is held for the **entire duration** of each request (including the HTTP
 round-trip). This means concurrent requests to the same provider are
 serialized. For most clinical workflows this is acceptable — AI calls are
@@ -284,6 +293,9 @@ infrequent and latency-tolerant.
 - Both providers' `available_models()` falls back to a single hardcoded model
   entry if the `/v1/models` endpoint fails or returns empty — this ensures
   the UI always has at least one model to display.
+- **oMLX** takes the same think-prefill path as LM Studio (mlx-lm Jinja
+  templates honor a pre-closed `<think>` block; API-level thinking
+  parameters are ignored).
 
 ## Module Structure
 
@@ -292,8 +304,10 @@ src/
 ├── lib.rs              — ProviderRegistry + module re-exports
 ├── http_client.rs      — RetryConfig, CircuitBreaker, send_with_retry, classify_*
 ├── sse.rs              — parse_sse_response (SSE stream → data lines)
-├── ollama.rs           — OllamaProvider (AiProvider impl)
-├── lmstudio.rs         — LmStudioProvider (AiProvider impl)
+├── local_openai.rs     — shared provider machinery + ProviderMeta/ThinkingControl
+├── ollama.rs           — OllamaProvider (thin wrapper over local_openai)
+├── lmstudio.rs         — LmStudioProvider (thin wrapper over local_openai)
+├── omlx.rs             — OmlxProvider (thin wrapper over local_openai)
 └── openai_compat/
     ├── mod.rs          — module declarations, re-exports OpenAiCompatibleClient
     ├── client.rs       — OpenAiCompatibleClient struct + constructors + message conversion
