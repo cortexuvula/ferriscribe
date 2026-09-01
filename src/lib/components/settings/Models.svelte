@@ -3,6 +3,8 @@
   import { settings } from '../../stores/settings.svelte';
   import { listModels, setActiveProvider, reinitProviders, type ModelInfo } from '../../api/chat';
   import { testLmStudioConnection, testOllamaConnection, testOmlxConnection, getApiKey } from '../../api/settings';
+  import { isPairedWithServer } from '../../api/sharing';
+  import { officeServedHint, providerStartHint } from '../../utils/providerHints';
   import { formatError } from '../../types/errors';
   import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
 
@@ -15,6 +17,12 @@
 
   let availableModels = $state<ModelInfo[]>([]);
   let modelsLoading = $state(false);
+  /** Why the model list couldn't load (provider offline / empty list) —
+   * shown with a start-the-server hint so the failure is actionable. */
+  let modelsError = $state('');
+  /** Paired clients route providers through the office server's proxies;
+   * changes which hint we show when a provider is unreachable. */
+  let isPaired = $state(false);
   const modelMemory = $state<Record<string, string>>({});
 
   let lmstudioTestStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -26,6 +34,7 @@
 
   async function fetchModelsForProvider(provider: string) {
     modelsLoading = true;
+    modelsError = '';
     try {
       const models = await listModels(provider);
       availableModels = models;
@@ -33,6 +42,9 @@
     } catch (e) {
       console.error('Failed to fetch models:', e);
       availableModels = [];
+      // Surface why: the backend error carries the provider name and the
+      // endpoint URL it tried (e.g. "Ollama at http://… is offline").
+      modelsError = formatError(e) || 'Could not fetch the model list.';
       return [];
     } finally {
       modelsLoading = false;
@@ -43,6 +55,7 @@
     if (settings.state.ai_provider && settings.state.ai_model) {
       modelMemory[settings.state.ai_provider] = settings.state.ai_model;
     }
+    isPaired = await isPairedWithServer().catch(() => false);
     try {
       await fetchModelsForProvider(settings.state.ai_provider);
     } catch (e) {
@@ -146,7 +159,7 @@
         {#if modelsLoading}
           <option value="">Loading models…</option>
         {:else if availableModels.length === 0}
-          <option value="">No models available</option>
+          <option value="">{modelsError ? 'Could not load models' : 'No models available'}</option>
         {:else}
           {#each availableModels as model (model.id)}
             <option value={model.id}>{model.name}</option>
@@ -162,6 +175,16 @@
         {modelsLoading ? '…' : '↻'}
       </button>
     </div>
+    {#if modelsError && !modelsLoading}
+      <div class="endpoint-warning model-list-error" role="alert">
+        <p class="model-list-error-message">{modelsError}</p>
+        <p class="model-list-error-hint">
+          {isPaired
+            ? officeServedHint(settings.state.ai_provider)
+            : providerStartHint(settings.state.ai_provider)}
+        </p>
+      </div>
+    {/if}
   </div>
 
   <div class="form-group">
@@ -619,6 +642,15 @@
     padding: 6px 10px;
     margin-top: 4px;
     font-size: 0.85rem;
+  }
+
+  .model-list-error p {
+    margin: 0;
+  }
+
+  .model-list-error p + p {
+    margin-top: 4px;
+    font-weight: 600;
   }
 
   .form-hint {

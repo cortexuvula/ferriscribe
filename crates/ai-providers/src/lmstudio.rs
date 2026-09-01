@@ -42,7 +42,6 @@ pub(crate) static META: ProviderMeta = ProviderMeta {
     display: "LM Studio",
     default_base: "http://localhost:1234",
     err_field: "lmstudio_host",
-    fallback_model: "default",
     thinking: ThinkingControl::AssistantPrefill,
 };
 
@@ -163,7 +162,6 @@ mod tests {
         assert_eq!(META.id, "lmstudio");
         assert_eq!(META.default_base, "http://localhost:1234");
         assert_eq!(META.err_field, "lmstudio_host");
-        assert_eq!(META.fallback_model, "default");
         assert_eq!(META.thinking, ThinkingControl::AssistantPrefill);
     }
 }
