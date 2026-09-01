@@ -1,6 +1,6 @@
 //! Shared streaming driver for the generation commands: consumes the
 //! provider's SSE stream, assembles the completion, enforces an idle
-//! timeout, and reports throttled count-only progress via a callback.
+//! timeout, and reports throttled estimated-token progress via a callback.
 
 use std::sync::Arc;
 
@@ -17,6 +17,13 @@ use super::GenerationProgressStats;
 pub(super) const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// Minimum spacing between on_progress callbacks.
 const PROGRESS_THROTTLE: std::time::Duration = std::time::Duration::from_millis(500);
+/// Rough bytes-per-token for the live progress estimate. Counting stream
+/// events instead (one tick per SSE chunk) breaks on servers that batch
+/// several tokens into one event — oMLX packs ~8, understating the live
+/// count and rate by that factor versus its own dashboard. The estimate is
+/// approximate by construction; when the server's terminal usage event
+/// arrives, it replaces the estimate with exact counts.
+const ESTIMATED_BYTES_PER_TOKEN: f64 = 4.0;
 
 /// Drive a streamed completion to completion. `on_progress` is invoked at
 /// most every 500ms with count-only stats, plus one terminal flush when the
@@ -45,7 +52,10 @@ async fn stream_with_idle_timeout(
 
     let mut content = String::new();
     let mut usage = UsageInfo::default();
-    let mut tokens: u64 = 0;
+    // Live token estimate in fractional tokens (bytes ÷ ESTIMATED_BYTES_PER_TOKEN)
+    // until the terminal Usage chunk supplies exact counts.
+    let mut est_tokens: f64 = 0.0;
+    let mut exact_tokens: Option<u64> = None;
     let mut first_chunk_at: Option<std::time::Instant> = None;
     let mut last_emit: Option<std::time::Instant> = None;
 
@@ -66,15 +76,22 @@ async fn stream_with_idle_timeout(
         }
         match chunk {
             StreamChunk::Delta { text } => {
+                est_tokens += text.len() as f64 / ESTIMATED_BYTES_PER_TOKEN;
                 content.push_str(&text);
-                tokens += 1;
             }
-            StreamChunk::ReasoningDelta { .. } => {
+            StreamChunk::ReasoningDelta { len } => {
                 // Length only by construction — the reasoning text stays
                 // inside the provider layer (AGENTS.md PHI rule).
-                tokens += 1;
+                est_tokens += len as f64 / ESTIMATED_BYTES_PER_TOKEN;
             }
-            StreamChunk::Usage(u) => usage = u,
+            StreamChunk::Usage(u) => {
+                // The server's own completion count supersedes the byte
+                // estimate — it covers reasoning and content alike.
+                if u.completion_tokens > 0 {
+                    exact_tokens = Some(u.completion_tokens as u64);
+                }
+                usage = u;
+            }
             StreamChunk::Done => break,
             StreamChunk::ToolCallDelta { .. } => {}
         }
@@ -85,6 +102,7 @@ async fn stream_with_idle_timeout(
         let due = !elapsed.is_zero()
             && last_emit.is_none_or(|t| now.duration_since(t) >= PROGRESS_THROTTLE);
         if due {
+            let tokens = reported_tokens(est_tokens, exact_tokens);
             on_progress(&GenerationProgressStats {
                 tokens,
                 elapsed_ms: elapsed.as_millis() as u64,
@@ -101,6 +119,7 @@ async fn stream_with_idle_timeout(
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(start);
         if !elapsed.is_zero() {
+            let tokens = reported_tokens(est_tokens, exact_tokens);
             on_progress(&GenerationProgressStats {
                 tokens,
                 elapsed_ms: elapsed.as_millis() as u64,
@@ -118,6 +137,12 @@ async fn stream_with_idle_timeout(
         usage,
         tool_calls: vec![],
     })
+}
+
+/// Token count for a progress report: the server-reported exact count once
+/// the terminal usage has arrived, else the byte-based estimate rounded up.
+fn reported_tokens(est: f64, exact: Option<u64>) -> u64 {
+    exact.unwrap_or_else(|| est.ceil() as u64)
 }
 
 #[cfg(test)]
@@ -164,6 +189,7 @@ mod tests {
                     prompt_tokens: 10,
                     completion_tokens: 3,
                     total_tokens: 13,
+                    decode_tokens_per_second: None,
                 })),
                 Ok(StreamChunk::Done),
             ],
@@ -253,5 +279,56 @@ mod tests {
             .await
             .expect("completes");
         assert_eq!(resp.usage.completion_tokens, 0);
+    }
+
+    // Regression (oMLX): the server batches several tokens into one SSE
+    // event, so counting events understated the live token count ~8x. The
+    // estimate must scale with delivered text, not with event count.
+    #[tokio::test]
+    async fn estimates_tokens_from_text_not_events() {
+        let long = "word ".repeat(100); // 500 bytes ≈ 125 estimated tokens
+        let p = provider(
+            vec![
+                Ok(StreamChunk::Delta { text: long }),
+                Ok(StreamChunk::ReasoningDelta { len: 400 }),
+                Ok(StreamChunk::Done),
+            ],
+            false,
+        );
+        let mut seen = Vec::new();
+        let _ = stream_to_completion(&p, |s| seen.push(*s), req()).await;
+        let last = seen.last().expect("terminal flush");
+        // 2 text events, but ~225 estimated tokens (never 2).
+        assert!(
+            (200..=250).contains(&last.tokens),
+            "estimate should track text volume, got {}",
+            last.tokens
+        );
+    }
+
+    // The terminal usage event supersedes the estimate with exact counts.
+    #[tokio::test]
+    async fn usage_corrects_final_count() {
+        let long = "word ".repeat(100); // ≈ 125 estimated tokens
+        let p = provider(
+            vec![
+                Ok(StreamChunk::Delta { text: long }),
+                Ok(StreamChunk::Usage(UsageInfo {
+                    prompt_tokens: 900,
+                    completion_tokens: 6800,
+                    total_tokens: 7700,
+                    decode_tokens_per_second: Some(84.0),
+                })),
+                Ok(StreamChunk::Done),
+            ],
+            false,
+        );
+        let mut seen = Vec::new();
+        let resp = stream_to_completion(&p, |s| seen.push(*s), req())
+            .await
+            .expect("completes");
+        assert_eq!(resp.usage.decode_tokens_per_second, Some(84.0));
+        let last = seen.last().expect("terminal flush");
+        assert_eq!(last.tokens, 6800, "exact count replaces the estimate");
     }
 }
