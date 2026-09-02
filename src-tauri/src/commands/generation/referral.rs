@@ -64,9 +64,8 @@ pub async fn generate_referral(
 
 #[cfg(test)]
 mod preflight_tests {
-    use super::super::test_helpers::build_test_state_with_recording;
+    use super::super::test_helpers::{assert_endpoint_offline, build_test_state_with_recording};
     use super::*;
-    use medical_core::error::{AppError, OfflineReason, ServiceKind};
     use medical_core::types::settings::AppConfig;
 
     #[tokio::test]
@@ -112,33 +111,7 @@ mod preflight_tests {
             },
         )
         .await;
-        let elapsed = start.elapsed();
-
-        let err = result.expect_err("must fail with offline error");
-        match err {
-            AppError::EndpointOffline {
-                service,
-                reason,
-                provider_name,
-                ..
-            } => {
-                assert_eq!(service, ServiceKind::AiProvider);
-                assert_eq!(provider_name, "Ollama");
-                assert!(
-                    matches!(
-                        reason,
-                        OfflineReason::ConnectionRefused | OfflineReason::Timeout
-                    ),
-                    "expected ConnectionRefused or Timeout, got {reason:?}"
-                );
-            }
-            other => panic!("expected EndpointOffline, got {other:?}"),
-        }
-
-        assert!(
-            elapsed < std::time::Duration::from_secs(8),
-            "should have short-circuited at ~3s; took {elapsed:?}"
-        );
+        assert_endpoint_offline(result, "Ollama", start);
     }
 }
 

@@ -29,6 +29,43 @@ function isLoopbackHost(host: string): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(stripped);
 }
 
+/** Per-provider probe recipe: which AppConfig fields carry the endpoint,
+ * the health-probe path (native API for Ollama, OpenAI-style for the
+ * rest), and the keychain slot for the optional bearer. Adding provider
+ * support is a one-row change. */
+const AI_PROBES: Record<
+  string,
+  {
+    hostField: 'ollama_host' | 'lmstudio_host' | 'omlx_host';
+    portField: 'ollama_port' | 'lmstudio_port' | 'omlx_port';
+    probePath: string;
+    keySlot: string;
+    providerName: string;
+  }
+> = {
+  ollama: {
+    hostField: 'ollama_host',
+    portField: 'ollama_port',
+    probePath: '/api/tags',
+    keySlot: 'ollama_api_key',
+    providerName: 'Ollama',
+  },
+  lmstudio: {
+    hostField: 'lmstudio_host',
+    portField: 'lmstudio_port',
+    probePath: '/v1/models',
+    keySlot: 'lmstudio_api_key',
+    providerName: 'LM Studio',
+  },
+  omlx: {
+    hostField: 'omlx_host',
+    portField: 'omlx_port',
+    probePath: '/v1/models',
+    keySlot: 'omlx_api_key',
+    providerName: 'oMLX',
+  },
+};
+
 function computeOverall(ai: ServiceStatus, stt: ServiceStatus): Overall {
   if (ai === 'skipped' && stt === 'skipped') return 'hidden';
   const states = [ai, stt].filter((s): s is 'online' | 'offline' => s !== 'skipped');
@@ -60,85 +97,34 @@ class EndpointHealthStore {
   }
 
   private async probeAi(cfg: AppConfig): Promise<ServiceStatus> {
-    const provider = cfg.ai_provider;
-    if (provider === 'ollama') {
-      if (isLoopbackHost(cfg.ollama_host)) return 'skipped';
-      // AI api_key is keychain-stored, not a settings field. Fetch it at probe
-      // time; treat fetch failure as "no key" so the probe still runs.
-      let apiKey: string | undefined = undefined;
-      try {
-        const key = await invoke<string | null>('get_api_key', {
-          provider: 'ollama_api_key',
-        });
-        if (key) apiKey = key;
-      } catch {
-        // Keychain unavailable or no key stored — continue without auth.
-      }
-      try {
-        await invoke('probe_endpoint_reachable', {
-          service: 'AiProvider',
-          providerName: 'Ollama',
-          host: cfg.ollama_host,
-          port: cfg.ollama_port,
-          probePath: '/api/tags',
-          apiKey,
-        });
-        return 'online';
-      } catch {
-        return 'offline';
-      }
+    const probe = AI_PROBES[cfg.ai_provider];
+    if (!probe) return 'skipped';
+    const host = cfg[probe.hostField];
+    if (isLoopbackHost(host)) return 'skipped';
+    // AI api_key is keychain-stored, not a settings field. Fetch it at probe
+    // time; treat fetch failure as "no key" so the probe still runs.
+    let apiKey: string | undefined = undefined;
+    try {
+      const key = await invoke<string | null>('get_api_key', {
+        provider: probe.keySlot,
+      });
+      if (key) apiKey = key;
+    } catch {
+      // Keychain unavailable or no key stored — continue without auth.
     }
-    if (provider === 'lmstudio') {
-      if (isLoopbackHost(cfg.lmstudio_host)) return 'skipped';
-      let apiKey: string | undefined = undefined;
-      try {
-        const key = await invoke<string | null>('get_api_key', {
-          provider: 'lmstudio_api_key',
-        });
-        if (key) apiKey = key;
-      } catch {
-        // Keychain unavailable or no key stored — continue without auth.
-      }
-      try {
-        await invoke('probe_endpoint_reachable', {
-          service: 'AiProvider',
-          providerName: 'LM Studio',
-          host: cfg.lmstudio_host,
-          port: cfg.lmstudio_port,
-          probePath: '/v1/models',
-          apiKey,
-        });
-        return 'online';
-      } catch {
-        return 'offline';
-      }
+    try {
+      await invoke('probe_endpoint_reachable', {
+        service: 'AiProvider',
+        providerName: probe.providerName,
+        host,
+        port: cfg[probe.portField],
+        probePath: probe.probePath,
+        apiKey,
+      });
+      return 'online';
+    } catch {
+      return 'offline';
     }
-    if (provider === 'omlx') {
-      if (isLoopbackHost(cfg.omlx_host)) return 'skipped';
-      let apiKey: string | undefined = undefined;
-      try {
-        const key = await invoke<string | null>('get_api_key', {
-          provider: 'omlx_api_key',
-        });
-        if (key) apiKey = key;
-      } catch {
-        // Keychain unavailable or no key stored — continue without auth.
-      }
-      try {
-        await invoke('probe_endpoint_reachable', {
-          service: 'AiProvider',
-          providerName: 'oMLX',
-          host: cfg.omlx_host,
-          port: cfg.omlx_port,
-          probePath: '/v1/models',
-          apiKey,
-        });
-        return 'online';
-      } catch {
-        return 'offline';
-      }
-    }
-    return 'skipped';
   }
 
   private async probeStt(cfg: AppConfig): Promise<ServiceStatus> {

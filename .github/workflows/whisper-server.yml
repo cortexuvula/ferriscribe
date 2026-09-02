@@ -22,7 +22,7 @@ env:
   # under it would create a bogus release — so dispatch must name the
   # release tag explicitly; empty means the upload step is skipped.
   RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
-  # Opt into Node.js 24 for GitHub Actions (actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7 and others
+  # Opt into Node.js 24 for GitHub Actions (actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7 and others
   # still run on Node.js 20 by default, which is deprecated as of 2026-05-26).
   # Node.js 24 will become the default on 2026-06-02.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -63,7 +63,7 @@ jobs:
           fi
 
       - name: Checkout whisper.cpp
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: ggml-org/whisper.cpp
           ref: ${{ env.WHISPER_TAG }}

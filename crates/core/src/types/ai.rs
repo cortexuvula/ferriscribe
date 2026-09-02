@@ -163,6 +163,14 @@ pub struct UsageInfo {
     pub completion_tokens: u32,
     /// Sum of prompt and completion tokens.
     pub total_tokens: u32,
+    /// Server-reported decode-phase throughput in tokens/second, when the
+    /// server reports one (oMLX's usage event carries
+    /// `generation_tokens_per_second`). `None` for servers that don't report
+    /// it (Ollama, LM Studio). Distinct from dividing `completion_tokens` by
+    /// the whole-call wall clock: this excludes prompt evaluation and
+    /// time-to-first-token, matching inference-server dashboards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_tokens_per_second: Option<f64>,
 }
 
 /// A chunk of a streaming completion response.
@@ -267,6 +275,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                decode_tokens_per_second: None,
             },
             tool_calls: vec![],
         };
