@@ -191,6 +191,45 @@ impl RecordingsRepo {
     // SQLITE_CORRUPT. With the guard, updates to trashed rows are a clean
     // no-op → `NotFound` (callers surface "recording deleted").
 
+    /// Update ONLY the audio-location columns (`audio_path`,
+    /// `file_size_bytes`) of an existing recording, deliberately leaving
+    /// `updated_at` untouched.
+    ///
+    /// Audio arrival is not a content change: the syncable fields
+    /// (transcript, SOAP, …) didn't change, and the wire builder stamps
+    /// every syncable field with max(revision, row). Bumping the row here
+    /// would inflate those stamps with the audio arrival time and let a
+    /// later pull overwrite a concurrent field edit on another machine
+    /// with the older stored value — silent data loss. Callers touching
+    /// actual content must use [`RecordingsRepo::update`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] if the recording does not exist.
+    pub fn update_audio_location(
+        conn: &Connection,
+        id: &Uuid,
+        audio_path: &std::path::Path,
+        file_size_bytes: Option<u64>,
+    ) -> DbResult<()> {
+        let rows = conn.execute(
+            "UPDATE recordings SET
+                audio_path = ?1,
+                file_size_bytes = ?2
+             WHERE id = ?3 AND deleted_at IS NULL",
+            rusqlite::params![
+                audio_path.to_string_lossy().as_ref(),
+                file_size_bytes.map(|n| n as i64),
+                id.to_string(),
+            ],
+        )?;
+
+        if rows == 0 {
+            return Err(DbError::NotFound(format!("recording {id}")));
+        }
+        Ok(())
+    }
+
     /// Delete a recording by ID.
     ///
     /// # Errors
@@ -794,6 +833,51 @@ mod tests {
         let conn = migrated_conn();
         let id = Uuid::new_v4();
         let result = RecordingsRepo::get_by_id(&conn, &id);
+        assert!(matches!(result, Err(DbError::NotFound(_))));
+    }
+
+    // Regression (2026-09-02 bug review): audio-location writes must NOT
+    // bump `updated_at`. The wire builder stamps every syncable field with
+    // max(revision, row); an audio arrival bumping the row inflated those
+    // stamps and let a later pull overwrite a concurrent field edit on
+    // another machine with the older stored value — silent data loss.
+    #[test]
+    fn update_audio_location_preserves_updated_at_and_content() {
+        let conn = migrated_conn();
+        let mut rec = new_rec();
+        rec.transcript = Some("v1".into());
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+        RecordingsRepo::update(&conn, &rec).unwrap(); // stamps updated_at = now
+        let before = RecordingsRepo::get_by_id(&conn, &rec.id)
+            .unwrap()
+            .updated_at
+            .expect("row stamp set");
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        RecordingsRepo::update_audio_location(
+            &conn,
+            &rec.id,
+            std::path::Path::new("/audio/remote.enc"),
+            Some(42),
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(after.updated_at, Some(before), "row stamp must not move");
+        assert_eq!(after.audio_path, PathBuf::from("/audio/remote.enc"));
+        assert_eq!(after.file_size_bytes, Some(42));
+        assert_eq!(after.transcript.as_deref(), Some("v1"), "content untouched");
+    }
+
+    #[test]
+    fn update_audio_location_missing_row_is_not_found() {
+        let conn = migrated_conn();
+        let result = RecordingsRepo::update_audio_location(
+            &conn,
+            &Uuid::new_v4(),
+            std::path::Path::new("/x"),
+            None,
+        );
         assert!(matches!(result, Err(DbError::NotFound(_))));
     }
 

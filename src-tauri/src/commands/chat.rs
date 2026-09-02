@@ -155,12 +155,17 @@ pub struct ChatMessageInput {
 /// Payload emitted for streaming token events.
 #[derive(Debug, Clone, Serialize)]
 struct TokenPayload {
+    /// Identifies the emitting stream so the frontend can discard events
+    /// from a previous, still-draining stream after a tab switch or a
+    /// superseding send (backend workers outlive their listeners).
+    stream_id: String,
     content: String,
 }
 
 /// Payload emitted when streaming completes.
 #[derive(Debug, Clone, Serialize)]
 struct DonePayload {
+    stream_id: String,
     usage: Option<UsageInfo>,
     finish_reason: Option<String>,
 }
@@ -168,6 +173,7 @@ struct DonePayload {
 /// Payload emitted on streaming errors.
 #[derive(Debug, Clone, Serialize)]
 struct ErrorPayload {
+    stream_id: String,
     message: String,
 }
 
@@ -299,10 +305,16 @@ pub async fn chat_send(
 
 /// Streaming chat completion via Tauri events.
 ///
-/// Emits the following events on the given `AppHandle`:
+/// Emits the following events on the given `AppHandle`, every payload
+/// carrying the `stream_id` supplied by the caller so the frontend can
+/// filter out events from a previous, still-draining stream:
 /// - `chat-token`  — for each text delta (`TokenPayload`)
 /// - `chat-done`   — when the stream finishes (`DonePayload`)
 /// - `chat-error`  — on error (`ErrorPayload`)
+///
+/// Only one stream is active at a time: starting a new one cancels the
+/// previous worker (its remaining tokens are discarded server-side rather
+/// than leaking into the new stream's global events).
 #[tauri::command]
 pub async fn chat_stream(
     app: tauri::AppHandle,
@@ -311,8 +323,21 @@ pub async fn chat_stream(
     model: Option<String>,
     system_prompt: Option<String>,
     documents: Option<Vec<ChatDocumentInput>>,
+    stream_id: Option<String>,
 ) -> AppResult<()> {
     check_history_size(&messages)?;
+
+    // Register this stream as the active one, cancelling any predecessor.
+    let stream_id = stream_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let cancel = {
+        let mut slot = state.chat_stream_cancel.lock().await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        if let Some((_, prev)) = slot.replace((stream_id.clone(), cancel.clone())) {
+            prev.cancel();
+            tracing::info!("chat_stream: superseding previous stream; cancelling it");
+        }
+        cancel
+    };
 
     // Load full config for pre-flight (also provides model/temperature).
     let cfg = crate::commands::load_app_config(&state.db, "chat").await?;
@@ -403,6 +428,8 @@ pub async fn chat_stream(
     // without a supervisor, a panicking JoinHandle would leave the UI spinner
     // spinning forever.
     let worker_app = app.clone();
+    let worker_stream_id = stream_id.clone();
+    let worker_cancel = cancel.clone();
     let worker = tokio::spawn(async move {
         // Tracks whether the worker has already emitted a terminal `chat-done`
         // event. If the provider closes the SSE stream without ever sending a
@@ -410,11 +437,39 @@ pub async fn chat_stream(
         // below exits normally and `emitted_done` stays false — in which case
         // we emit a `chat-done` ourselves so the frontend spinner doesn't hang.
         let mut emitted_done = false;
-        while let Some(result) = stream.next().await {
-            match result {
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = worker_cancel.cancelled() => {
+                    // Frontend-driven cancel (tab switch with cleanup, or a
+                    // superseding send). Emit a terminal event so any still-
+                    // listening consumer stops its spinner.
+                    let _ = worker_app.emit(
+                        "chat-done",
+                        DonePayload {
+                            stream_id: worker_stream_id.clone(),
+                            usage: None,
+                            finish_reason: Some("cancelled".to_string()),
+                        },
+                    );
+                    emitted_done = true;
+                    break;
+                }
+                next = stream.next() => match next {
+                    Some(result) => result,
+                    None => break,
+                },
+            };
+            match chunk {
                 Ok(chunk) => match chunk {
                     StreamChunk::Delta { text } => {
-                        let _ = worker_app.emit("chat-token", TokenPayload { content: text });
+                        let _ = worker_app.emit(
+                            "chat-token",
+                            TokenPayload {
+                                stream_id: worker_stream_id.clone(),
+                                content: text,
+                            },
+                        );
                     }
                     StreamChunk::ToolCallDelta { .. } => {
                         // Tool-call deltas are not surfaced in the basic chat stream.
@@ -426,6 +481,7 @@ pub async fn chat_stream(
                         let _ = worker_app.emit(
                             "chat-done",
                             DonePayload {
+                                stream_id: worker_stream_id.clone(),
                                 usage: Some(usage),
                                 finish_reason: Some("stop".to_string()),
                             },
@@ -436,6 +492,7 @@ pub async fn chat_stream(
                         let _ = worker_app.emit(
                             "chat-done",
                             DonePayload {
+                                stream_id: worker_stream_id.clone(),
                                 usage: None,
                                 finish_reason: Some("stop".to_string()),
                             },
@@ -457,6 +514,7 @@ pub async fn chat_stream(
             let _ = worker_app.emit(
                 "chat-done",
                 DonePayload {
+                    stream_id: worker_stream_id.clone(),
                     usage: None,
                     finish_reason: Some("stream ended".to_string()),
                 },
@@ -468,9 +526,23 @@ pub async fn chat_stream(
     // Supervisor: ensures the UI always sees a terminal event even if the
     // worker task panics, is cancelled, or returns an error. The worker emits
     // `chat-done` itself on clean completion; we only emit `chat-error` here.
+    // Also clears the active-stream slot so a later `chat_cancel_stream`
+    // doesn't fire a stale token.
     let supervisor_app = app.clone();
+    let supervisor_stream_id = stream_id.clone();
+    let supervisor_state_cancel = std::sync::Arc::clone(&state.chat_stream_cancel);
     tokio::spawn(async move {
-        match worker.await {
+        let result = worker.await;
+        {
+            let mut slot = supervisor_state_cancel.lock().await;
+            if slot
+                .as_ref()
+                .is_some_and(|(id, _)| *id == supervisor_stream_id)
+            {
+                *slot = None;
+            }
+        }
+        match result {
             Ok(Ok(())) => {
                 // Normal completion — worker already emitted `chat-done`.
             }
@@ -478,6 +550,7 @@ pub async fn chat_stream(
                 let _ = supervisor_app.emit(
                     "chat-error",
                     ErrorPayload {
+                        stream_id: supervisor_stream_id.clone(),
                         message: super::unwrap_app_error_message(e),
                     },
                 );
@@ -489,11 +562,29 @@ pub async fn chat_stream(
                     format!("Chat stream cancelled: {join_err}")
                 };
                 error!("chat_stream supervisor: {msg}");
-                let _ = supervisor_app.emit("chat-error", ErrorPayload { message: msg });
+                let _ = supervisor_app.emit(
+                    "chat-error",
+                    ErrorPayload {
+                        stream_id: supervisor_stream_id.clone(),
+                        message: msg,
+                    },
+                );
             }
         }
     });
 
+    Ok(())
+}
+
+/// Cancel the active chat stream (if any). Emits nothing itself — the
+/// worker's cancel branch emits the terminal `chat-done`.
+#[tauri::command]
+pub async fn chat_cancel_stream(state: tauri::State<'_, AppState>) -> AppResult<()> {
+    let slot = state.chat_stream_cancel.lock().await;
+    if let Some((id, token)) = slot.as_ref() {
+        tracing::info!(stream_id = %id, "chat_cancel_stream: cancelling active stream");
+        token.cancel();
+    }
     Ok(())
 }
 
@@ -850,6 +941,7 @@ mod preflight_tests {
             remote_stt_provider: RwLock::new(None),
             http_client,
             content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            chat_stream_cancel: Arc::new(tokio::sync::Mutex::new(None)),
             content_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
             condition_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
             dict_sse_cancel: Arc::new(std::sync::Mutex::new(None)),

@@ -319,22 +319,11 @@ pub async fn import_audio_file(
         };
 
         // Encrypt the imported recording at rest (same as captured recordings).
-        // Best-effort: a keychain failure falls back to plaintext so the import
-        // isn't lost, matching the capture path's behavior.
-        if file_size > 0
-            && let Err(e) = medical_security::file_crypto::encrypt_file_in_place(&dest_path)
-        {
-            use medical_security::file_crypto::FileCryptoError;
-            match e {
-                FileCryptoError::Keychain(e) => {
-                    tracing::warn!(error = %e, "import: could not encrypt (keychain unavailable); storing plaintext")
-                }
-                e => {
-                    tracing::warn!(error = %e, path = %dest_path.display(), "import: could not encrypt; storing plaintext")
-                }
-            }
-        }
-
+        // The row is inserted (with `encryption_pending = 1`) BEFORE the
+        // encrypt attempt, in one transaction — mirroring stop_recording's
+        // ordering. A crash or a transient keychain/IO failure mid-encrypt
+        // then leaves a flagged plaintext WAV the boot sweep retries, instead
+        // of an invisible orphan outside the sweep's view.
         let dest_filename = dest_path
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
@@ -348,7 +337,52 @@ pub async fn import_audio_file(
         recording.status = ProcessingStatus::Pending;
 
         let conn = db.conn()?;
-        RecordingsRepo::insert(&conn, &recording)?;
+        let should_encrypt = file_size > 0;
+        if should_encrypt {
+            conn.execute_batch("BEGIN")
+                .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+            let result: medical_db::DbResult<()> = (|| {
+                RecordingsRepo::insert(&conn, &recording)?;
+                conn.execute(
+                    "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+                    [&recording_id.to_string()],
+                )
+                .map_err(medical_db::DbError::from)?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => conn
+                    .execute_batch("COMMIT")
+                    .map_err(|e| AppError::from(medical_db::DbError::from(e)))?,
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(AppError::from(e));
+                }
+            }
+        } else {
+            RecordingsRepo::insert(&conn, &recording)?;
+        }
+
+        if should_encrypt {
+            match medical_security::file_crypto::encrypt_file_in_place(&recording.audio_path) {
+                Ok(()) => {
+                    RecordingsRepo::set_encryption_done(&conn, &recording_id)?;
+                }
+                Err(e) => {
+                    // Leave the flag set — the boot sweep retries, matching
+                    // the capture path's failure semantics.
+                    use medical_security::file_crypto::FileCryptoError;
+                    match e {
+                        FileCryptoError::Keychain(e) => {
+                            tracing::warn!(error = %e, "import: could not encrypt (keychain unavailable); encryption_pending stays set for the boot sweep")
+                        }
+                        e => {
+                            tracing::warn!(error = %e, path = %recording.audio_path.display(), "import: could not encrypt; encryption_pending stays set for the boot sweep")
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(recording_id.to_string())
     })

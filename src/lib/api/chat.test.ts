@@ -48,6 +48,7 @@ describe('chat api', () => {
       model: 'm',
       systemPrompt: 's',
       documents: null,
+      streamId: null,
     });
     invokeMock.mockReset();
     await chatStream(msgs);
@@ -56,6 +57,7 @@ describe('chat api', () => {
       model: null,
       systemPrompt: null,
       documents: null,
+      streamId: null,
     });
   });
 
@@ -67,6 +69,7 @@ describe('chat api', () => {
       model: null,
       systemPrompt: null,
       documents: docs,
+      streamId: null,
     });
     invokeMock.mockReset();
     await chatStream(msgs, { documents: [] });
@@ -75,6 +78,7 @@ describe('chat api', () => {
       model: null,
       systemPrompt: null,
       documents: null,
+      streamId: null,
     });
   });
 

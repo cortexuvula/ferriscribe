@@ -30,6 +30,9 @@ export interface ChatStreamOptions {
   systemPrompt?: string;
   /** Attached documents; the backend appends them to the system prompt. */
   documents?: ChatDocument[];
+  /** Caller-generated stream id, echoed in every chat event payload so the
+   * store can discard events from a previous, still-draining stream. */
+  streamId?: string;
 }
 
 export async function chatStream(
@@ -41,6 +44,7 @@ export async function chatStream(
     model: opts.model ?? null,
     systemPrompt: opts.systemPrompt ?? null,
     documents: opts.documents && opts.documents.length > 0 ? opts.documents : null,
+    streamId: opts.streamId ?? null,
   });
 }
 

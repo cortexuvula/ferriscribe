@@ -275,6 +275,11 @@ pub struct AppState {
     /// Mutex serializing content sync rounds (`run_sync`). Prevents
     /// concurrent pulls from racing on the cursor or interleaving merges.
     pub content_sync_lock: Arc<tokio::sync::Mutex<()>>,
+    /// The active chat stream: its id (echoed in every `chat-token` /
+    /// `chat-done` / `chat-error` payload so the frontend can filter stale
+    /// streams) and its cancellation token. Starting a new stream cancels
+    /// the previous worker; `chat_cancel_stream` cancels the current one.
+    pub chat_stream_cancel: Arc<tokio::sync::Mutex<Option<(String, CancellationToken)>>>,
     /// Cancellation token for the content sync SSE subscriber task.
     /// Replaced on each `subscribe_content_sync` call so re-subscribes
     /// don't leak eternal tasks.
@@ -800,6 +805,7 @@ impl AppState {
             remote_stt_provider,
             http_client,
             content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            chat_stream_cancel: Arc::new(tokio::sync::Mutex::new(None)),
             content_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
             condition_sse_cancel: Arc::new(std::sync::Mutex::new(None)),
             dict_sse_cancel: Arc::new(std::sync::Mutex::new(None)),

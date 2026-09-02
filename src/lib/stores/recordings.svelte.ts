@@ -234,16 +234,40 @@ class RecordingsStore {
   /// recordings would fire 200 `load()` calls in rapid succession.
   private remoteUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /// Recordings with unsaved/in-flight edits in the editor. A remote
+  /// update for a protected recording must NOT re-select it — that would
+  /// wholesale replace `selectedRecording` and visually revert the user's
+  /// edits (the editor's own dirty-checked listener shows the "updated on
+  /// another machine" notice instead). The EditorTab maintains membership.
+  private editProtected = new Set<string>();
+
+  /** Mark a recording as having unsaved editor state (idempotent). */
+  protectFromRemoteUpdate(recordingId: string): void {
+    this.editProtected.add(recordingId);
+  }
+
+  /** Clear the protection (recording left or edits flushed/saved). */
+  unprotectFromRemoteUpdate(recordingId: string): void {
+    this.editProtected.delete(recordingId);
+  }
+
+  /** Test seam: is this recording currently edit-protected? */
+  isEditProtected(recordingId: string): boolean {
+    return this.editProtected.has(recordingId);
+  }
+
   /// Handle a `recording-updated` event for a specific recording. If the
   /// affected recording is currently selected, re-fetch it so the open editor
   /// shows the merged content. The list reload is debounced (500ms) so
   /// batch sync updates only trigger one `load()` call.
   ///
-  /// If a generation is in flight (syncing flag), skip re-selecting the
-  /// recording — the in-flight generation will refresh the data on completion.
-  /// This prevents a sync event from clobbering a freshly regenerated note.
+  /// Skips the re-select when a generation is in flight (syncing flag —
+  /// the in-flight generation refreshes the data on completion) or when
+  /// the editor holds unsaved state for the recording (edit protection).
   handleRemoteUpdate(recordingId: string): void {
-    if (this.selectedRecording?.id === recordingId && !this.syncing) {
+    const clobberSafe =
+      this.selectedRecording?.id === recordingId && !this.syncing && !this.editProtected.has(recordingId);
+    if (clobberSafe) {
       // If the recording was remotely deleted, selectRecording will fail
       // (the row is now soft-deleted). Clear it so the editor doesn't
       // show a stale, now-deleted recording.

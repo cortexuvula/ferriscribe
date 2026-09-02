@@ -120,10 +120,18 @@ describe('ChatStore', () => {
     // Listeners register before the stream call, so wait for the CALL.
     await vi.waitFor(() => expect(releaseStream).toBeInstanceOf(Function));
 
-    // REALISTIC payloads: the backend emits TokenPayload { content } objects.
-    emit('chat-token', { content: 'Lipids improved ' });
-    emit('chat-token', { content: 'since 2024.' });
-    emit('chat-done', { usage: null, finish_reason: 'stop' });
+    // The store generated a stream id and handed it to chatStream; events
+    // carry it back and stale-id events are discarded (stream filter).
+    const streamId = vi.mocked(chatStream).mock.calls[0]?.[1]?.streamId;
+    expect(streamId).toBeTruthy();
+
+    // REALISTIC payloads: the backend emits TokenPayload objects with the
+    // stream_id echoed.
+    emit('chat-token', { stream_id: streamId, content: 'Lipids improved ' });
+    emit('chat-token', { stream_id: streamId, content: 'since 2024.' });
+    // A stale event from a previous stream must be ignored entirely.
+    emit('chat-token', { stream_id: 'stale-stream', content: 'GARBAGE' });
+    emit('chat-done', { stream_id: streamId, usage: null, finish_reason: 'stop' });
     releaseStream!();
     await sending;
 
@@ -131,6 +139,7 @@ describe('ChatStore', () => {
     expect(last.role).toBe('assistant');
     expect(last.content).toBe('Lipids improved since 2024.');
     expect(last.content).not.toContain('[object Object]');
+    expect(last.content).not.toContain('GARBAGE');
     expect(isStreaming.value).toBe(false);
   });
 

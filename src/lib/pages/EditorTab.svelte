@@ -92,12 +92,30 @@
   let copyBadgeTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingValue: string | null = null;
 
+  // Keep the recordings store's edit-protection in sync with this tab's
+  // dirty state: while there is unsaved/in-flight/failed-save state for the
+  // open recording, `handleRemoteUpdate` (the App-level listener) must not
+  // re-select it — that wholesale-replaces `selectedRecording` and would
+  // visually revert these edits, bypassing the dirty-checked listener below.
+  $effect(() => {
+    const recId = recordings.selectedRecording?.id ?? null;
+    const dirty = pendingValue !== null || saveStatus === 'saving' || saveStatus === 'error';
+    if (!recId) return;
+    if (dirty) {
+      recordings.protectFromRemoteUpdate(recId);
+    } else {
+      recordings.unprotectFromRemoteUpdate(recId);
+    }
+  });
+
   onDestroy(() => {
     // Destroy fires whenever the user switches tabs (App renders exactly one
     // EditorTab at a time) — flush the debounced edit so it is not silently
     // dropped. The optimistic store update already made it look saved, so
     // skipping this is invisible data loss.
     flushPendingEdit();
+    const recId = recordings.selectedRecording?.id;
+    if (recId) recordings.unprotectFromRemoteUpdate(recId);
     disposed = true;
     if (saveTimer) clearTimeout(saveTimer);
     if (clearBadgeTimer) clearTimeout(clearBadgeTimer);

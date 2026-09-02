@@ -405,10 +405,12 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, path = %enc_path.display(), "Could not encrypt recording; storing plaintext");
-                    if let Ok(conn) = db_for_enc.conn() {
-                        let _ = RecordingsRepo::set_encryption_done(&conn, &rec_id);
-                    }
+                    // Leave `encryption_pending` SET so the boot sweep
+                    // retries on next launch — matching the sweep's own
+                    // failure semantics (sweeps.rs). Clearing it here
+                    // would strand the plaintext WAV outside the sweep's
+                    // view forever after a transient keychain/IO failure.
+                    tracing::warn!(error = %e, path = %enc_path.display(), "Could not encrypt recording; keeping encryption_pending for the boot sweep to retry");
                 }
             }
         });

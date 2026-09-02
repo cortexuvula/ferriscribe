@@ -424,16 +424,17 @@ async fn run_sync(
                                 let uuid = uuid::Uuid::parse_str(&rec_id_owned).map_err(|e| {
                                     AppError::Other(format!("invalid recording id: {e}"))
                                 })?;
-                                if let Ok(mut rec) =
-                                    medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
-                                {
-                                    rec.audio_path = target.clone();
-                                    rec.file_size_bytes = Some(
-                                        std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0),
+                                let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+                                // Audio-location-only write: must not bump
+                                // `updated_at` (LWW stamp inflation → silent
+                                // loss of concurrent field edits).
+                                let _ =
+                                    medical_db::recordings::RecordingsRepo::update_audio_location(
+                                        &conn,
+                                        &uuid,
+                                        &target,
+                                        Some(size),
                                     );
-                                    let _ =
-                                        medical_db::recordings::RecordingsRepo::update(&conn, &rec);
-                                }
                                 return Ok(target.to_string_lossy().into_owned());
                             }
                             // Encrypt in memory before anything touches disk —
@@ -447,16 +448,18 @@ async fn run_sync(
                                     AppError::security(format!("audio re-encrypt failed: {e}"))
                                 })?;
                             std::fs::rename(&tmp, &target)?;
-                            // Update DB.
+                            // Update DB. Audio-location-only write: must not
+                            // bump `updated_at` (LWW stamp inflation → silent
+                            // loss of concurrent field edits).
                             let uuid = uuid::Uuid::parse_str(&rec_id_owned)
                                 .map_err(|e| AppError::Other(format!("invalid id: {e}")))?;
-                            let mut rec =
-                                medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
-                                    .map_err(AppError::from)?;
-                            rec.audio_path = target.clone();
-                            rec.file_size_bytes = Some(byte_count as u64);
-                            medical_db::recordings::RecordingsRepo::update(&conn, &rec)
-                                .map_err(AppError::from)?;
+                            medical_db::recordings::RecordingsRepo::update_audio_location(
+                                &conn,
+                                &uuid,
+                                &target,
+                                Some(byte_count as u64),
+                            )
+                            .map_err(AppError::from)?;
                             Ok(target.to_string_lossy().into_owned())
                         })
                         .await
@@ -995,13 +998,18 @@ pub async fn fetch_audio_from_server(
         }
 
         // Update the recording's audio_path + file_size_bytes.
+        // Audio-location-only write: must not bump `updated_at` (LWW stamp
+        // inflation → silent loss of concurrent field edits).
         let conn = db2.conn()?;
         let uuid = uuid::Uuid::parse_str(&rec_id_for_task)
             .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-        let mut rec = RecordingsRepo::get_by_id(&conn, &uuid).map_err(AppError::from)?;
-        rec.audio_path = target_for_task.clone();
-        rec.file_size_bytes = Some(byte_count as u64);
-        RecordingsRepo::update(&conn, &rec).map_err(AppError::from)?;
+        RecordingsRepo::update_audio_location(
+            &conn,
+            &uuid,
+            &target_for_task,
+            Some(byte_count as u64),
+        )
+        .map_err(AppError::from)?;
 
         Ok(target_for_task.to_string_lossy().into_owned())
     })

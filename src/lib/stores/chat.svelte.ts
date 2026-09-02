@@ -1,4 +1,5 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import * as chatApi from '../api/chat';
 import type { ChatMessage, ToolCallRecord } from '../types';
 import { formatError } from '../types/errors';
@@ -60,6 +61,16 @@ class ChatStore {
   private _doneUnlisten: UnlistenFn | null = null;
   private _errorUnlisten: UnlistenFn | null = null;
   private _safetyTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The backend stream this store is currently attached to. Chat events are
+   * global and workers outlive their listeners (tab switches, superseding
+   * sends); every payload carries its `stream_id`, and anything not matching
+   * the active id is discarded — otherwise a previous stream's leftover
+   * tokens would splice into the new message, and its terminal event would
+   * tear the new stream's listeners down early.
+   */
+  private _activeStreamId: string | null = null;
 
   addUserMessage(content: string) {
     const msg: ChatMessage = {
@@ -123,8 +134,15 @@ class ChatStore {
     isStreaming.value = false;
   }
 
-  /** Tear down an active stream: unlisten events, clear timeout, reset flag. */
+  /** Tear down an active stream: cancel the backend worker, unlisten
+   * events, clear timeout, reset flag. */
   cancel() {
+    // Tell the backend to stop consuming/eming — without this the worker
+    // streams on and a later re-mount would receive its stale tokens.
+    if (this._activeStreamId) {
+      void invoke('chat_cancel_stream').catch(() => {});
+    }
+    this._activeStreamId = null;
     if (this._safetyTimeout) clearTimeout(this._safetyTimeout);
     this._safetyTimeout = null;
     this._tokenUnlisten?.();
@@ -141,11 +159,19 @@ class ChatStore {
     this.addUserMessage(content);
     this.startStreaming();
 
+    // This send's stream identity — generated here, echoed by the backend
+    // in every payload, used to filter global events below.
+    const streamId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    this._activeStreamId = streamId;
+    const isMine = (payload: { stream_id?: string } | null | undefined) =>
+      payload?.stream_id === streamId;
+
     let cleaned = false;
 
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
+      this._activeStreamId = null;
       this.cancel();
     };
 
@@ -159,27 +185,39 @@ class ChatStore {
     }, 5 * 60 * 1000);
 
     try {
-      this._tokenUnlisten = await listen<{ content: string }>('chat-token', (event) => {
-        // The backend emits TokenPayload { content } — an OBJECT, not a bare
-        // string. The old `listen<string>` type was compile-time fiction;
-        // concatenating the object rendered "[object Object]" per token.
-        this.appendToLast(event.payload.content);
-        // Reset safety timeout on each token — the stream is still alive.
-        if (this._safetyTimeout) clearTimeout(this._safetyTimeout);
-        this._safetyTimeout = setTimeout(() => {
-          if (!cleaned) {
-            this.appendOrOverwriteLast('\n\n(Stream timed out)');
-            cleanup();
+      this._tokenUnlisten = await listen<{ stream_id: string; content: string }>(
+        'chat-token',
+        (event) => {
+          if (!isMine(event.payload)) return; // stale stream draining out
+          // The backend emits TokenPayload { content } — an OBJECT, not a bare
+          // string. The old `listen<string>` type was compile-time fiction;
+          // concatenating the object rendered "[object Object]" per token.
+          this.appendToLast(event.payload.content);
+          // Reset safety timeout on each token — the stream is still alive.
+          if (this._safetyTimeout) clearTimeout(this._safetyTimeout);
+          this._safetyTimeout = setTimeout(() => {
+            if (!cleaned) {
+              this.appendOrOverwriteLast('\n\n(Stream timed out)');
+              cleanup();
+            }
+          }, 5 * 60 * 1000);
+        }
+      );
+      this._doneUnlisten = await listen<{ stream_id: string }>('chat-done', (event) => {
+        if (!isMine(event.payload)) return;
+        cleanup();
+      });
+      this._errorUnlisten = await listen<{ stream_id: string; message: string } | string>(
+        'chat-error',
+        (event) => {
+          const payload = event.payload;
+          if (typeof payload === 'object' && payload !== null) {
+            if (!isMine(payload)) return;
           }
-        }, 5 * 60 * 1000);
-      });
-      this._doneUnlisten = await listen('chat-done', () => {
-        cleanup();
-      });
-      this._errorUnlisten = await listen<{ message: string } | string>('chat-error', (event) => {
-        this.appendOrOverwriteLast(`\n\nError: ${formatError(event.payload)}`);
-        cleanup();
-      });
+          this.appendOrOverwriteLast(`\n\nError: ${formatError(payload)}`);
+          cleanup();
+        }
+      );
 
       // Build messages for the API — read current value directly.
       // Filter excludes the empty streaming message (assistant with '' content).
@@ -195,6 +233,7 @@ class ChatStore {
       // an oversized send before it gets here.
       await chatApi.chatStream(apiMessages, {
         documents: this.documents.length > 0 ? this.documents : undefined,
+        streamId,
       });
     } catch (e) {
       if (e instanceof OfflineCancelled) {
