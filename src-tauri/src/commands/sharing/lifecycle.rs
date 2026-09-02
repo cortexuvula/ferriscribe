@@ -322,7 +322,6 @@ async fn build_sharing_config(friendly_name: String) -> AppResult<SharingConfig>
     // if they boot after the gate (the login-launch race we're fixing). No
     // Stop+Start needed.
     Ok(SharingConfig {
-        enabled: true,
         friendly_name,
         ollama_proxy_port: 11435,
         whisper_proxy_port: 8081,

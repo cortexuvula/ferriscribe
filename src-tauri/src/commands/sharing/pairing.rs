@@ -366,11 +366,10 @@ pub async fn pair_with_server(
 
     // Best-effort model validation for whichever provider generation will
     // use after this pair — switched OR kept. A kept provider can carry a
-    // stale or placeholder model name (e.g. oMLX's "default", saved when a
-    // pre-repair model fetch failed and the fallback list was
-    // indistinguishable from a real one-model list); sending it to the
-    // server 404s every generation. Replace the saved model with the
-    // provider's first real model when it isn't actually offered.
+    // stale model name (e.g. a placeholder saved by an older build whose
+    // model fetch failed); sending it to the server 404s every generation.
+    // Replace the saved model with the provider's first offered model when
+    // it isn't actually offered.
     let effective_provider: Option<String> = chosen_provider
         .clone()
         .or_else(|| current_answers.then(|| current.clone()));
@@ -379,11 +378,21 @@ pub async fn pair_with_server(
             let registry = state.ai_providers.lock().await;
             registry.get_arc(provider_id)
         };
-        if let Some(provider) = arc
-            && let Ok(models) = provider.available_models().await
-        {
-            let ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
-            chosen_model = refreshed_model(provider_id, &pair_cfg.ai_model, &ids);
+        if let Some(provider) = arc {
+            match provider.available_models().await {
+                Ok(models) => {
+                    let ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
+                    chosen_model = refreshed_model(&pair_cfg.ai_model, &ids);
+                }
+                // The error carries the provider name and endpoint URL
+                // (no model content) — worth a trace, since it means the
+                // model refresh was skipped and a stale name survives.
+                Err(e) => tracing::warn!(
+                    provider = %provider_id,
+                    error = %e,
+                    "pair: model list unavailable; kept the saved model"
+                ),
+            }
         }
     }
 
@@ -549,32 +558,19 @@ async fn probe_provider_proxy(
     }
 }
 
-/// The hardcoded model ids `available_models` falls back to when the model
-/// list can't be fetched (see `local_openai::ProviderMeta::fallback_model`).
-/// Persisting one of these as `ai_model` after a provider switch would bake
-/// in a model the server almost certainly doesn't have, so the pair flow
-/// skips them.
-fn is_fallback_model(provider: &str, model: &str) -> bool {
-    matches!(
-        (provider, model),
-        ("ollama", "llama3") | ("lmstudio", "default") | ("omlx", "default")
-    )
-}
-
 /// Decide whether the pair flow must replace the saved `ai_model` for the
 /// provider generation will use after pairing (switched OR kept): the model
-/// must actually be offered by that provider and must not be its fetch-failure
-/// placeholder. Returns the replacement (first real model) when a refresh is
-/// needed, else `None`.
-fn refreshed_model(provider: &str, saved: &str, offered: &[String]) -> Option<String> {
-    let real = offered
-        .iter()
-        .filter(|id| !is_fallback_model(provider, id))
-        .collect::<Vec<_>>();
-    let first = *real.first()?;
-    let saved_offered = offered.iter().any(|id| id == saved);
-    if saved_offered && !is_fallback_model(provider, saved) {
-        None // a real, explicitly chosen model — respect it
+/// must actually be offered by that provider. Returns the replacement (first
+/// offered model) when a refresh is needed, else `None`.
+///
+/// The list comes straight from the server (`available_models` errors rather
+/// than synthesizing ids), so any name it contains is real — including a
+/// model that happens to be called "llama3" or "default". Filtering by name
+/// here would shadow such a model and override a user's explicit choice.
+fn refreshed_model(saved: &str, offered: &[String]) -> Option<String> {
+    let first = offered.first()?;
+    if offered.iter().any(|id| id == saved) {
+        None // an explicitly chosen, offered model — respect it
     } else {
         Some(first.clone())
     }
@@ -862,31 +858,31 @@ mod tests {
     }
 
     #[test]
-    fn is_fallback_model_matches_provider_fallback_ids() {
-        assert!(is_fallback_model("ollama", "llama3"));
-        assert!(is_fallback_model("lmstudio", "default"));
-        assert!(is_fallback_model("omlx", "default"));
-        assert!(!is_fallback_model("ollama", "qwen3:8b"));
-        assert!(!is_fallback_model("omlx", "mlx-community/Qwen3-8B"));
-    }
-
-    #[test]
-    fn refreshed_model_replaces_placeholder_and_missing_saved_model() {
+    fn refreshed_model_replaces_model_not_offered_by_server() {
         let offered = vec![
             "mlx-community--Qwen2.5-0.5B-Instruct-4bit".to_string(),
             "Ornith-1.5-35B-A3B-MLX-4bit".to_string(),
         ];
-        // Regression: a kept provider with oMLX's "default" placeholder
-        // saved as ai_model 404s every generation after re-pairing.
+        // Regression: a kept provider with a placeholder saved as ai_model
+        // 404s every generation after re-pairing.
         assert_eq!(
-            refreshed_model("omlx", "default", &offered),
+            refreshed_model("default", &offered),
             Some("mlx-community--Qwen2.5-0.5B-Instruct-4bit".to_string())
         );
         // A model left over from another server/provider isn't offered.
         assert_eq!(
-            refreshed_model("omlx", "llama3:8b", &offered),
+            refreshed_model("llama3:8b", &offered),
             Some("mlx-community--Qwen2.5-0.5B-Instruct-4bit".to_string())
         );
+    }
+
+    // A model that happens to share a name with the old fallback ids is a
+    // REAL server model — filtering by name would shadow it and override
+    // the user's explicit choice.
+    #[test]
+    fn refreshed_model_respects_offered_model_named_like_old_placeholder() {
+        let offered = vec!["llama3".to_string(), "llama3.1:8b".to_string()];
+        assert_eq!(refreshed_model("llama3", &offered), None);
     }
 
     #[test]
@@ -896,19 +892,17 @@ mod tests {
             "Ornith-1.5-35B-A3B-MLX-4bit".to_string(),
         ];
         assert_eq!(
-            refreshed_model("omlx", "Ornith-1.5-35B-A3B-MLX-4bit", &offered),
+            refreshed_model("Ornith-1.5-35B-A3B-MLX-4bit", &offered),
             None,
             "an explicitly chosen offered model must be respected"
         );
     }
 
     #[test]
-    fn refreshed_model_no_ops_on_fallback_only_list() {
-        // available_models' fetch-failure fallback list carries only the
-        // placeholder — nothing real to switch to, keep the saved value.
-        let offered = vec!["default".to_string()];
-        assert_eq!(refreshed_model("omlx", "default", &offered), None);
-        assert_eq!(refreshed_model("omlx", "anything", &[]), None);
+    fn refreshed_model_no_ops_when_nothing_offered() {
+        // Defensive: available_models errors on an empty list, so this only
+        // guards the pure function's contract.
+        assert_eq!(refreshed_model("anything", &[]), None);
     }
 
     #[tokio::test]

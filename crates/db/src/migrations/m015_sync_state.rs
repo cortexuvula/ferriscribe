@@ -14,8 +14,7 @@ pub fn up(conn: &Connection) -> DbResult<()> {
         );
         INSERT OR IGNORE INTO sync_state (key, value) VALUES
             ('content_sync_cursor', NULL),
-            ('content_sync_last_pull', NULL),
-            ('pending_audio_uploads', '[]');",
+            ('content_sync_last_pull', NULL);",
     )?;
     Ok(())
 }
