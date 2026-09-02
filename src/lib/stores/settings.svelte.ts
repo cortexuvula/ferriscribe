@@ -133,14 +133,32 @@ class SettingsStore {
       console.warn('Settings not loaded yet, refusing to save');
       return;
     }
+    // Snapshot the pre-change state so the queue can diff this call's
+    // INTENDED changes at drain time.
+    const base = this.state;
     this.state = config;
     this.notify();
     const prev = this.saveQueue;
     this.saveQueue = (async () => {
       await prev.catch(() => {});
+      // Derive the payload at DRAIN time from the last known persisted
+      // state + ONLY this call's delta (config vs. its base). Sending the
+      // call-time snapshot wholesale would resurrect sibling changes whose
+      // earlier save failed and was rolled back, or clobber updateField
+      // writes that landed while this save sat queued — the same class of
+      // bug updateField's drain-time fix addresses. Shallow comparison is
+      // sufficient: configs are treated immutably (fresh objects per edit)
+      // and all fields are primitives or strings.
+      const payload: AppConfig = { ...(this.serverState ?? this.state) };
+      for (const key of Object.keys(config) as (keyof AppConfig)[]) {
+        if (config[key] !== base[key]) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (payload as any)[key] = config[key];
+        }
+      }
       try {
-        await saveSettings(config);
-        this.serverState = config;
+        await saveSettings(payload);
+        this.serverState = payload;
       } catch (err) {
         console.error('Failed to save settings:', err);
         try {

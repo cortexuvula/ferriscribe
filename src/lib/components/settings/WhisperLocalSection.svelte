@@ -1,6 +1,6 @@
 <script lang="ts">
   import { settings } from '../../stores/settings.svelte';
-  import type { ModelInfo as WhisperModelInfo } from '../../api/models';
+  import type { DownloadableModel as WhisperModelInfo } from '../../api/models';
 
   interface Props {
     whisperModels: WhisperModelInfo[];

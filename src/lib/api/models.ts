@@ -1,6 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 
-export interface ModelInfo {
+/**
+ * A downloadable STT model (whisper / pyannote). Named `DownloadableModel`
+ * (was `ModelInfo`) so it can't be confused with the AI-provider model
+ * entry of the same name in `api/chat.ts`.
+ */
+export interface DownloadableModel {
   id: string;
   filename: string;
   size_bytes: number;
@@ -9,11 +14,11 @@ export interface ModelInfo {
   downloaded: boolean;
 }
 
-export async function listWhisperModels(): Promise<ModelInfo[]> {
+export async function listWhisperModels(): Promise<DownloadableModel[]> {
   return invoke('list_whisper_models');
 }
 
-export async function listPyannoteModels(): Promise<ModelInfo[]> {
+export async function listPyannoteModels(): Promise<DownloadableModel[]> {
   return invoke('list_pyannote_models');
 }
 

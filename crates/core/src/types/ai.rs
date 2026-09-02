@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 /// Metadata about an available AI model.
 ///
 /// Returned by [`AiProvider::available_models`](crate::traits::AiProvider::available_models).
-/// The `supports_tools` and `supports_streaming` flags let the agent
-/// orchestrator and UI decide which code path to use.
+/// Only real, server-derived data lives here — per-model capability flags
+/// (tool support, streaming, context window) were removed in 2026-09:
+/// every provider fabricated them and no consumer ever read them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     /// Provider-specific model identifier (e.g. `"llama3:8b"`).
@@ -15,12 +16,6 @@ pub struct ModelInfo {
     pub name: String,
     /// Canonical provider name (e.g. `"ollama"`, `"lmstudio"`).
     pub provider: String,
-    /// Maximum context window in tokens.
-    pub max_tokens: u32,
-    /// Whether this model supports function/tool calling.
-    pub supports_tools: bool,
-    /// Whether this model supports streaming responses.
-    pub supports_streaming: bool,
 }
 
 /// A request to generate a chat completion.

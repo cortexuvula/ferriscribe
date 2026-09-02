@@ -357,9 +357,6 @@ impl AiProvider for LocalOpenAiProvider {
                 name: id.clone(),
                 id,
                 provider: self.meta.id.into(),
-                max_tokens: 8_192,
-                supports_tools: false,
-                supports_streaming: true,
             })
             .collect();
         if models.is_empty() {

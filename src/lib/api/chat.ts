@@ -73,13 +73,11 @@ export async function reinitProviders(): Promise<string[]> {
   return invoke('reinit_providers');
 }
 
+/** Server-reported AI model entry (mirrors `crates/core/src/types/ai.rs::ModelInfo`). */
 export interface ModelInfo {
   id: string;
   name: string;
   provider: string;
-  max_tokens: number;
-  supports_tools: boolean;
-  supports_streaming: boolean;
 }
 
 export async function listModels(providerName?: string): Promise<ModelInfo[]> {

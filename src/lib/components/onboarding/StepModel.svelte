@@ -3,12 +3,12 @@
   import { listen } from '@tauri-apps/api/event';
   import { settings } from '../../stores/settings.svelte';
   import { listWhisperModels, downloadModel } from '../../api/models';
-  import type { ModelInfo } from '../../api/models';
+  import type { DownloadableModel } from '../../api/models';
 
   interface Props { onNext: () => void; onSkip: () => void; }
   const { onNext, onSkip }: Props = $props();
 
-  let models = $state<ModelInfo[]>([]);
+  let models = $state<DownloadableModel[]>([]);
   let selected = $state(settings.state.whisper_model);
   let downloadingModel = $state<string | null>(null);
   let downloadProgress = $state<Record<string, { downloaded: number; total: number }>>({});
