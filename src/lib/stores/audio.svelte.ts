@@ -134,8 +134,11 @@ class AudioStore {
     }
   }
 
-  async stop() {
-    if (this.busy) return;
+  /** Stop the recording. Resolves to the backend-confirmed recording id,
+   * or null when the stop failed / was already busy — callers must NOT
+   * launch the pipeline on null (the row may not exist). */
+  async stop(): Promise<string | null> {
+    if (this.busy) return null;
     this.busy = true;
     this.clearTimer();
     // Stop listening for waveform events immediately so the visualizer freezes.
@@ -162,6 +165,7 @@ class AudioStore {
         ...this.state,
         lastRecordingId: recordingId,
       };
+      return recordingId;
     } catch (e) {
       const message = formatError(e);
       log.error('Failed to stop recording', { error: message });
@@ -172,6 +176,10 @@ class AudioStore {
         ...this.state,
         error: message || 'Failed to stop recording',
       };
+      // Signal failure: the old lastRecordingId may reference a row that
+      // was never inserted (the backend inserts at stop time), so the
+      // caller must not launch the pipeline against it.
+      return null;
     } finally {
       this.busy = false;
     }

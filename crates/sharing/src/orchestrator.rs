@@ -708,13 +708,27 @@ impl SharingService {
 
         if changed {
             self.rebuild_info_snapshot().await;
-            // Re-advertise mDNS with the new ports.
+            // Re-advertise mDNS with the new ports. The advertiser is taken
+            // out of the slot across the snapshot read — if `stop()` runs in
+            // that window it sees an empty slot and skips `m.stop()`, so the
+            // reinsert below must not resurrect a dead service. Holding the
+            // `running` lock across the decision closes the race: `stop()`
+            // takes `running` before touching `mdns`, so either it already
+            // flipped `running` to false (we stop the advertiser) or it
+            // can't complete until after our reinsert (and will then stop
+            // what it finds in the slot).
             if let Some(m) = self.mdns.lock().await.take() {
                 let snapshot = self.info.read().await;
                 let ports = snapshot.ports.clone();
                 let ts = snapshot.tailscale.clone();
                 drop(snapshot);
-                *self.mdns.lock().await = Some(m.update_ports(&ports, ts.as_deref()));
+                let running = self.running.lock().await;
+                if *running {
+                    *self.mdns.lock().await = Some(m.update_ports(&ports, ts.as_deref()));
+                } else {
+                    m.stop();
+                }
+                drop(running);
             }
             let r = self.readiness.read().await.clone();
             let _ = self.readiness_tx.send(r);

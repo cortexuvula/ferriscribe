@@ -249,7 +249,11 @@ pub(super) fn extract_bearer(headers: &HeaderMap) -> Option<String> {
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
         .ok()?;
-    v.strip_prefix("Bearer ").map(|s| s.trim().to_string())
+    // RFC 7235: the auth-scheme is case-insensitive.
+    let (scheme, rest) = v.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| rest.trim().to_string())
 }
 
 pub(super) fn authorize<R: tauri::Runtime>(

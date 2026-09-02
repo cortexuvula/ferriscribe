@@ -73,11 +73,19 @@ pub(super) async fn templates_upsert_handler<R: tauri::Runtime>(
     if name.is_empty() || body_text.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
+    // Serialize template writers (same discipline as the merge handlers):
+    // each does a whole-config read-modify-write, and two concurrent
+    // writers would silently drop one's change — or clobber unrelated
+    // settings fields saved in the interleaving.
+    let _merge_guard = state.merge_lock.lock().await;
     let db = Arc::clone(&state.db);
     let entry = tokio::task::spawn_blocking(
         move || -> Result<ContextTemplate, medical_core::error::AppError> {
             let conn = db.conn()?;
-            let mut cfg = SettingsRepo::load_config(&conn)?;
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| medical_core::error::AppError::from(medical_db::DbError::from(e)))?;
+            let mut cfg = SettingsRepo::load_config(&tx)?;
             cfg.migrate();
             let entry = ContextTemplate {
                 name: name.clone(),
@@ -94,7 +102,9 @@ pub(super) async fn templates_upsert_handler<R: tauri::Runtime>(
             }
             cfg.custom_context_templates
                 .sort_by_key(|a| a.name.to_lowercase());
-            SettingsRepo::save_config(&conn, &cfg)?;
+            SettingsRepo::save_config(&tx, &cfg)?;
+            tx.commit()
+                .map_err(|e| medical_core::error::AppError::from(medical_db::DbError::from(e)))?;
             Ok(entry)
         },
     )
@@ -119,11 +129,15 @@ pub(super) async fn templates_rename_handler<R: tauri::Runtime>(
         return Err(StatusCode::BAD_REQUEST);
     }
     let old_name = body.old_name;
+    let _merge_guard = state.merge_lock.lock().await;
     let db = Arc::clone(&state.db);
     let entry = tokio::task::spawn_blocking(
         move || -> Result<ContextTemplate, medical_core::error::AppError> {
             let conn = db.conn()?;
-            let mut cfg = SettingsRepo::load_config(&conn)?;
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| medical_core::error::AppError::from(medical_db::DbError::from(e)))?;
+            let mut cfg = SettingsRepo::load_config(&tx)?;
             cfg.migrate();
             if old_name == new_name {
                 return cfg
@@ -155,7 +169,9 @@ pub(super) async fn templates_rename_handler<R: tauri::Runtime>(
             let renamed = cfg.custom_context_templates[idx].clone();
             cfg.custom_context_templates
                 .sort_by_key(|a| a.name.to_lowercase());
-            SettingsRepo::save_config(&conn, &cfg)?;
+            SettingsRepo::save_config(&tx, &cfg)?;
+            tx.commit()
+                .map_err(|e| medical_core::error::AppError::from(medical_db::DbError::from(e)))?;
             Ok(renamed)
         },
     )
@@ -175,10 +191,14 @@ pub(super) async fn templates_delete_handler<R: tauri::Runtime>(
 ) -> Result<StatusCode, StatusCode> {
     let _ = authorize(&state, &headers)?;
     let name = body.name;
+    let _merge_guard = state.merge_lock.lock().await;
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || -> Result<(), medical_core::error::AppError> {
         let conn = db.conn()?;
-        let mut cfg = SettingsRepo::load_config(&conn)?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| medical_core::error::AppError::from(medical_db::DbError::from(e)))?;
+        let mut cfg = SettingsRepo::load_config(&tx)?;
         cfg.migrate();
         let idx = cfg
             .custom_context_templates
@@ -188,7 +208,9 @@ pub(super) async fn templates_delete_handler<R: tauri::Runtime>(
                 "'{name}' not found"
             )))?;
         cfg.custom_context_templates.remove(idx);
-        SettingsRepo::save_config(&conn, &cfg)?;
+        SettingsRepo::save_config(&tx, &cfg)?;
+        tx.commit()
+            .map_err(|e| medical_core::error::AppError::from(medical_db::DbError::from(e)))?;
         Ok(())
     })
     .await
