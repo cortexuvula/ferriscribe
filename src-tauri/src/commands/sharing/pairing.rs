@@ -155,6 +155,21 @@ pub async fn pair_with_server(
     code: String,
     label: String,
 ) -> AppResult<()> {
+    pair_with_server_inner(&state, lan, tailscale, ports, code, label).await
+}
+
+/// Testable core of [`pair_with_server`]: takes `&AppState` directly so the
+/// command-level tests can drive the full flow (handshake, endpoint wiring,
+/// STT switch, provider selection, model refresh, persistence) against a
+/// wiremock office server.
+pub(super) async fn pair_with_server_inner(
+    state: &AppState,
+    lan: Option<String>,
+    tailscale: Option<String>,
+    ports: PairPorts,
+    code: String,
+    label: String,
+) -> AppResult<()> {
     // The QR encodes BOTH LAN and Tailscale addresses; a remote client over
     // Tailscale cannot reach the office LAN IP. Try LAN first, and on a
     // connect-level failure (TCP refused, DNS unresolved, timeout) fall back
@@ -226,10 +241,7 @@ pub async fn pair_with_server(
         .to_string();
 
     // Store bearer token in OS keychain.
-    keyring::Entry::new("rustMedicalAssistant", "sharing-bearer")
-        .map_err(|e| AppError::Other(format!("keychain open: {e}")))?
-        .set_password(&token)
-        .map_err(|e| AppError::Other(format!("keychain write: {e}")))?;
+    store_sharing_bearer(&token)?;
 
     // Persist non-secret endpoint metadata.
     let conn = PairedConnection {
@@ -508,6 +520,24 @@ fn served_providers(ports: &PairPorts) -> Vec<&'static str> {
     v
 }
 
+/// Write the sharing bearer to the OS keychain slot that
+/// `state::load_sharing_bearer` reads at startup and re-init.
+#[cfg(not(test))]
+fn store_sharing_bearer(token: &str) -> AppResult<()> {
+    keyring::Entry::new("rustMedicalAssistant", "sharing-bearer")
+        .map_err(|e| AppError::Other(format!("keychain open: {e}")))?
+        .set_password(token)
+        .map_err(|e| AppError::Other(format!("keychain write: {e}")))
+}
+
+/// Test double: never touches the developer's real keychain. The token's
+/// effect is asserted through the per-service `state.keys` mirror instead
+/// (same KeyStorage abstraction the production flow writes).
+#[cfg(test)]
+fn store_sharing_bearer(_token: &str) -> AppResult<()> {
+    Ok(())
+}
+
 /// The advertised proxy port for a provider id, or `None` when the server
 /// doesn't serve it.
 fn provider_proxy_port(ports: &PairPorts, provider: &str) -> Option<u16> {
@@ -758,10 +788,10 @@ pub async fn backfill_tailscale() -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    //! Tests for `try_pair_at_base`. The full `pair_with_server` command depends
-    //! on Tauri `State` and the keychain, which are awkward to fake — but the
-    //! retry-discrimination logic lives entirely in the helper, so unit-testing
-    //! the helper covers the bug fix.
+    //! Tests for `try_pair_at_base` and the pure pair-flow helpers. The
+    //! full command flow has its own coverage in `command_tests` below
+    //! (wiremock office server + mocked keychain + redirected app-data
+    //! dir); this module keeps the unit tests for the pieces.
     use super::*;
 
     /// Bind a TCP listener to grab an ephemeral port, then drop the listener so
@@ -927,5 +957,211 @@ mod tests {
         let http = reqwest::Client::new();
         assert!(probe_provider_proxy(&http, &host, port, "omlx", "fixture-auth-value").await);
         srv.verify().await;
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    //! Full-flow coverage for `pair_with_server_inner` against a wiremock
+    //! office server: handshake, keychain mirror, provider availability
+    //! switch, model refresh, and AppConfig persistence. Machine-global
+    //! side effects are contained — the OS-keychain bearer write is a
+    //! #[cfg(test)] no-op (`store_sharing_bearer`), and the
+    //! paired-connection file lands in the per-process test tempdir
+    //! (`super::super::test_app_data_dir`).
+    use super::super::{paired_connection_path, test_app_data_guard};
+    use super::*;
+    use crate::commands::generation::test_helpers::build_test_state_with_provider;
+    use medical_core::types::settings::{AppConfig, SttMode};
+    use medical_db::settings::SettingsRepo;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Neutral fixture token the mock enroll endpoint hands out.
+    const FIXTURE_TOKEN: &str = "pair-flow-fixture-42";
+
+    /// Bind an ephemeral port and drop the listener — connects against it
+    /// fail instantly with ECONNREFUSED, standing in for an unbound proxy.
+    fn closed_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        port
+    }
+
+    /// A wiremock "office server": /pair/enroll hands out the fixture
+    /// token, /v1/models serves `models`. The caller must keep the
+    /// returned server alive for the duration of the test (a dropped
+    /// MockServer can unmount its mocks mid-request).
+    async fn office_server(models: &[&str]) -> (MockServer, u16) {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/pair/enroll"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": FIXTURE_TOKEN
+            })))
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": models.iter().map(|m| serde_json::json!({ "id": m })).collect::<Vec<_>>()
+            })))
+            .mount(&srv)
+            .await;
+        let port = srv
+            .uri()
+            .parse::<reqwest::Url>()
+            .expect("url")
+            .port()
+            .expect("port");
+        (srv, port)
+    }
+
+    fn ports(pairing: u16, lmstudio: Option<u16>, omlx: Option<u16>) -> PairPorts {
+        PairPorts {
+            ollama: closed_port(), // never answers in these scenarios
+            whisper: 8081,
+            pairing,
+            lmstudio,
+            omlx,
+            vocab: None,
+        }
+    }
+
+    /// State whose registry holds ONE oMLX provider statically pointed at
+    /// the mock office server (so post-pair model refreshes hit its
+    /// /v1/models), plus the config fields the flow reads.
+    async fn client_state(
+        srv_port: u16,
+        ai_provider: &str,
+        ai_model: &str,
+    ) -> crate::state::AppState {
+        let mut config = AppConfig::default();
+        config.ai_provider = ai_provider.to_string();
+        config.ai_model = ai_model.to_string();
+        let base = format!("http://127.0.0.1:{srv_port}");
+        let provider = medical_ai_providers::omlx::OmlxProvider::new(
+            Some(base.as_str()),
+            false,
+            None,
+            medical_ai_providers::http_client::RetryConfig {
+                max_retries: 0,
+                ..Default::default()
+            },
+        )
+        .expect("build omlx provider");
+        let (mut state, _recording_id) = build_test_state_with_provider(
+            config,
+            "transcript text",
+            std::sync::Arc::new(provider) as std::sync::Arc<dyn medical_core::traits::AiProvider>,
+        )
+        .await;
+        // The pair flow initializes STT providers under data_dir; point it
+        // at a real tempdir so those reads don't fail with NotFound.
+        let dir = tempfile::tempdir().expect("stt tempdir");
+        state.data_dir = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        state
+    }
+
+    async fn load_cfg(state: &crate::state::AppState) -> AppConfig {
+        let conn = state.db.conn().expect("conn");
+        let mut cfg = SettingsRepo::load_config(&conn).expect("load config");
+        cfg.migrate();
+        cfg
+    }
+
+    #[tokio::test]
+    async fn pair_switches_to_the_only_answering_provider_and_picks_its_model() {
+        let _guard = test_app_data_guard().await;
+        let (_server, srv_port) = office_server(&["Ornith-1.5-35B", "Qwen-4B"]).await;
+        let state = client_state(srv_port, "lmstudio", "llama3:8b").await;
+
+        // Only the oMLX proxy answers; LM Studio's port is closed.
+        pair_with_server_inner(
+            &state,
+            Some("127.0.0.1".into()),
+            None,
+            ports(srv_port, Some(closed_port()), Some(srv_port)),
+            "123456".into(),
+            "Test Client".into(),
+        )
+        .await
+        .expect("pair succeeds");
+
+        let cfg = load_cfg(&state).await;
+        assert_eq!(
+            cfg.ai_provider, "omlx",
+            "switched to the answering provider"
+        );
+        assert_eq!(cfg.ai_model, "Ornith-1.5-35B", "first offered model picked");
+        assert_eq!(cfg.omlx_host, "127.0.0.1");
+        assert_eq!(cfg.omlx_port, srv_port);
+        assert_eq!(
+            cfg.stt_mode,
+            SttMode::Remote,
+            "STT routed through the office"
+        );
+
+        // Bearer mirrored into the per-service keychain slots (state.keys
+        // is the same file-backed KeyStorage the flow writes).
+        assert_eq!(
+            state.keys.get_key("omlx_api_key").expect("key read"),
+            Some(FIXTURE_TOKEN.to_string())
+        );
+        assert!(paired_connection_path().expect("path").exists());
+    }
+
+    #[tokio::test]
+    async fn pair_keeps_answering_provider_and_replaces_stale_saved_model() {
+        let _guard = test_app_data_guard().await;
+        let (_server, srv_port) = office_server(&["Ornith-1.5-35B", "Qwen-4B"]).await;
+        // Saved model is the old placeholder id — not in the server's list.
+        let state = client_state(srv_port, "omlx", "default").await;
+
+        pair_with_server_inner(
+            &state,
+            Some("127.0.0.1".into()),
+            None,
+            ports(srv_port, None, Some(srv_port)),
+            "123456".into(),
+            "Test Client".into(),
+        )
+        .await
+        .expect("pair succeeds");
+
+        let cfg = load_cfg(&state).await;
+        assert_eq!(cfg.ai_provider, "omlx", "answering provider kept");
+        assert_eq!(
+            cfg.ai_model, "Ornith-1.5-35B",
+            "stale model replaced with the first offered one"
+        );
+    }
+
+    #[tokio::test]
+    async fn pair_respects_saved_model_when_the_server_actually_offers_it() {
+        // Regression pin (2026-09-02): a REAL server model that happens to
+        // share a name with the old placeholder ids must not be shadowed.
+        let _guard = test_app_data_guard().await;
+        let (_server, srv_port) = office_server(&["default", "Ornith-1.5-35B"]).await;
+        let state = client_state(srv_port, "omlx", "default").await;
+
+        pair_with_server_inner(
+            &state,
+            Some("127.0.0.1".into()),
+            None,
+            ports(srv_port, None, Some(srv_port)),
+            "123456".into(),
+            "Test Client".into(),
+        )
+        .await
+        .expect("pair succeeds");
+
+        let cfg = load_cfg(&state).await;
+        assert_eq!(
+            cfg.ai_model, "default",
+            "an offered model is respected, even one named like the old placeholder"
+        );
     }
 }
