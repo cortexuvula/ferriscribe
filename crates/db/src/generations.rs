@@ -74,11 +74,11 @@ impl GenerationsRepo {
         input: GenerationInsert<'_>,
     ) -> DbResult<Generation> {
         let id = Uuid::new_v4();
-        // The MAX read and INSERT run inside a transaction so a concurrent
-        // writer can't slip in between them and collide on regeneration_seq.
-        // `unchecked_transaction` works on the pooled `&Connection` and rolls
-        // back on drop if the insert fails.
-        let tx = conn.unchecked_transaction()?;
+        // The MAX read and INSERT run inside an IMMEDIATE transaction: the
+        // write lock is taken BEFORE the read, so a concurrent writer can't
+        // slip in between them and collide on regeneration_seq (DEFERRED
+        // serializes nothing until the first write). Rolls back on drop.
+        let tx = crate::unchecked_transaction_immediate(conn)?;
         let prev_max: i64 = tx.query_row(
             "SELECT COALESCE(MAX(regeneration_seq), 0) FROM generations \
                  WHERE recording_id = ? AND output_type = ?",

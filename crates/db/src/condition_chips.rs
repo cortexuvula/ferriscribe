@@ -224,11 +224,13 @@ impl ConditionChipsRepo {
     /// Add a new chip with the given text. The id is derived deterministically
     /// from the normalized text. Returns the active chip list afterwards.
     ///
-    /// The MAX(sort_order) read and the subsequent insert run inside a
-    /// transaction so a concurrent writer can't slip in between them and
-    /// steal the same sort_order slot.
+    /// The MAX(sort_order) read and the subsequent insert run inside an
+    /// IMMEDIATE transaction: it takes the write lock BEFORE the read, so
+    /// a concurrent writer can't slip between the MAX and the insert and
+    /// steal the same sort_order slot (a DEFERRED transaction serializes
+    /// nothing until its first write — the old comment's claim).
     pub fn add(conn: &Connection, text: &str, now_iso: &str) -> DbResult<Vec<ConditionChip>> {
-        let tx = conn.unchecked_transaction()?;
+        let tx = crate::unchecked_transaction_immediate(conn)?;
         let max_order: i32 = tx.query_row(
             "SELECT COALESCE(MAX(sort_order), -1) FROM condition_chips WHERE deleted_at IS NULL",
             [],
@@ -285,7 +287,9 @@ impl ConditionChipsRepo {
         now_iso: &str,
     ) -> DbResult<Vec<ConditionChip>> {
         let id = deterministic_id(text);
-        let tx = conn.unchecked_transaction()?;
+        // IMMEDIATE: the fallback create below reads MAX(sort_order) and
+        // inserts — same read-then-write serialization as `add`.
+        let tx = crate::unchecked_transaction_immediate(conn)?;
         // Active rows only: a click must not resurrect a tombstone. A
         // tombstoned chip once carried a fresh `deleted_at = NULL` here,
         // which (after tombstones started propagating) let one user's click

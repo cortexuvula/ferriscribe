@@ -50,6 +50,9 @@ async fn test_app() -> TestApp {
         data_dir: tmp.path().to_path_buf(),
         app_handle: app.handle().clone(),
         merge_lock: Arc::new(tokio::sync::Mutex::new(())),
+        fail_limiter: Arc::new(std::sync::Mutex::new(
+            medical_security::rate_limiter::RateLimiter::new(5),
+        )),
     };
     TestApp {
         router: build_router(state),
@@ -106,7 +109,9 @@ fn authed(app: &TestApp) -> Option<&str> {
 
 #[tokio::test]
 async fn auth_rejects_missing_and_wrong_bearer_on_every_route_group() {
-    let app = test_app().await;
+    // Fresh app per route: authorize now consumes a shared fail-limiter
+    // bucket on bad/missing bearers (5 slots), and 12 failures in one app
+    // would trip 429s instead of the exact 401s asserted here.
     for uri in [
         "/v1/vocabulary",
         "/v1/context-templates",
@@ -115,11 +120,31 @@ async fn auth_rejects_missing_and_wrong_bearer_on_every_route_group() {
         "/v1/content/sync/meta",
         "/v1/content/audio/00000000-0000-0000-0000-000000000000",
     ] {
+        let app = test_app().await;
         let (status, _) = req(&app, "GET", uri, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "no bearer on {uri}");
         let (status, _) = req(&app, "GET", uri, Some("forged-token"), None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "bad bearer on {uri}");
     }
+}
+
+#[tokio::test]
+async fn auth_rate_limits_after_budget_exhausted() {
+    let app = test_app().await;
+    // 5-slot bucket: the first 5 forged attempts get honest 401s, the 6th
+    // onward get 429 until the bucket refills.
+    let mut saw_401 = 0;
+    let mut saw_429 = false;
+    for _ in 0..8 {
+        let (status, _) = req(&app, "GET", "/v1/vocabulary", Some("forged-token"), None).await;
+        match status {
+            StatusCode::UNAUTHORIZED => saw_401 += 1,
+            StatusCode::TOO_MANY_REQUESTS => saw_429 = true,
+            other => panic!("expected 401 or 429, got {other} on /v1/vocabulary"),
+        }
+    }
+    assert_eq!(saw_401, 5, "exactly the bucket size gets honest 401s");
+    assert!(saw_429, "budget exhaustion must throttle");
 }
 
 #[tokio::test]

@@ -51,6 +51,25 @@ pub use pool::{DbPool, PooledConnection};
 /// type (e.g. for helper signatures) without taking a direct dep on rusqlite.
 pub use rusqlite::Connection;
 
+/// `BEGIN IMMEDIATE` variant of `Connection::unchecked_transaction` for
+/// read-then-write sequences (MAX-then-INSERT, exists-check-then-insert).
+///
+/// A DEFERRED transaction takes no locks until its first write, so two
+/// concurrent writers can both pass the read phase and interleave —
+/// duplicating a `MAX(seq)+1` slot or colliding on insert. IMMEDIATE
+/// acquires the write lock up front, serializing the writers. The lock is
+/// held for the transaction's (short) duration; keep these scopes tight.
+///
+/// Use ONLY for genuinely racy read-then-write sequences: an IMMEDIATE
+/// transaction that begins, reads, and finds nothing to change still held
+/// the write lock, so bulk read paths must stay DEFERRED (the default).
+pub fn unchecked_transaction_immediate(
+    conn: &Connection,
+) -> Result<rusqlite::Transaction<'_>, DbError> {
+    rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(DbError::from)
+}
+
 /// Errors produced by database operations.
 ///
 /// Every repository method returns [`DbResult<T>`] which is an alias for
