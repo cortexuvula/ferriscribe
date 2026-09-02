@@ -81,6 +81,98 @@ pub fn encryption_pending_sweep(db: &Database) {
     }
 }
 
+/// Sweep: encrypt any WAV in the recordings dir with NO database row.
+///
+/// The capture path creates the WAV the moment recording starts, but the
+/// DB row (and its `encryption_pending` flag) only exists after
+/// `stop_recording` — a crash or hard-quit mid-recording leaves a
+/// plaintext PHI file that `encryption_pending_sweep` can never see (it
+/// enumerates flagged ROWS). This sweep closes that window: every `.wav`
+/// in the recordings dir whose filename doesn't match any row's stored
+/// audio path gets encrypted in place.
+///
+/// Age guard: files modified in the last 10 minutes are skipped — they
+/// may belong to a recording in progress (its row doesn't exist yet
+/// either). They'll be picked up on the NEXT boot.
+///
+/// No row is ever created for these orphans: the recording was never
+/// finalized, so there is no duration/transcript to show — encrypting
+/// at rest (instead of deleting) preserves the audio for manual
+/// recovery. PHI-safe: logs carry counts only.
+pub fn orphaned_wav_sweep(db: &Database, recordings_dir: &Path) {
+    let dir = match std::fs::read_dir(recordings_dir) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "orphan wav sweep: cannot read recordings dir");
+            return;
+        }
+    };
+
+    // Collect the audio paths the DB knows about (basename compare — the
+    // stored paths may be absolute while we list the dir directly).
+    let known: std::collections::HashSet<String> = {
+        let conn = match db.conn() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "orphan wav sweep: cannot open DB");
+                return;
+            }
+        };
+        match conn
+            .prepare("SELECT audio_path FROM recordings")
+            .and_then(|mut stmt| {
+                let mut out = std::collections::HashSet::new();
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                for path in rows.flatten() {
+                    if let Some(name) = std::path::Path::new(&path).file_name() {
+                        out.insert(name.to_string_lossy().into_owned());
+                    }
+                }
+                Ok(out)
+            }) {
+            Ok(set) => set,
+            Err(e) => {
+                tracing::warn!(error = %e, "orphan wav sweep: audio_path query failed");
+                return;
+            }
+        }
+    };
+
+    let now = std::time::SystemTime::now();
+    let mut encrypted = 0usize;
+    for entry in dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("wav") {
+            continue;
+        }
+        let name = match path.file_name() {
+            Some(n) => n.to_string_lossy().into_owned(),
+            None => continue,
+        };
+        if known.contains(&name) {
+            continue; // row exists — encryption_pending_sweep owns it
+        }
+        // Age guard: skip possibly-in-progress captures.
+        let mtime = entry.metadata().and_then(|m| m.modified()).ok();
+        if let Some(t) = mtime
+            && now.duration_since(t).unwrap_or(Duration::ZERO) < Duration::from_secs(600)
+        {
+            continue;
+        }
+        // Already encrypted (FE1 magic)? Nothing to do.
+        if medical_security::file_crypto::is_encrypted(&path) {
+            continue;
+        }
+        match medical_security::file_crypto::encrypt_file_in_place(&path) {
+            Ok(()) => encrypted += 1,
+            Err(e) => tracing::warn!(error = %e, "orphan wav sweep: encrypt failed"),
+        }
+    }
+    if encrypted > 0 {
+        info!(count = encrypted, "Encrypted orphaned WAVs with no DB row");
+    }
+}
+
 /// One tick of the daily retention sweeper. Two idempotent, PHI-safe phases
 /// (logs carry counts/ids only):
 ///
@@ -420,5 +512,63 @@ mod tests {
         let conn = db.conn().expect("conn");
         let pending = RecordingsRepo::list_encryption_pending(&conn).expect("list pending");
         assert!(pending.is_empty(), "flag cleared without re-encrypting");
+    }
+
+    /// Build a WAV fixture with a backdated mtime so the age guard lets
+    /// the sweep see it.
+    fn write_aged_wav(dir: &Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"RIFF fake plaintext wav bytes").expect("write wav");
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let ft = filetime::FileTime::from_system_time(past);
+        filetime::set_file_mtime(&path, ft).expect("backdate mtime");
+        path
+    }
+
+    // Mid-recording crash: the WAV exists, no DB row does — the file is
+    // plaintext PHI invisible to encryption_pending_sweep (which only
+    // enumerates flagged rows).
+    #[test]
+    fn orphaned_wav_sweep_encrypts_rowless_wavs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let orphan = write_aged_wav(tmp.path(), "crash-mid-recording.wav");
+
+        let db = Database::open_in_memory().expect("db");
+        orphaned_wav_sweep(&db, tmp.path());
+
+        assert!(
+            medical_security::file_crypto::is_encrypted(&orphan),
+            "row-less WAV must be encrypted at rest"
+        );
+    }
+
+    #[test]
+    fn orphaned_wav_sweep_leaves_known_and_fresh_files_alone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Known: a row references this file (encryption_pending_sweep owns it).
+        let known = tmp.path().join("has-row.wav");
+        std::fs::write(&known, b"RIFF plaintext but owned").expect("write known");
+
+        // Fresh: modified "just now" — could be an in-progress capture.
+        let fresh = tmp.path().join("in-progress.wav");
+        std::fs::write(&fresh, b"RIFF possibly still recording").expect("write fresh");
+
+        let db = Database::open_in_memory().expect("db");
+        {
+            let conn = db.conn().expect("conn");
+            seed_days_old(&conn, 0, "has-row.wav", known.clone());
+        }
+
+        orphaned_wav_sweep(&db, tmp.path());
+
+        assert!(
+            !medical_security::file_crypto::is_encrypted(&known),
+            "row-backed WAV is the pending-sweep's business, not ours"
+        );
+        assert!(
+            !medical_security::file_crypto::is_encrypted(&fresh),
+            "recently-modified WAV may be an active capture — skip it"
+        );
     }
 }
