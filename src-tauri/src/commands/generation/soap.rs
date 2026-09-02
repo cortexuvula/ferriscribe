@@ -5,17 +5,16 @@ use std::sync::Arc;
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::PatientContext;
 use medical_processing::soap_generator::{self, SoapPromptConfig};
-use tauri::Emitter;
 use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
 
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, load_recording_and_settings, patient_context_is_empty,
-    persist_recording, resolve_provider, resolve_soap_template, validate_patient_context,
+    build_completion_request, ensure_metadata_object, load_recording_and_settings,
+    patient_context_is_empty, persist_recording, require_transcript, resolve_provider,
+    resolve_soap_template, run_generation_command, stream_with_events, validate_patient_context,
 };
-use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_TRANSCRIPT_CHARS, format_progress_error};
 
 /// Generate a SOAP note from a recording's transcript.
 ///
@@ -30,68 +29,21 @@ pub async fn generate_soap(
     context: Option<String>,
     patient_context: Option<PatientContext>,
 ) -> AppResult<String> {
-    // Reject oversized user-supplied context up front, before emitting "started"
-    // or touching the DB / provider.
-    if let Some(ref ctx) = context
-        && ctx.len() > MAX_CONTEXT_CHARS
-    {
-        return Err(AppError::InvalidInput(format!(
-            "Context too large: {} chars, limit is {}",
-            ctx.len(),
-            MAX_CONTEXT_CHARS
-        )));
-    }
+    // Reject a malformed structured context up front (the freeform-context
+    // size cap runs inside run_generation_command, before "started").
     if let Some(ref pc) = patient_context {
         validate_patient_context(pc)?;
     }
 
-    // Emit: started
-    let _ = app.emit(
-        "generation-progress",
-        GenerationProgress {
-            doc_type: "soap".into(),
-            status: "started".into(),
-            recording_id: recording_id.clone(),
-            progress: None,
-        },
-    );
-
-    let result = generate_soap_inner(
+    let inner = generate_soap_inner(
         &state,
         Some(&app),
         &recording_id,
         template.as_deref(),
         context.as_deref(),
         patient_context.as_ref(),
-    )
-    .await;
-
-    match &result {
-        Ok(_) => {
-            let _ = app.emit(
-                "generation-progress",
-                GenerationProgress {
-                    doc_type: "soap".into(),
-                    status: "completed".into(),
-                    recording_id: recording_id.clone(),
-                    progress: None,
-                },
-            );
-        }
-        Err(err) => {
-            let _ = app.emit(
-                "generation-progress",
-                GenerationProgress {
-                    doc_type: "soap".into(),
-                    status: format_progress_error(err),
-                    recording_id: recording_id.clone(),
-                    progress: None,
-                },
-            );
-        }
-    }
-
-    result
+    );
+    run_generation_command(&app, &recording_id, "soap", context.as_deref(), inner).await
 }
 
 #[instrument(skip(state, app, context, patient_context), fields(recording_id = %recording_id))]
@@ -117,23 +69,7 @@ async fn generate_soap_inner(
 
     let provider = resolve_provider(state, &settings.ai_provider).await?;
 
-    let transcript = recording
-        .transcript
-        .as_deref()
-        .filter(|t| !t.is_empty())
-        .ok_or_else(|| {
-            AppError::processing(
-                "Recording has no transcript. Run transcription first.".to_string(),
-            )
-        })?;
-
-    if transcript.len() > MAX_TRANSCRIPT_CHARS {
-        return Err(AppError::InvalidInput(format!(
-            "Transcript too large: {} chars, limit is {}",
-            transcript.len(),
-            MAX_TRANSCRIPT_CHARS
-        )));
-    }
+    let transcript = require_transcript(&recording)?;
 
     // Explicit template wins; otherwise the stored preference from
     // AppConfig. Resolved here so every caller path (pipeline, Generate
@@ -199,35 +135,8 @@ async fn generate_soap_inner(
         None,
     );
 
-    let generation_start = std::time::Instant::now();
-    let response = super::stream::stream_to_completion(
-        &provider,
-        |stats| {
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "generation-progress",
-                    GenerationProgress {
-                        doc_type: "soap".into(),
-                        status: "generating".into(),
-                        recording_id: recording_id.to_string(),
-                        progress: Some(*stats),
-                    },
-                );
-            }
-        },
-        request,
-    )
-    .await
-    .map_err(|e| match e {
-        // Preserve EndpointOffline as-is so the frontend dialog can fire.
-        AppError::EndpointOffline { .. } => e,
-        // For other errors, keep the existing nicer wrapping.
-        _ => AppError::ai_provider(format!(
-            "AI completion failed: {}",
-            crate::commands::unwrap_app_error_message(e)
-        )),
-    })?;
-    let generation_elapsed = generation_start.elapsed();
+    let (response, generation_elapsed) =
+        stream_with_events(&provider, app, "soap", recording_id, request).await?;
 
     let raw_soap = response.content;
     if raw_soap.is_empty() {
@@ -285,9 +194,7 @@ async fn generate_soap_inner(
     );
 
     // Save context to recording metadata for future reference.
-    if recording.metadata.is_null() {
-        recording.metadata = serde_json::json!({});
-    }
+    ensure_metadata_object(&mut recording.metadata);
     if let Some(obj) = recording.metadata.as_object_mut() {
         // Always written (even when empty) so the frontend can tell a
         // new-format recording (codes in metadata, clean note) from a

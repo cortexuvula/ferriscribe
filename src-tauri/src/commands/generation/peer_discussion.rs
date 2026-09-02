@@ -3,15 +3,15 @@
 
 use medical_core::error::{AppError, AppResult};
 use medical_processing::peer_discussion::{self, PeerDiscussionPromptConfig};
-use tauri::Emitter;
 use tracing::{debug, info};
 
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, load_recording_and_settings, persist_recording, resolve_provider,
+    build_completion_request, ensure_metadata_object, ensure_nonempty_output,
+    load_recording_and_settings, persist_recording, require_transcript, resolve_provider,
+    run_generation_command, stream_with_events,
 };
-use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_TRANSCRIPT_CHARS, format_progress_error};
 
 /// Generate a peer discussion note from a recording's transcript.
 ///
@@ -37,27 +37,8 @@ pub async fn generate_peer_discussion(
             "Reason for discussion is required.".to_string(),
         ));
     }
-    if let Some(ref ctx) = context
-        && ctx.len() > MAX_CONTEXT_CHARS
-    {
-        return Err(AppError::InvalidInput(format!(
-            "Context too large: {} chars, limit is {}",
-            ctx.len(),
-            MAX_CONTEXT_CHARS
-        )));
-    }
 
-    let _ = app.emit(
-        "generation-progress",
-        GenerationProgress {
-            doc_type: "peer_discussion".into(),
-            status: "started".into(),
-            recording_id: recording_id.clone(),
-            progress: None,
-        },
-    );
-
-    let result = generate_peer_discussion_inner(
+    let inner = generate_peer_discussion_inner(
         &state,
         Some(&app),
         &recording_id,
@@ -65,35 +46,15 @@ pub async fn generate_peer_discussion(
         &specialty,
         &reason,
         context.as_deref(),
+    );
+    run_generation_command(
+        &app,
+        &recording_id,
+        "peer_discussion",
+        context.as_deref(),
+        inner,
     )
-    .await;
-
-    match &result {
-        Ok(_) => {
-            let _ = app.emit(
-                "generation-progress",
-                GenerationProgress {
-                    doc_type: "peer_discussion".into(),
-                    status: "completed".into(),
-                    recording_id: recording_id.clone(),
-                    progress: None,
-                },
-            );
-        }
-        Err(err) => {
-            let _ = app.emit(
-                "generation-progress",
-                GenerationProgress {
-                    doc_type: "peer_discussion".into(),
-                    status: format_progress_error(err),
-                    recording_id: recording_id.clone(),
-                    progress: None,
-                },
-            );
-        }
-    }
-
-    result
+    .await
 }
 
 async fn generate_peer_discussion_inner(
@@ -116,23 +77,7 @@ async fn generate_peer_discussion_inner(
 
     let provider = resolve_provider(state, &settings.ai_provider).await?;
 
-    let transcript = recording
-        .transcript
-        .as_deref()
-        .filter(|t| !t.is_empty())
-        .ok_or_else(|| {
-            AppError::processing(
-                "Recording has no transcript. Run transcription first.".to_string(),
-            )
-        })?;
-
-    if transcript.len() > MAX_TRANSCRIPT_CHARS {
-        return Err(AppError::InvalidInput(format!(
-            "Transcript too large: {} chars, limit is {}",
-            transcript.len(),
-            MAX_TRANSCRIPT_CHARS
-        )));
-    }
+    let transcript = require_transcript(&recording)?;
 
     // PHI guard: physician_name/specialty are provider PHI — log only
     // structural metadata (AGENTS.md line 6).
@@ -169,46 +114,13 @@ async fn generate_peer_discussion_inner(
         None,
     );
 
-    let generation_start = std::time::Instant::now();
-    let response = super::stream::stream_to_completion(
-        &provider,
-        |stats| {
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "generation-progress",
-                    GenerationProgress {
-                        doc_type: "peer_discussion".into(),
-                        status: "generating".into(),
-                        recording_id: recording_id.to_string(),
-                        progress: Some(*stats),
-                    },
-                );
-            }
-        },
-        request,
-    )
-    .await
-    .map_err(|e| match e {
-        // Preserve EndpointOffline as-is so the frontend dialog can fire.
-        AppError::EndpointOffline { .. } => e,
-        // For other errors, keep the existing nicer wrapping.
-        _ => AppError::ai_provider(format!(
-            "AI completion failed: {}",
-            crate::commands::unwrap_app_error_message(e)
-        )),
-    })?;
-    let generation_elapsed = generation_start.elapsed();
+    let (response, generation_elapsed) =
+        stream_with_events(&provider, app, "peer_discussion", recording_id, request).await?;
 
     let discussion_text = response.content;
-    if discussion_text.is_empty() {
-        return Err(AppError::ai_provider(
-            "AI returned an empty peer discussion note.".to_string(),
-        ));
-    }
+    ensure_nonempty_output(&discussion_text, "peer discussion note")?;
 
-    if recording.metadata.is_null() {
-        recording.metadata = serde_json::json!({});
-    }
+    ensure_metadata_object(&mut recording.metadata);
     if let Some(obj) = recording.metadata.as_object_mut() {
         obj.insert(
             "peer_discussion_context".to_string(),

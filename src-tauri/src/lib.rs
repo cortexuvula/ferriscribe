@@ -41,6 +41,7 @@ pub mod corpus_export;
 mod sharing_vocab_api;
 mod state;
 mod sweeps;
+mod sync_sparse_fields;
 mod templates_remote;
 mod user_dict_remote;
 mod vocab_remote;
