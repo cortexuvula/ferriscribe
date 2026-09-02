@@ -466,8 +466,9 @@ pub async fn transcribe_recording_inner(
 
     // Store structured segment data (with speaker labels and timestamps) in
     // the recording's metadata JSON so the frontend can render a rich speaker
-    // display without re-parsing the formatted text. Preserves any existing
-    // metadata keys (context, patient_context, etc.).
+    // display without re-parsing the formatted text. Applied as a persist-time
+    // PATCH (merged into the row's CURRENT metadata) — see the producer
+    // persist below.
     let segments_json: serde_json::Value = serde_json::Value::Array(
         transcript
             .segments
@@ -482,19 +483,35 @@ pub async fn transcribe_recording_inner(
             })
             .collect(),
     );
-    if let Some(obj) = recording.metadata.as_object_mut() {
-        obj.insert("transcript_segments".into(), segments_json);
-    } else {
-        recording.metadata = serde_json::json!({ "transcript_segments": segments_json });
-    }
 
     let recording_for_failure = recording.clone();
+    let persist_id = recording.id;
+    let persist_transcript = display_text.clone();
+    let persist_stt_provider = transcript.provider.clone();
+    let persist_status_json = serde_json::to_string(&ProcessingStatus::Completed {
+        completed_at: Utc::now(),
+    })
+    .unwrap_or_else(|_| "\"pending\"".to_string());
     let join_result = tokio::task::spawn_blocking({
         let db = Arc::clone(&state.db);
-        let recording_owned = recording;
         move || {
             let conn = db.conn()?;
-            RecordingsRepo::update(&conn, &recording_owned)?;
+            // Targeted producer persist: the recording snapshot above is
+            // minutes stale by now — a whole-row update would revert any
+            // column the editor (or a concurrent generator) saved while
+            // transcription ran. Only the transcription-owned columns are
+            // written; the segments patch merges into current metadata.
+            RecordingsRepo::persist_producer_update(
+                &conn,
+                &persist_id,
+                &medical_db::recordings::ProducerPersist {
+                    transcript: Some(persist_transcript),
+                    stt_provider: Some(persist_stt_provider),
+                    processing_status: Some(persist_status_json),
+                    metadata_patch: vec![("transcript_segments".into(), segments_json)],
+                    ..Default::default()
+                },
+            )?;
             Ok::<(), AppError>(())
         }
     })

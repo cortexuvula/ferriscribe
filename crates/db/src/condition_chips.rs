@@ -161,16 +161,15 @@ impl ConditionChipsRepo {
         conn: &Connection,
         remote_chips: &[ConditionChip],
     ) -> DbResult<Vec<ConditionChip>> {
-        // Load all local chips once and index by id for O(1) lookup.
-        let local_all = Self::list_all(conn)?;
+        // Load all local chips once and index by id for O(1) lookup. The
+        // load runs INSIDE the transaction: concurrent sync rounds reading
+        // the same snapshot outside it could apply the older chip on top
+        // of the newer one, and nothing re-delivers the loser.
+        let tx = conn.unchecked_transaction()?;
+        let local_all = Self::list_all(&tx)?;
         let local_map: std::collections::HashMap<&str, &ConditionChip> =
             local_all.iter().map(|c| (c.id.as_str(), c)).collect();
 
-        // Wrap the upsert loop in a transaction so a mid-merge failure
-        // rolls back all prior writes — otherwise a partial merge leaves
-        // the local store inconsistent with the remote side.
-        // `unchecked_transaction` rolls back on drop.
-        let tx = conn.unchecked_transaction()?;
         for remote in remote_chips {
             match local_map.get(remote.id.as_str()) {
                 None => {

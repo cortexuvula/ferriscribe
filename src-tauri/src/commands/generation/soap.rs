@@ -11,9 +11,9 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, ensure_metadata_object, load_recording_and_settings,
-    patient_context_is_empty, persist_recording, require_transcript, resolve_provider,
-    resolve_soap_template, run_generation_command, stream_with_events, validate_patient_context,
+    build_completion_request, load_recording_and_settings, patient_context_is_empty,
+    require_transcript, resolve_provider, resolve_soap_template, run_generation_command,
+    stream_with_events, validate_patient_context,
 };
 
 /// Generate a SOAP note from a recording's transcript.
@@ -55,7 +55,7 @@ async fn generate_soap_inner(
     context: Option<&str>,
     patient_context: Option<&PatientContext>,
 ) -> AppResult<String> {
-    let (mut recording, settings, config) =
+    let (recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
 
     // Pre-flight: probe the remote AI endpoint before doing any work.
@@ -193,46 +193,73 @@ async fn generate_soap_inner(
         &soap_text,
     );
 
-    // Save context to recording metadata for future reference.
-    ensure_metadata_object(&mut recording.metadata);
-    if let Some(obj) = recording.metadata.as_object_mut() {
-        // Always written (even when empty) so the frontend can tell a
-        // new-format recording (codes in metadata, clean note) from a
-        // legacy one (codes inline in the note, mined as fallback).
-        obj.insert(
-            "icd_codes".to_string(),
-            serde_json::to_value(&icd_codes).unwrap_or_else(|_| serde_json::json!([])),
-        );
-        if let Some(ctx) = context
-            && !ctx.is_empty()
-        {
-            obj.insert(
-                "context".to_string(),
-                serde_json::Value::String(ctx.to_string()),
-            );
-        }
-        if let Some(pc) = patient_context
-            && !patient_context_is_empty(pc)
-        {
-            obj.insert(
-                "patient_context".to_string(),
-                serde_json::to_value(pc).unwrap_or(serde_json::Value::Null),
-            );
-        }
+    // Build the metadata PATCH (applied to the row's CURRENT metadata at
+    // persist time — the snapshot may be minutes stale, and a wholesale
+    // metadata write would drop concurrent key writes). `icd_codes` is
+    // always written (even when empty) so the frontend can tell a
+    // new-format recording (codes in metadata, clean note) from a legacy
+    // one (codes inline in the note, mined as fallback).
+    let mut metadata_patch: Vec<(String, serde_json::Value)> = vec![(
+        "icd_codes".to_string(),
+        serde_json::to_value(&icd_codes).unwrap_or_else(|_| serde_json::json!([])),
+    )];
+    if let Some(ctx) = context
+        && !ctx.is_empty()
+    {
+        metadata_patch.push((
+            "context".to_string(),
+            serde_json::Value::String(ctx.to_string()),
+        ));
+    }
+    if let Some(pc) = patient_context
+        && !patient_context_is_empty(pc)
+    {
+        metadata_patch.push((
+            "patient_context".to_string(),
+            serde_json::to_value(pc).unwrap_or(serde_json::Value::Null),
+        ));
     }
 
+    // The stat merges under generation_stats.soap — record it on a scratch
+    // object and ship just that sub-object as the patch entry (the persist
+    // merges one level, preserving sibling doc-type stats).
+    let mut stats_scratch = serde_json::json!({});
     medical_core::types::recording::record_completion_stat(
-        &mut recording.metadata,
+        &mut stats_scratch,
         "soap",
         provider.name(),
         &model_name,
         &response.usage,
         generation_elapsed,
     );
+    if let Some(stats) = stats_scratch.get("generation_stats") {
+        metadata_patch.push(("generation_stats".to_string(), stats.clone()));
+    }
 
-    // Persist to DB (on blocking thread)
-    recording.soap_note = Some(soap_text.clone());
-    persist_recording(&state.db, recording).await?;
+    // Targeted producer persist (blocking thread): the recording snapshot
+    // is stale by however long the LLM ran — a whole-row update would
+    // revert any column the editor saved meanwhile. Only soap_note plus
+    // the metadata patch are written; updated_at still bumps.
+    {
+        let db = Arc::clone(&state.db);
+        let persist_id = recording.id;
+        let persist_soap = soap_text.clone();
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db.conn()?;
+            medical_db::recordings::RecordingsRepo::persist_producer_update(
+                &conn,
+                &persist_id,
+                &medical_db::recordings::ProducerPersist {
+                    soap_note: Some(persist_soap),
+                    metadata_patch,
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
+    }
 
     finalize_training_generation(&state.db, capture_generation_id, recording_uuid, &soap_text);
 

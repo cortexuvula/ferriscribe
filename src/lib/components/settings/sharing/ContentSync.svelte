@@ -21,17 +21,28 @@
   // button in this component).
   let unlistenSyncComplete: (() => void) | null = null;
 
+  // Race guard: the settings dialog can close before listen() resolves —
+  // a resolved-after-unmount listener must unregister itself instead of
+  // leaking (same disposed-flag discipline as the other listen sites).
+  let disposed = false;
+
   onMount(async () => {
     try {
-      unlistenSyncComplete = await listen('content-sync-complete', () => {
+      const un = await listen('content-sync-complete', () => {
         recordings.lastSyncedAt = new Date();
       });
+      if (disposed) {
+        un();
+      } else {
+        unlistenSyncComplete = un;
+      }
     } catch {
       // Non-fatal: event listener failure just means the timestamp won't update
     }
   });
 
   onDestroy(() => {
+    disposed = true;
     unlistenSyncComplete?.();
   });
 

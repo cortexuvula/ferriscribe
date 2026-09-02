@@ -184,8 +184,13 @@
       } else if (type === 'peer_discussion') {
         await generatePeerDiscussion(recordingId, physicianName, specialty, discussionReason, combinedContext);
       }
+      // Only re-select when the user hasn't moved on mid-generation —
+      // an unconditional selectRecording would hijack the view back to a
+      // recording they deliberately switched away from (the pipeline store
+      // guards the same way).
+      const stillCurrent = recordings.selectedRecording?.id === recordingId;
       await Promise.all([
-        selectRecording(recordingId),
+        ...(stillCurrent ? [selectRecording(recordingId)] : []),
         recordings.load(),
       ]);
       generation.finish();

@@ -178,7 +178,14 @@ impl<'a> ContentRemote<'a> {
             .base_url()
             .ok_or_else(|| AppError::Other("content remote has no tailscale base URL".into()))?;
         let url = match since {
-            Some(cursor) => format!("{base}/v1/content/sync?since={cursor}&limit=200"),
+            // The cursor is an RFC-3339 timestamp whose `+00:00` suffix
+            // decodes as a space under form-url decoding — it MUST be
+            // percent-encoded or the server-side `since` filter silently
+            // sees a corrupted value.
+            Some(cursor) => format!(
+                "{base}/v1/content/sync?since={}&limit=200",
+                urlencoding::encode(cursor)
+            ),
             None => format!("{base}/v1/content/sync?limit=200"),
         };
         let resp = self

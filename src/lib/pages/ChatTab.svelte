@@ -86,8 +86,9 @@
         <h2>Medical AI Chat</h2>
         <p>
           Drop or attach documents (PDF, DOCX, scans) to ask questions about
-          them, or just chat. Nothing is saved — conversations and documents
-          are cleared when you leave or clear the chat.
+          them, or just chat. Nothing is synced or exported — conversations
+          and documents stay in memory for this session until you clear the
+          chat or restart the app.
         </p>
       </div>
     {:else}

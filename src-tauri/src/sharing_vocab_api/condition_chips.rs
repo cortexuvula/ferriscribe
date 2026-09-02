@@ -71,6 +71,10 @@ pub(super) async fn condition_chips_sync_handler<R: tauri::Runtime>(
 
     let incoming_count = incoming.len();
 
+    // Serialize concurrent merges (same discipline as the content-push
+    // handler and the dictionary syncs).
+    let merge_guard = state.merge_lock.lock().await;
+
     // Prune old tombstones opportunistically. Retention is 365 days: a
     // tombstone must outlive every stale client's next sync, or a machine
     // that syncs rarely (or was offline for weeks) would never learn of the
@@ -100,6 +104,9 @@ pub(super) async fn condition_chips_sync_handler<R: tauri::Runtime>(
         warn!("condition_chips_api sync failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Release the merge lock before the SSE fan-out.
+    drop(merge_guard);
 
     // Notify SSE subscribers that chips changed. Best-effort: no receivers is
     // not an error (send returns Err only when there are no active receivers,
