@@ -5,17 +5,16 @@ use std::sync::Arc;
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::PatientContext;
 use medical_processing::soap_generator::{self, SoapPromptConfig};
-use tauri::Emitter;
 use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
 
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, load_recording_and_settings, patient_context_is_empty,
-    persist_recording, resolve_provider, resolve_soap_template, validate_patient_context,
+    build_completion_request, ensure_metadata_object, load_recording_and_settings,
+    patient_context_is_empty, persist_recording, require_transcript, resolve_provider,
+    resolve_soap_template, run_generation_command, stream_with_events, validate_patient_context,
 };
-use super::{GenerationProgress, MAX_CONTEXT_CHARS, MAX_TRANSCRIPT_CHARS, format_progress_error};
 
 /// Generate a SOAP note from a recording's transcript.
 ///
@@ -30,68 +29,21 @@ pub async fn generate_soap(
     context: Option<String>,
     patient_context: Option<PatientContext>,
 ) -> AppResult<String> {
-    // Reject oversized user-supplied context up front, before emitting "started"
-    // or touching the DB / provider.
-    if let Some(ref ctx) = context
-        && ctx.len() > MAX_CONTEXT_CHARS
-    {
-        return Err(AppError::InvalidInput(format!(
-            "Context too large: {} chars, limit is {}",
-            ctx.len(),
-            MAX_CONTEXT_CHARS
-        )));
-    }
+    // Reject a malformed structured context up front (the freeform-context
+    // size cap runs inside run_generation_command, before "started").
     if let Some(ref pc) = patient_context {
         validate_patient_context(pc)?;
     }
 
-    // Emit: started
-    let _ = app.emit(
-        "generation-progress",
-        GenerationProgress {
-            doc_type: "soap".into(),
-            status: "started".into(),
-            recording_id: recording_id.clone(),
-            progress: None,
-        },
-    );
-
-    let result = generate_soap_inner(
+    let inner = generate_soap_inner(
         &state,
         Some(&app),
         &recording_id,
         template.as_deref(),
         context.as_deref(),
         patient_context.as_ref(),
-    )
-    .await;
-
-    match &result {
-        Ok(_) => {
-            let _ = app.emit(
-                "generation-progress",
-                GenerationProgress {
-                    doc_type: "soap".into(),
-                    status: "completed".into(),
-                    recording_id: recording_id.clone(),
-                    progress: None,
-                },
-            );
-        }
-        Err(err) => {
-            let _ = app.emit(
-                "generation-progress",
-                GenerationProgress {
-                    doc_type: "soap".into(),
-                    status: format_progress_error(err),
-                    recording_id: recording_id.clone(),
-                    progress: None,
-                },
-            );
-        }
-    }
-
-    result
+    );
+    run_generation_command(&app, &recording_id, "soap", context.as_deref(), inner).await
 }
 
 #[instrument(skip(state, app, context, patient_context), fields(recording_id = %recording_id))]
@@ -117,23 +69,7 @@ async fn generate_soap_inner(
 
     let provider = resolve_provider(state, &settings.ai_provider).await?;
 
-    let transcript = recording
-        .transcript
-        .as_deref()
-        .filter(|t| !t.is_empty())
-        .ok_or_else(|| {
-            AppError::processing(
-                "Recording has no transcript. Run transcription first.".to_string(),
-            )
-        })?;
-
-    if transcript.len() > MAX_TRANSCRIPT_CHARS {
-        return Err(AppError::InvalidInput(format!(
-            "Transcript too large: {} chars, limit is {}",
-            transcript.len(),
-            MAX_TRANSCRIPT_CHARS
-        )));
-    }
+    let transcript = require_transcript(&recording)?;
 
     // Explicit template wins; otherwise the stored preference from
     // AppConfig. Resolved here so every caller path (pipeline, Generate
@@ -199,35 +135,8 @@ async fn generate_soap_inner(
         None,
     );
 
-    let generation_start = std::time::Instant::now();
-    let response = super::stream::stream_to_completion(
-        &provider,
-        |stats| {
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "generation-progress",
-                    GenerationProgress {
-                        doc_type: "soap".into(),
-                        status: "generating".into(),
-                        recording_id: recording_id.to_string(),
-                        progress: Some(*stats),
-                    },
-                );
-            }
-        },
-        request,
-    )
-    .await
-    .map_err(|e| match e {
-        // Preserve EndpointOffline as-is so the frontend dialog can fire.
-        AppError::EndpointOffline { .. } => e,
-        // For other errors, keep the existing nicer wrapping.
-        _ => AppError::ai_provider(format!(
-            "AI completion failed: {}",
-            crate::commands::unwrap_app_error_message(e)
-        )),
-    })?;
-    let generation_elapsed = generation_start.elapsed();
+    let (response, generation_elapsed) =
+        stream_with_events(&provider, app, "soap", recording_id, request).await?;
 
     let raw_soap = response.content;
     if raw_soap.is_empty() {
@@ -249,8 +158,17 @@ async fn generate_soap_inner(
         "AI completion received, post-processing"
     );
 
-    // Post-process: strip markdown, fix paragraph formatting
-    let soap_text = soap_generator::postprocess_soap(&raw_soap);
+    // Post-process: strip markdown, pull the billing codes out of the note
+    // body, and fix paragraph formatting. The stored/returned note carries
+    // no code lines — codes go to metadata (`icd_codes`) and render in the
+    // frontend's billing-code list, keeping the note clean for reading,
+    // copying, and export. (postprocess_soap extracts around the paragraph
+    // formatter so the bullet splitter can't orphan code descriptions.)
+    let (soap_text, icd_codes) = soap_generator::postprocess_soap(&raw_soap);
+    info!(
+        icd_codes_extracted = icd_codes.len(),
+        "ICD codes extracted from SOAP note"
+    );
 
     // ── Training-corpus capture ─────────────────────────────────────────
     // The two helpers below are the entire training-capture surface of the
@@ -276,10 +194,15 @@ async fn generate_soap_inner(
     );
 
     // Save context to recording metadata for future reference.
-    if recording.metadata.is_null() {
-        recording.metadata = serde_json::json!({});
-    }
+    ensure_metadata_object(&mut recording.metadata);
     if let Some(obj) = recording.metadata.as_object_mut() {
+        // Always written (even when empty) so the frontend can tell a
+        // new-format recording (codes in metadata, clean note) from a
+        // legacy one (codes inline in the note, mined as fallback).
+        obj.insert(
+            "icd_codes".to_string(),
+            serde_json::to_value(&icd_codes).unwrap_or_else(|_| serde_json::json!([])),
+        );
         if let Some(ctx) = context
             && !ctx.is_empty()
         {
@@ -461,9 +384,8 @@ pub(crate) fn spawn_edit_distance_task(
 
 #[cfg(test)]
 mod preflight_tests {
-    use super::super::test_helpers::build_test_state_with_recording;
+    use super::super::test_helpers::{assert_endpoint_offline, build_test_state_with_recording};
     use super::*;
-    use medical_core::error::{AppError, OfflineReason, ServiceKind};
     use medical_core::types::settings::AppConfig;
 
     #[tokio::test]
@@ -489,37 +411,7 @@ mod preflight_tests {
             None, // patient_context
         )
         .await;
-        let elapsed = start.elapsed();
-
-        let err = result.expect_err("must fail with offline error");
-        match err {
-            AppError::EndpointOffline {
-                service,
-                reason,
-                provider_name,
-                ..
-            } => {
-                assert_eq!(service, ServiceKind::AiProvider);
-                assert_eq!(provider_name, "Ollama");
-                // 192.0.2.1 is unrouteable — Timeout is the expected outcome.
-                // ConnectionRefused is also acceptable if the OS responds fast.
-                assert!(
-                    matches!(
-                        reason,
-                        OfflineReason::ConnectionRefused | OfflineReason::Timeout
-                    ),
-                    "expected ConnectionRefused or Timeout, got {reason:?}"
-                );
-            }
-            other => panic!("expected EndpointOffline, got {other:?}"),
-        }
-
-        // Pre-flight must short-circuit BEFORE the real call: ~3s probe ceiling
-        // plus some overhead, much less than the real call's timeout.
-        assert!(
-            elapsed < std::time::Duration::from_secs(8),
-            "should have short-circuited at ~3s; took {elapsed:?}"
-        );
+        assert_endpoint_offline(result, "Ollama", start);
     }
 }
 
@@ -573,6 +465,108 @@ mod stats_tests {
         assert_eq!(
             medical_core::types::recording::latest_tokens_per_second(&rec.metadata),
             Some(stat.tokens_per_second)
+        );
+    }
+
+    /// The stored + returned SOAP note must be free of ICD code lines; the
+    /// codes move to `metadata.icd_codes` for the billing-code list.
+    #[tokio::test]
+    async fn generate_soap_strips_icd_lines_into_metadata() {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+
+        let provider = std::sync::Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "ICD-9 Code: 847.2 — Sprain of lumbar\nICD-9 Code: 724.5 — Lumbago\nICD-9 Code: 719.43 - Pain in ankle\n\nSubjective:\n- Chief complaint: back pain\n\nAssessment:\n- Lumbar strain",
+            200,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports back pain after lifting boxes.",
+            provider,
+        )
+        .await;
+
+        let soap = generate_soap_inner(&state, None, &recording_id, None, None, None)
+            .await
+            .expect("generation with mock provider succeeds");
+
+        // Returned text: no code lines, clinical content intact, and the
+        // hyphen-separated description is not stranded as an orphan bullet.
+        assert!(
+            !soap.contains("ICD-9"),
+            "returned note must be code-free: {soap}"
+        );
+        assert!(
+            !soap.contains("- Pain in ankle"),
+            "no orphaned description bullet: {soap}"
+        );
+        assert!(soap.contains("Subjective:"));
+        assert!(soap.contains("Lumbar strain"));
+
+        let uuid = Uuid::parse_str(&recording_id).expect("valid uuid");
+        let conn = state.db.conn().expect("conn");
+        let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+            .expect("recording persisted");
+
+        // Persisted note: also code-free.
+        let stored = rec.soap_note.as_deref().expect("soap_note persisted");
+        assert!(
+            !stored.contains("ICD-9"),
+            "stored note must be code-free: {stored}"
+        );
+
+        // Metadata: structured codes with their model-written titles — the
+        // hyphen-separated line keeps its description too (bullet-split
+        // regression).
+        let codes = rec.metadata["icd_codes"]
+            .as_array()
+            .expect("icd_codes array in metadata");
+        assert_eq!(codes.len(), 3);
+        assert_eq!(codes[0]["code"], "847.2");
+        assert_eq!(codes[0]["description"], "Sprain of lumbar");
+        assert_eq!(codes[0]["kind"], "icd9");
+        assert_eq!(codes[1]["code"], "724.5");
+        assert_eq!(codes[2]["code"], "719.43");
+        assert_eq!(codes[2]["description"], "Pain in ankle");
+    }
+
+    /// A note with no code lines must round-trip untouched, with an empty
+    /// `icd_codes` array still written (new-format marker).
+    #[tokio::test]
+    async fn generate_soap_without_codes_writes_empty_metadata_array() {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+
+        let provider = std::sync::Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Subjective:\n- Headache for 3 days.\n\nPlan:\n- Rest",
+            200,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports headache and fatigue.",
+            provider,
+        )
+        .await;
+
+        let soap = generate_soap_inner(&state, None, &recording_id, None, None, None)
+            .await
+            .expect("generation with mock provider succeeds");
+        assert!(soap.contains("Headache for 3 days."));
+
+        let uuid = Uuid::parse_str(&recording_id).expect("valid uuid");
+        let conn = state.db.conn().expect("conn");
+        let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+            .expect("recording persisted");
+        assert_eq!(
+            rec.metadata["icd_codes"].as_array().map(Vec::len),
+            Some(0),
+            "empty icd_codes array written as new-format marker"
         );
     }
     /// The finalize helper is documented "Never errors" and must not panic

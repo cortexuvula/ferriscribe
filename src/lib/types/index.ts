@@ -128,6 +128,13 @@ export interface AppConfig {
    *  `reasoning_effort: "none"` on the OpenAI-compatible endpoint. Mirrors
    *  `ollama_disable_thinking: bool` in crates/core/src/types/settings.rs. */
   ollama_disable_thinking: boolean;
+  omlx_host: string;
+  omlx_port: number;
+  /** Disable the reasoning/"thinking" phase for oMLX models — appends an
+   *  assistant prefill with a pre-closed <think> block (same strategy as LM
+   *  Studio). Mirrors `omlx_disable_thinking: bool` in
+   *  crates/core/src/types/settings.rs. */
+  omlx_disable_thinking: boolean;
   temperature: number;
   input_device: string | null;
   sample_rate: number;
@@ -212,6 +219,8 @@ export interface UsageInfo {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** Server-reported decode-phase throughput (oMLX); absent on Ollama/LM Studio. */
+  decode_tokens_per_second?: number;
 }
 
 /**

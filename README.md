@@ -56,9 +56,9 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 - **Real-time Updates** — SSE-based change notifications refresh the recordings list instantly when new content arrives.
 
 ### AI providers
-- **Local and LAN-accessible only** — Ollama and LM Studio, each configurable with a remote host/port so you can run the heavy model on a separate machine over LAN or Tailscale.
-- **Thinking Control** — Reasoning models (Qwen3 & co.) can spend minutes in a "thinking" phase before writing a note. **Settings → Models** has a per-provider **Disable thinking** toggle. Ollama skips reasoning via `reasoning_effort: "none"`; LM Studio ignores API thinking parameters, so FerriScribe injects a pre-closed think-block prefill instead — for a fix that covers every app at once, edit the model's prompt template in LM Studio (Model Settings → Prompt Template, add `{%- set enable_thinking = false %}`).
-- **Hybrid Retrieval (RAG)** — Powers the chat's chart-review mode: documents are chunked, embedded, and searched with vector + BM25 fusion at question time. Embeddings work against either provider via the OpenAI-compatible `/v1/embeddings` endpoint (Ollama or LM Studio).
+- **Local and LAN-accessible only** — Ollama, LM Studio, and oMLX (MLX inference for Apple Silicon), each configurable with a remote host/port so you can run the heavy model on a separate machine over LAN or Tailscale.
+- **Thinking Control** — Reasoning models (Qwen3 & co.) can spend minutes in a "thinking" phase before writing a note. **Settings → Models** has a per-provider **Disable thinking** toggle. Ollama skips reasoning via `reasoning_effort: "none"`; LM Studio and oMLX ignore API thinking parameters, so FerriScribe injects a pre-closed think-block prefill instead — for a fix that covers every app at once, edit the model's prompt template in LM Studio (Model Settings → Prompt Template, add `{%- set enable_thinking = false %}`).
+- **Hybrid Retrieval (RAG)** — Powers the chat's chart-review mode: documents are chunked, embedded, and searched with vector + BM25 fusion at question time. Embeddings work against any provider via the OpenAI-compatible `/v1/embeddings` endpoint (Ollama, LM Studio, or oMLX).
 
 ### Data
 - **Recording Management** — Record, import, search, tag, and organize audio. SQLite-backed with soft-delete and undo (8-second window), a 30-day trash (with a configurable retention policy under **Settings → Data Management** for auto-trashing old recordings), and permanent purge on the office server with a resurrection-proof ledger.

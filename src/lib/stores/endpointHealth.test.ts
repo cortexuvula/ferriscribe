@@ -471,6 +471,65 @@ describe('endpointHealth store', () => {
     expect(state.ai).toBe('online');
   });
 
+  it('fetches omlx_api_key from keychain and forwards it to the oMLX probe', async () => {
+    // Fake keychain value — a neutral marker, not a real credential shape.
+    const fakeStoredAuth = 'omlx-probe-fixture-42';
+    settings.set({
+      ai_provider: 'omlx',
+      lmstudio_host: '',
+      lmstudio_port: 1234,
+      ollama_host: '',
+      ollama_port: 11434,
+      omlx_host: '192.168.1.10',
+      omlx_port: 8000,
+      stt_remote_host: '',
+      stt_remote_port: 8080,
+      stt_mode: 'local',
+    } as any);
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_api_key') return Promise.resolve(fakeStoredAuth);
+      if (cmd === 'probe_endpoint_reachable') return Promise.resolve('Connected');
+      return Promise.resolve(undefined);
+    });
+
+    await endpointHealth.probeNow();
+
+    expect(invokeMock).toHaveBeenCalledWith('get_api_key', { provider: 'omlx_api_key' });
+    expect(invokeMock).toHaveBeenCalledWith('probe_endpoint_reachable', {
+      service: 'AiProvider',
+      providerName: 'oMLX',
+      host: '192.168.1.10',
+      port: 8000,
+      probePath: '/v1/models',
+      apiKey: fakeStoredAuth,
+    });
+    const state = endpointHealth.state;
+    expect(state.ai).toBe('online');
+  });
+
+  it('skips loopback omlx host without calling invoke', async () => {
+    settings.set({
+      ai_provider: 'omlx',
+      lmstudio_host: '',
+      lmstudio_port: 1234,
+      ollama_host: '',
+      ollama_port: 11434,
+      omlx_host: 'localhost',
+      omlx_port: 8000,
+      stt_remote_host: '',
+      stt_remote_port: 8080,
+      stt_mode: 'local',
+    } as any);
+
+    await endpointHealth.probeNow();
+
+    expect(invokeMock).not.toHaveBeenCalled();
+    const state = endpointHealth.state;
+    expect(state.ai).toBe('skipped');
+    expect(state.overall).toBe('hidden');
+  });
+
   it('AI probe continues without auth if keychain fetch fails', async () => {
     settings.set({
       ai_provider: 'ollama',

@@ -1,16 +1,16 @@
 //! `generate_synopsis` Tauri command — produces a brief synopsis from a recording's SOAP note.
 
-use medical_core::error::{AppError, AppResult};
+use medical_core::error::AppResult;
 use medical_processing::document_generator;
-use tauri::Emitter;
 use tracing::debug;
 
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, load_recording_and_settings, persist_recording, resolve_provider,
+    build_completion_request, ensure_metadata_object, ensure_nonempty_output,
+    load_recording_and_settings, persist_recording, require_soap_note, resolve_provider,
+    stream_with_events,
 };
-use super::{GenerationProgress, MAX_SOAP_NOTE_CHARS};
 
 /// Generate a brief synopsis from a recording's SOAP note.
 ///
@@ -44,23 +44,7 @@ async fn generate_synopsis_inner(
 
     let provider = resolve_provider(state, &settings.ai_provider).await?;
 
-    let soap_note = recording
-        .soap_note
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            AppError::processing(
-                "Recording has no SOAP note. Generate a SOAP note first.".to_string(),
-            )
-        })?;
-
-    if soap_note.len() > MAX_SOAP_NOTE_CHARS {
-        return Err(AppError::InvalidInput(format!(
-            "SOAP note too large: {} chars, limit is {}",
-            soap_note.len(),
-            MAX_SOAP_NOTE_CHARS
-        )));
-    }
+    let soap_note = require_soap_note(&recording)?;
 
     let (system_prompt, user_prompt) = document_generator::build_synopsis_prompt(
         soap_note,
@@ -83,47 +67,14 @@ async fn generate_synopsis_inner(
         None,
     );
 
-    let generation_start = std::time::Instant::now();
-    let response = super::stream::stream_to_completion(
-        &provider,
-        |stats| {
-            if let Some(app) = app {
-                let _ = app.emit(
-                    "generation-progress",
-                    GenerationProgress {
-                        doc_type: "synopsis".into(),
-                        status: "generating".into(),
-                        recording_id: recording_id.to_string(),
-                        progress: Some(*stats),
-                    },
-                );
-            }
-        },
-        request,
-    )
-    .await
-    .map_err(|e| match e {
-        // Preserve EndpointOffline as-is so the frontend dialog can fire.
-        AppError::EndpointOffline { .. } => e,
-        // For other errors, keep the existing nicer wrapping.
-        _ => AppError::ai_provider(format!(
-            "AI completion failed: {}",
-            crate::commands::unwrap_app_error_message(e)
-        )),
-    })?;
-    let generation_elapsed = generation_start.elapsed();
+    let (response, generation_elapsed) =
+        stream_with_events(&provider, app, "synopsis", recording_id, request).await?;
 
     let synopsis_text = response.content;
-    if synopsis_text.is_empty() {
-        return Err(AppError::ai_provider(
-            "AI returned an empty synopsis.".to_string(),
-        ));
-    }
+    ensure_nonempty_output(&synopsis_text, "synopsis")?;
 
     // Store synopsis in the metadata JSON object.
-    if recording.metadata.is_null() {
-        recording.metadata = serde_json::json!({});
-    }
+    ensure_metadata_object(&mut recording.metadata);
     if let Some(obj) = recording.metadata.as_object_mut() {
         obj.insert(
             "synopsis".to_string(),
@@ -147,9 +98,8 @@ async fn generate_synopsis_inner(
 
 #[cfg(test)]
 mod preflight_tests {
-    use super::super::test_helpers::build_test_state_with_recording;
+    use super::super::test_helpers::{assert_endpoint_offline, build_test_state_with_recording};
     use super::*;
-    use medical_core::error::{AppError, OfflineReason, ServiceKind};
     use medical_core::types::settings::AppConfig;
 
     #[tokio::test]
@@ -167,33 +117,7 @@ mod preflight_tests {
 
         let start = std::time::Instant::now();
         let result = generate_synopsis_inner(&state, None, &recording_id).await;
-        let elapsed = start.elapsed();
-
-        let err = result.expect_err("must fail with offline error");
-        match err {
-            AppError::EndpointOffline {
-                service,
-                reason,
-                provider_name,
-                ..
-            } => {
-                assert_eq!(service, ServiceKind::AiProvider);
-                assert_eq!(provider_name, "Ollama");
-                assert!(
-                    matches!(
-                        reason,
-                        OfflineReason::ConnectionRefused | OfflineReason::Timeout
-                    ),
-                    "expected ConnectionRefused or Timeout, got {reason:?}"
-                );
-            }
-            other => panic!("expected EndpointOffline, got {other:?}"),
-        }
-
-        assert!(
-            elapsed < std::time::Duration::from_secs(8),
-            "should have short-circuited at ~3s; took {elapsed:?}"
-        );
+        assert_endpoint_offline(result, "Ollama", start);
     }
 }
 

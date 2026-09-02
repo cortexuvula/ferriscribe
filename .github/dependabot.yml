@@ -58,6 +58,13 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
+      # printpdf is deliberately pinned at 0.7: 0.9+ is a major API rewrite
+      # (see AGENTS.md "Dependency version pins"). Our copy is write-only —
+      # user-PDF parsing goes through pdf-extract/lopdf — so the vendored
+      # lopdf advisory is not reachable. Migrate deliberately, not via a
+      # weekly bot PR.
+      - dependency-name: "printpdf"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"

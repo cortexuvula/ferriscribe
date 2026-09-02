@@ -3,14 +3,13 @@
   import { settings } from '../../stores/settings.svelte';
   import { testSttRemoteConnection, setApiKey, getApiKey } from '../../api/settings';
   import { reinitProviders } from '../../api/chat';
-  import { formatError } from '../../types/errors';
   import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
+  import { useTestConnection } from '../../composables/useTestConnection.svelte';
 
   const sttOk = $derived(isLocalOrAllowed(settings.state.stt_remote_host ?? '', settings.state.allow_public_endpoint));
   const sttKind = $derived(classifyEndpoint(settings.state.stt_remote_host ?? ''));
 
-  let sttRemoteTestStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
-  let sttRemoteTestMessage = $state('');
+  const test = useTestConnection();
   let sttRemoteApiKey = $state('');
 
   onMount(() => {
@@ -29,8 +28,7 @@
     value={settings.state.stt_remote_host ?? ''}
     onchange={async (e) => {
       await settings.updateField('stt_remote_host', (e.target as HTMLInputElement).value);
-      sttRemoteTestStatus = 'idle';
-      sttRemoteTestMessage = '';
+      test.reset();
       await reinitProviders();
     }}
     class="text-input"
@@ -54,8 +52,7 @@
       const value = parseInt((e.target as HTMLInputElement).value, 10);
       if (value >= 1 && value <= 65535) {
         await settings.updateField('stt_remote_port', value);
-        sttRemoteTestStatus = 'idle';
-        sttRemoteTestMessage = '';
+        test.reset();
         await reinitProviders();
       }
     }}
@@ -87,17 +84,12 @@
   <button
     class="btn-test-connection"
     type="button"
-    onclick={async () => {
-      try {
+    onclick={() =>
+      test.run(async () => {
         await setApiKey('stt_remote_api_key', sttRemoteApiKey);
-        sttRemoteTestMessage = 'Key saved.';
-        sttRemoteTestStatus = 'success';
         await reinitProviders();
-      } catch (err) {
-        sttRemoteTestStatus = 'error';
-        sttRemoteTestMessage = `Failed to save key: ${err}`;
-      }
-    }}
+        return 'Key saved.';
+      })}
   >Save key</button>
   <span class="form-hint">Leave blank and click Save to clear.</span>
 </div>
@@ -105,28 +97,20 @@
   <button
     class="btn-test-connection"
     type="button"
-    disabled={sttRemoteTestStatus === 'testing'}
-    onclick={async () => {
-      sttRemoteTestStatus = 'testing';
-      sttRemoteTestMessage = '';
-      try {
-        const msg = await testSttRemoteConnection(
+    disabled={test.status === 'testing'}
+    onclick={() =>
+      test.run(() =>
+        testSttRemoteConnection(
           settings.state.stt_remote_host || 'localhost',
           settings.state.stt_remote_port || 8080,
           sttRemoteApiKey || null,
-        );
-        sttRemoteTestStatus = 'success';
-        sttRemoteTestMessage = msg;
-      } catch (err) {
-        sttRemoteTestStatus = 'error';
-        sttRemoteTestMessage = formatError(err) || 'Connection failed';
-      }
-    }}
-  >{sttRemoteTestStatus === 'testing' ? 'Testing…' : 'Test Connection'}</button>
-  {#if sttRemoteTestStatus === 'success'}
-    <span class="test-result test-success">✓ {sttRemoteTestMessage}</span>
-  {:else if sttRemoteTestStatus === 'error'}
-    <span class="test-result test-error">✗ {sttRemoteTestMessage}</span>
+        ),
+      )}
+  >{test.status === 'testing' ? 'Testing…' : 'Test Connection'}</button>
+  {#if test.status === 'success'}
+    <span class="test-result test-success">✓ {test.message}</span>
+  {:else if test.status === 'error'}
+    <span class="test-result test-error">✗ {test.message}</span>
   {/if}
 </div>
 
@@ -151,11 +135,19 @@
     color: var(--text-muted);
   }
 
+  .form-hint code {
+    font-size: 10px;
+    background-color: var(--bg-tertiary, #374151);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
   .port-input {
     max-width: 120px;
   }
 
   .btn-test-connection {
+    align-self: flex-start;
     padding: 6px 14px;
     font-size: 13px;
     font-weight: 500;
@@ -199,5 +191,14 @@
     padding: 6px 10px;
     margin-top: 4px;
     font-size: 0.85rem;
+  }
+
+  .text-input {
+    padding: 8px 10px;
+    font-size: 13px;
+    background-color: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
   }
 </style>

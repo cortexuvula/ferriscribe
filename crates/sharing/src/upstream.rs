@@ -18,6 +18,7 @@ pub enum UpstreamKind {
     Ollama,
     Whisper,
     LmStudio,
+    Omlx,
 }
 
 /// A probe target: kind + base URL (e.g. `http://127.0.0.1:11434`).
@@ -43,7 +44,7 @@ impl UpstreamTarget {
             // whisper.cpp's whisper-server implements GET /health (returns
             // {"status":"ok"}) — it does NOT implement /v1/models.
             UpstreamKind::Whisper => format!("{base}/health"),
-            UpstreamKind::LmStudio => format!("{base}/v1/models"),
+            UpstreamKind::LmStudio | UpstreamKind::Omlx => format!("{base}/v1/models"),
         }
     }
 }
@@ -139,6 +140,18 @@ mod tests {
             .mount(&srv)
             .await;
         let t = UpstreamTarget::new(UpstreamKind::LmStudio, srv.uri());
+        assert!(probe_ready(&client(), &t).await);
+    }
+
+    #[tokio::test]
+    async fn probe_ready_omlx_hits_v1_models() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&srv)
+            .await;
+        let t = UpstreamTarget::new(UpstreamKind::Omlx, srv.uri());
         assert!(probe_ready(&client(), &t).await);
     }
 

@@ -1,8 +1,8 @@
 <script lang="ts">
   import { settings } from '../../stores/settings.svelte';
-  import { testLmStudioConnection, testOllamaConnection } from '../../api/settings';
+  import { testLmStudioConnection, testOllamaConnection, testOmlxConnection } from '../../api/settings';
   import { reinitProviders } from '../../api/chat';
-  import { formatError } from '../../types/errors';
+  import { useTestConnection } from '../../composables/useTestConnection.svelte';
 
   interface Props { onNext: () => void; onSkip: () => void; }
   const { onNext, onSkip }: Props = $props();
@@ -13,23 +13,21 @@
   let lmPort = $state(settings.state.lmstudio_port);
   let ollamaHost = $state(settings.state.ollama_host);
   let ollamaPort = $state(settings.state.ollama_port);
-  let testStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
-  let testError = $state<string | null>(null);
+  let omlxHost = $state(settings.state.omlx_host);
+  let omlxPort = $state(settings.state.omlx_port);
+  const test = useTestConnection();
 
-  async function testConnection() {
-    testStatus = 'testing';
-    testError = null;
-    try {
+  function runTest() {
+    test.run(async () => {
       if (provider === 'lmstudio') {
         await testLmStudioConnection(lmHost, lmPort, undefined);
+      } else if (provider === 'omlx') {
+        await testOmlxConnection(omlxHost, omlxPort, undefined);
       } else {
         await testOllamaConnection(ollamaHost, ollamaPort, undefined);
       }
-      testStatus = 'success';
-    } catch (e) {
-      testStatus = 'error';
-      testError = formatError(e);
-    }
+      return 'Connected';
+    });
   }
 
   async function saveAndNext() {
@@ -38,19 +36,22 @@
     await settings.updateField('lmstudio_port', lmPort);
     await settings.updateField('ollama_host', ollamaHost);
     await settings.updateField('ollama_port', ollamaPort);
+    await settings.updateField('omlx_host', omlxHost);
+    await settings.updateField('omlx_port', omlxPort);
     try { await reinitProviders(); } catch (e) { console.error('reinit failed', e); }
     onNext();
   }
 </script>
 
 <h2>Set up your AI provider</h2>
-<p class="hint">FerriScribe needs Ollama or LM Studio running locally to generate clinical notes. Pick the one you have installed and test the connection.</p>
+<p class="hint">FerriScribe needs a local AI server (Ollama, LM Studio, or oMLX) running to generate clinical notes. Pick the one you have installed and test the connection.</p>
 
 <div class="field">
   <label for="ob-provider">Provider</label>
   <select id="ob-provider" bind:value={provider}>
     <option value="lmstudio">LM Studio</option>
     <option value="ollama">Ollama</option>
+    <option value="omlx">oMLX</option>
   </select>
 </div>
 
@@ -63,6 +64,17 @@
     <div class="field">
       <label for="ob-lm-port">Port</label>
       <input id="ob-lm-port" type="number" bind:value={lmPort} placeholder="1234" />
+    </div>
+  </div>
+{:else if provider === 'omlx'}
+  <div class="row">
+    <div class="field grow">
+      <label for="ob-omlx-host">Host</label>
+      <input id="ob-omlx-host" type="text" bind:value={omlxHost} placeholder="localhost" />
+    </div>
+    <div class="field">
+      <label for="ob-omlx-port">Port</label>
+      <input id="ob-omlx-port" type="number" bind:value={omlxPort} placeholder="8000" />
     </div>
   </div>
 {:else}
@@ -79,17 +91,17 @@
 {/if}
 
 <div class="test-row">
-  <button class="btn-secondary" onclick={testConnection} disabled={testStatus === 'testing'}>
-    {testStatus === 'testing' ? 'Testing…' : 'Test connection'}
+  <button class="btn-secondary" onclick={runTest} disabled={test.status === 'testing'}>
+    {test.status === 'testing' ? 'Testing…' : 'Test connection'}
   </button>
-  {#if testStatus === 'success'}
+  {#if test.status === 'success'}
     <span class="test-ok">✓ Connected</span>
-  {:else if testStatus === 'error'}
-    <span class="test-fail" title={testError ?? ''}>✗ Not reachable</span>
+  {:else if test.status === 'error'}
+    <span class="test-fail" title={test.message}>✗ Not reachable</span>
   {/if}
 </div>
-{#if testStatus === 'error' && testError}
-  <p class="error-detail">{testError}</p>
+{#if test.status === 'error' && test.message}
+  <p class="error-detail">{test.message}</p>
 {/if}
 
 <div class="actions">

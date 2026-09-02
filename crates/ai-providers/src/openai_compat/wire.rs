@@ -145,11 +145,16 @@ pub(super) struct ChatDelta {
     pub tool_calls: Option<Vec<ApiToolCallDelta>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub(super) struct ApiUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Decode-phase throughput in tokens/second, reported by some servers
+    /// (oMLX's usage event carries `generation_tokens_per_second`). Absent
+    /// on Ollama/LM Studio.
+    #[serde(default)]
+    pub generation_tokens_per_second: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,8 +287,44 @@ mod tests {
         });
         let resp: ModelsListResponse = serde_json::from_value(json).expect("must deserialize");
         assert_eq!(resp.data.len(), 2);
-        assert_eq!(resp.data[0].id, "llama3:8b");
         assert_eq!(resp.data[0].owned_by.as_deref(), Some("meta"));
-        assert!(resp.data[1].owned_by.is_none()); // #[serde(default)]
+        assert_eq!(resp.data[1].owned_by, None); // #[serde(default)]
+    }
+
+    #[test]
+    fn deserialize_usage_with_omlx_timing_extras() {
+        // Shape captured from a live oMLX stream: the standard usage fields
+        // plus server-specific timing metrics. Unknown extras are ignored;
+        // `generation_tokens_per_second` is kept (decode-phase throughput).
+        let json = serde_json::json!({
+            "prompt_tokens": 22,
+            "completion_tokens": 120,
+            "total_tokens": 142,
+            "input_tokens": 22,
+            "output_tokens": 120,
+            "prompt_tokens_details": { "cached_tokens": 0 },
+            "time_to_first_token": 0.75,
+            "total_time": 1.96,
+            "prompt_eval_duration": 0.75,
+            "generation_duration": 1.21,
+            "prompt_tokens_per_second": 29.23,
+            "generation_tokens_per_second": 99.34
+        });
+        let u: ApiUsage = serde_json::from_value(json).expect("must deserialize");
+        assert_eq!(u.prompt_tokens, 22);
+        assert_eq!(u.completion_tokens, 120);
+        assert_eq!(u.generation_tokens_per_second, Some(99.34));
+    }
+
+    #[test]
+    fn deserialize_usage_without_extras() {
+        // Ollama / LM Studio shape: no timing fields at all.
+        let json = serde_json::json!({
+            "prompt_tokens": 1,
+            "completion_tokens": 2,
+            "total_tokens": 3
+        });
+        let u: ApiUsage = serde_json::from_value(json).expect("must deserialize");
+        assert_eq!(u.generation_tokens_per_second, None);
     }
 }

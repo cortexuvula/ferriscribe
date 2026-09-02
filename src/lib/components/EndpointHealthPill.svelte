@@ -15,8 +15,12 @@
   onDestroy(() => stop());
 
   function aiProviderLabel(): string {
-    // Valid providers are 'ollama' and 'lmstudio'; binary fallback is intentional.
-    return settings.state.ai_provider === 'ollama' ? 'Ollama' : 'LM Studio';
+    // Mirrors the backend's SUPPORTED_AI_PROVIDERS allowlist.
+    switch (settings.state.ai_provider) {
+      case 'ollama': return 'Ollama';
+      case 'omlx': return 'oMLX';
+      default: return 'LM Studio';
+    }
   }
 
   function lastCheckedDescription(): string {

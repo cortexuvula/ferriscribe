@@ -340,7 +340,11 @@ pub struct GenerationStat {
     /// Wall-clock duration of the completion call, in milliseconds (truncated;
     /// a sub-millisecond call records 0).
     pub duration_ms: u64,
-    /// Effective throughput: completion tokens divided by wall-clock seconds.
+    /// Effective throughput: the server-reported decode-phase rate when the
+    /// server provides one (oMLX reports `generation_tokens_per_second`),
+    /// else completion tokens divided by wall-clock seconds. The decode-phase
+    /// rate excludes prompt evaluation and matches inference-server
+    /// dashboards, so recorded stats agree with what the server shows.
     pub tokens_per_second: f64,
     /// When the generation completed.
     pub generated_at: DateTime<Utc>,
@@ -362,13 +366,18 @@ impl GenerationStat {
             return None;
         }
         let seconds = elapsed.as_secs_f64();
+        let tokens_per_second = match usage.decode_tokens_per_second {
+            // Guard against malformed server reports (NaN / negative / inf).
+            Some(r) if r.is_finite() && r > 0.0 => r,
+            _ => usage.completion_tokens as f64 / seconds,
+        };
         Some(Self {
             provider: provider.to_string(),
             model: model.to_string(),
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             duration_ms: elapsed.as_millis() as u64,
-            tokens_per_second: usage.completion_tokens as f64 / seconds,
+            tokens_per_second,
             generated_at: Utc::now(),
         })
     }
@@ -561,6 +570,7 @@ mod tests {
             prompt_tokens: 1000,
             completion_tokens: 200,
             total_tokens: 1200,
+            decode_tokens_per_second: None,
         };
         let stat = GenerationStat::from_completion(
             "ollama",
@@ -575,6 +585,51 @@ mod tests {
         assert_eq!(stat.completion_tokens, 200);
         assert_eq!(stat.duration_ms, 4000);
         assert_eq!(stat.tokens_per_second, 50.0);
+    }
+
+    // oMLX reports its decode-phase rate in the usage event; the recorded
+    // stat must match that (dashboard parity) instead of diluting it with
+    // prompt-eval wall time.
+    #[test]
+    fn generation_stat_prefers_server_decode_rate() {
+        let usage = UsageInfo {
+            prompt_tokens: 6000,
+            completion_tokens: 6800,
+            total_tokens: 12800,
+            decode_tokens_per_second: Some(84.0),
+        };
+        let stat = GenerationStat::from_completion(
+            "omlx",
+            "Ornith-1.5-35B",
+            &usage,
+            std::time::Duration::from_millis(101_000),
+        )
+        .expect("throughput is computable");
+        assert_eq!(stat.tokens_per_second, 84.0);
+        assert_eq!(stat.completion_tokens, 6800);
+        assert_eq!(stat.duration_ms, 101_000, "duration stays wall-clock");
+    }
+
+    // A malformed server report (zero/NaN/negative) must not corrupt the
+    // stat — fall back to the wall-clock computation.
+    #[test]
+    fn generation_stat_ignores_malformed_decode_rate() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let usage = UsageInfo {
+                prompt_tokens: 10,
+                completion_tokens: 100,
+                total_tokens: 110,
+                decode_tokens_per_second: Some(bad),
+            };
+            let stat = GenerationStat::from_completion(
+                "omlx",
+                "m",
+                &usage,
+                std::time::Duration::from_secs(2),
+            )
+            .expect("throughput is computable");
+            assert_eq!(stat.tokens_per_second, 50.0, "fallback for {bad}");
+        }
     }
 
     #[test]
@@ -597,6 +652,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
+            decode_tokens_per_second: None,
         };
         assert!(
             GenerationStat::from_completion("ollama", "llama3", &usage, std::time::Duration::ZERO)
@@ -676,6 +732,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 50,
             total_tokens: 60,
+            decode_tokens_per_second: None,
         };
         record_completion_stat(
             &mut metadata,

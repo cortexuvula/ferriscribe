@@ -81,7 +81,7 @@ All provider traits are `Send + Sync` and use `#[async_trait]`. They
 return `AppResult<T>` with subsystem-specific error variants on failure.
 The `AiProvider` trait exposes three completion modes (batch, streaming,
 tool-calling) that map directly to the OpenAI-compatible API surface used
-by both Ollama and LM Studio. `SttProvider` supports both buffer and
+by Ollama, LM Studio, and oMLX. `SttProvider` supports both buffer and
 streaming transcription, with a `CancellationToken` for user-initiated
 cancellation.
 

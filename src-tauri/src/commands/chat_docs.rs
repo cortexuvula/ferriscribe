@@ -77,10 +77,10 @@ pub(crate) fn doc_set_key(documents: &[ChatDocumentInput]) -> u64 {
     hasher.finish()
 }
 
-/// Resolve the embedding generator from config. Both Ollama and LM Studio
-/// serve the OpenAI-compatible `/v1/embeddings` endpoint, so the compatible
-/// client covers either provider. v1 limitation: hosts are the providers'
-/// default ports (custom endpoint hosts are not yet consulted for
+/// Resolve the embedding generator from config. Ollama, LM Studio, and oMLX
+/// all serve the OpenAI-compatible `/v1/embeddings` endpoint, so the
+/// compatible client covers any provider. v1 limitation: hosts are the
+/// providers' default ports (custom endpoint hosts are not yet consulted for
 /// embeddings — the model-missing error names the host it tried).
 pub(crate) fn embeddings_for_config(cfg: &AppConfig) -> AppResult<EmbeddingGenerator> {
     // `embedding_model`'s serde default is a stale OpenAI name no local
@@ -91,10 +91,11 @@ pub(crate) fn embeddings_for_config(cfg: &AppConfig) -> AppResult<EmbeddingGener
     } else {
         configured
     };
-    let host = if cfg.ai_provider == "lmstudio" {
-        "http://localhost:1234"
-    } else {
-        "http://localhost:11434"
+    let host = match cfg.ai_provider.as_str() {
+        "lmstudio" => "http://localhost:1234",
+        "omlx" => "http://localhost:8000",
+        // Ollama (and any unknown provider) default.
+        _ => "http://localhost:11434",
     };
     EmbeddingGenerator::new_openai_compatible(Some(host), Some(model))
 }

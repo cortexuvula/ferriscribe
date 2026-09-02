@@ -1,27 +1,26 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { settings } from '../../stores/settings.svelte';
-  import { listModels, setActiveProvider, reinitProviders, type ModelInfo } from '../../api/chat';
-  import { testLmStudioConnection, testOllamaConnection, getApiKey } from '../../api/settings';
+  import { listModels, setActiveProvider, type ModelInfo } from '../../api/chat';
+  import { testLmStudioConnection, testOllamaConnection, testOmlxConnection } from '../../api/settings';
+  import { isPairedWithServer } from '../../api/sharing';
+  import { officeServedHint, providerStartHint } from '../../utils/providerHints';
   import { formatError } from '../../types/errors';
-  import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
-
-  const ollamaOk = $derived(isLocalOrAllowed(settings.state.ollama_host ?? '', settings.state.allow_public_endpoint));
-  const ollamaKind = $derived(classifyEndpoint(settings.state.ollama_host ?? ''));
-  const lmstudioOk = $derived(isLocalOrAllowed(settings.state.lmstudio_host ?? '', settings.state.allow_public_endpoint));
-  const lmstudioKind = $derived(classifyEndpoint(settings.state.lmstudio_host ?? ''));
+  import ProviderServerSection from './ProviderServerSection.svelte';
 
   let availableModels = $state<ModelInfo[]>([]);
   let modelsLoading = $state(false);
+  /** Why the model list couldn't load (provider offline / empty list) —
+   * shown with a start-the-server hint so the failure is actionable. */
+  let modelsError = $state('');
+  /** Paired clients route providers through the office server's proxies;
+   * changes which hint we show when a provider is unreachable. */
+  let isPaired = $state(false);
   const modelMemory = $state<Record<string, string>>({});
-
-  let lmstudioTestStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
-  let lmstudioTestMessage = $state('');
-  let ollamaTestStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
-  let ollamaTestMessage = $state('');
 
   async function fetchModelsForProvider(provider: string) {
     modelsLoading = true;
+    modelsError = '';
     try {
       const models = await listModels(provider);
       availableModels = models;
@@ -29,6 +28,9 @@
     } catch (e) {
       console.error('Failed to fetch models:', e);
       availableModels = [];
+      // Surface why: the backend error carries the provider name and the
+      // endpoint URL it tried (e.g. "Ollama at http://… is offline").
+      modelsError = formatError(e) || 'Could not fetch the model list.';
       return [];
     } finally {
       modelsLoading = false;
@@ -39,6 +41,7 @@
     if (settings.state.ai_provider && settings.state.ai_model) {
       modelMemory[settings.state.ai_provider] = settings.state.ai_model;
     }
+    isPaired = await isPairedWithServer().catch(() => false);
     try {
       await fetchModelsForProvider(settings.state.ai_provider);
     } catch (e) {
@@ -73,45 +76,6 @@
     const value = parseFloat((e.target as HTMLInputElement).value);
     await settings.updateField('temperature', value);
   }
-
-  async function handleLmStudioHostChange(e: Event) {
-    const value = (e.target as HTMLInputElement).value;
-    await settings.updateField('lmstudio_host', value);
-    lmstudioTestStatus = 'idle';
-    lmstudioTestMessage = '';
-    await reinitProviders();
-  }
-
-  async function handleLmStudioPortChange(e: Event) {
-    const value = parseInt((e.target as HTMLInputElement).value, 10);
-    if (value >= 1 && value <= 65535) {
-      await settings.updateField('lmstudio_port', value);
-      lmstudioTestStatus = 'idle';
-      lmstudioTestMessage = '';
-      await reinitProviders();
-    }
-  }
-
-  async function handleTestLmStudioConnection() {
-    lmstudioTestStatus = 'testing';
-    lmstudioTestMessage = '';
-    try {
-      const host = settings.state.lmstudio_host || 'localhost';
-      const port = settings.state.lmstudio_port || 1234;
-      let apiKey: string | null = null;
-      try {
-        apiKey = await getApiKey('lmstudio_api_key');
-      } catch {
-        // Keychain unavailable — try without auth.
-      }
-      const msg = await testLmStudioConnection(host, port, apiKey);
-      lmstudioTestStatus = 'success';
-      lmstudioTestMessage = msg;
-    } catch (err) {
-      lmstudioTestStatus = 'error';
-      lmstudioTestMessage = formatError(err) || 'Connection failed';
-    }
-  }
 </script>
 
 <section class="settings-section">
@@ -126,6 +90,7 @@
     >
       <option value="lmstudio">LM Studio</option>
       <option value="ollama">Ollama</option>
+      <option value="omlx">oMLX</option>
     </select>
   </div>
 
@@ -141,7 +106,7 @@
         {#if modelsLoading}
           <option value="">Loading models…</option>
         {:else if availableModels.length === 0}
-          <option value="">No models available</option>
+          <option value="">{modelsError ? 'Could not load models' : 'No models available'}</option>
         {:else}
           {#each availableModels as model (model.id)}
             <option value={model.id}>{model.name}</option>
@@ -157,6 +122,16 @@
         {modelsLoading ? '…' : '↻'}
       </button>
     </div>
+    {#if modelsError && !modelsLoading}
+      <div class="endpoint-warning model-list-error" role="alert">
+        <p class="model-list-error-message">{modelsError}</p>
+        <p class="model-list-error-hint">
+          {isPaired
+            ? officeServedHint(settings.state.ai_provider)
+            : providerStartHint(settings.state.ai_provider)}
+        </p>
+      </div>
+    {/if}
   </div>
 
   <div class="form-group">
@@ -204,198 +179,72 @@
   </div>
 
   <!-- LM Studio Server -->
-  <div class="form-group-divider"></div>
-  <h4 class="subsection-title">LM Studio Server</h4>
-  <p class="subsection-hint">
-    Configure the LM Studio server address. Use <code>localhost</code> if LM Studio runs on this machine, or enter a remote IP for a network server.
-  </p>
-
-  <div class="form-group">
-    <label for="lmstudio-host" class="form-label">Host</label>
-    <input
-      id="lmstudio-host"
-      type="text"
-      value={settings.state.lmstudio_host}
-      placeholder="localhost"
-      onchange={handleLmStudioHostChange}
-      class="text-input"
-    />
-    {#if !lmstudioOk}
-      <div class="endpoint-warning" role="alert">
-        ⚠ This is a public-internet address ({lmstudioKind}). PHI may leave your device.
-        Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
-      </div>
-    {/if}
-  </div>
-
-  <div class="form-group">
-    <label for="lmstudio-port" class="form-label">Port</label>
-    <input
-      id="lmstudio-port"
-      type="number"
-      value={settings.state.lmstudio_port}
-      placeholder="1234"
-      min="1"
-      max="65535"
-      onchange={handleLmStudioPortChange}
-      class="text-input port-input"
-    />
-  </div>
-
-  <div class="form-group">
-    <button
-      class="btn-test-connection"
-      onclick={handleTestLmStudioConnection}
-      disabled={lmstudioTestStatus === 'testing'}
-    >
-      {#if lmstudioTestStatus === 'testing'}
-        Testing…
-      {:else}
-        Test Connection
-      {/if}
-    </button>
-    {#if lmstudioTestStatus === 'success'}
-      <span class="test-result test-success">✓ {lmstudioTestMessage}</span>
-    {:else if lmstudioTestStatus === 'error'}
-      <span class="test-result test-error">✗ {lmstudioTestMessage}</span>
-    {/if}
-  </div>
-
-  <div class="form-group">
-    <label class="form-row">
-      <input
-        type="checkbox"
-        checked={settings.state.lmstudio_disable_thinking ?? false}
-        onchange={async (e) => {
-          await settings.updateField('lmstudio_disable_thinking', (e.target as HTMLInputElement).checked);
-          try { await reinitProviders(); } catch (err) { console.error('Failed to reinit providers after thinking toggle:', err); }
-        }}
-      />
-      <span>
-        Disable thinking (reasoning models)
-        <p class="form-hint">
-          Skips the minutes-long reasoning/"thinking" phase on models like Qwen3
-          before they write a SOAP note. LM Studio ignores API thinking parameters,
-          so FerriScribe injects a pre-closed think block instead. For a fix that
-          covers every app, edit the model's Prompt Template in LM Studio
-          (Model Settings → Prompt Template, add <code>{'{%- set enable_thinking = false %}'}</code>).
-        </p>
-      </span>
-    </label>
-  </div>
+  <ProviderServerSection
+    idPrefix="lmstudio"
+    title="LM Studio Server"
+    hostField="lmstudio_host"
+    portField="lmstudio_port"
+    defaultPort={1234}
+    apiKeySlot="lmstudio_api_key"
+    testConnection={testLmStudioConnection}
+    thinkingField="lmstudio_disable_thinking"
+  >
+    {#snippet hint()}
+      Configure the LM Studio server address. Use <code>localhost</code> if LM Studio runs on this
+      machine, or enter a remote IP for a network server.
+    {/snippet}
+    {#snippet thinkingHint()}
+      Skips the minutes-long reasoning/"thinking" phase on models like Qwen3 before they write a
+      SOAP note. LM Studio ignores API thinking parameters, so FerriScribe injects a pre-closed
+      think block instead. For a fix that covers every app, edit the model's Prompt Template in LM
+      Studio (Model Settings → Prompt Template, add
+      <code>{'{%- set enable_thinking = false %}'}</code>).
+    {/snippet}
+  </ProviderServerSection>
 
   <!-- Ollama Server -->
-  <div class="form-group-divider"></div>
-  <h4 class="subsection-title">Ollama Server</h4>
-  <p class="subsection-hint">
-    Configure the Ollama server address. Use <code>localhost</code> if Ollama runs on this machine, or enter a remote IP / Tailscale hostname for a network server.
-  </p>
+  <ProviderServerSection
+    idPrefix="ollama"
+    title="Ollama Server"
+    hostField="ollama_host"
+    portField="ollama_port"
+    defaultPort={11434}
+    apiKeySlot="ollama_api_key"
+    testConnection={testOllamaConnection}
+    thinkingField="ollama_disable_thinking"
+  >
+    {#snippet hint()}
+      Configure the Ollama server address. Use <code>localhost</code> if Ollama runs on this
+      machine, or enter a remote IP / Tailscale hostname for a network server.
+    {/snippet}
+    {#snippet thinkingHint()}
+      Skips the minutes-long reasoning/"thinking" phase on models like Qwen3 before they write a
+      SOAP note. Sends <code>reasoning_effort: "none"</code> to Ollama's OpenAI-compatible endpoint.
+    {/snippet}
+  </ProviderServerSection>
 
-  <div class="form-group">
-    <label for="ollama-host" class="form-label">Host</label>
-    <input
-      id="ollama-host"
-      type="text"
-      value={settings.state.ollama_host ?? ''}
-      placeholder="localhost"
-      onchange={async (e) => {
-        await settings.updateField('ollama_host', (e.target as HTMLInputElement).value);
-        ollamaTestStatus = 'idle';
-        ollamaTestMessage = '';
-        await reinitProviders();
-      }}
-      class="text-input"
-    />
-    {#if !ollamaOk}
-      <div class="endpoint-warning" role="alert">
-        ⚠ This is a public-internet address ({ollamaKind}). PHI may leave your device.
-        Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
-      </div>
-    {/if}
-  </div>
-
-  <div class="form-group">
-    <label for="ollama-port" class="form-label">Port</label>
-    <input
-      id="ollama-port"
-      type="number"
-      value={settings.state.ollama_port ?? 11434}
-      placeholder="11434"
-      min="1"
-      max="65535"
-      onchange={async (e) => {
-        const value = parseInt((e.target as HTMLInputElement).value, 10);
-        if (value >= 1 && value <= 65535) {
-          await settings.updateField('ollama_port', value);
-          ollamaTestStatus = 'idle';
-          ollamaTestMessage = '';
-          await reinitProviders();
-        }
-      }}
-      class="text-input port-input"
-    />
-  </div>
-
-  <div class="form-group">
-    <button
-      class="btn-test-connection"
-      disabled={ollamaTestStatus === 'testing'}
-      onclick={async () => {
-        ollamaTestStatus = 'testing';
-        ollamaTestMessage = '';
-        try {
-          let apiKey: string | null = null;
-          try {
-            apiKey = await getApiKey('ollama_api_key');
-          } catch {
-            // Keychain unavailable — try without auth.
-          }
-          const msg = await testOllamaConnection(
-            settings.state.ollama_host || 'localhost',
-            settings.state.ollama_port || 11434,
-            apiKey,
-          );
-          ollamaTestStatus = 'success';
-          ollamaTestMessage = msg;
-        } catch (err) {
-          ollamaTestStatus = 'error';
-          ollamaTestMessage = formatError(err) || 'Connection failed';
-        }
-      }}
-    >
-      {#if ollamaTestStatus === 'testing'}
-        Testing…
-      {:else}
-        Test Connection
-      {/if}
-    </button>
-    {#if ollamaTestStatus === 'success'}
-      <span class="test-result test-success">✓ {ollamaTestMessage}</span>
-    {:else if ollamaTestStatus === 'error'}
-      <span class="test-result test-error">✗ {ollamaTestMessage}</span>
-    {/if}
-  </div>
-
-  <div class="form-group">
-    <label class="form-row">
-      <input
-        type="checkbox"
-        checked={settings.state.ollama_disable_thinking ?? false}
-        onchange={async (e) => {
-          await settings.updateField('ollama_disable_thinking', (e.target as HTMLInputElement).checked);
-          try { await reinitProviders(); } catch (err) { console.error('Failed to reinit providers after thinking toggle:', err); }
-        }}
-      />
-      <span>
-        Disable thinking (reasoning models)
-        <p class="form-hint">
-          Skips the minutes-long reasoning/"thinking" phase on models like Qwen3
-          before they write a SOAP note. Sends <code>reasoning_effort: "none"</code>
-          to Ollama's OpenAI-compatible endpoint.
-        </p>
-      </span>
-    </label>
-  </div>
+  <!-- oMLX Server -->
+  <ProviderServerSection
+    idPrefix="omlx"
+    title="oMLX Server"
+    hostField="omlx_host"
+    portField="omlx_port"
+    defaultPort={8000}
+    apiKeySlot="omlx_api_key"
+    testConnection={testOmlxConnection}
+    thinkingField="omlx_disable_thinking"
+  >
+    {#snippet hint()}
+      Configure the oMLX server address (MLX inference for Apple Silicon). Use
+      <code>localhost</code> if oMLX runs on this machine, or enter a remote IP for a network
+      server.
+    {/snippet}
+    {#snippet thinkingHint()}
+      Skips the minutes-long reasoning/"thinking" phase on models like Qwen3 before they write a
+      SOAP note. oMLX ignores API thinking parameters, so FerriScribe injects a pre-closed think
+      block instead.
+    {/snippet}
+  </ProviderServerSection>
 </section>
 
 <style>
@@ -467,32 +316,6 @@
     color: var(--text-muted);
   }
 
-  .form-group-divider {
-    border-top: 1px solid var(--border);
-    margin: 20px 0 16px;
-  }
-
-  .subsection-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin: 0 0 4px;
-  }
-
-  .subsection-hint {
-    font-size: 12px;
-    color: var(--text-muted);
-    margin: 0 0 12px;
-    line-height: 1.5;
-  }
-
-  .subsection-hint code {
-    font-size: 11px;
-    background-color: var(--bg-tertiary, #374151);
-    padding: 1px 5px;
-    border-radius: 3px;
-  }
-
   .endpoint-warning {
     color: #b45309;
     background: #fef3c7;
@@ -503,24 +326,19 @@
     font-size: 0.85rem;
   }
 
+  .model-list-error p {
+    margin: 0;
+  }
+
+  .model-list-error p + p {
+    margin-top: 4px;
+    font-weight: 600;
+  }
+
   .form-hint {
     font-size: 11px;
     color: var(--text-muted);
     margin: 4px 0 0;
     line-height: 1.5;
-  }
-
-  .form-hint code {
-    font-size: 10px;
-    background-color: var(--bg-tertiary, #374151);
-    padding: 1px 4px;
-    border-radius: 3px;
-  }
-
-  .form-row {
-    display: flex;
-    gap: 10px;
-    align-items: flex-start;
-    cursor: pointer;
   }
 </style>

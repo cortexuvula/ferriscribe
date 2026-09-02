@@ -30,7 +30,7 @@
 //! ```rust,ignore
 //! use medical_sharing::{SharingService, SharingConfig};
 //!
-//! let config = SharingConfig { enabled: true, ..Default::default() };
+//! let config = SharingConfig::default();
 //! let svc = SharingService::new(config)?;
 //! svc.start().await?;
 //! // ... server is now broadcasting mDNS, accepting pairing requests, and

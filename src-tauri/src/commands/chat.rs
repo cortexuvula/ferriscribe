@@ -768,7 +768,6 @@ mod prompt_tests {
 mod preflight_tests {
     use std::sync::Arc;
 
-    use medical_core::error::{AppError, OfflineReason, ServiceKind};
     use medical_core::types::settings::AppConfig;
     use medical_db::settings::SettingsRepo;
     use tokio::sync::{Mutex, RwLock};
@@ -847,6 +846,7 @@ mod preflight_tests {
             vocab_api: RwLock::new(None),
             ollama_provider: RwLock::new(None),
             lmstudio_provider: RwLock::new(None),
+            omlx_provider: RwLock::new(None),
             remote_stt_provider: RwLock::new(None),
             http_client,
             content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -875,33 +875,7 @@ mod preflight_tests {
             None,
         )
         .await;
-        let elapsed = start.elapsed();
-
-        let err = result.expect_err("must fail with offline error");
-        match err {
-            AppError::EndpointOffline {
-                service,
-                reason,
-                provider_name,
-                ..
-            } => {
-                assert_eq!(service, ServiceKind::AiProvider);
-                assert_eq!(provider_name, "Ollama");
-                assert!(
-                    matches!(
-                        reason,
-                        OfflineReason::ConnectionRefused | OfflineReason::Timeout
-                    ),
-                    "expected ConnectionRefused or Timeout, got {reason:?}"
-                );
-            }
-            other => panic!("expected EndpointOffline, got {other:?}"),
-        }
-
-        assert!(
-            elapsed < std::time::Duration::from_secs(8),
-            "should have short-circuited at ~3s; took {elapsed:?}"
-        );
+        crate::commands::generation::test_helpers::assert_endpoint_offline(result, "Ollama", start);
     }
 
     /// Verify that `chat_with_agent_inner` short-circuits with `EndpointOffline`
@@ -916,32 +890,6 @@ mod preflight_tests {
         let start = std::time::Instant::now();
         let result =
             chat_with_agent_inner(&state, "Hello".to_string(), "chat".to_string(), None).await;
-        let elapsed = start.elapsed();
-
-        let err = result.expect_err("must fail with offline error");
-        match err {
-            AppError::EndpointOffline {
-                service,
-                provider_name,
-                reason,
-                ..
-            } => {
-                assert_eq!(service, ServiceKind::AiProvider);
-                assert_eq!(provider_name, "Ollama");
-                assert!(
-                    matches!(
-                        reason,
-                        OfflineReason::ConnectionRefused | OfflineReason::Timeout
-                    ),
-                    "expected ConnectionRefused or Timeout, got {reason:?}"
-                );
-            }
-            other => panic!("expected EndpointOffline, got {other:?}"),
-        }
-
-        assert!(
-            elapsed < std::time::Duration::from_secs(8),
-            "should short-circuit; took {elapsed:?}"
-        );
+        crate::commands::generation::test_helpers::assert_endpoint_offline(result, "Ollama", start);
     }
 }

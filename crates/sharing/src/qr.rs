@@ -1,8 +1,10 @@
-//! Encode and decode the `ferriscribe://pair?...` URL the QR carries.
+//! Encode the `ferriscribe://pair?...` URL the QR carries.
 //!
 //! The URL is a custom-scheme deep link that the FerriScribe client app
 //! recognises. It encodes the server's hostname, LAN/Tailscale addresses,
-//! all proxy ports, and the 6-digit pairing code.
+//! all proxy ports, and the 6-digit pairing code. Decoding happens in the
+//! client's TypeScript (`usePairing.svelte.ts`), so only `encode` lives
+//! here.
 //!
 //! ## URL format
 //!
@@ -38,8 +40,8 @@ pub struct PairPayload {
 
 /// Service ports carried in the QR payload.
 ///
-/// `lmstudio` and `vocab` are optional because not every server runs those
-/// subsystems. A missing `vocab` port means "vocab sync unavailable" and
+/// `lmstudio`, `omlx`, and `vocab` are optional because not every server runs
+/// those subsystems. A missing `vocab` port means "vocab sync unavailable" and
 /// clients fall back to local vocabulary.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairPorts {
@@ -51,6 +53,9 @@ pub struct PairPorts {
     pub pairing: u16,
     /// LM Studio auth proxy port (query param `lp`). Absent when LM Studio isn't running.
     pub lmstudio: Option<u16>,
+    /// oMLX auth proxy port (query param `mp`). Absent when oMLX isn't running.
+    #[serde(default)]
+    pub omlx: Option<u16>,
     /// Vocabulary CRUD HTTP API port (query param `vp`). `None` when the
     /// office server predates the vocab-sync feature; clients should treat
     /// absence as "vocab sync unavailable" and fall back to local vocab.
@@ -77,6 +82,9 @@ pub fn encode(p: &PairPayload) -> String {
     if let Some(l) = p.ports.lmstudio {
         q.insert("lp", l.to_string());
     }
+    if let Some(m) = p.ports.omlx {
+        q.insert("mp", m.to_string());
+    }
     if let Some(v) = p.ports.vocab {
         q.insert("vp", v.to_string());
     }
@@ -88,72 +96,12 @@ pub fn encode(p: &PairPayload) -> String {
     format!("ferriscribe://pair?{}", qs.join("&"))
 }
 
-/// Errors that can occur when decoding a `ferriscribe://pair?...` URL.
-#[derive(Debug, thiserror::Error)]
-pub enum DecodeError {
-    /// The URL doesn't start with `ferriscribe://pair?`.
-    #[error("not a ferriscribe pairing URL")]
-    NotPairUrl,
-    /// A required query parameter is missing.
-    #[error("missing field: {0}")]
-    Missing(&'static str),
-    /// A port value couldn't be parsed as `u16`.
-    #[error("bad number: {0}")]
-    BadNumber(String),
-}
-
-/// Decode a `ferriscribe://pair?...` URL into a [`PairPayload`].
-///
-/// Inverse of [`encode`]. Unknown query parameters are silently ignored
-/// (forward-compatible with future fields).
-pub fn decode(url: &str) -> Result<PairPayload, DecodeError> {
-    let rest = url
-        .strip_prefix("ferriscribe://pair?")
-        .ok_or(DecodeError::NotPairUrl)?;
-    let mut map = std::collections::HashMap::<String, String>::new();
-    for kv in rest.split('&') {
-        if let Some((k, v)) = kv.split_once('=') {
-            map.insert(
-                k.to_string(),
-                urlencoding::decode(v).unwrap_or_default().into_owned(),
-            );
-        }
-    }
-    let parse_port = |s: &str| -> Result<u16, DecodeError> {
-        s.parse()
-            .map_err(|e: std::num::ParseIntError| DecodeError::BadNumber(e.to_string()))
-    };
-    let host = map.remove("host").ok_or(DecodeError::Missing("host"))?;
-    let lan = map.remove("lan");
-    let tailscale = map.remove("ts");
-    let op = map.remove("op").ok_or(DecodeError::Missing("op"))?;
-    let wp = map.remove("wp").ok_or(DecodeError::Missing("wp"))?;
-    let pp = map.remove("pp").ok_or(DecodeError::Missing("pp"))?;
-    let lp = map.remove("lp").and_then(|s| s.parse().ok());
-    let vp = map.remove("vp").and_then(|s| s.parse().ok());
-    let code = map.remove("code").ok_or(DecodeError::Missing("code"))?;
-    Ok(PairPayload {
-        host,
-        lan,
-        tailscale,
-        ports: PairPorts {
-            ollama: parse_port(&op)?,
-            whisper: parse_port(&wp)?,
-            pairing: parse_port(&pp)?,
-            lmstudio: lp,
-            vocab: vp,
-        },
-        code,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn round_trip() {
-        let p = PairPayload {
+    fn sample() -> PairPayload {
+        PairPayload {
             host: "Clinic Server".to_string(),
             lan: Some("192.168.1.42".to_string()),
             tailscale: Some("clinic.tail-abc.ts.net".to_string()),
@@ -161,18 +109,41 @@ mod tests {
                 ollama: 11435,
                 whisper: 8081,
                 pairing: 11436,
-                lmstudio: Some(1234),
+                lmstudio: Some(1235),
+                omlx: Some(8001),
                 vocab: Some(11437),
             },
             code: "123456".to_string(),
-        };
-        let url = encode(&p);
-        let back = decode(&url).unwrap();
-        assert_eq!(back, p);
+        }
     }
 
     #[test]
-    fn rejects_garbage() {
-        assert!(decode("https://example.com").is_err());
+    fn encodes_all_params_in_sorted_order() {
+        let url = encode(&sample());
+        // Sorted keys: code, host, lan, lp, mp, op, pp, ts, vp, wp. Spaces
+        // percent-encode as %20 (urlencoding crate).
+        assert!(url.starts_with("ferriscribe://pair?code=123456&host=Clinic%20Server"));
+        assert!(url.contains("lan=192.168.1.42"));
+        assert!(url.contains("op=11435"));
+        assert!(url.contains("wp=8081"));
+        assert!(url.contains("pp=11436"));
+        assert!(url.contains("lp=1235"));
+        assert!(url.contains("mp=8001"));
+        assert!(url.contains("vp=11437"));
+        assert!(url.contains("ts=clinic.tail-abc.ts.net"));
+    }
+
+    #[test]
+    fn omits_absent_optional_ports() {
+        // Pre-oMLX shape: no lp/mp/vp params at all.
+        let mut p = sample();
+        p.ports.lmstudio = None;
+        p.ports.omlx = None;
+        p.ports.vocab = None;
+        let url = encode(&p);
+        assert!(!url.contains("lp="));
+        assert!(!url.contains("mp="));
+        assert!(!url.contains("vp="));
+        assert!(url.contains("op=11435"));
     }
 }

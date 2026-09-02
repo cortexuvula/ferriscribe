@@ -41,6 +41,7 @@ pub mod corpus_export;
 mod sharing_vocab_api;
 mod state;
 mod sweeps;
+mod sync_sparse_fields;
 mod templates_remote;
 mod user_dict_remote;
 mod vocab_remote;
@@ -332,6 +333,7 @@ pub fn run() {
             commands::providers::test_lmstudio_connection,
             commands::providers::test_stt_remote_connection,
             commands::providers::test_ollama_connection,
+            commands::providers::test_omlx_connection,
             commands::providers::probe_endpoint_reachable,
             commands::audio::list_audio_devices,
             commands::audio::start_recording,

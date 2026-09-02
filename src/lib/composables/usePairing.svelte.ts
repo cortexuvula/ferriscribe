@@ -16,6 +16,7 @@ export type Discovered = {
     ollama: number | null;
     whisper: number | null;
     lmstudio: number | null;
+    omlx: number | null;
     pairing: number | null;
     vocab: number | null;
   };
@@ -27,6 +28,7 @@ export type PairPorts = {
   whisper: number;
   pairing: number;
   lmstudio: number | null;
+  omlx: number | null;
   vocab: number | null;
 };
 
@@ -219,6 +221,9 @@ export function usePairing(onPaired?: () => void | Promise<void>) {
     const lpRaw = u.searchParams.get('lp');
     const lp = lpRaw ? parseInt(lpRaw, 10) : null;
 
+    const mpRaw = u.searchParams.get('mp');
+    const mp = mpRaw ? parseInt(mpRaw, 10) : null;
+
     const vpRaw = u.searchParams.get('vp');
     const vp = vpRaw ? parseInt(vpRaw, 10) : null;
 
@@ -231,6 +236,7 @@ export function usePairing(onPaired?: () => void | Promise<void>) {
       whisper: wp,
       pairing: pp,
       lmstudio: lp !== null && Number.isFinite(lp) ? lp : null,
+      omlx: mp !== null && Number.isFinite(mp) ? mp : null,
       vocab: vp !== null && Number.isFinite(vp) ? vp : null,
     }, code);
   }
@@ -252,6 +258,7 @@ export function usePairing(onPaired?: () => void | Promise<void>) {
       whisper: d.ports.whisper ?? 8081,
       pairing: d.ports.pairing ?? 11436,
       lmstudio: d.ports.lmstudio ?? null,
+      omlx: d.ports.omlx ?? null,
       vocab: d.ports.vocab ?? null,
     };
     const code = prompt('Enter the 6-digit code from the office server.') ?? '';

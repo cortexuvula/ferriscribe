@@ -188,90 +188,14 @@ pub(crate) fn build_sync_recording(
 
 /// Build the sparse field map for a recording.
 ///
-/// For each syncable field that has content, look up its revision (if any)
-/// to get the precise `updated_at` + `origin_device`; otherwise fall back to
-/// the recording's row-level `updated_at`. Mirrors the server-side helper of
-/// the same name.
+/// Delegates to the shared [`crate::sync_sparse_fields::build_sparse_fields`]
+/// (single source of truth for both sync directions — the client push path
+/// here and the server's pull responses).
 fn build_sparse_fields(
     rec: &medical_core::types::recording::Recording,
     revisions: &[FieldRevision],
 ) -> HashMap<String, SyncFieldValue> {
-    let mut fields: HashMap<String, SyncFieldValue> = HashMap::new();
-    let rev_map: HashMap<&str, &FieldRevision> =
-        revisions.iter().map(|r| (r.field.as_str(), r)).collect();
-
-    let row_ts = rec
-        .updated_at
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| rec.created_at.to_rfc3339());
-
-    // Field wire timestamp = max(revision, row write). Writers that bump
-    // only the row (transcription/generation completion via
-    // `RecordingsRepo::update`) leave stale revisions from a pre-edit sync
-    // round-trip; shipping the stale revision timestamp ties against the
-    // server's copy and the merge's Equal arm silently drops the newer
-    // value. Parsed comparison — string comparison is wrong across the two
-    // stored timestamp formats. When the row is newer the origin device is
-    // unknown (the row bump doesn't carry one).
-    let field_ts = |rev: Option<&FieldRevision>| -> (String, Option<String>) {
-        match rev {
-            Some(r) => {
-                if medical_db::content_sync::cmp_lww_timestamps(&r.updated_at, &row_ts)
-                    == std::cmp::Ordering::Less
-                {
-                    (row_ts.clone(), None)
-                } else {
-                    (r.updated_at.clone(), r.origin_device.clone())
-                }
-            }
-            None => (row_ts.clone(), None),
-        }
-    };
-
-    let mut push_text = |name: &str, val: Option<&str>| {
-        if let Some(s) = val {
-            let (ts, device) = field_ts(rev_map.get(name).copied());
-            fields.insert(
-                name.to_string(),
-                SyncFieldValue {
-                    value: serde_json::Value::String(s.to_string()),
-                    updated_at: ts,
-                    origin_device: device,
-                },
-            );
-        }
-    };
-
-    push_text("transcript", rec.transcript.as_deref());
-    push_text("soap_note", rec.soap_note.as_deref());
-    push_text("referral", rec.referral.as_deref());
-    push_text("letter", rec.letter.as_deref());
-    push_text("peer_discussion", rec.peer_discussion.as_deref());
-    push_text("chat", rec.chat.as_deref());
-    push_text("patient_name", rec.patient_name.as_deref());
-
-    let mut push_json = |name: &str, val: &serde_json::Value| {
-        if !val.is_null() {
-            let (ts, device) = field_ts(rev_map.get(name).copied());
-            fields.insert(
-                name.to_string(),
-                SyncFieldValue {
-                    value: val.clone(),
-                    updated_at: ts,
-                    origin_device: device,
-                },
-            );
-        }
-    };
-
-    if let Ok(tags_json) = serde_json::to_value(&rec.tags) {
-        push_json("tags", &tags_json);
-    }
-    push_json("metadata", &rec.metadata);
-    let status_json = serde_json::to_value(&rec.status).unwrap_or(serde_json::Value::Null);
-    push_json("processing_status", &status_json);
-
-    fields
+    crate::sync_sparse_fields::build_sparse_fields(rec, revisions)
 }
 
 /// Run one full bidirectional content sync against the office server.
@@ -450,6 +374,7 @@ async fn run_sync(
                 whisper: 0,
                 pairing: 0,
                 lmstudio: None,
+                omlx: None,
                 vocab: Some(vp),
             },
             label: String::new(),

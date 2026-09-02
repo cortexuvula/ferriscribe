@@ -262,31 +262,31 @@ fn extract_docx_text(path: &Path) -> Result<String, OcrError> {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = e.name();
-                if name.as_ref() == b"w:t" {
+                if name.as_ref() == "w:t" {
                     in_t = true;
-                } else if name.as_ref() == b"w:p" {
+                } else if name.as_ref() == "w:p" {
                     in_paragraph = true;
                 }
             }
             Ok(Event::End(e)) => {
                 let name = e.name();
-                if name.as_ref() == b"w:t" {
+                if name.as_ref() == "w:t" {
                     in_t = false;
-                } else if name.as_ref() == b"w:p" && in_paragraph {
+                } else if name.as_ref() == "w:p" && in_paragraph {
                     text_parts.push("\n".to_string());
                     in_paragraph = false;
                 }
             }
             Ok(Event::Text(e)) if in_t => {
-                // Text arrives unescaped-adjacent: `&amp;` is NOT in Text
-                // events anymore — it comes as a GeneralRef event below.
-                if let Ok(text) = e.decode() {
-                    text_parts.push(text.into_owned());
-                }
+                // Since quick-xml 0.42, Text events carry `str` content
+                // directly; `&amp;` still never appears here — entities
+                // arrive as their own GeneralRef event below.
+                text_parts.push(e.into_inner().into_owned());
             }
             Ok(Event::GeneralRef(e)) if in_t => {
-                // quick-xml 0.41 emits entity references as their own event,
-                // carrying the content BETWEEN `&` and `;` ("amp", "#38").
+                // quick-xml emits entity references as their own event,
+                // carrying the content BETWEEN `&` and `;` ("amp", "#38");
+                // `BytesRef` derefs to `&str` since 0.42.
                 if let Some(text) = resolve_xml_entity(&e) {
                     text_parts.push(text);
                 }
@@ -309,19 +309,21 @@ fn extract_docx_text(path: &Path) -> Result<String, OcrError> {
 /// and hex (`#x26`) character references. Unknown entities resolve to `None`
 /// and are skipped — partial extraction continues, matching the parse-error
 /// path's stance.
-fn resolve_xml_entity(content: &[u8]) -> Option<String> {
-    let s = std::str::from_utf8(content).ok()?;
-    Some(match s {
+fn resolve_xml_entity(content: &str) -> Option<String> {
+    Some(match content {
         "amp" => "&".into(),
         "lt" => "<".into(),
         "gt" => ">".into(),
         "quot" => "\"".into(),
         "apos" => "'".into(),
-        _ if s.starts_with('#') => {
-            let code = if let Some(hex) = s.strip_prefix("#x").or_else(|| s.strip_prefix("#X")) {
+        _ if content.starts_with('#') => {
+            let code = if let Some(hex) = content
+                .strip_prefix("#x")
+                .or_else(|| content.strip_prefix("#X"))
+            {
                 u32::from_str_radix(hex, 16).ok()?
             } else {
-                s[1..].parse::<u32>().ok()?
+                content[1..].parse::<u32>().ok()?
             };
             char::from_u32(code)?.to_string()
         }
@@ -1210,11 +1212,11 @@ mod tests {
 
     #[test]
     fn resolves_xml_entities() {
-        assert_eq!(resolve_xml_entity(b"amp").as_deref(), Some("&"));
-        assert_eq!(resolve_xml_entity(b"#38").as_deref(), Some("&"));
-        assert_eq!(resolve_xml_entity(b"#x26").as_deref(), Some("&"));
-        assert_eq!(resolve_xml_entity(b"#x1F600").as_deref(), Some("😀"));
-        assert_eq!(resolve_xml_entity(b"nbsp"), None, "unknown entities skip");
+        assert_eq!(resolve_xml_entity("amp").as_deref(), Some("&"));
+        assert_eq!(resolve_xml_entity("#38").as_deref(), Some("&"));
+        assert_eq!(resolve_xml_entity("#x26").as_deref(), Some("&"));
+        assert_eq!(resolve_xml_entity("#x1F600").as_deref(), Some("😀"));
+        assert_eq!(resolve_xml_entity("nbsp"), None, "unknown entities skip");
     }
 
     #[test]
