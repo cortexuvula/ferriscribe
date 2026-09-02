@@ -715,12 +715,15 @@ impl AppState {
         let db = Database::open(&db_path, db_key)?;
         let db = Arc::new(db);
 
-        // Boot-time sweeps (stuck-Processing flip, crash-pending encryption)
-        // and the daily retention/tombstone sweeper live in `sweeps.rs`,
-        // extracted from here so they are unit-testable against an
-        // in-memory DB.
+        // Boot-time sweeps (stuck-Processing flip, crash-pending encryption,
+        // row-less plaintext WAVs from a mid-recording crash) and the daily
+        // retention/tombstone sweeper live in `sweeps.rs`, extracted from
+        // here so they are unit-testable against an in-memory DB.
         crate::sweeps::fail_stuck_processing_sweep(&db);
         crate::sweeps::encryption_pending_sweep(&db);
+        if let Ok(dir) = crate::commands::resolve_recordings_dir(&db, &data_dir) {
+            crate::sweeps::orphaned_wav_sweep(&db, &dir);
+        }
         crate::sweeps::spawn_retention_sweeper(Arc::clone(&db));
 
         let config_dir = data_dir.join("config");

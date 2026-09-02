@@ -275,19 +275,26 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
         .await
         .map_err(|e| AppError::Other(format!("Stop task panicked: {e}")))?;
 
-    // Set recording inactive.
-    {
-        let mut active = state.recording_active.lock().await;
-        *active = false;
-    }
-
-    // Take the current recording info.
+    // Atomically consume `current_recording` and clear `recording_active`
+    // in one step. The old order (clear active → take slot) left a window
+    // where a start_recording could store its fresh CurrentRecording into
+    // the slot and this stop's `take()` would steal it — double-inserting
+    // the new recording and background-encrypting a WAV still being
+    // written. Taking the slot FIRST means a start that lands mid-stop
+    // finds an empty slot and cleanly overwrites it with its own info
+    // after we clear the flag; our stop then finalizes only what it took.
     let current = {
-        let mut rec_lock = state
-            .current_recording
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
-        rec_lock.take()
+        // current_recording is a std Mutex — take it without awaiting
+        // inside the guard, then flip the async flag.
+        let taken = {
+            let mut rec_lock = state
+                .current_recording
+                .lock()
+                .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
+            rec_lock.take()
+        };
+        *state.recording_active.lock().await = false;
+        taken
     };
 
     let current =

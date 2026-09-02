@@ -48,17 +48,36 @@ use crate::state::{self, AppState};
 /// in the batch while still including same-timestamp recordings that were
 /// not part of this batch.
 ///
-/// Parses the RFC3339 timestamp, adds 1 microsecond, re-serializes. If the
-/// input fails to parse, it is returned unchanged (the raw `max_ts` is
-/// still a safe-enough cursor — the data-loss window only affects rows
-/// sharing that exact timestamp).
+/// Clock-skew clamp (2026-08-17 tracked item, fixed 2026-09-03): a server
+/// row written by a machine with a fast clock carries a FUTURE timestamp;
+/// advancing the cursor past it would pin every pull fleet-wide at that
+/// future instant, and no machine's present-day writes would be `>` the
+/// cursor until real time caught up — silently missed updates across the
+/// whole practice. The cursor is therefore clamped to the LOCAL now: a
+/// future-stamped batch re-delivers on subsequent pulls (LWW merges are
+/// idempotent, so the only cost is redundant transfer) instead of
+/// skipping everyone else's rows.
+///
+/// Parses the RFC3339 timestamp, adds 1 microsecond, clamps to local now,
+/// re-serializes. If the input fails to parse, it is returned unchanged
+/// (the raw `max_ts` is still a safe-enough cursor — the data-loss window
+/// only affects rows sharing that exact timestamp).
 fn advance_cursor(ts: &str) -> String {
     match chrono::DateTime::parse_from_rfc3339(ts) {
         Ok(dt) => {
             let advanced = dt
                 .checked_add_signed(chrono::Duration::microseconds(1))
                 .unwrap_or(dt);
-            advanced.to_rfc3339()
+            let local_now = chrono::Utc::now();
+            let clamped: chrono::DateTime<chrono::FixedOffset> = if advanced > local_now {
+                tracing::warn!(
+                    "sync cursor clamped to local now — server row carries a future timestamp (clock skew?)"
+                );
+                local_now.fixed_offset()
+            } else {
+                advanced
+            };
+            clamped.to_rfc3339()
         }
         Err(_) => ts.to_string(),
     }
@@ -1129,6 +1148,24 @@ mod tests {
         // An unparseable batch max is still a safe-enough cursor — the raw
         // value must come back unchanged rather than empty or zeroed.
         assert_eq!(advance_cursor("not-a-timestamp"), "not-a-timestamp");
+    }
+
+    // Clock-skew clamp (2026-08-17 tracked item): a future-stamped batch max
+    // must NOT advance the cursor past local now — that would pin every
+    // fleet pull at the future instant and silently skip all present-day
+    // writes until real time caught up.
+    #[test]
+    fn advance_cursor_clamps_future_timestamps_to_local_now() {
+        let far_future = "2999-01-01T00:00:00Z";
+        let out = advance_cursor(far_future);
+        let dt = chrono::DateTime::parse_from_rfc3339(&out).expect("clamped parses");
+        let now = chrono::Utc::now();
+        assert!(
+            dt <= now && now.signed_duration_since(dt).num_seconds() < 60,
+            "future cursor must clamp to ~local now, got {dt} (now {now})"
+        );
+        // Sanity: the clamp didn't happen via parse failure passthrough.
+        assert_ne!(out, far_future);
     }
 
     /// Seed a recording with two populated content fields plus a metadata

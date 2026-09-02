@@ -10,7 +10,7 @@
 //! Tombstones older than a cutoff can eventually be pruned via
 //! [`ConditionChipsRepo::prune_tombstones`].
 
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use medical_core::types::condition_chip::{ConditionChip, deterministic_id};
 
@@ -231,13 +231,39 @@ impl ConditionChipsRepo {
     /// nothing until its first write — the old comment's claim).
     pub fn add(conn: &Connection, text: &str, now_iso: &str) -> DbResult<Vec<ConditionChip>> {
         let tx = crate::unchecked_transaction_immediate(conn)?;
+        let id = deterministic_id(text);
+        // Resurrection path: if a tombstone exists for this id, un-delete it
+        // and PRESERVE the accumulated use_count (the historical frequency
+        // is still valid clinical signal — resetting it to 0 lost the
+        // practice's usage history on every delete/re-add cycle). A fresh
+        // row keeps count 0.
+        let resurrected = tx
+            .query_row(
+                "SELECT use_count FROM condition_chips WHERE id = ?1 AND deleted_at IS NOT NULL",
+                [&id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        // `use_count` is deliberately NOT touched in the UPDATE below —
+        // that's the fix (the prior count survives resurrection).
+        if resurrected.is_some() {
+            let changed = tx.execute(
+                "UPDATE condition_chips
+                 SET deleted_at = NULL, updated_at = ?1, text = ?2
+                 WHERE id = ?3",
+                params![now_iso, text.trim(), id],
+            )?;
+            debug_assert_eq!(changed, 1, "resurrection matched the row we just read");
+            tx.commit()?;
+            return Self::list_active(conn);
+        }
         let max_order: i32 = tx.query_row(
             "SELECT COALESCE(MAX(sort_order), -1) FROM condition_chips WHERE deleted_at IS NULL",
             [],
             |row| row.get(0),
         )?;
         let chip = ConditionChip {
-            id: deterministic_id(text),
+            id,
             text: text.trim().to_string(),
             updated_at: now_iso.to_string(),
             deleted_at: None,
@@ -553,6 +579,35 @@ mod tests {
         let all = ConditionChipsRepo::list_all(&conn).expect("list_all");
         assert_eq!(all.len(), 1, "tombstone should be retained");
         assert!(all[0].deleted_at.is_some(), "chip should be a tombstone");
+    }
+
+    // Regression (2026-08-17 tracked item, fixed 2026-09-03): re-adding a
+    // deleted condition used to resurrect it with use_count = 0, losing the
+    // practice's accumulated usage history every delete/re-add cycle.
+    #[test]
+    fn add_resurrects_tombstone_preserving_use_count() {
+        let conn = fresh();
+        ConditionChipsRepo::add(&conn, "Hypertension", &now(100)).expect("initial add");
+        // Accumulate usage history, then delete.
+        for t in [200, 300, 400] {
+            ConditionChipsRepo::increment_use(&conn, "Hypertension", &now(t)).expect("increment");
+        }
+        ConditionChipsRepo::remove_by_text(&conn, "Hypertension", &now(500)).expect("remove");
+
+        // Re-add: the tombstone resurrects WITH its history.
+        let after = ConditionChipsRepo::add(&conn, "Hypertension", &now(600)).expect("re-add");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].text, "Hypertension");
+        assert!(after[0].deleted_at.is_none(), "resurrected, not tombstoned");
+        assert_eq!(
+            after[0].use_count, 3,
+            "usage history must survive resurrection"
+        );
+
+        // And the incremented count still propagates under LWW sync: a
+        // remote merge with an older count takes MAX, not the local reset.
+        let all = ConditionChipsRepo::list_all(&conn).expect("list_all");
+        assert_eq!(all[0].use_count, 3);
     }
 
     #[test]

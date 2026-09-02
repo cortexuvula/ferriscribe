@@ -129,6 +129,20 @@ class RecordingsStore {
 
   /// Monotonic request id guarding list writes (see load/search).
   listRequestId = 0;
+  /// Monotonic request id guarding selected-recording writes: two rapid
+  /// `selectRecording` calls resolve last-write-wins without it, so a slow
+  /// fetch for recording A can land after the user already switched to B
+  /// and clobber the view (same discipline as load/search).
+  selectRequestId = 0;
+
+  /** Fetch one recording and make it the selected one. Stale calls (a
+   * newer selection superseded this one mid-flight) are discarded. */
+  async select(id: string): Promise<void> {
+    const token = ++this.selectRequestId;
+    const recording = await getRecording(id);
+    if (token !== this.selectRequestId) return;
+    this.selectedRecording = recording;
+  }
 
   /** The most recently deleted summary, for undo. Cleared after restore or on next delete. */
   lastDeleted = $state<RecordingSummary | null>(null);
@@ -315,8 +329,7 @@ export function stopBackgroundSync(): void {
 
 export async function selectRecording(id: string): Promise<void> {
   try {
-    const recording = await getRecording(id);
-    recordings.selectedRecording = recording;
+    await recordings.select(id);
   } catch (err) {
     console.error('Failed to select recording:', err);
     throw err;
