@@ -155,319 +155,410 @@ pub async fn pair_with_server(
     code: String,
     label: String,
 ) -> AppResult<()> {
-    // The QR encodes BOTH LAN and Tailscale addresses; a remote client over
-    // Tailscale cannot reach the office LAN IP. Try LAN first, and on a
-    // connect-level failure (TCP refused, DNS unresolved, timeout) fall back
-    // to Tailscale exactly once. HTTP-level rejections (4xx/5xx) are NOT
-    // retried — those are real server-side responses, not connectivity.
-    //
-    // http_url brackets IPv6 literals — without it, an mDNS-discovered IPv6
-    // address makes reqwest emit a generic "Builder error" with no URL context.
-    let body = serde_json::json!({ "code": code, "label": label });
+    pair_with_server_inner(&state, lan, tailscale, ports, code, label).await
+}
 
-    // Track which host actually answered the pair handshake. The QR carries
-    // both LAN and Tailscale, but a remote client may only reach the latter;
-    // downstream AppConfig autofill must use the reachable address, not just
-    // whichever one happened to be present in the QR.
-    let (winning_host, v): (String, serde_json::Value) = match (lan.as_ref(), tailscale.as_ref()) {
+/// Testable core of [`pair_with_server`]: takes `&AppState` directly so the
+/// command-level tests can drive the full flow (handshake, endpoint wiring,
+/// STT switch, provider selection, model refresh, persistence) against a
+/// wiremock office server.
+pub(super) async fn pair_with_server_inner(
+    state: &AppState,
+    lan: Option<String>,
+    tailscale: Option<String>,
+    ports: PairPorts,
+    code: String,
+    label: String,
+) -> AppResult<()> {
+    // ── Phase 1: handshake ──
+    let body = serde_json::json!({ "code": code, "label": label });
+    let (winning_host, v) = pair_handshake(
+        &state.http_client,
+        lan.as_deref(),
+        tailscale.as_deref(),
+        ports.pairing,
+        &body,
+    )
+    .await?;
+    let token = bearer_from_enroll_response(&v)?;
+
+    // ── Phase 2: persist credentials + connection metadata ──
+    store_sharing_bearer(&token)?;
+    let conn = PairedConnection {
+        lan,
+        tailscale,
+        ports: ports.clone(),
+        label,
+    };
+    persist_connection_metadata(&conn)?;
+
+    // ── Phase 3: re-point the live AI providers through the office proxies ──
+    let (pair_cfg, eps) = wire_ai_provider_endpoints(state, &conn, &token).await?;
+
+    // ── Phase 4: route STT through the office whisper proxy ──
+    switch_stt_to_remote(state, eps.whisper.clone()).await?;
+
+    // ── Phase 5: availability-aware provider + model selection ──
+    let (current_answers, chosen_provider) =
+        select_served_provider(state, &pair_cfg.ai_provider, &ports, &winning_host, &token).await;
+    let effective_provider = chosen_provider
+        .clone()
+        .or_else(|| current_answers.then(|| pair_cfg.ai_provider.clone()));
+    let chosen_model =
+        refresh_model_choice(state, effective_provider.as_deref(), &pair_cfg.ai_model).await;
+
+    // ── Phase 6: mirror the bearer into per-service slots + persist AppConfig ──
+    persist_pair_settings(
+        state,
+        &winning_host,
+        &ports,
+        &token,
+        chosen_provider.as_deref(),
+        chosen_model.as_deref(),
+    )
+    .await
+}
+
+/// Phase 1: POST the enroll code, trying LAN first and falling back to
+/// Tailscale exactly once on a connect-level failure (TCP refused, DNS
+/// unresolved, timeout). HTTP-level rejections (4xx/5xx) are NOT retried —
+/// those are real server-side responses, not connectivity.
+///
+/// Returns the host that actually answered (downstream AppConfig autofill
+/// must use the reachable address) plus the raw enroll JSON. `http_url`
+/// brackets IPv6 literals — without it, an mDNS-discovered IPv6 address
+/// makes reqwest emit a generic "Builder error" with no URL context.
+async fn pair_handshake(
+    http: &reqwest::Client,
+    lan: Option<&str>,
+    tailscale: Option<&str>,
+    pairing_port: u16,
+    body: &serde_json::Value,
+) -> AppResult<(String, serde_json::Value)> {
+    match (lan, tailscale) {
         (Some(l), ts_opt) => {
-            let lan_base = medical_core::types::http_url(l, ports.pairing);
-            tracing::info!(host = %l, port = ports.pairing, "pair: trying LAN");
-            match try_pair_at_base(&state.http_client, &lan_base, &body).await {
-                Ok(v) => (l.clone(), v),
+            let lan_base = medical_core::types::http_url(l, pairing_port);
+            tracing::info!(host = %l, port = pairing_port, "pair: trying LAN");
+            match try_pair_at_base(http, &lan_base, body).await {
+                Ok(v) => Ok((l.to_string(), v)),
                 Err(PairAttemptError::Connect(_)) => {
                     if let Some(ts) = ts_opt {
                         tracing::info!(
                             host = %ts,
-                            port = ports.pairing,
+                            port = pairing_port,
                             "pair: LAN unreachable, falling back to Tailscale"
                         );
-                        let ts_base = medical_core::types::http_url(ts, ports.pairing);
-                        match try_pair_at_base(&state.http_client, &ts_base, &body).await {
-                            Ok(v) => (ts.clone(), v),
+                        let ts_base = medical_core::types::http_url(ts, pairing_port);
+                        match try_pair_at_base(http, &ts_base, body).await {
+                            Ok(v) => Ok((ts.to_string(), v)),
                             Err(PairAttemptError::Connect(e)) => {
-                                return Err(AppError::Other(e.to_string()));
+                                Err(AppError::Other(e.to_string()))
                             }
-                            Err(PairAttemptError::Final(e)) => return Err(e),
+                            Err(PairAttemptError::Final(e)) => Err(e),
                         }
                     } else {
                         // No Tailscale fallback available — surface the
                         // LAN connect failure as a normal AppError.
-                        return Err(AppError::Other(
+                        Err(AppError::Other(
                             "could not connect to server (LAN unreachable, no Tailscale address)"
                                 .into(),
-                        ));
+                        ))
                     }
                 }
-                Err(PairAttemptError::Final(e)) => return Err(e),
+                Err(PairAttemptError::Final(e)) => Err(e),
             }
         }
         (None, Some(ts)) => {
-            let ts_base = medical_core::types::http_url(ts, ports.pairing);
-            tracing::info!(host = %ts, port = ports.pairing, "pair: trying Tailscale");
-            match try_pair_at_base(&state.http_client, &ts_base, &body).await {
-                Ok(v) => (ts.clone(), v),
-                Err(PairAttemptError::Connect(e)) => {
-                    return Err(AppError::Other(e.to_string()));
-                }
-                Err(PairAttemptError::Final(e)) => return Err(e),
+            let ts_base = medical_core::types::http_url(ts, pairing_port);
+            tracing::info!(host = %ts, port = pairing_port, "pair: trying Tailscale");
+            match try_pair_at_base(http, &ts_base, body).await {
+                Ok(v) => Ok((ts.to_string(), v)),
+                Err(PairAttemptError::Connect(e)) => Err(AppError::Other(e.to_string())),
+                Err(PairAttemptError::Final(e)) => Err(e),
             }
         }
-        (None, None) => {
-            return Err(AppError::Other("no reachable address provided".into()));
-        }
-    };
+        (None, None) => Err(AppError::Other("no reachable address provided".into())),
+    }
+}
 
-    let token = v
-        .get("token")
+/// Extract the bearer token from the enroll response.
+fn bearer_from_enroll_response(v: &serde_json::Value) -> AppResult<String> {
+    v.get("token")
         .and_then(|t| t.as_str())
         .filter(|t| !t.is_empty())
-        .ok_or_else(|| AppError::Other("server did not return a token".into()))?
-        .to_string();
+        .map(str::to_string)
+        .ok_or_else(|| AppError::Other("server did not return a token".into()))
+}
 
-    // Store bearer token in OS keychain.
-    keyring::Entry::new("rustMedicalAssistant", "sharing-bearer")
-        .map_err(|e| AppError::Other(format!("keychain open: {e}")))?
-        .set_password(&token)
-        .map_err(|e| AppError::Other(format!("keychain write: {e}")))?;
-
-    // Persist non-secret endpoint metadata.
-    let conn = PairedConnection {
-        lan: lan.clone(),
-        tailscale: tailscale.clone(),
-        ports: ports.clone(),
-        label,
-    };
-    let json = serde_json::to_string(&conn)?;
+/// Phase 2b: persist the non-secret connection metadata next to the config.
+fn persist_connection_metadata(conn: &PairedConnection) -> AppResult<()> {
+    let json = serde_json::to_string(conn)?;
     let path = paired_connection_path()?;
     std::fs::write(&path, json)?;
+    Ok(())
+}
 
-    // Update in-memory provider endpoints immediately so the "models visible"
-    // success message in ClientPair.svelte is truthful without an app restart.
+/// Phase 3: load the pair-time config, build the office endpoints, and
+/// re-point the live Ollama / LM Studio / oMLX providers through the
+/// proxies immediately — so the "models visible" success message in
+/// ClientPair.svelte is truthful without an app restart. Returns the
+/// config (caller needs the current provider/model) and the endpoints
+/// (the whisper one feeds the STT switch).
+async fn wire_ai_provider_endpoints(
+    state: &AppState,
+    conn: &PairedConnection,
+    token: &str,
+) -> AppResult<(
+    medical_core::types::settings::AppConfig,
+    super::PairedEndpoints,
+)> {
     let pair_cfg = crate::commands::load_app_config(&state.db, "pairing").await?;
     let allow_public = pair_cfg.allow_public_endpoint;
-    let bearer = Some(token.clone());
-    let eps = super::paired_endpoints(&conn, bearer);
+    let eps = super::paired_endpoints(conn, Some(token.to_string()));
 
     {
         let guard = state.ollama_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(eps.ollama, allow_public).await?;
+            p.set_endpoint(eps.ollama.clone(), allow_public).await?;
         }
     }
     {
         let guard = state.lmstudio_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(eps.lmstudio, allow_public).await?;
+            p.set_endpoint(eps.lmstudio.clone(), allow_public).await?;
         }
     }
     {
         let guard = state.omlx_provider.read().await;
         if let Some(ref p) = *guard {
-            p.set_endpoint(eps.omlx, allow_public).await?;
+            p.set_endpoint(eps.omlx.clone(), allow_public).await?;
         }
     }
 
-    // STT requires more than set_endpoint: if the user was in Local mode at
-    // app startup, state.remote_stt_provider is None and set_endpoint would
-    // be a no-op. Persist `stt_mode = Remote` and rebuild the STT provider
-    // so transcription routes through the office server's whisper proxy —
-    // otherwise the user hits "Whisper model not found" because the local
-    // provider is still the active one.
-    {
-        use medical_core::types::settings::SttMode;
-        let db = std::sync::Arc::clone(&state.db);
-        let cfg = tokio::task::spawn_blocking(
-            move || -> AppResult<medical_core::types::settings::AppConfig> {
-                let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
-                let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+    Ok((pair_cfg, eps))
+}
+
+/// Phase 4: STT requires more than set_endpoint — if the user was in Local
+/// mode at app startup, `state.remote_stt_provider` is None and
+/// set_endpoint would be a no-op. Persist `stt_mode = Remote` and rebuild
+/// the STT providers so transcription routes through the office server's
+/// whisper proxy — otherwise the user hits "Whisper model not found"
+/// because the local provider is still the active one.
+async fn switch_stt_to_remote(
+    state: &AppState,
+    whisper_ep: Option<medical_core::types::RemoteEndpoint>,
+) -> AppResult<()> {
+    use medical_core::types::settings::SttMode;
+    let db = std::sync::Arc::clone(&state.db);
+    let cfg = tokio::task::spawn_blocking(
+        move || -> AppResult<medical_core::types::settings::AppConfig> {
+            let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+                .map_err(|e| AppError::Other(e.to_string()))?;
+            cfg.migrate();
+            if cfg.stt_mode != SttMode::Remote {
+                cfg.stt_mode = SttMode::Remote;
+                medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
                     .map_err(|e| AppError::Other(e.to_string()))?;
-                cfg.migrate();
-                if cfg.stt_mode != SttMode::Remote {
-                    cfg.stt_mode = SttMode::Remote;
-                    medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
-                        .map_err(|e| AppError::Other(e.to_string()))?;
-                    tracing::info!("pair: switched stt_mode to Remote");
-                }
-                Ok(cfg)
-            },
-        )
-        .await
-        .map_err(crate::commands::join_err)??;
+                tracing::info!("pair: switched stt_mode to Remote");
+            }
+            Ok(cfg)
+        },
+    )
+    .await
+    .map_err(crate::commands::join_err)??;
 
-        let stt_handles = crate::state::init_stt_providers_with_config(
-            &state.data_dir,
-            &cfg,
-            eps.whisper.clone(),
-        );
-        {
-            let mut guard = state.stt_providers.lock().await;
-            *guard = stt_handles.provider;
-        }
-        *state.remote_stt_provider.write().await = stt_handles.remote;
+    let stt_handles =
+        crate::state::init_stt_providers_with_config(&state.data_dir, &cfg, whisper_ep);
+    {
+        let mut guard = state.stt_providers.lock().await;
+        *guard = stt_handles.provider;
     }
+    *state.remote_stt_provider.write().await = stt_handles.remote;
+    Ok(())
+}
 
-    // ── Availability-aware provider selection ──
-    //
-    // A fresh client defaults to ai_provider = "lmstudio". If the server
-    // doesn't serve that provider, generation would point at a dead endpoint
-    // even though the server happily serves Ollama or oMLX — looking exactly
-    // like "the client won't connect".
-    //
-    // Advertisement alone is not trusted: the QR encodes the server's static
-    // config ports (LM Studio / oMLX may be listed without their proxies
-    // bound), and Ollama's proxy port is advertised unconditionally. So the
-    // CURRENT provider is always probed through the just-established proxies
-    // — if it answers, it is kept (respects an explicit user choice). Only
-    // when it doesn't answer (or isn't advertised at all) are the other
-    // providers probed, switching to the first that answers. If nothing
-    // answers, the current setting stands and pairing still succeeds.
-    let current = pair_cfg.ai_provider.clone();
-    let current_answers = match provider_proxy_port(&ports, &current) {
+/// Phase 5a: availability-aware provider selection.
+///
+/// A fresh client defaults to ai_provider = "lmstudio". If the server
+/// doesn't serve that provider, generation would point at a dead endpoint
+/// even though the server happily serves Ollama or oMLX — looking exactly
+/// like "the client won't connect".
+///
+/// Advertisement alone is not trusted: the QR encodes the server's static
+/// config ports (LM Studio / oMLX may be listed without their proxies
+/// bound), and Ollama's proxy port is advertised unconditionally. So the
+/// CURRENT provider is always probed through the just-established proxies
+/// — if it answers, it is kept (respects an explicit user choice). Only
+/// when it doesn't answer (or isn't advertised at all) are the other
+/// providers probed, switching to the first that answers. If nothing
+/// answers, the current setting stands and pairing still succeeds.
+///
+/// Returns `(current_answers, chosen_switch)`.
+async fn select_served_provider(
+    state: &AppState,
+    current: &str,
+    ports: &PairPorts,
+    winning_host: &str,
+    token: &str,
+) -> (bool, Option<String>) {
+    let current_answers = match provider_proxy_port(ports, current) {
         Some(port) => {
-            probe_provider_proxy(&state.http_client, &winning_host, port, &current, &token).await
+            probe_provider_proxy(&state.http_client, winning_host, port, current, token).await
         }
         None => false,
     };
 
-    let mut chosen_provider: Option<String> = None;
-    let mut chosen_model: Option<String> = None;
     if current_answers {
         tracing::info!(
             provider = %current,
             "pair: current provider answered through the office proxy; keeping it"
         );
-    } else {
-        for cand in served_providers(&ports) {
-            if cand == current.as_str() {
-                continue; // already probed above and it didn't answer
-            }
-            let Some(proxy_port) = provider_proxy_port(&ports, cand) else {
-                continue;
-            };
-            if !probe_provider_proxy(&state.http_client, &winning_host, proxy_port, cand, &token)
-                .await
-            {
-                tracing::info!(
-                    provider = cand,
-                    "pair: provider proxy not answering; skipping"
-                );
-                continue;
-            }
-            chosen_provider = Some(cand.to_string());
-            break;
-        }
-        if chosen_provider.is_none() {
-            tracing::info!(
-                "pair: no advertised provider proxy answered; keeping current provider setting"
-            );
-        }
+        return (true, None);
     }
 
-    // Best-effort model selection for a switched provider: the old
-    // provider's model name likely doesn't exist on the new one. Ask the
-    // (already re-endpointed) provider for its list and take the first —
-    // unless the list is the provider's hardcoded fetch-failure fallback,
-    // which would persist a model the server doesn't have.
-    if let Some(ref provider_id) = chosen_provider {
-        let arc = {
-            let registry = state.ai_providers.lock().await;
-            registry.get_arc(provider_id)
+    for cand in served_providers(ports) {
+        if cand == current {
+            continue; // already probed above and it didn't answer
+        }
+        let Some(proxy_port) = provider_proxy_port(ports, cand) else {
+            continue;
         };
-        if let Some(provider) = arc
-            && let Ok(models) = provider.available_models().await
-            && let Some(first) = models.first()
-            && !is_fallback_model(provider_id, &first.id)
-        {
-            chosen_model = Some(first.id.clone());
+        if !probe_provider_proxy(&state.http_client, winning_host, proxy_port, cand, token).await {
+            tracing::info!(
+                provider = cand,
+                "pair: provider proxy not answering; skipping"
+            );
+            continue;
+        }
+        return (false, Some(cand.to_string()));
+    }
+    tracing::info!("pair: no advertised provider proxy answered; keeping current provider setting");
+    (false, None)
+}
+
+/// Phase 5b: best-effort model validation for whichever provider
+/// generation will use after this pair — switched OR kept. A kept provider
+/// can carry a stale model name (e.g. a placeholder saved by an older
+/// build whose model fetch failed); sending it to the server 404s every
+/// generation. Returns the replacement model when the saved one isn't
+/// offered.
+async fn refresh_model_choice(
+    state: &AppState,
+    effective_provider: Option<&str>,
+    saved_model: &str,
+) -> Option<String> {
+    let provider_id = effective_provider?;
+    let arc = {
+        let registry = state.ai_providers.lock().await;
+        registry.get_arc(provider_id)
+    };
+    let provider = arc?;
+    match provider.available_models().await {
+        Ok(models) => {
+            let ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
+            refreshed_model(saved_model, &ids)
+        }
+        // The error carries the provider name and endpoint URL (no model
+        // content) — worth a trace, since it means the model refresh was
+        // skipped and a stale name survives.
+        Err(e) => {
+            tracing::warn!(
+                provider = %provider_id,
+                error = %e,
+                "pair: model list unavailable; kept the saved model"
+            );
+            None
+        }
+    }
+}
+
+/// Phase 6: mirror the bearer into the per-service keychain slots and
+/// persist the AppConfig host/port fields (plus the availability-selected
+/// provider/model). The rest of the app — Settings UI, pre-flight,
+/// endpointHealth polling — reads from those slots and fields, so paired
+/// clients don't need to manually fill in Settings → Audio / Models.
+/// Finally flips the live registry's active provider so generation uses
+/// the served provider immediately (no reinit needed).
+async fn persist_pair_settings(
+    state: &AppState,
+    winning_host: &str,
+    ports: &PairPorts,
+    token: &str,
+    chosen_provider: Option<&str>,
+    chosen_model: Option<&str>,
+) -> AppResult<()> {
+    use super::settings_helpers::apply_paired_settings;
+
+    // The in-memory RemoteEndpoint still carries BOTH LAN and Tailscale and
+    // probes both at call time; but the static AppConfig field has to be a
+    // single address the client can actually reach. Using `winning_host`
+    // ensures a remote-paired client doesn't get the server's unreachable
+    // LAN IP written into Settings (which would poison pre-flight checks
+    // and health polling that read AppConfig host fields directly).
+    for slot in &[
+        "stt_remote_api_key",
+        "ollama_api_key",
+        "lmstudio_api_key",
+        "omlx_api_key",
+    ] {
+        state
+            .keys
+            .store_key(slot, token)
+            .map_err(|e| AppError::Other(format!("autofill: store {slot}: {e}")))?;
+    }
+
+    // Wrapped in spawn_blocking so the SQLite read-modify-write never
+    // blocks the async runtime worker.
+    let db = std::sync::Arc::clone(&state.db);
+    let host_for_db = winning_host.to_string();
+    let ports_for_db = ports.clone();
+    let provider_for_db = chosen_provider.map(str::to_string);
+    let model_for_db = chosen_model.map(str::to_string);
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
+        let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
+        let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
+            .map_err(|e| AppError::Other(e.to_string()))?;
+        cfg.migrate();
+        apply_paired_settings(&mut cfg, &host_for_db, &ports_for_db);
+        if let Some(p) = provider_for_db {
+            tracing::info!(
+                from = %cfg.ai_provider, to = %p,
+                "pair: current provider not served by server; switching"
+            );
+            cfg.ai_provider = p;
+        }
+        // Written independently of a provider switch: a kept provider can
+        // still need its stale/placeholder model corrected.
+        if let Some(m) = model_for_db {
+            tracing::info!(
+                from = %cfg.ai_model, to = %m,
+                "pair: saved model not offered by the serving provider; replacing"
+            );
+            cfg.ai_model = m;
+        }
+        medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
+            .map_err(|e| AppError::Other(e.to_string()))?;
+        Ok(())
+    })
+    .await
+    .map_err(crate::commands::join_err)??;
+
+    if let Some(p) = chosen_provider {
+        let mut registry = state.ai_providers.lock().await;
+        if registry.set_active(p) {
+            tracing::info!(provider = %p, "pair: active provider switched to served provider");
         }
     }
 
-    // ── Phase 3: per-service keychain mirror + AppConfig population ──
-    //
-    // The bearer above is stored at keyring "rustMedicalAssistant"/"sharing-bearer"
-    // (used by the in-memory provider path). The rest of the app — Settings UI,
-    // pre-flight, endpointHealth polling — reads from per-service keychain slots
-    // and AppConfig host/port fields. Mirror the bearer here so paired clients
-    // don't need to manually fill in Settings → Audio / Models.
-    {
-        use super::settings_helpers::apply_paired_settings;
-
-        // 1. Use the host that actually answered the pair handshake above.
-        //    The in-memory RemoteEndpoint still carries BOTH LAN and Tailscale
-        //    and probes both at call time; but the static AppConfig field has
-        //    to be a single address that the client can actually reach. Using
-        //    `winning_host` ensures a remote-paired client doesn't get the
-        //    server's unreachable LAN IP written into Settings (which would
-        //    poison pre-flight checks and health polling that read AppConfig
-        //    host fields directly).
-        let host = winning_host;
-
-        // 2. Write the bearer to per-service keychain slots via state.keys.
-        //    Same KeyStorage abstraction the set_api_key Tauri command uses.
-        for slot in &[
-            "stt_remote_api_key",
-            "ollama_api_key",
-            "lmstudio_api_key",
-            "omlx_api_key",
-        ] {
-            state
-                .keys
-                .store_key(slot, &token)
-                .map_err(|e| AppError::Other(format!("autofill: store {slot}: {e}")))?;
-        }
-
-        // 3. Update AppConfig with the paired endpoint values (and the
-        //    availability-selected provider, when a switch happened).
-        //    Wrapped in spawn_blocking so the SQLite read-modify-write never
-        //    blocks the async runtime worker.
-        let db = std::sync::Arc::clone(&state.db);
-        let host_for_db = host.clone();
-        let ports_for_db = ports.clone();
-        let provider_for_db = chosen_provider.clone();
-        let model_for_db = chosen_model.clone();
-        tokio::task::spawn_blocking(move || -> AppResult<()> {
-            let conn = db.conn().map_err(|e| AppError::Other(e.to_string()))?;
-            let mut cfg = medical_db::settings::SettingsRepo::load_config(&conn)
-                .map_err(|e| AppError::Other(e.to_string()))?;
-            cfg.migrate();
-            apply_paired_settings(&mut cfg, &host_for_db, &ports_for_db);
-            if let Some(p) = provider_for_db {
-                tracing::info!(
-                    from = %cfg.ai_provider, to = %p,
-                    "pair: current provider not served by server; switching"
-                );
-                cfg.ai_provider = p;
-                if let Some(m) = model_for_db {
-                    cfg.ai_model = m;
-                }
-            }
-            medical_db::settings::SettingsRepo::save_config(&conn, &cfg)
-                .map_err(|e| AppError::Other(e.to_string()))?;
-            Ok(())
-        })
-        .await
-        .map_err(crate::commands::join_err)??;
-
-        // 4. Flip the live registry's active provider to match, so generation
-        //    uses the served provider immediately (no reinit needed).
-        if let Some(ref p) = chosen_provider {
-            let mut registry = state.ai_providers.lock().await;
-            if registry.set_active(p) {
-                tracing::info!(provider = %p, "pair: active provider switched to served provider");
-            }
-        }
-
-        tracing::info!(
-            host = %host,
-            whisper_port = ports.whisper,
-            ollama_port = ports.ollama,
-            lmstudio_port = ?ports.lmstudio,
-            omlx_port = ?ports.omlx,
-            "pair: populated per-service api_keys and AppConfig host/ports"
-        );
-    }
-
+    tracing::info!(
+        host = %winning_host,
+        whisper_port = ports.whisper,
+        ollama_port = ports.ollama,
+        lmstudio_port = ?ports.lmstudio,
+        omlx_port = ?ports.omlx,
+        "pair: populated per-service api_keys and AppConfig host/ports"
+    );
     Ok(())
 }
 
@@ -487,6 +578,24 @@ fn served_providers(ports: &PairPorts) -> Vec<&'static str> {
         v.push("omlx");
     }
     v
+}
+
+/// Write the sharing bearer to the OS keychain slot that
+/// `state::load_sharing_bearer` reads at startup and re-init.
+#[cfg(not(test))]
+fn store_sharing_bearer(token: &str) -> AppResult<()> {
+    keyring::Entry::new("rustMedicalAssistant", "sharing-bearer")
+        .map_err(|e| AppError::Other(format!("keychain open: {e}")))?
+        .set_password(token)
+        .map_err(|e| AppError::Other(format!("keychain write: {e}")))
+}
+
+/// Test double: never touches the developer's real keychain. The token's
+/// effect is asserted through the per-service `state.keys` mirror instead
+/// (same KeyStorage abstraction the production flow writes).
+#[cfg(test)]
+fn store_sharing_bearer(_token: &str) -> AppResult<()> {
+    Ok(())
 }
 
 /// The advertised proxy port for a provider id, or `None` when the server
@@ -539,16 +648,22 @@ async fn probe_provider_proxy(
     }
 }
 
-/// The hardcoded model ids `available_models` falls back to when the model
-/// list can't be fetched (see `local_openai::ProviderMeta::fallback_model`).
-/// Persisting one of these as `ai_model` after a provider switch would bake
-/// in a model the server almost certainly doesn't have, so the pair flow
-/// skips them.
-fn is_fallback_model(provider: &str, model: &str) -> bool {
-    matches!(
-        (provider, model),
-        ("ollama", "llama3") | ("lmstudio", "default") | ("omlx", "default")
-    )
+/// Decide whether the pair flow must replace the saved `ai_model` for the
+/// provider generation will use after pairing (switched OR kept): the model
+/// must actually be offered by that provider. Returns the replacement (first
+/// offered model) when a refresh is needed, else `None`.
+///
+/// The list comes straight from the server (`available_models` errors rather
+/// than synthesizing ids), so any name it contains is real — including a
+/// model that happens to be called "llama3" or "default". Filtering by name
+/// here would shadow such a model and override a user's explicit choice.
+fn refreshed_model(saved: &str, offered: &[String]) -> Option<String> {
+    let first = offered.first()?;
+    if offered.iter().any(|id| id == saved) {
+        None // an explicitly chosen, offered model — respect it
+    } else {
+        Some(first.clone())
+    }
 }
 
 /// Returns the saved paired-connection metadata, or `None` if not paired.
@@ -733,10 +848,10 @@ pub async fn backfill_tailscale() -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    //! Tests for `try_pair_at_base`. The full `pair_with_server` command depends
-    //! on Tauri `State` and the keychain, which are awkward to fake — but the
-    //! retry-discrimination logic lives entirely in the helper, so unit-testing
-    //! the helper covers the bug fix.
+    //! Tests for `try_pair_at_base` and the pure pair-flow helpers. The
+    //! full command flow has its own coverage in `command_tests` below
+    //! (wiremock office server + mocked keychain + redirected app-data
+    //! dir); this module keeps the unit tests for the pieces.
     use super::*;
 
     /// Bind a TCP listener to grab an ephemeral port, then drop the listener so
@@ -833,12 +948,51 @@ mod tests {
     }
 
     #[test]
-    fn is_fallback_model_matches_provider_fallback_ids() {
-        assert!(is_fallback_model("ollama", "llama3"));
-        assert!(is_fallback_model("lmstudio", "default"));
-        assert!(is_fallback_model("omlx", "default"));
-        assert!(!is_fallback_model("ollama", "qwen3:8b"));
-        assert!(!is_fallback_model("omlx", "mlx-community/Qwen3-8B"));
+    fn refreshed_model_replaces_model_not_offered_by_server() {
+        let offered = vec![
+            "mlx-community--Qwen2.5-0.5B-Instruct-4bit".to_string(),
+            "Ornith-1.5-35B-A3B-MLX-4bit".to_string(),
+        ];
+        // Regression: a kept provider with a placeholder saved as ai_model
+        // 404s every generation after re-pairing.
+        assert_eq!(
+            refreshed_model("default", &offered),
+            Some("mlx-community--Qwen2.5-0.5B-Instruct-4bit".to_string())
+        );
+        // A model left over from another server/provider isn't offered.
+        assert_eq!(
+            refreshed_model("llama3:8b", &offered),
+            Some("mlx-community--Qwen2.5-0.5B-Instruct-4bit".to_string())
+        );
+    }
+
+    // A model that happens to share a name with the old fallback ids is a
+    // REAL server model — filtering by name would shadow it and override
+    // the user's explicit choice.
+    #[test]
+    fn refreshed_model_respects_offered_model_named_like_old_placeholder() {
+        let offered = vec!["llama3".to_string(), "llama3.1:8b".to_string()];
+        assert_eq!(refreshed_model("llama3", &offered), None);
+    }
+
+    #[test]
+    fn refreshed_model_keeps_valid_saved_choice() {
+        let offered = vec![
+            "mlx-community--Qwen2.5-0.5B-Instruct-4bit".to_string(),
+            "Ornith-1.5-35B-A3B-MLX-4bit".to_string(),
+        ];
+        assert_eq!(
+            refreshed_model("Ornith-1.5-35B-A3B-MLX-4bit", &offered),
+            None,
+            "an explicitly chosen offered model must be respected"
+        );
+    }
+
+    #[test]
+    fn refreshed_model_no_ops_when_nothing_offered() {
+        // Defensive: available_models errors on an empty list, so this only
+        // guards the pure function's contract.
+        assert_eq!(refreshed_model("anything", &[]), None);
     }
 
     #[tokio::test]
@@ -863,5 +1017,211 @@ mod tests {
         let http = reqwest::Client::new();
         assert!(probe_provider_proxy(&http, &host, port, "omlx", "fixture-auth-value").await);
         srv.verify().await;
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    //! Full-flow coverage for `pair_with_server_inner` against a wiremock
+    //! office server: handshake, keychain mirror, provider availability
+    //! switch, model refresh, and AppConfig persistence. Machine-global
+    //! side effects are contained — the OS-keychain bearer write is a
+    //! #[cfg(test)] no-op (`store_sharing_bearer`), and the
+    //! paired-connection file lands in the per-process test tempdir
+    //! (`super::super::test_app_data_dir`).
+    use super::super::{paired_connection_path, test_app_data_guard};
+    use super::*;
+    use crate::commands::generation::test_helpers::build_test_state_with_provider;
+    use medical_core::types::settings::{AppConfig, SttMode};
+    use medical_db::settings::SettingsRepo;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Neutral fixture token the mock enroll endpoint hands out.
+    const FIXTURE_TOKEN: &str = "pair-flow-fixture-42";
+
+    /// Bind an ephemeral port and drop the listener — connects against it
+    /// fail instantly with ECONNREFUSED, standing in for an unbound proxy.
+    fn closed_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+        port
+    }
+
+    /// A wiremock "office server": /pair/enroll hands out the fixture
+    /// token, /v1/models serves `models`. The caller must keep the
+    /// returned server alive for the duration of the test (a dropped
+    /// MockServer can unmount its mocks mid-request).
+    async fn office_server(models: &[&str]) -> (MockServer, u16) {
+        let srv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/pair/enroll"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": FIXTURE_TOKEN
+            })))
+            .mount(&srv)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": models.iter().map(|m| serde_json::json!({ "id": m })).collect::<Vec<_>>()
+            })))
+            .mount(&srv)
+            .await;
+        let port = srv
+            .uri()
+            .parse::<reqwest::Url>()
+            .expect("url")
+            .port()
+            .expect("port");
+        (srv, port)
+    }
+
+    fn ports(pairing: u16, lmstudio: Option<u16>, omlx: Option<u16>) -> PairPorts {
+        PairPorts {
+            ollama: closed_port(), // never answers in these scenarios
+            whisper: 8081,
+            pairing,
+            lmstudio,
+            omlx,
+            vocab: None,
+        }
+    }
+
+    /// State whose registry holds ONE oMLX provider statically pointed at
+    /// the mock office server (so post-pair model refreshes hit its
+    /// /v1/models), plus the config fields the flow reads.
+    async fn client_state(
+        srv_port: u16,
+        ai_provider: &str,
+        ai_model: &str,
+    ) -> crate::state::AppState {
+        let mut config = AppConfig::default();
+        config.ai_provider = ai_provider.to_string();
+        config.ai_model = ai_model.to_string();
+        let base = format!("http://127.0.0.1:{srv_port}");
+        let provider = medical_ai_providers::omlx::OmlxProvider::new(
+            Some(base.as_str()),
+            false,
+            None,
+            medical_ai_providers::http_client::RetryConfig {
+                max_retries: 0,
+                ..Default::default()
+            },
+        )
+        .expect("build omlx provider");
+        let (mut state, _recording_id) = build_test_state_with_provider(
+            config,
+            "transcript text",
+            std::sync::Arc::new(provider) as std::sync::Arc<dyn medical_core::traits::AiProvider>,
+        )
+        .await;
+        // The pair flow initializes STT providers under data_dir; point it
+        // at a real tempdir so those reads don't fail with NotFound.
+        let dir = tempfile::tempdir().expect("stt tempdir");
+        state.data_dir = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        state
+    }
+
+    async fn load_cfg(state: &crate::state::AppState) -> AppConfig {
+        let conn = state.db.conn().expect("conn");
+        let mut cfg = SettingsRepo::load_config(&conn).expect("load config");
+        cfg.migrate();
+        cfg
+    }
+
+    #[tokio::test]
+    async fn pair_switches_to_the_only_answering_provider_and_picks_its_model() {
+        let _guard = test_app_data_guard().await;
+        let (_server, srv_port) = office_server(&["Ornith-1.5-35B", "Qwen-4B"]).await;
+        let state = client_state(srv_port, "lmstudio", "llama3:8b").await;
+
+        // Only the oMLX proxy answers; LM Studio's port is closed.
+        pair_with_server_inner(
+            &state,
+            Some("127.0.0.1".into()),
+            None,
+            ports(srv_port, Some(closed_port()), Some(srv_port)),
+            "123456".into(),
+            "Test Client".into(),
+        )
+        .await
+        .expect("pair succeeds");
+
+        let cfg = load_cfg(&state).await;
+        assert_eq!(
+            cfg.ai_provider, "omlx",
+            "switched to the answering provider"
+        );
+        assert_eq!(cfg.ai_model, "Ornith-1.5-35B", "first offered model picked");
+        assert_eq!(cfg.omlx_host, "127.0.0.1");
+        assert_eq!(cfg.omlx_port, srv_port);
+        assert_eq!(
+            cfg.stt_mode,
+            SttMode::Remote,
+            "STT routed through the office"
+        );
+
+        // Bearer mirrored into the per-service keychain slots (state.keys
+        // is the same file-backed KeyStorage the flow writes).
+        assert_eq!(
+            state.keys.get_key("omlx_api_key").expect("key read"),
+            Some(FIXTURE_TOKEN.to_string())
+        );
+        assert!(paired_connection_path().expect("path").exists());
+    }
+
+    #[tokio::test]
+    async fn pair_keeps_answering_provider_and_replaces_stale_saved_model() {
+        let _guard = test_app_data_guard().await;
+        let (_server, srv_port) = office_server(&["Ornith-1.5-35B", "Qwen-4B"]).await;
+        // Saved model is the old placeholder id — not in the server's list.
+        let state = client_state(srv_port, "omlx", "default").await;
+
+        pair_with_server_inner(
+            &state,
+            Some("127.0.0.1".into()),
+            None,
+            ports(srv_port, None, Some(srv_port)),
+            "123456".into(),
+            "Test Client".into(),
+        )
+        .await
+        .expect("pair succeeds");
+
+        let cfg = load_cfg(&state).await;
+        assert_eq!(cfg.ai_provider, "omlx", "answering provider kept");
+        assert_eq!(
+            cfg.ai_model, "Ornith-1.5-35B",
+            "stale model replaced with the first offered one"
+        );
+    }
+
+    #[tokio::test]
+    async fn pair_respects_saved_model_when_the_server_actually_offers_it() {
+        // Regression pin (2026-09-02): a REAL server model that happens to
+        // share a name with the old placeholder ids must not be shadowed.
+        let _guard = test_app_data_guard().await;
+        let (_server, srv_port) = office_server(&["default", "Ornith-1.5-35B"]).await;
+        let state = client_state(srv_port, "omlx", "default").await;
+
+        pair_with_server_inner(
+            &state,
+            Some("127.0.0.1".into()),
+            None,
+            ports(srv_port, None, Some(srv_port)),
+            "123456".into(),
+            "Test Client".into(),
+        )
+        .await
+        .expect("pair succeeds");
+
+        let cfg = load_cfg(&state).await;
+        assert_eq!(
+            cfg.ai_model, "default",
+            "an offered model is respected, even one named like the old placeholder"
+        );
     }
 }

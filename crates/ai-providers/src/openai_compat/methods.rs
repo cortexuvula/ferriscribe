@@ -284,6 +284,7 @@ impl OpenAiCompatibleClient {
                 prompt_tokens: u.prompt_tokens,
                 completion_tokens: u.completion_tokens,
                 total_tokens: u.total_tokens,
+                decode_tokens_per_second: u.generation_tokens_per_second,
             })
             .unwrap_or_default();
 
@@ -369,6 +370,7 @@ fn map_chat_event(resp: &ChatResponse) -> Vec<AppResult<StreamChunk>> {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
             total_tokens: u.total_tokens,
+            decode_tokens_per_second: u.generation_tokens_per_second,
         })));
         out.push(Ok(StreamChunk::Done));
     }
@@ -552,5 +554,21 @@ mod tests {
         assert!(matches!(&chunks[0], Ok(StreamChunk::Delta { text }) if text == "hi"));
         assert!(matches!(&chunks[1], Ok(StreamChunk::Usage(u)) if u.completion_tokens == 2));
         assert!(matches!(chunks[2], Ok(StreamChunk::Done)));
+    }
+
+    // oMLX's terminal usage event carries timing extras alongside the
+    // standard fields; `generation_tokens_per_second` must survive the
+    // mapping so recorded stats can match the server dashboard.
+    #[test]
+    fn maps_omlx_usage_extras() {
+        let raw = r#"{"choices":[],"usage":{"prompt_tokens":22,"completion_tokens":120,"total_tokens":142,"input_tokens":22,"output_tokens":120,"time_to_first_token":0.75,"total_time":1.96,"prompt_eval_duration":0.75,"generation_duration":1.21,"prompt_tokens_per_second":29.23,"generation_tokens_per_second":99.34}}"#;
+        let resp: ChatResponse = serde_json::from_str(raw).unwrap();
+        let chunks = map_chat_event(&resp);
+        assert!(matches!(
+            &chunks[0],
+            Ok(StreamChunk::Usage(u)) if u.completion_tokens == 120
+                && u.decode_tokens_per_second == Some(99.34)
+        ));
+        assert!(matches!(chunks[1], Ok(StreamChunk::Done)));
     }
 }

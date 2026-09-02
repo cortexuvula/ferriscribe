@@ -37,7 +37,6 @@ pub(crate) static META: ProviderMeta = ProviderMeta {
     display: "Ollama",
     default_base: "http://localhost:11434",
     err_field: "ollama_host",
-    fallback_model: "llama3",
     thinking: ThinkingControl::ReasoningEffortNone,
 };
 
@@ -167,7 +166,6 @@ mod tests {
         assert_eq!(META.id, "ollama");
         assert_eq!(META.default_base, "http://localhost:11434");
         assert_eq!(META.err_field, "ollama_host");
-        assert_eq!(META.fallback_model, "llama3");
         assert_eq!(META.thinking, ThinkingControl::ReasoningEffortNone);
     }
 }

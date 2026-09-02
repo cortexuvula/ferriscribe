@@ -30,8 +30,6 @@ use crate::whisper_supervisor::WhisperSupervisor;
 /// `whisper_internal_api_key`) are redacted in [`Debug`] output.
 #[derive(Clone)]
 pub struct SharingConfig {
-    /// Whether sharing is enabled. When `false`, `start()` is a no-op.
-    pub enabled: bool,
     /// Human-readable server name broadcast via mDNS and embedded in the QR URL.
     pub friendly_name: String,
     /// Public listener port for the Ollama auth proxy (default 11435).
@@ -77,7 +75,6 @@ pub struct SharingConfig {
 impl std::fmt::Debug for SharingConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharingConfig")
-            .field("enabled", &self.enabled)
             .field("friendly_name", &self.friendly_name)
             .field("ollama_proxy_port", &self.ollama_proxy_port)
             .field("whisper_proxy_port", &self.whisper_proxy_port)
@@ -101,7 +98,6 @@ impl std::fmt::Debug for SharingConfig {
 impl Default for SharingConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             friendly_name: "FerriScribe Server".to_string(),
             ollama_proxy_port: 11435,
             whisper_proxy_port: 8081,
@@ -1349,7 +1345,6 @@ mod lifecycle_tests {
 
     fn cfg_with_tokens_at(path: PathBuf, key: [u8; 32], api_key: &str) -> SharingConfig {
         SharingConfig {
-            enabled: true,
             friendly_name: "test-server".into(),
             ollama_proxy_port: 11435,
             whisper_proxy_port: 8081,
@@ -1380,9 +1375,8 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn sharing_config_default_is_disabled() {
+    fn sharing_config_default_has_no_optional_providers() {
         let c = SharingConfig::default();
-        assert!(!c.enabled);
         assert!(c.lmstudio_internal_port.is_none());
         assert!(c.lmstudio_proxy_port.is_none());
         assert!(c.omlx_internal_port.is_none());
@@ -1586,7 +1580,6 @@ mod lifecycle_tests {
 
         let dir = tempdir().unwrap();
         let c = SharingConfig {
-            enabled: true,
             friendly_name: "busy-port-test".into(),
             ollama_proxy_port: ephemeral_port().await,
             whisper_proxy_port: ephemeral_port().await,
@@ -1646,7 +1639,6 @@ mod lifecycle_tests {
 
         let dir = tempdir().unwrap();
         let c = SharingConfig {
-            enabled: true,
             friendly_name: "gate-test".into(),
             ollama_proxy_port: ephemeral_port().await,
             whisper_proxy_port: whisper_proxy,
@@ -1735,7 +1727,6 @@ mod lifecycle_tests {
 
         let dir = tempdir().unwrap();
         let c = SharingConfig {
-            enabled: true,
             friendly_name: "watcher-test".into(),
             ollama_proxy_port: ephemeral_port().await,
             whisper_proxy_port: whisper_proxy,
