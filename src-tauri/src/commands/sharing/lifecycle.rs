@@ -311,10 +311,7 @@ async fn build_sharing_config(friendly_name: String) -> AppResult<SharingConfig>
             AppError::Other("FerriScribe's database hasn't been initialized yet. Restart the app and try again.".into())
         })?;
 
-    let app_data = dirs::data_dir()
-        .ok_or_else(|| AppError::Other("no app data dir".into()))?
-        .join("rust-medical-assistant");
-    std::fs::create_dir_all(&app_data)?;
+    let app_data = super::app_data_dir()?;
     let mut whisper_api = [0u8; 16];
     rand::rng().fill_bytes(&mut whisper_api);
     // LM Studio and oMLX are always candidates in office mode. The start()

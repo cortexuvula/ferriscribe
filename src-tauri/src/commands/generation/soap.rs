@@ -384,9 +384,8 @@ pub(crate) fn spawn_edit_distance_task(
 
 #[cfg(test)]
 mod preflight_tests {
-    use super::super::test_helpers::build_test_state_with_recording;
+    use super::super::test_helpers::{assert_endpoint_offline, build_test_state_with_recording};
     use super::*;
-    use medical_core::error::{AppError, OfflineReason, ServiceKind};
     use medical_core::types::settings::AppConfig;
 
     #[tokio::test]
@@ -412,37 +411,7 @@ mod preflight_tests {
             None, // patient_context
         )
         .await;
-        let elapsed = start.elapsed();
-
-        let err = result.expect_err("must fail with offline error");
-        match err {
-            AppError::EndpointOffline {
-                service,
-                reason,
-                provider_name,
-                ..
-            } => {
-                assert_eq!(service, ServiceKind::AiProvider);
-                assert_eq!(provider_name, "Ollama");
-                // 192.0.2.1 is unrouteable — Timeout is the expected outcome.
-                // ConnectionRefused is also acceptable if the OS responds fast.
-                assert!(
-                    matches!(
-                        reason,
-                        OfflineReason::ConnectionRefused | OfflineReason::Timeout
-                    ),
-                    "expected ConnectionRefused or Timeout, got {reason:?}"
-                );
-            }
-            other => panic!("expected EndpointOffline, got {other:?}"),
-        }
-
-        // Pre-flight must short-circuit BEFORE the real call: ~3s probe ceiling
-        // plus some overhead, much less than the real call's timeout.
-        assert!(
-            elapsed < std::time::Duration::from_secs(8),
-            "should have short-circuited at ~3s; took {elapsed:?}"
-        );
+        assert_endpoint_offline(result, "Ollama", start);
     }
 }
 
