@@ -314,6 +314,7 @@ mod tests {
                 prompt_tokens: 1,
                 completion_tokens: 2,
                 total_tokens: 3,
+                decode_tokens_per_second: None,
             })),
             Ok(StreamChunk::Done),
         ];

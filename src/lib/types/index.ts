@@ -219,6 +219,8 @@ export interface UsageInfo {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** Server-reported decode-phase throughput (oMLX); absent on Ollama/LM Studio. */
+  decode_tokens_per_second?: number;
 }
 
 /**

@@ -20,7 +20,7 @@ use crate::state::AppState;
 /// `preflight_for_command` short-circuits before the provider is ever invoked.
 ///
 /// Returns `(AppState, recording_id_as_string)`.
-pub(super) async fn build_test_state_with_recording(
+pub(crate) async fn build_test_state_with_recording(
     config: AppConfig,
     transcript_text: &str,
 ) -> (AppState, String) {
@@ -32,7 +32,7 @@ pub(super) async fn build_test_state_with_recording(
 /// `config.ai_provider` must match `provider.name()` so `resolve_provider`
 /// finds it, and `config.ollama_host` should be loopback so the pre-flight
 /// probe is skipped.
-pub(super) async fn build_test_state_with_provider(
+pub(crate) async fn build_test_state_with_provider(
     config: AppConfig,
     transcript_text: &str,
     provider: Arc<dyn medical_core::traits::AiProvider>,
@@ -148,12 +148,53 @@ async fn build_test_state_inner(
     (state, recording_id.to_string())
 }
 
+/// Shared assertion for the "returns EndpointOffline when the AI provider
+/// is unreachable" preflight tests: the command must fail FAST (the probe
+/// short-circuits at ~3s, well under the 8s ceiling) with
+/// `AppError::EndpointOffline` naming the provider — never invoking the
+/// provider itself. Generic over the command's success payload.
+pub(crate) fn assert_endpoint_offline<T>(
+    result: AppResult<T>,
+    expected_provider: &str,
+    started: std::time::Instant,
+) where
+    T: std::fmt::Debug,
+{
+    let err = result.expect_err("must fail with offline error");
+    match err {
+        AppError::EndpointOffline {
+            service,
+            reason,
+            provider_name,
+            ..
+        } => {
+            assert_eq!(service, medical_core::error::ServiceKind::AiProvider);
+            assert_eq!(provider_name, expected_provider);
+            assert!(
+                matches!(
+                    reason,
+                    medical_core::error::OfflineReason::ConnectionRefused
+                        | medical_core::error::OfflineReason::Timeout
+                ),
+                "expected ConnectionRefused or Timeout, got {reason:?}"
+            );
+        }
+        other => panic!("expected EndpointOffline, got {other:?}"),
+    }
+
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "should have short-circuited at ~3s; took {elapsed:?}"
+    );
+}
+
 /// Deterministic in-process `AiProvider` for generation success-path tests.
 ///
 /// `complete()` returns a fixed non-empty completion with a known token
 /// usage; every other method is unused by these tests and returns an error
 /// or an empty list. Never performs network I/O.
-pub(super) struct MockCompletionProvider {
+pub(crate) struct MockCompletionProvider {
     name: &'static str,
     content: String,
     usage: medical_core::types::UsageInfo,
@@ -161,7 +202,7 @@ pub(super) struct MockCompletionProvider {
 
 impl MockCompletionProvider {
     /// `completion_tokens` drives the recorded throughput stat.
-    pub(super) fn new(name: &'static str, content: &str, completion_tokens: u32) -> Self {
+    pub(crate) fn new(name: &'static str, content: &str, completion_tokens: u32) -> Self {
         Self {
             name,
             content: content.to_string(),
@@ -169,6 +210,7 @@ impl MockCompletionProvider {
                 prompt_tokens: 128,
                 completion_tokens,
                 total_tokens: 128 + completion_tokens,
+                decode_tokens_per_second: None,
             },
         }
     }

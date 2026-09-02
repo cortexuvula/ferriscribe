@@ -80,102 +80,17 @@ pub(super) struct ContentMetaResponse {
 /// Build the sparse `fields` map for a `SyncRecording` from a `Recording`
 /// row plus its optional field revisions.
 ///
-/// For each syncable text field that has content on the recording row, we
-/// look up the matching revision (if any) to get the precise `updated_at`
-/// and `origin_device`; otherwise we fall back to the recording's row-level
-/// `updated_at`. Only fields with content are included — the map is sparse
-/// by design so absent fields don't participate in the merge.
+/// Delegates to the shared [`crate::sync_sparse_fields::build_sparse_fields`]
+/// (single source of truth for both sync directions — the server's pull
+/// responses here and the client's push path).
 fn build_sparse_fields(
     rec: &Recording,
     revisions: Option<&Vec<FieldRevision>>,
 ) -> HashMap<String, SyncFieldValue> {
-    let rev_map: HashMap<&str, &FieldRevision> = revisions
-        .map(|v| v.iter().map(|r| (r.field.as_str(), r)).collect())
-        .unwrap_or_default();
-
-    let row_ts = rec
-        .updated_at
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| rec.created_at.to_rfc3339());
-
-    // Field wire timestamp = max(revision, row write) — the same rider as
-    // the client-side builder in commands/content_sync.rs. Local writers
-    // that bump only the row (transcription/generation completion) leave
-    // stale revisions from a pre-edit sync round-trip; serving the stale
-    // revision timestamp makes clients' merges tie and silently drop the
-    // newer value. Parsed comparison (mixed timestamp formats compare
-    // wrongly as strings). Row-derived stamps carry no origin device.
-    let field_ts = |rev: Option<&FieldRevision>| -> (String, Option<String>) {
-        match rev {
-            Some(r) => {
-                if medical_db::content_sync::cmp_lww_timestamps(&r.updated_at, &row_ts)
-                    == std::cmp::Ordering::Less
-                {
-                    (row_ts.clone(), None)
-                } else {
-                    (r.updated_at.clone(), r.origin_device.clone())
-                }
-            }
-            None => (row_ts.clone(), None),
-        }
-    };
-
-    let mut fields: HashMap<String, SyncFieldValue> = HashMap::new();
-
-    // Text columns: value is a JSON string when present.
-    let mut push_text = |name: &str, val: Option<&str>| {
-        if let Some(s) = val {
-            let (ts, device) = field_ts(rev_map.get(name).copied());
-            fields.insert(
-                name.to_string(),
-                SyncFieldValue {
-                    value: serde_json::Value::String(s.to_string()),
-                    updated_at: ts,
-                    origin_device: device,
-                },
-            );
-        }
-    };
-
-    push_text("transcript", rec.transcript.as_deref());
-    push_text("soap_note", rec.soap_note.as_deref());
-    push_text("referral", rec.referral.as_deref());
-    push_text("letter", rec.letter.as_deref());
-    push_text("peer_discussion", rec.peer_discussion.as_deref());
-    push_text("chat", rec.chat.as_deref());
-    push_text("patient_name", rec.patient_name.as_deref());
-
-    // JSON columns: tags, metadata, processing_status. These store the
-    // serialized JSON value directly.
-    let mut push_json = |name: &str, val: &serde_json::Value| {
-        if !val.is_null() {
-            let (ts, device) = field_ts(rev_map.get(name).copied());
-            fields.insert(
-                name.to_string(),
-                SyncFieldValue {
-                    value: val.clone(),
-                    updated_at: ts,
-                    origin_device: device,
-                },
-            );
-        }
-    };
-
-    // tags is a Vec<String> on the struct; serialize to JSON.
-    if let Ok(tags_json) = serde_json::to_value(&rec.tags) {
-        push_json("tags", &tags_json);
-    }
-    // Strip synced_from from metadata before transmitting — it's a local-only
-    // marker that must not round-trip back to the origin machine.
-    let mut metadata_clean = rec.metadata.clone();
-    if let Some(obj) = metadata_clean.as_object_mut() {
-        obj.remove("synced_from");
-    }
-    push_json("metadata", &metadata_clean);
-    let status_json = serde_json::to_value(&rec.status).unwrap_or(serde_json::Value::Null);
-    push_json("processing_status", &status_json);
-
-    fields
+    crate::sync_sparse_fields::build_sparse_fields(
+        rec,
+        revisions.map(|v| v.as_slice()).unwrap_or(&[]),
+    )
 }
 
 /// Convert a `Recording` row into a wire-format `SyncRecording`.

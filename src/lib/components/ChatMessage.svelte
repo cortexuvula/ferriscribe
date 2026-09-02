@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ChatMessage } from '../types';
   import { formatTimestamp } from '../utils/format';
+  import { copyWithStatus, type CopyStatus } from '../utils/clipboard';
 
   const { message }: { message: ChatMessage } = $props();
 
@@ -8,6 +9,16 @@
   const roleName = $derived(
     isUser ? 'You' : message.agent ? message.agent : 'Assistant'
   );
+
+  let copyStatus = $state<CopyStatus>('idle');
+
+  async function copyResponse() {
+    if (copyStatus !== 'idle') return;
+    await copyWithStatus({
+      setStatus: (s) => (copyStatus = s),
+      getText: () => message.content,
+    });
+  }
 </script>
 
 <div class="chat-message" class:user={isUser} class:assistant={!isUser}>
@@ -15,6 +26,16 @@
     <div class="meta">
       <span class="role">{roleName}</span>
       <span class="time">{formatTimestamp(message.timestamp)}</span>
+      {#if !isUser && message.content}
+        <button
+          class="copy-btn"
+          onclick={copyResponse}
+          disabled={copyStatus !== 'idle'}
+          aria-label="Copy response"
+        >
+          {#if copyStatus === 'copied'}Copied ✓{:else if copyStatus === 'copying'}Copying…{:else}Copy{/if}
+        </button>
+      {/if}
     </div>
     <div class="content">{message.content}</div>
 
@@ -83,6 +104,29 @@
   .time {
     font-size: 10px;
     opacity: 0.5;
+  }
+
+  .copy-btn {
+    margin-left: auto;
+    padding: 1px 8px;
+    font-size: 10px;
+    line-height: 1.5;
+    color: var(--text-muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm, 4px);
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .copy-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: var(--accent);
+  }
+
+  .copy-btn:disabled {
+    cursor: default;
+    opacity: 0.8;
   }
 
   .content {

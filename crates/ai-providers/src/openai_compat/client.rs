@@ -218,6 +218,7 @@ impl OpenAiCompatibleClient {
                 prompt_tokens: u.prompt_tokens,
                 completion_tokens: u.completion_tokens,
                 total_tokens: u.total_tokens,
+                decode_tokens_per_second: u.generation_tokens_per_second,
             })
             .unwrap_or_default();
 
@@ -470,6 +471,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                generation_tokens_per_second: None,
             }),
         };
         let completion = c.parse_response(resp, "gpt-4o");

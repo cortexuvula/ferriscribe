@@ -1,10 +1,8 @@
-//! Shared HTTP client infrastructure with retry and circuit-breaker support.
+//! Shared HTTP client infrastructure with retry support.
 //!
 //! This module provides the building blocks for resilient HTTP communication
 //! with local AI providers:
 //!
-//! - [`build_client`] / [`build_client_custom_auth`] — construct reqwest
-//!   clients with Bearer-token or custom-header authentication.
 //! - [`RetryConfig`] — exponential-backoff configuration with jitter,
 //!   constructible from user-facing [`AppConfig`] settings.
 //! - [`send_with_retry`] — wraps any request factory with retry/backoff
@@ -17,61 +15,9 @@
 //! [`AppConfig`]: medical_core::types::settings::AppConfig
 
 use rand::Rng;
-use reqwest::{Client, header};
 use std::time::Duration;
 
-use medical_core::error::{AppError, AppResult};
 use medical_core::types::settings::AppConfig;
-
-/// Build a reqwest client with Bearer-token auth.
-///
-/// Returns `Err(AppError::ai_provider(...))` if the API key contains characters
-/// that are invalid in HTTP header values (newlines, raw control bytes) or if
-/// reqwest's builder fails — the caller decides how to surface that.
-pub fn build_client(api_key: &str, timeout_secs: u64) -> AppResult<Client> {
-    let mut auth_value =
-        header::HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| {
-            AppError::ai_provider("API key contains characters invalid in HTTP headers")
-        })?;
-    auth_value.set_sensitive(true);
-
-    let mut headers = header::HeaderMap::new();
-    headers.insert(header::AUTHORIZATION, auth_value);
-
-    Client::builder()
-        .default_headers(headers)
-        .pool_max_idle_per_host(5)
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()
-        .map_err(|e| AppError::ai_provider(format!("Failed to build HTTP client: {e}")))
-}
-
-/// Build a reqwest client with a custom auth header.
-pub fn build_client_custom_auth(
-    header_name: &str,
-    api_key: &str,
-    timeout_secs: u64,
-) -> AppResult<Client> {
-    let header_name = header::HeaderName::from_bytes(header_name.as_bytes())
-        .map_err(|_| AppError::ai_provider(format!("Invalid auth header name: {header_name:?}")))?;
-
-    let mut header_value = header::HeaderValue::from_str(api_key).map_err(|_| {
-        AppError::ai_provider("API key contains characters invalid in HTTP headers")
-    })?;
-    header_value.set_sensitive(true);
-
-    let mut headers = header::HeaderMap::new();
-    headers.insert(header_name, header_value);
-
-    Client::builder()
-        .default_headers(headers)
-        .pool_max_idle_per_host(5)
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()
-        .map_err(|e| AppError::ai_provider(format!("Failed to build HTTP client: {e}")))
-}
 
 /// Configuration for exponential-backoff retry logic.
 #[derive(Debug, Clone)]
