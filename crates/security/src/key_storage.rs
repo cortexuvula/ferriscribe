@@ -302,9 +302,19 @@ where
 /// undecryptable data.
 fn load_or_create_salt(config_dir: &Path) -> SecurityResult<Vec<u8>> {
     let path = config_dir.join(SALT_FILE_NAME);
-    // Fast path: the salt has existed since a previous run.
+    // Fast path: the salt has existed since a previous run. The length
+    // check is load-bearing: a concurrent first-open racer may have
+    // CREATED the file but not yet written/synced its bytes — reading at
+    // that instant yields a short (often empty) salt, and adopting it
+    // silently derives keys nobody else can reproduce (the CI flake this
+    // fixes). Fall through to the waiting read instead.
     if path.exists() {
-        return Ok(std::fs::read(&path)?);
+        if let Ok(bytes) = std::fs::read(&path)
+            && bytes.len() == SALT_LENGTH
+        {
+            return Ok(bytes);
+        }
+        return read_complete_salt_or_wait(&path);
     }
     let mut salt = vec![0u8; SALT_LENGTH];
     rand::rng().fill_bytes(&mut salt);
