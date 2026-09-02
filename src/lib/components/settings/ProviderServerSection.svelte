@@ -1,0 +1,305 @@
+<script lang="ts">
+  /**
+   * Shared "provider server" subsection of Settings → Models: host input
+   * with the public-endpoint PHI warning, port input with 1–65535
+   * validation, a Test Connection button (useTestConnection state machine),
+   * and the disable-thinking toggle. One component instead of three
+   * hand-maintained copies (LM Studio / Ollama / oMLX).
+   *
+   * All edits persist via `settings.updateField` and re-init providers so
+   * the new endpoint takes effect without an app restart. Section copy is
+   * passed as snippets (`hint`, `thinkingHint`) so callers keep rich markup
+   * without an {@html} XSS surface.
+   */
+  import type { Snippet } from 'svelte';
+  import { getApiKey } from '../../api/settings';
+  import { reinitProviders } from '../../api/chat';
+  import { settings } from '../../stores/settings.svelte';
+  import type { AppConfig } from '../../types';
+  import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
+  import { useTestConnection } from '../../composables/useTestConnection.svelte';
+
+  type HostField = Extract<keyof AppConfig, `${'lmstudio' | 'ollama' | 'omlx'}_host`>;
+  type PortField = Extract<keyof AppConfig, `${'lmstudio' | 'ollama' | 'omlx'}_port`>;
+  type ThinkingField = Extract<
+    keyof AppConfig,
+    `${'lmstudio' | 'ollama' | 'omlx'}_disable_thinking`
+  >;
+
+  interface Props {
+    /** Prefix for element ids (e.g. "omlx" → id="omlx-host"). */
+    idPrefix: string;
+    /** Section heading, e.g. "oMLX Server". */
+    title: string;
+    /** Intro hint rendered under the heading (optional). */
+    hint?: Snippet;
+    /** AppConfig field names this section edits. */
+    hostField: HostField;
+    portField: PortField;
+    /** Default/fallback port (placeholder + `?? fallback` reads). */
+    defaultPort: number;
+    /** Keychain slot holding the optional bearer key. */
+    apiKeySlot: string;
+    /** `(host, port, apiKey) => success message` — the connection test. */
+    testConnection: (host: string, port: number, apiKey: string | null) => Promise<string>;
+    /** AppConfig field for the thinking toggle; omit to hide the toggle. */
+    thinkingField?: ThinkingField;
+    /** Hint rendered under the thinking toggle. */
+    thinkingHint?: Snippet;
+  }
+
+  let {
+    idPrefix,
+    title,
+    hint,
+    hostField,
+    portField,
+    defaultPort,
+    apiKeySlot,
+    testConnection,
+    thinkingField,
+    thinkingHint,
+  }: Props = $props();
+
+  const test = useTestConnection();
+
+  const host = $derived(settings.state[hostField]);
+  const port = $derived(settings.state[portField] ?? defaultPort);
+  const thinkingDisabled = $derived(
+    thinkingField ? (settings.state[thinkingField] ?? false) : false,
+  );
+
+  const endpointOk = $derived(isLocalOrAllowed(host ?? '', settings.state.allow_public_endpoint));
+  const endpointKind = $derived(classifyEndpoint(host ?? ''));
+
+  async function onHostChange(e: Event) {
+    await settings.updateField(hostField, (e.target as HTMLInputElement).value);
+    test.reset();
+    await reinitProviders();
+  }
+
+  async function onPortChange(e: Event) {
+    const value = parseInt((e.target as HTMLInputElement).value, 10);
+    if (value >= 1 && value <= 65535) {
+      await settings.updateField(portField, value);
+      test.reset();
+      await reinitProviders();
+    }
+  }
+
+  async function onTestConnection() {
+    await test.run(async () => {
+      let apiKey: string | null = null;
+      try {
+        apiKey = await getApiKey(apiKeySlot);
+      } catch {
+        // Keychain unavailable — try without auth.
+      }
+      return testConnection(host || 'localhost', port, apiKey);
+    });
+  }
+
+  async function onThinkingToggle(e: Event) {
+    if (!thinkingField) return;
+    await settings.updateField(thinkingField, (e.target as HTMLInputElement).checked);
+    try {
+      await reinitProviders();
+    } catch (err) {
+      console.error('Failed to reinit providers after thinking toggle:', err);
+    }
+  }
+</script>
+
+<div class="form-group-divider"></div>
+<h4 class="subsection-title">{title}</h4>
+{#if hint}
+  <p class="subsection-hint">{@render hint()}</p>
+{/if}
+
+<div class="form-group">
+  <label for="{idPrefix}-host" class="form-label">Host</label>
+  <input
+    id="{idPrefix}-host"
+    type="text"
+    value={host ?? ''}
+    placeholder="localhost"
+    onchange={onHostChange}
+    class="text-input"
+  />
+  {#if !endpointOk}
+    <div class="endpoint-warning" role="alert">
+      ⚠ This is a public-internet address ({endpointKind}). PHI may leave your device.
+      Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
+    </div>
+  {/if}
+</div>
+
+<div class="form-group">
+  <label for="{idPrefix}-port" class="form-label">Port</label>
+  <input
+    id="{idPrefix}-port"
+    type="number"
+    value={port}
+    placeholder={String(defaultPort)}
+    min="1"
+    max="65535"
+    onchange={onPortChange}
+    class="text-input port-input"
+  />
+</div>
+
+<div class="form-group">
+  <button class="btn-test-connection" disabled={test.status === 'testing'} onclick={onTestConnection}>
+    {#if test.status === 'testing'}
+      Testing…
+    {:else}
+      Test Connection
+    {/if}
+  </button>
+  {#if test.status === 'success'}
+    <span class="test-result test-success">✓ {test.message}</span>
+  {:else if test.status === 'error'}
+    <span class="test-result test-error">✗ {test.message}</span>
+  {/if}
+</div>
+
+{#if thinkingField}
+  <div class="form-group">
+    <label class="form-row">
+      <input type="checkbox" checked={thinkingDisabled} onchange={onThinkingToggle} />
+      <span>
+        Disable thinking (reasoning models)
+        {#if thinkingHint}
+          <p class="form-hint">{@render thinkingHint()}</p>
+        {/if}
+      </span>
+    </label>
+  </div>
+{/if}
+
+<style>
+  .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .form-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .text-input {
+    padding: 8px 10px;
+    font-size: 13px;
+    background-color: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+
+  .port-input {
+    max-width: 120px;
+  }
+
+  .form-group-divider {
+    border-top: 1px solid var(--border);
+    margin: 20px 0 16px;
+  }
+
+  .subsection-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 4px;
+  }
+
+  .subsection-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 0 0 12px;
+    line-height: 1.5;
+  }
+
+  .subsection-hint :global(code) {
+    font-size: 11px;
+    background-color: var(--bg-tertiary, #374151);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+
+  .endpoint-warning {
+    color: #b45309;
+    background: #fef3c7;
+    border: 1px solid #fbbf24;
+    border-radius: 4px;
+    padding: 6px 10px;
+    margin-top: 4px;
+    font-size: 0.85rem;
+  }
+
+  .btn-test-connection {
+    align-self: flex-start;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background-color: var(--bg-tertiary, #374151);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition:
+      background-color 0.15s ease,
+      color 0.15s ease,
+      border-color 0.15s ease;
+  }
+
+  .btn-test-connection:hover:not(:disabled) {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--accent);
+  }
+
+  .btn-test-connection:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .test-result {
+    font-size: 13px;
+    margin-left: 10px;
+  }
+
+  .test-result.test-success {
+    color: #22c55e;
+  }
+
+  .test-result.test-error {
+    color: var(--danger, #ef4444);
+  }
+
+  .form-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    cursor: pointer;
+  }
+
+  .form-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin: 4px 0 0;
+    line-height: 1.5;
+  }
+
+  .form-hint :global(code) {
+    font-size: 10px;
+    background-color: var(--bg-tertiary, #374151);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+</style>
