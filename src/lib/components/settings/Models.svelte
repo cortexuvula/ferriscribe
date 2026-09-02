@@ -17,15 +17,22 @@
    * changes which hint we show when a provider is unreachable. */
   let isPaired = $state(false);
   const modelMemory = $state<Record<string, string>>({});
+  /** Request token: rapid provider switches resolve out of order — only
+   * the most recent fetch may render its list (same discipline as the
+   * recordings store's load/search). */
+  let modelFetchToken = 0;
 
   async function fetchModelsForProvider(provider: string) {
+    const token = ++modelFetchToken;
     modelsLoading = true;
     modelsError = '';
     try {
       const models = await listModels(provider);
+      if (token !== modelFetchToken) return []; // superseded mid-flight
       availableModels = models;
       return models;
     } catch (e) {
+      if (token !== modelFetchToken) return []; // superseded mid-flight
       console.error('Failed to fetch models:', e);
       availableModels = [];
       // Surface why: the backend error carries the provider name and the
@@ -33,7 +40,7 @@
       modelsError = formatError(e) || 'Could not fetch the model list.';
       return [];
     } finally {
-      modelsLoading = false;
+      if (token === modelFetchToken) modelsLoading = false;
     }
   }
 
@@ -63,6 +70,12 @@
       await settings.updateField('ai_model', remembered);
     } else if (models.length > 0) {
       await settings.updateField('ai_model', models[0].id);
+    } else {
+      // No models on the new provider: leaving the OLD provider's model id
+      // in place would send a foreign model name to every generation
+      // (404 on oMLX, wrong model on Ollama). Clear it; the offline hint
+      // tells the user why the dropdown is empty.
+      await settings.updateField('ai_model', '');
     }
   }
 

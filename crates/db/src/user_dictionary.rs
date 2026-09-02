@@ -107,15 +107,14 @@ impl UserDictionaryRepo {
     /// Returns the active word list (`Vec<String>`) after merging.
     pub fn merge_incoming(conn: &Connection, remote: &[UserDictEntry]) -> DbResult<Vec<String>> {
         // Load all local entries once and index by sync_id for O(1) lookup.
-        let local_all = Self::list_all(conn)?;
+        // The load runs INSIDE the transaction: two concurrent sync rounds
+        // reading the same snapshot outside it could apply the older entry
+        // on top of the newer one, and nothing re-delivers the loser.
+        let tx = conn.unchecked_transaction()?;
+        let local_all = Self::list_all(&tx)?;
         let local_map: std::collections::HashMap<&str, &UserDictEntry> =
             local_all.iter().map(|e| (e.id.as_str(), e)).collect();
 
-        // Wrap the upsert loop in a transaction so a mid-merge failure rolls
-        // back all prior writes — otherwise a partial merge leaves the local
-        // store inconsistent with the remote side. `unchecked_transaction`
-        // rolls back on drop.
-        let tx = conn.unchecked_transaction()?;
         for remote_entry in remote {
             match local_map.get(remote_entry.id.as_str()) {
                 None => {

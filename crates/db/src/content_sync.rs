@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{DbError, DbResult};
@@ -401,11 +401,18 @@ impl ContentSyncRepo {
         let limit_i64 = limit as i64;
         // Fetch limit+1 rows to detect "has_more" without a separate COUNT.
         let fetch = limit_i64 + 1;
+        // `julianday` on both sides: `updated_at` mixes RFC 3339 (T-format,
+        // +00:00) and legacy SQLite space-format stamps, and a plain string
+        // `>` misorders them (a same-day space-format row sorts BEFORE any
+        // T-format cursor of that day, so it can be permanently skipped once
+        // the cursor passes the date). Parsed comparison matches
+        // [`cmp_lww_timestamps`]; unparseable stamps compare NULL (row
+        // excluded) — the same "unparseable is oldest" semantics.
         let ids: Vec<String> = if let Some(since) = since {
             let mut stmt = conn.prepare(
                 "SELECT id FROM recordings
-                 WHERE updated_at > ?1
-                 ORDER BY updated_at ASC
+                 WHERE julianday(updated_at) > julianday(?1)
+                 ORDER BY julianday(updated_at) ASC, updated_at ASC
                  LIMIT ?2",
             )?;
             stmt.query_map(params![since, fetch], |row| row.get::<_, String>(0))?
@@ -413,7 +420,7 @@ impl ContentSyncRepo {
         } else {
             let mut stmt = conn.prepare(
                 "SELECT id FROM recordings
-                 ORDER BY updated_at ASC
+                 ORDER BY julianday(updated_at) ASC, updated_at ASC
                  LIMIT ?1",
             )?;
             stmt.query_map(params![fetch], |row| row.get::<_, String>(0))?
@@ -737,17 +744,37 @@ impl ContentSyncRepo {
                 // `deleted_at IS NULL` keeps this an FTS-safe no-op on
                 // locally-trashed rows (a local tombstone wins over peer
                 // field edits — see `apply_field`).
+                //
+                // max_ts is chosen with the PARSED comparator (string
+                // `.max()` misorders the two stored timestamp formats — a
+                // T-format stamp can "win" over a chronologically-later
+                // space-format one), and the bump guard compares parsed
+                // values for the same reason: a raw `?1 > updated_at`
+                // string compare could move the stamp BACKWARD.
                 let max_ts = remote
                     .fields
                     .values()
                     .map(|v| v.updated_at.as_str())
-                    .max()
-                    .unwrap_or(&remote.updated_at);
-                conn.execute(
-                    "UPDATE recordings SET updated_at = ?1
-                         WHERE id = ?2 AND deleted_at IS NULL AND ?1 > updated_at",
-                    params![max_ts, id_str],
-                )?;
+                    .max_by(|a, b| cmp_lww_timestamps(a, b))
+                    .unwrap_or(remote.updated_at.as_str());
+                let current: Option<String> = conn
+                    .query_row(
+                        "SELECT updated_at FROM recordings WHERE id = ?1 AND deleted_at IS NULL",
+                        params![id_str],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let bump = match current.as_deref() {
+                    Some(cur) => cmp_lww_timestamps(max_ts, cur) != std::cmp::Ordering::Less,
+                    None => false, // row vanished/trashed mid-merge — nothing to bump
+                };
+                if bump {
+                    conn.execute(
+                        "UPDATE recordings SET updated_at = ?1
+                         WHERE id = ?2 AND deleted_at IS NULL",
+                        params![max_ts, id_str],
+                    )?;
+                }
                 changed.push(id_str.clone());
             }
         }
@@ -1138,6 +1165,42 @@ mod tests {
         let after = ContentSyncRepo::get_cursor(&conn).expect("get");
         assert_eq!(after.cursor.as_deref(), Some("2026-07-10T00:00:00Z"));
         assert!(after.last_pull.is_some(), "last_pull should be stamped");
+    }
+
+    // Regression (2026-09-02 bug review): a legacy space-format
+    // `updated_at` sorts BEFORE a same-day T-format cursor as a raw string
+    // (' ' < 'T'), so a string `>` filter would permanently skip the row
+    // even when it is chronologically NEWER than the cursor. The parsed
+    // (julianday) comparison must include it.
+    #[test]
+    fn changed_since_compares_mixed_format_stamps_parsed() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+
+        conn.execute(
+            "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
+             VALUES ('00000000-0000-0000-0000-0000000000aa', 'legacy.wav', '',
+                     '2026-07-01 09:00:00', '2026-07-01 23:00:00')",
+            [],
+        )
+        .expect("insert legacy space-format row (23:00)");
+
+        // T-format cursor EARLIER the same day (10:00). String compare:
+        // '2026-07-01 23:00:00' < '2026-07-01T10:00:00+00:00' → wrongly
+        // skipped. Parsed compare: 23:00 > 10:00 → included.
+        let (ids, _) =
+            ContentSyncRepo::changed_since(&conn, Some("2026-07-01T10:00:00+00:00"), 100)
+                .expect("query");
+        assert!(
+            ids.contains(&"00000000-0000-0000-0000-0000000000aa".to_string()),
+            "chronologically-newer space-format row must not be skipped; got {ids:?}"
+        );
+
+        // And a later T-format cursor correctly excludes it.
+        let (ids, _) =
+            ContentSyncRepo::changed_since(&conn, Some("2026-07-02T00:00:00+00:00"), 100)
+                .expect("query");
+        assert!(!ids.contains(&"00000000-0000-0000-0000-0000000000aa".to_string()));
     }
 
     #[test]

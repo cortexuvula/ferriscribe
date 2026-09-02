@@ -213,31 +213,45 @@ export function usePairing(onPaired?: () => void | Promise<void>) {
 
     const op = parseInt(u.searchParams.get('op') ?? '', 10);
     const wp = parseInt(u.searchParams.get('wp') ?? '', 10);
-    if (!Number.isFinite(op) || !Number.isFinite(wp)) {
-      error = 'Pairing URL is missing required ports (op or wp).';
+    const portOrError = (v: number, label: string): string | null =>
+      !Number.isFinite(v) || v <= 0 || v > 65535 ? label : null;
+    const opErr = portOrError(op, 'op');
+    const wpErr = portOrError(wp, 'wp');
+    if (opErr || wpErr) {
+      error = `Pairing URL has an out-of-range port (${opErr ?? wpErr}).`;
       return;
     }
 
-    const lpRaw = u.searchParams.get('lp');
-    const lp = lpRaw ? parseInt(lpRaw, 10) : null;
+    // Optional ports: present-but-invalid is an error (a truncated or
+    // hand-mangled URL), absent stays null. NaN/0/negative/>65535 all
+    // reject — ports outside the u16 range can never be dialed.
+    const optionalPort = (raw: string | null): number | null | 'invalid' => {
+      if (raw === null) return null;
+      const v = parseInt(raw, 10);
+      return Number.isFinite(v) && v > 0 && v <= 65535 ? v : ('invalid' as const);
+    };
+    const lp = optionalPort(u.searchParams.get('lp'));
+    const mp = optionalPort(u.searchParams.get('mp'));
+    const vp = optionalPort(u.searchParams.get('vp'));
+    if (lp === 'invalid' || mp === 'invalid' || vp === 'invalid') {
+      error = 'Pairing URL has an out-of-range optional port (lp/mp/vp).';
+      return;
+    }
 
-    const mpRaw = u.searchParams.get('mp');
-    const mp = mpRaw ? parseInt(mpRaw, 10) : null;
-
-    const vpRaw = u.searchParams.get('vp');
-    const vp = vpRaw ? parseInt(vpRaw, 10) : null;
-
-    if (!lan && !ts) {
+    // `lan=` (empty value) is not an address — treat as absent so it can't
+    // reach the pair handshake as an empty-string host.
+    const lanEmpty = lan === '';
+    if ((!lan || lanEmpty) && !ts) {
       error = 'No reachable address in URL';
       return;
     }
-    pairManual(lan, ts, {
+    pairManual(lanEmpty ? null : lan, ts, {
       ollama: op,
       whisper: wp,
       pairing: pp,
-      lmstudio: lp !== null && Number.isFinite(lp) ? lp : null,
-      omlx: mp !== null && Number.isFinite(mp) ? mp : null,
-      vocab: vp !== null && Number.isFinite(vp) ? vp : null,
+      lmstudio: lp,
+      omlx: mp,
+      vocab: vp,
     }, code);
   }
 

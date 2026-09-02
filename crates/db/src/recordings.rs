@@ -17,6 +17,19 @@ use crate::{DbError, DbResult};
 /// a JSON `metadata` column (see crate-level docs for the dual-field design).
 pub struct RecordingsRepo;
 
+/// Column-scoped update payload for [`RecordingsRepo::persist_producer_update`].
+/// `None` fields are left untouched; the metadata patch is merged into the
+/// row's CURRENT metadata at persist time (see the method docs).
+#[derive(Default)]
+pub struct ProducerPersist {
+    pub transcript: Option<String>,
+    pub soap_note: Option<String>,
+    pub stt_provider: Option<String>,
+    /// Pre-serialized `ProcessingStatus` JSON.
+    pub processing_status: Option<String>,
+    pub metadata_patch: Vec<(String, serde_json::Value)>,
+}
+
 impl RecordingsRepo {
     /// Insert a new recording.  All JSON fields are serialised before storing.
     ///
@@ -224,6 +237,118 @@ impl RecordingsRepo {
             ],
         )?;
 
+        if rows == 0 {
+            return Err(DbError::NotFound(format!("recording {id}")));
+        }
+        Ok(())
+    }
+
+    /// Targeted persist for long-running producers (transcription, SOAP
+    /// generation). These paths hold a recording snapshot across
+    /// minutes-long operations; a whole-row [`RecordingsRepo::update`] on
+    /// the stale snapshot would silently revert any column another writer
+    /// changed in the window (the editor's field-level autosave, a
+    /// concurrent document generator). This writes ONLY the carried
+    /// columns, and merges the metadata PATCH into the CURRENT row's
+    /// metadata at persist time — never a wholesale metadata write.
+    ///
+    /// `updated_at` still bumps: this is a real content change, and the
+    /// sync wire builder's max(revision, row) stamp relies on it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] if the recording does not exist.
+    pub fn persist_producer_update(
+        conn: &Connection,
+        id: &Uuid,
+        update: &ProducerPersist,
+    ) -> DbResult<()> {
+        let tx = conn.unchecked_transaction()?;
+
+        // Persist-time metadata merge: read the row's CURRENT metadata
+        // (not the producer's stale snapshot) and apply the patch. When
+        // both the current value and the patch value are objects, merge
+        // one level (so a `generation_stats` patch adds its doc-type key
+        // without dropping sibling stats).
+        let mut sets: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut next_idx = 1usize;
+
+        if !update.metadata_patch.is_empty() {
+            let current: Option<String> = tx.query_row(
+                "SELECT metadata FROM recordings WHERE id = ?1 AND deleted_at IS NULL",
+                [&id.to_string()],
+                |row| row.get(0),
+            )?;
+            let mut metadata: serde_json::Value = current
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::Value::Null);
+            if !metadata.is_object() {
+                metadata = serde_json::json!({});
+            }
+            let obj = metadata.as_object_mut().expect("just made an object");
+            for (key, value) in &update.metadata_patch {
+                match (obj.get_mut(key), value) {
+                    (
+                        Some(serde_json::Value::Object(existing)),
+                        serde_json::Value::Object(incoming),
+                    ) => {
+                        for (k, v) in incoming {
+                            existing.insert(k.clone(), v.clone());
+                        }
+                    }
+                    _ => {
+                        obj.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            sets.push(format!("metadata = ?{next_idx}"));
+            params.push(Box::new(metadata.to_string()));
+            next_idx += 1;
+        }
+
+        if let Some(transcript) = &update.transcript {
+            sets.push(format!("transcript = ?{next_idx}"));
+            params.push(Box::new(transcript.clone()));
+            next_idx += 1;
+        }
+        if let Some(soap_note) = &update.soap_note {
+            sets.push(format!("soap_note = ?{next_idx}"));
+            params.push(Box::new(soap_note.clone()));
+            next_idx += 1;
+        }
+        if let Some(stt_provider) = &update.stt_provider {
+            sets.push(format!("stt_provider = ?{next_idx}"));
+            params.push(Box::new(stt_provider.clone()));
+            next_idx += 1;
+        }
+        if let Some(processing_status) = &update.processing_status {
+            sets.push(format!("processing_status = ?{next_idx}"));
+            params.push(Box::new(processing_status.clone()));
+            next_idx += 1;
+        }
+
+        if sets.is_empty() && update.metadata_patch.is_empty() {
+            return Ok(());
+        }
+
+        // Content change → row stamp moves (LWW rider dependency).
+        let now_rfc3339 = Utc::now().to_rfc3339();
+        sets.push(format!("updated_at = ?{next_idx}"));
+        params.push(Box::new(now_rfc3339));
+        next_idx += 1;
+
+        params.push(Box::new(id.to_string()));
+        let sql = format!(
+            "UPDATE recordings SET {} WHERE id = ?{next_idx} AND deleted_at IS NULL",
+            sets.join(", ")
+        );
+
+        let rows = tx.execute(
+            sql.as_str(),
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+        )?;
+        tx.commit()?;
         if rows == 0 {
             return Err(DbError::NotFound(format!("recording {id}")));
         }
@@ -879,6 +1004,109 @@ mod tests {
             None,
         );
         assert!(matches!(result, Err(DbError::NotFound(_))));
+    }
+
+    // Regression (2026-09-02 bug review): transcription/SOAP hold a
+    // minutes-stale snapshot; a whole-row update reverted concurrent
+    // column edits. The producer persist must touch ONLY its columns.
+    #[test]
+    fn persist_producer_update_does_not_revert_concurrent_column_edits() {
+        let conn = migrated_conn();
+        let mut rec = new_rec();
+        rec.transcript = Some("stale".into());
+        rec.referral = Some("old referral".into());
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        // While the "producer" was running, the editor saved a new referral.
+        let mut edited = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        edited.referral = Some("edited referral".into());
+        RecordingsRepo::update(&conn, &edited).unwrap();
+
+        // The producer finishes and persists only its own columns.
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                transcript: Some("fresh transcript".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(after.transcript.as_deref(), Some("fresh transcript"));
+        assert_eq!(
+            after.referral.as_deref(),
+            Some("edited referral"),
+            "concurrent column edit must survive the producer persist"
+        );
+    }
+
+    #[test]
+    fn persist_producer_update_merges_metadata_patch_into_current_row() {
+        let conn = migrated_conn();
+        let mut rec = new_rec();
+        rec.metadata = serde_json::json!({
+            "context": "visit notes",
+            "generation_stats": { "referral": { "model": "m1" } }
+        });
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                soap_note: Some("S: cough".into()),
+                metadata_patch: vec![
+                    ("icd_codes".into(), serde_json::json!([{"code": "786.2"}])),
+                    (
+                        "generation_stats".into(),
+                        serde_json::json!({ "soap": { "model": "m2" } }),
+                    ),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(after.soap_note.as_deref(), Some("S: cough"));
+        let meta = after.metadata;
+        assert_eq!(meta["context"], "visit notes", "unrelated keys preserved");
+        assert_eq!(meta["icd_codes"][0]["code"], "786.2");
+        assert_eq!(
+            meta["generation_stats"]["referral"]["model"], "m1",
+            "sibling stats preserved (one-level merge)"
+        );
+        assert_eq!(meta["generation_stats"]["soap"]["model"], "m2");
+    }
+
+    #[test]
+    fn persist_producer_update_bumps_updated_at() {
+        let conn = migrated_conn();
+        let rec = new_rec();
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+        let before = RecordingsRepo::get_by_id(&conn, &rec.id)
+            .unwrap()
+            .updated_at
+            .expect("stamp");
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                transcript: Some("t".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert!(
+            after.updated_at.unwrap() > before,
+            "content change bumps the row stamp"
+        );
     }
 
     #[test]

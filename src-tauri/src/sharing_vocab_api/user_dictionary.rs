@@ -135,6 +135,12 @@ pub(super) async fn dict_sync_handler<R: tauri::Runtime>(
 
     let incoming_count = incoming.len();
 
+    // Serialize concurrent merges (two clients syncing simultaneously) —
+    // same discipline as the content-push handler. The merge's snapshot
+    // read lives inside its transaction, but the whole read-modify-write
+    // must also not interleave ACROSS requests.
+    let merge_guard = state.merge_lock.lock().await;
+
     // Prune old tombstones opportunistically (365 days — matches
     // `/sync-full` and the condition-chips sync: a tombstone must outlive
     // every stale client's next sync, or a machine that syncs rarely would
@@ -163,6 +169,10 @@ pub(super) async fn dict_sync_handler<R: tauri::Runtime>(
         warn!("dict_api sync failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Release the merge lock before the SSE fan-out so a slow broadcast
+    // never blocks the next concurrent dictionary merge.
+    drop(merge_guard);
 
     // Notify SSE subscribers that the dictionary changed. Best-effort: no
     // receivers is not an error (send returns Err only when there are no
@@ -201,6 +211,10 @@ pub(super) async fn dict_sync_full_handler<R: tauri::Runtime>(
 
     let incoming_count = incoming.len();
 
+    // Serialize concurrent merges (same discipline as the content-push
+    // handler and the basic dictionary sync).
+    let merge_guard = state.merge_lock.lock().await;
+
     // Prune old tombstones opportunistically. Retention is 365 days: a
     // tombstone must outlive every stale client's next sync, or a machine
     // that syncs rarely (or was offline for weeks) would never learn of the
@@ -233,6 +247,9 @@ pub(super) async fn dict_sync_full_handler<R: tauri::Runtime>(
         warn!("dict_api sync-full failed: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Release the merge lock before the SSE fan-out.
+    drop(merge_guard);
 
     // Notify SSE subscribers that the dictionary changed. Best-effort: no
     // receivers is not an error (send returns Err only when there are no
