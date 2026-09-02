@@ -328,14 +328,24 @@ impl WhisperSupervisor {
     /// and `netstat`+`taskkill` on Windows. Logs the count of killed PIDs
     /// (PHI-safe — no process details).
     async fn reclaim_port(&self) {
-        let pids = pids_on_port(self.port).await;
+        // Only kill processes that ARE whisper-server (name-filtered): an
+        // unrelated local service on the port must never be force-killed —
+        // and if one holds the port, the subsequent spawn will fail loudly
+        // instead of silently murdering it.
+        let pids = whisper_pids_on_port(self.port, self.binary_name_for_platform()).await;
         if pids.is_empty() {
+            if !pids_on_port(self.port).await.is_empty() {
+                warn!(
+                    port = self.port,
+                    "port is held by a non-whisper process; refusing to kill it — configure a different whisper port"
+                );
+            }
             return;
         }
         info!(
             port = self.port,
             count = pids.len(),
-            "reclaiming port from stale processes"
+            "reclaiming port from stale whisper-server processes"
         );
         for pid in &pids {
             let _ = kill_pid(*pid).await;
@@ -582,8 +592,67 @@ fn extract_tar_gz(bytes: &[u8], out_dir: &Path, binary_name: &str) -> Result<()>
     )))
 }
 
-/// Return PIDs of processes listening on `port`. Uses `lsof` on Unix,
-/// `netstat` on Windows. Best-effort — returns empty on any error.
+/// Return PIDs of processes listening on `port` whose command line contains
+/// `name_filter` (a binary-name fragment like "whisper-server"). Uses
+/// `lsof` on Unix, `netstat`+`tasklist` on Windows. Best-effort — returns
+/// empty on any error.
+///
+/// The filter is load-bearing: an innocent local service can legitimately
+/// occupy the port (8080 is a common dev port), and `reclaim_port` KILLS
+/// whatever it is handed — an unfiltered list would force-kill unrelated
+/// processes.
+async fn whisper_pids_on_port(port: u16, name_filter: &str) -> Vec<u32> {
+    // lsof -t with the `-a` intersection: port+LISTEN+command-name match.
+    // (`-c` matches against the whole command name.)
+    let output = if cfg!(target_os = "windows") {
+        // netstat gives no process names; filter via tasklist per PID.
+        let all = pids_on_port(port).await;
+        return filter_pids_by_name_windows(&all, name_filter).await;
+    } else {
+        let port_arg = format!(":{port}");
+        tokio::process::Command::new("lsof")
+            .args(["-ti", &port_arg, "-sTCP:LISTEN", "-a", "-c", name_filter])
+            .output()
+            .await
+    };
+    let out = match output {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut pids: Vec<u32> = text
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// Windows: netstat knows no process names — ask `tasklist` per PID and
+/// keep only the ones whose image name contains the filter. Best-effort:
+/// PIDs that can't be queried are dropped (never killed blind).
+async fn filter_pids_by_name_windows(pids: &[u32], name_filter: &str) -> Vec<u32> {
+    let mut kept = Vec::new();
+    for pid in pids {
+        let Ok(out) = tokio::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .await
+        else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.to_lowercase().contains(&name_filter.to_lowercase()) {
+            kept.push(*pid);
+        }
+    }
+    kept
+}
+
+/// Unfiltered port listeners (any process). Used only by the health
+/// re-check logging path; the kill path goes through
+/// [`whisper_pids_on_port`].
 async fn pids_on_port(port: u16) -> Vec<u32> {
     let output = if cfg!(target_os = "windows") {
         tokio::process::Command::new("netstat")

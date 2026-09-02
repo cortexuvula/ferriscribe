@@ -333,8 +333,10 @@
   }
 
   function handleStopRecording() {
-    audio.stop().then(() => {
-      const recordingId = audio.state.lastRecordingId;
+    audio.stop().then((recordingId) => {
+      // The backend inserts the recording row during stop — a failed stop
+      // means no row exists, and the stale lastRecordingId must not drive
+      // the pipeline (it would target a nonexistent recording).
       if (!recordingId) return;
 
       pipelineRecordingId = recordingId;

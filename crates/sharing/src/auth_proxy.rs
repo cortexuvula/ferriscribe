@@ -213,6 +213,18 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
     let token = match extract_bearer(req.headers()) {
         Some(t) => t,
         None => {
+            // Headerless hammering must consume the failure budget too —
+            // otherwise it's an unthrottled bypass of the limiter that
+            // bounds unknown-token guessing.
+            let throttled = state
+                .fail_limiter
+                .lock()
+                .map(|mut l| !l.try_acquire())
+                .unwrap_or(false);
+            if throttled {
+                warn!("proxy: 429 rate-limited (failed-auth budget exhausted)");
+                return Err(too_many_attempts());
+            }
             warn!("proxy: 401 missing-bearer (no Authorization header)");
             return Err(unauthorized_with_reason("missing-bearer"));
         }
@@ -303,9 +315,21 @@ async fn handle_inner(state: AppState, req: Request) -> Result<Response, Respons
         req_builder
     };
 
-    // First attempt.
+    // First attempt. Retrying is limited to idempotent methods: a POST
+    // whose response was lost mid-flight may have already been applied by
+    // the backend (a transcription submitted twice, a vocab write
+    // duplicated) — a connect-error tells us the connection died, not
+    // that the request never landed.
+    let method_is_idempotent = matches!(
+        parts.method.as_str(),
+        "GET" | "HEAD" | "PUT" | "DELETE" | "OPTIONS"
+    );
     let upstream = match build_upstream(body_bytes.clone()).send().await {
         Ok(r) => r,
+        Err(e) if !method_is_idempotent => {
+            warn!(error = %e, "proxy upstream error on non-idempotent method; not retrying");
+            return Err((StatusCode::BAD_GATEWAY, "").into_response());
+        }
         Err(e) => {
             warn!(error = %e, "proxy upstream error on first attempt; will retry once");
             // The backend (whisper-server / ollama / lmstudio) is likely down.
@@ -408,7 +432,15 @@ fn gateway_down_response() -> Response {
 
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     let v = headers.get(reqwest::header::AUTHORIZATION)?.to_str().ok()?;
-    v.strip_prefix("Bearer ").map(|s| s.to_string())
+    // RFC 7235: the auth-scheme is case-insensitive — accept `bearer`,
+    // `BEARER`, etc. Split on the first space so the token itself is
+    // never trimmed of meaningful characters.
+    let (scheme, rest) = v.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        Some(rest.to_string())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
