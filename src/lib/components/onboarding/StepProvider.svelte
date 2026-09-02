@@ -2,7 +2,7 @@
   import { settings } from '../../stores/settings.svelte';
   import { testLmStudioConnection, testOllamaConnection, testOmlxConnection } from '../../api/settings';
   import { reinitProviders } from '../../api/chat';
-  import { formatError } from '../../types/errors';
+  import { useTestConnection } from '../../composables/useTestConnection.svelte';
 
   interface Props { onNext: () => void; onSkip: () => void; }
   const { onNext, onSkip }: Props = $props();
@@ -15,13 +15,10 @@
   let ollamaPort = $state(settings.state.ollama_port);
   let omlxHost = $state(settings.state.omlx_host);
   let omlxPort = $state(settings.state.omlx_port);
-  let testStatus = $state<'idle' | 'testing' | 'success' | 'error'>('idle');
-  let testError = $state<string | null>(null);
+  const test = useTestConnection();
 
-  async function testConnection() {
-    testStatus = 'testing';
-    testError = null;
-    try {
+  function runTest() {
+    test.run(async () => {
       if (provider === 'lmstudio') {
         await testLmStudioConnection(lmHost, lmPort, undefined);
       } else if (provider === 'omlx') {
@@ -29,11 +26,8 @@
       } else {
         await testOllamaConnection(ollamaHost, ollamaPort, undefined);
       }
-      testStatus = 'success';
-    } catch (e) {
-      testStatus = 'error';
-      testError = formatError(e);
-    }
+      return 'Connected';
+    });
   }
 
   async function saveAndNext() {
@@ -97,17 +91,17 @@
 {/if}
 
 <div class="test-row">
-  <button class="btn-secondary" onclick={testConnection} disabled={testStatus === 'testing'}>
-    {testStatus === 'testing' ? 'Testing…' : 'Test connection'}
+  <button class="btn-secondary" onclick={runTest} disabled={test.status === 'testing'}>
+    {test.status === 'testing' ? 'Testing…' : 'Test connection'}
   </button>
-  {#if testStatus === 'success'}
+  {#if test.status === 'success'}
     <span class="test-ok">✓ Connected</span>
-  {:else if testStatus === 'error'}
-    <span class="test-fail" title={testError ?? ''}>✗ Not reachable</span>
+  {:else if test.status === 'error'}
+    <span class="test-fail" title={test.message}>✗ Not reachable</span>
   {/if}
 </div>
-{#if testStatus === 'error' && testError}
-  <p class="error-detail">{testError}</p>
+{#if test.status === 'error' && test.message}
+  <p class="error-detail">{test.message}</p>
 {/if}
 
 <div class="actions">

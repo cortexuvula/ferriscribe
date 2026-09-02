@@ -44,12 +44,32 @@ export default defineConfig({
       // Floors, not targets — calibrated to just under the measured
       // baseline (2026-08-25) so coverage drift fails CI instead of
       // silently eroding. Ratchet up as the known gaps close.
-      thresholds: {
-        lines: 25,
-        statements: 25,
-        functions: 30,
-        branches: 20,
-      },
+      thresholds: [
+        // Workspace-wide floor (well-tested stores/utils mask these).
+        {
+          lines: 25,
+          statements: 25,
+          functions: 30,
+          branches: 20,
+        },
+        // Per-area floors (2026-09-02, measured baseline): without them the
+        // big component/page trees (Models, BackupWizard, EditorTab…) hide
+        // under the global average. Ratchet up as component tests land.
+        {
+          glob: 'src/lib/components/**',
+          lines: 21,
+          statements: 24,
+          functions: 24,
+          branches: 12,
+        },
+        {
+          glob: 'src/lib/pages/**',
+          lines: 9,
+          statements: 12,
+          functions: 16,
+          branches: 5,
+        },
+      ],
     },
   },
 });
