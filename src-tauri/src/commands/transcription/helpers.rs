@@ -317,8 +317,113 @@ pub(crate) fn open_recording_wav(
         }
     };
 
-    hound::WavReader::new(std::io::Cursor::new(wav_bytes))
-        .map_err(|e| AppError::processing(format!("Failed to open WAV: {e}")))
+    match hound::WavReader::new(std::io::Cursor::new(wav_bytes.clone())) {
+        Ok(reader) => Ok(reader),
+        Err(first_err) => {
+            // hound is strict: a data-chunk length that isn't a whole
+            // number of frames, or that extends past the actual bytes,
+            // hard-fails the whole pipeline. Real files hit both cases —
+            // crash/force-quit mid-recording truncates the WAV after the
+            // header was flushed, and plenty of imported/streamed WAVs
+            // carry slightly-off lengths that every mainstream decoder
+            // (whisper.cpp included) tolerates. Salvage what's actually
+            // there: clamp the data chunk to whole frames present in the
+            // file, patch the header, and retry once.
+            match salvage_partial_wav(&wav_bytes) {
+                Some(fixed) => {
+                    tracing::warn!(
+                        original_len = wav_bytes.len(),
+                        salvaged_len = fixed.len(),
+                        "WAV failed strict parse; salvaged whole frames from partial data chunk"
+                    );
+                    hound::WavReader::new(std::io::Cursor::new(fixed))
+                        .map_err(|e| AppError::processing(format!("Failed to open WAV: {e}")))
+                }
+                None => Err(AppError::processing(format!(
+                    "Failed to open WAV: {first_err}"
+                ))),
+            }
+        }
+    }
+}
+
+/// Best-effort repair of a RIFF/WAVE byte blob whose `data` chunk length is
+/// unusable as-is (not frame-aligned, or extending beyond the bytes we
+/// actually have). Returns a patched copy with the data chunk clamped to
+/// whole frames and the RIFF/data size fields rewritten, or `None` when the
+/// input doesn't look like a patchable RIFF/WAVE (bad magic, no fmt/data
+/// chunks, or a fmt chunk we can't read the frame size from).
+///
+/// PHI-safe: operates on and returns raw bytes; callers log lengths only.
+fn salvage_partial_wav(bytes: &[u8]) -> Option<Vec<u8>> {
+    const RIFF: &[u8; 4] = b"RIFF";
+    const WAVE: &[u8; 4] = b"WAVE";
+    const FMT: &[u8; 4] = b"fmt ";
+    const DATA: &[u8; 4] = b"data";
+
+    if bytes.len() < 12 || &bytes[0..4] != RIFF || &bytes[8..12] != WAVE {
+        return None;
+    }
+
+    // Walk the chunk list: find `fmt ` (frame size) and `data` (start +
+    // declared length).
+    let mut pos = 12usize;
+    let mut frame_bytes: Option<usize> = None;
+    let mut data_start: Option<usize> = None;
+    let mut data_declared: Option<usize> = None;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let len = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
+        let body = pos + 8;
+        if id == FMT && frame_bytes.is_none() && len >= 16 && body + 16 <= bytes.len() {
+            // fmt payload: channels at +2 (u16), bits per sample at +14 (u16).
+            let channels = u16::from_le_bytes([bytes[body + 2], bytes[body + 3]]) as usize;
+            let bits = u16::from_le_bytes([bytes[body + 14], bytes[body + 15]]) as usize;
+            if channels > 0 && bits > 0 && bits.is_multiple_of(8) {
+                frame_bytes = Some(channels * (bits / 8));
+            }
+        } else if id == DATA && data_start.is_none() {
+            data_start = Some(body);
+            data_declared = Some(len);
+            // Keep walking only to find fmt if it trails data (unusual but
+            // legal); stop if we run past the file.
+        }
+        // Chunks are word-aligned: odd lengths carry a pad byte.
+        let advance = len
+            .checked_add(8)
+            .and_then(|a| a.checked_add(len & 1))
+            .filter(|a| *a > 0)?;
+        pos = pos.checked_add(advance)?;
+        if frame_bytes.is_some() && data_start.is_some() {
+            break;
+        }
+    }
+
+    let (Some(frame), Some(start), Some(declared)) = (frame_bytes, data_start, data_declared)
+    else {
+        return None;
+    };
+    let available = bytes.len().saturating_sub(start);
+    // Clamp to what's present AND to a whole-frame boundary. Trailing
+    // partial-frame bytes carry no usable audio.
+    let clamped = declared.min(available) / frame * frame;
+    if clamped == declared && declared <= available {
+        return None; // data chunk was already fine — nothing to salvage
+    }
+
+    let mut out = bytes[..start + clamped].to_vec();
+    // Rewrite the data chunk length...
+    let len_bytes = (clamped as u32).to_le_bytes();
+    out[start - 4..start].copy_from_slice(&len_bytes);
+    // ...and the RIFF size (everything after the 8-byte RIFF header).
+    let riff_size = (out.len().saturating_sub(8)) as u32;
+    out[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    Some(out)
 }
 
 /// Load a WAV file from disk and convert it into `AudioData` (f32 PCM).
@@ -451,6 +556,106 @@ mod tests {
             crate::commands::unwrap_app_error_message(err),
             "Failed to open WAV: foo"
         );
+    }
+
+    /// A small valid mono 16-bit WAV built with hound, for salvage tests.
+    fn sample_wav_bytes() -> Vec<u8> {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(&mut cursor, spec).expect("writer");
+            // Whole frames of stereo pairs.
+            for i in 0..100 {
+                writer.write_sample(i as i16).expect("l");
+                writer.write_sample(i as i16).expect("r");
+            }
+            writer.finalize().expect("finalize");
+        }
+        cursor.into_inner()
+    }
+
+    // Crash mid-recording: the header's data-chunk length extends past the
+    // bytes that actually landed. Strict hound rejects; salvage must clamp
+    // to the whole frames present and the reader must accept the result.
+    #[test]
+    fn salvage_recovers_truncated_wav() {
+        let full = sample_wav_bytes();
+        // Chop 3 bytes off the end: 1 full frame (4 bytes) + partial lost.
+        let truncated = full[..full.len() - 3].to_vec();
+
+        let salvaged = salvage_partial_wav(&truncated).expect("must be salvageable");
+        // Data chunk clamped down to whole frames: 99 full stereo frames.
+        let reader =
+            hound::WavReader::new(std::io::Cursor::new(salvaged)).expect("salvaged parses");
+        assert_eq!(reader.duration(), 99, "one frame lost to truncation");
+    }
+
+    // Streamed/imported WAV: data-chunk length off by a couple bytes (not
+    // frame-aligned) with extra bytes present. Salvage rounds down.
+    #[test]
+    fn salvage_rounds_non_frame_aligned_length_down() {
+        let mut wav = sample_wav_bytes();
+        // Append 2 stray bytes and patch the data length to include them
+        // (declared odd-sized: exactly the "invalid data chunk length"
+        // shape hound rejects).
+        let data_start = find_data_chunk_start(&wav).expect("data chunk");
+        let declared = u32::from_le_bytes([
+            wav[data_start - 4],
+            wav[data_start - 3],
+            wav[data_start - 2],
+            wav[data_start - 1],
+        ]) as usize;
+        let available = wav.len() - data_start;
+        wav.extend_from_slice(&[0xAA, 0xBB]);
+        let bad_len = (available + 2) as u32; // covers the strays, non-aligned
+        wav[data_start - 4..data_start].copy_from_slice(&bad_len.to_le_bytes());
+
+        let salvaged = salvage_partial_wav(&wav).expect("must be salvageable");
+        let reader =
+            hound::WavReader::new(std::io::Cursor::new(salvaged)).expect("salvaged parses");
+        assert_eq!(
+            reader.duration() as usize,
+            declared / 4,
+            "stray bytes dropped, all whole frames kept"
+        );
+    }
+
+    #[test]
+    fn salvage_leaves_valid_wav_alone() {
+        let wav = sample_wav_bytes();
+        assert!(
+            salvage_partial_wav(&wav).is_none(),
+            "a well-formed WAV must pass through untouched"
+        );
+    }
+
+    #[test]
+    fn salvage_rejects_non_riff_garbage() {
+        assert!(salvage_partial_wav(b"not a wav at all").is_none());
+        assert!(salvage_partial_wav(&[]).is_none());
+    }
+
+    /// Locate the start of the `data` chunk body in a RIFF blob (test aid).
+    fn find_data_chunk_start(bytes: &[u8]) -> Option<usize> {
+        let mut pos = 12;
+        while pos + 8 <= bytes.len() {
+            if &bytes[pos..pos + 4] == b"data" {
+                return Some(pos + 8);
+            }
+            let len = u32::from_le_bytes([
+                bytes[pos + 4],
+                bytes[pos + 5],
+                bytes[pos + 6],
+                bytes[pos + 7],
+            ]) as usize;
+            pos += 8 + len + (len & 1);
+        }
+        None
     }
 
     #[test]
