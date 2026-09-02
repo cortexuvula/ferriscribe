@@ -196,6 +196,11 @@ pub struct SharingService {
     /// Watch channel: a new `ReadinessState` is sent whenever the ready set
     /// changes. The Tauri layer forwards changes to a frontend event.
     readiness_tx: tokio::sync::watch::Sender<ReadinessState>,
+    /// Honest pairing-server liveness: set when the pairing HTTP task is
+    /// spawned, cleared when its serve loop exits (crash or abort). Drives
+    /// `SharingStatus::pairing_ok` — previously a plain mirror of `running`
+    /// that reported a dead pairing server as healthy.
+    pairing_alive: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One upstream's start-gate outcome: the pre-bound proxy listener, whether
@@ -312,6 +317,7 @@ impl SharingService {
             readiness: tokio::sync::RwLock::new(readiness),
             info: Arc::new(tokio::sync::RwLock::new(info)),
             readiness_tx,
+            pairing_alive: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -556,11 +562,15 @@ impl SharingService {
 
         // 8. Pairing service (always up). Shares the live /info snapshot so
         //    Tailscale discovery sees newly-ready upstreams.
+        self.pairing_alive
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let pairing_alive = Arc::clone(&self.pairing_alive);
         let h3 = match spawn_pairing_service(
             self.config.pairing_port,
             self.pairing.clone(),
             self.store.clone(),
             self.info.clone(),
+            pairing_alive,
         )
         .await
         {
@@ -907,8 +917,14 @@ impl SharingService {
             whisper_ok: running && whisper.last_probe_ok,
             lmstudio_ok: running && lmstudio.configured && lmstudio.last_probe_ok,
             omlx_ok: running && omlx.configured && omlx.last_probe_ok,
-            mdns_ok: running,
-            pairing_ok: running,
+            // Honest bits: an advertiser actually in the slot, a pairing
+            // server whose serve loop is still running — not plain mirrors
+            // of `running` that reported dead subsystems as healthy.
+            mdns_ok: running && self.mdns.lock().await.is_some(),
+            pairing_ok: running
+                && self
+                    .pairing_alive
+                    .load(std::sync::atomic::Ordering::Relaxed),
             paired_clients: n,
         }
     }
@@ -1043,6 +1059,7 @@ async fn spawn_pairing_service(
     pairing: Arc<PairingState>,
     store: Arc<TokenStore>,
     info: Arc<tokio::sync::RwLock<InfoSnapshot>>,
+    alive: Arc<std::sync::atomic::AtomicBool>,
 ) -> crate::Result<tokio::task::JoinHandle<()>> {
     use std::net::SocketAddr;
 
@@ -1052,11 +1069,16 @@ async fn spawn_pairing_service(
         .map_err(|e| crate::SharingError::Pairing(format!("bind 0.0.0.0:{port}: {e}")))?;
 
     Ok(tokio::spawn(async move {
-        let _ = axum::serve(
+        alive.store(true, std::sync::atomic::Ordering::Relaxed);
+        let serve = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await;
+        // Serve loop ended (crash or task abort) — surface that honestly.
+        let _ = serve;
+        alive.store(false, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!("pairing HTTP server exited; pairing_ok will report false");
     }))
 }
 

@@ -94,6 +94,12 @@ pub(super) struct ApiState<R: tauri::Runtime> {
     /// `spawn_blocking` merge call in the push handler. Wrapped in an `Arc`
     /// so the `Clone` derive can clone the same underlying lock.
     pub(super) merge_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Bounds failed-token attempts on this API (same RateLimiter the auth
+    /// proxy uses): unknown/missing bearer tokens consume from the bucket;
+    /// once drained, further guesses get 429 until it refills. Valid tokens
+    /// are never throttled. The transport itself stays plain HTTP (tracked
+    /// item) — this at least closes the unthrottled guessing surface.
+    pub(super) fail_limiter: Arc<std::sync::Mutex<medical_security::rate_limiter::RateLimiter>>,
 }
 
 // Manual Clone: the derive would add a spurious `R: Clone` bound (Runtime
@@ -109,6 +115,7 @@ impl<R: tauri::Runtime> Clone for ApiState<R> {
             data_dir: self.data_dir.clone(),
             app_handle: self.app_handle.clone(),
             merge_lock: Arc::clone(&self.merge_lock),
+            fail_limiter: Arc::clone(&self.fail_limiter),
         }
     }
 }
@@ -137,6 +144,9 @@ pub async fn spawn(
         data_dir,
         app_handle,
         merge_lock: Arc::new(tokio::sync::Mutex::new(())),
+        fail_limiter: Arc::new(std::sync::Mutex::new(
+            medical_security::rate_limiter::RateLimiter::new(5),
+        )),
     };
     let app = build_router(state);
 
@@ -260,12 +270,37 @@ pub(super) fn authorize<R: tauri::Runtime>(
     state: &ApiState<R>,
     headers: &HeaderMap,
 ) -> Result<i64, StatusCode> {
-    let token = extract_bearer(headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    let row = state
-        .tokens
-        .validate(&token)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = match extract_bearer(headers) {
+        Some(t) => t,
+        None => {
+            // Headerless hammering consumes the failure budget too (same
+            // discipline as the auth proxy).
+            consume_fail_budget(state)?;
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
+    let row = match state.tokens.validate(&token) {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            consume_fail_budget(state)?;
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
     let _ = state.tokens.touch(row.id);
     Ok(row.id)
+}
+
+/// Consume one slot from the failed-auth budget; 429 when drained.
+fn consume_fail_budget<R: tauri::Runtime>(state: &ApiState<R>) -> Result<(), StatusCode> {
+    let throttled = state
+        .fail_limiter
+        .lock()
+        .map(|mut l| !l.try_acquire())
+        .unwrap_or(false);
+    if throttled {
+        warn!("vocab_api: 429 rate-limited (failed-auth budget exhausted)");
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    Ok(())
 }

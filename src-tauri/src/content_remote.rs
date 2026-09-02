@@ -259,7 +259,19 @@ impl<'a> ContentRemote<'a> {
             .send()
             .await
             .map_err(|e| AppError::Other(format!("content audio fetch: {e}")))?;
-        check_status(&resp).await?;
+        let status = resp.status();
+        if !status.is_success() {
+            // 404 here means "no audio on the server yet" (row exists, file
+            // doesn't) — NOT "server predates content sync". The generic
+            // map_status_error wording would send the user chasing a
+            // phantom upgrade.
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Err(AppError::Other(
+                    "content audio fetch: no audio on the office server for this recording".into(),
+                ));
+            }
+            return Err(map_status_error(status, "content audio fetch"));
+        }
         let bytes = resp
             .bytes()
             .await

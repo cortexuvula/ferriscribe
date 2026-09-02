@@ -25,6 +25,57 @@ use tauri::Emitter as _;
 
 use super::{ApiState, authorize};
 
+/// Typed error for the audio GET path — each variant maps to a specific
+/// HTTP status instead of substring-matching an error message (the old
+/// approach misrouted invalid ids and unknown recordings to 500, and any
+/// wording change silently broke the routing).
+enum AudioGetError {
+    /// Malformed recording id — client error.
+    InvalidId,
+    /// No such recording row (or it's soft-deleted) — client error.
+    RecordingNotFound,
+    /// Row exists but has no audio file yet — the normal "client hasn't
+    /// pushed audio" case, maps to 404.
+    FileNotFound,
+    /// Path escaped the recordings dir — tampered DB value, client error.
+    PathNotAllowed,
+    /// Decrypt/read/canonicalize/internal failures — server error. The
+    /// inner error exists for construction ergonomics; it's logged at the
+    /// map site (status + context) rather than carried to the client.
+    Internal(#[allow(dead_code)] medical_core::error::AppError),
+}
+
+impl AudioGetError {
+    fn status(&self) -> StatusCode {
+        match self {
+            AudioGetError::InvalidId => StatusCode::BAD_REQUEST,
+            AudioGetError::RecordingNotFound | AudioGetError::FileNotFound => StatusCode::NOT_FOUND,
+            AudioGetError::PathNotAllowed => StatusCode::FORBIDDEN,
+            AudioGetError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<medical_db::DbError> for AudioGetError {
+    fn from(e: medical_db::DbError) -> Self {
+        match e {
+            medical_db::DbError::NotFound(_) => AudioGetError::RecordingNotFound,
+            other => AudioGetError::Internal(medical_core::error::AppError::from(other)),
+        }
+    }
+}
+
+impl From<medical_core::error::AppError> for AudioGetError {
+    fn from(e: medical_core::error::AppError) -> Self {
+        // A missing row surfaces as AppError::Database (DbError::NotFound
+        // maps there) — everything else is an internal failure.
+        match e {
+            medical_core::error::AppError::Database { .. } => AudioGetError::RecordingNotFound,
+            other => AudioGetError::Internal(other),
+        }
+    }
+}
+
 /// GET /v1/content/audio/{recording_id} — download decrypted audio bytes.
 ///
 /// Loads the recording row, resolves its `audio_path`, and decrypts the
@@ -41,67 +92,50 @@ pub(super) async fn content_audio_get_handler<R: tauri::Runtime>(
     let db = Arc::clone(&state.db);
     let data_dir = state.data_dir.clone();
 
-    let bytes =
-        tokio::task::spawn_blocking(move || -> Result<Vec<u8>, medical_core::error::AppError> {
-            let conn = db.conn()?;
-            let uuid = Uuid::parse_str(&recording_id)
-                .map_err(|_| medical_core::error::AppError::Other("invalid recording id".into()))?;
-            let rec = RecordingsRepo::get_by_id(&conn, &uuid)
-                .map_err(medical_core::error::AppError::from)?;
-            let path = &rec.audio_path;
-            if path.as_os_str().is_empty() || !path.exists() {
-                return Err(medical_core::error::AppError::Other(
-                    "audio file not found".into(),
-                ));
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, AudioGetError> {
+        let conn = db.conn().map_err(|e| AudioGetError::Internal(e.into()))?;
+        let uuid = Uuid::parse_str(&recording_id).map_err(|_| AudioGetError::InvalidId)?;
+        let rec = RecordingsRepo::get_by_id(&conn, &uuid).map_err(AudioGetError::from)?;
+        let path = &rec.audio_path;
+        if path.as_os_str().is_empty() || !path.exists() {
+            return Err(AudioGetError::FileNotFound);
+        }
+        // Containment check: verify the audio path is within the
+        // recordings directory. This prevents a malicious DB value
+        // from causing the server to decrypt/read arbitrary files.
+        let recordings_dir = crate::commands::resolve_recordings_dir(&db, &data_dir)
+            .map_err(AudioGetError::Internal)?;
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|e| AudioGetError::Internal(medical_core::error::AppError::Io(e)))?;
+        let canonical_dir = recordings_dir
+            .canonicalize()
+            .map_err(|e| AudioGetError::Internal(medical_core::error::AppError::Io(e)))?;
+        if !canonical_path.starts_with(&canonical_dir) {
+            tracing::warn!(
+                id_len,
+                "content_audio: path outside recordings dir — rejected"
+            );
+            return Err(AudioGetError::PathNotAllowed);
+        }
+        match file_crypto::decrypt_file(path) {
+            Ok(plaintext) => Ok(plaintext),
+            Err(file_crypto::FileCryptoError::NotEncrypted) => {
+                // Legacy plaintext file — read as-is.
+                std::fs::read(path)
+                    .map_err(|e| AudioGetError::Internal(medical_core::error::AppError::Io(e)))
             }
-            // Containment check: verify the audio path is within the
-            // recordings directory. This prevents a malicious DB value
-            // from causing the server to decrypt/read arbitrary files.
-            let recordings_dir = crate::commands::resolve_recordings_dir(&db, &data_dir)?;
-            let canonical_path = path.canonicalize().map_err(|e| {
-                medical_core::error::AppError::Other(format!("path canonicalize failed: {e}"))
-            })?;
-            let canonical_dir = recordings_dir.canonicalize().map_err(|e| {
-                medical_core::error::AppError::Other(format!(
-                    "recordings dir canonicalize failed: {e}"
-                ))
-            })?;
-            if !canonical_path.starts_with(&canonical_dir) {
-                tracing::warn!(
-                    id_len,
-                    "content_audio: path outside recordings dir — rejected"
-                );
-                return Err(medical_core::error::AppError::Other(
-                    "audio path not allowed".into(),
-                ));
-            }
-            match file_crypto::decrypt_file(path) {
-                Ok(plaintext) => Ok(plaintext),
-                Err(file_crypto::FileCryptoError::NotEncrypted) => {
-                    // Legacy plaintext file — read as-is.
-                    std::fs::read(path).map_err(|e| {
-                        medical_core::error::AppError::Other(format!("audio read failed: {e}"))
-                    })
-                }
-                Err(e) => Err(medical_core::error::AppError::security(format!(
-                    "audio decrypt failed: {e}"
-                ))),
-            }
-        })
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map_err(|e| {
-            warn!(id_len, error = %e, "content_audio: get failed");
-            if matches!(
-                e,
-                medical_core::error::AppError::Other(ref s)
-                    if s.contains("not found")
-            ) {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-        })?;
+            Err(e) => Err(AudioGetError::Internal(
+                medical_core::error::AppError::security(format!("audio decrypt failed: {e}")),
+            )),
+        }
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|e| {
+        warn!(id_len, status = ?e.status(), "content_audio: get failed");
+        e.status()
+    })?;
 
     let byte_count = bytes.len();
     info!(id_len, byte_count, "content_audio: get");
