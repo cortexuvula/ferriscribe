@@ -125,18 +125,37 @@ pub(super) async fn content_audio_put_handler<R: tauri::Runtime>(
     let id_len = recording_id.len();
     let byte_count = body.len();
 
-    // Validate recording exists before writing anything to disk.
+    // Reject empty uploads outright: a 0-byte audio file would permanently
+    // occupy the first-write-wins slot with undecryptable nothing.
+    if byte_count == 0 {
+        warn!(id_len, "content_audio: put rejected, empty body (400)");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validate recording exists before writing anything to disk. Tombstoned
+    // rows are rejected too — `get_by_id` doesn't filter `deleted_at`, but a
+    // later guarded update on such a row 500s AFTER the ciphertext has been
+    // renamed into place, orphaning PHI bytes and wedging every retry on the
+    // exists-409 below.
     let db = Arc::clone(&state.db);
     let uuid = Uuid::parse_str(&recording_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let exists = tokio::task::spawn_blocking({
         let db = Arc::clone(&db);
         move || -> Result<bool, StatusCode> {
             let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            match RecordingsRepo::get_by_id(&conn, &uuid) {
-                Ok(_) => Ok(true),
-                Err(medical_db::DbError::NotFound(_)) => Ok(false),
-                Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-            }
+            // Direct visibility query: `get_by_id` doesn't project
+            // `deleted_at`, and a whole-row fetch of a tombstoned row
+            // would pass here only for the guarded update below to 500
+            // AFTER the ciphertext landed — orphaning PHI bytes and
+            // wedging every retry on the exists-409.
+            let visible: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM recordings WHERE id = ?1 AND deleted_at IS NULL",
+                    [&uuid.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(visible > 0)
         }
     })
     .await
@@ -156,10 +175,32 @@ pub(super) async fn content_audio_put_handler<R: tauri::Runtime>(
         recordings_dir.join(format!("{recording_id}.enc"))
     };
 
-    // First-write-wins: if the target already exists, refuse.
-    if target_path.exists() {
-        info!(id_len, "content_audio: put rejected, file exists (409)");
-        return Err(StatusCode::CONFLICT);
+    // First-write-wins: claim the target with an EXCLUSIVE create before
+    // any heavy work. The bare exists()-check raced two concurrent PUTs
+    // into both passing and the second rename silently discarding the
+    // first audio; a create_new placeholder closes the window while
+    // keeping the atomic tmp+rename finalize. A zero-length target is a
+    // crashed predecessor's placeholder — reclaim it (the finalize below
+    // replaces it atomically).
+    if let Ok(meta) = std::fs::metadata(&target_path)
+        && meta.len() == 0
+    {
+        let _ = std::fs::remove_file(&target_path);
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target_path)
+    {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            info!(id_len, "content_audio: put rejected, file exists (409)");
+            return Err(StatusCode::CONFLICT);
+        }
+        Err(e) => {
+            warn!(id_len, error = %e, "content_audio: cannot claim target path");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
     }
 
     // Encrypt in memory first, then write ciphertext directly to a unique temp
@@ -169,33 +210,48 @@ pub(super) async fn content_audio_put_handler<R: tauri::Runtime>(
     let path_for_db = target_path.clone();
     let body_vec = body.to_vec();
     tokio::task::spawn_blocking(move || -> Result<(), medical_core::error::AppError> {
-        // Encrypt the plaintext bytes in memory (no disk I/O).
-        let ciphertext = file_crypto::encrypt_bytes_in_memory(&body_vec).map_err(|e| {
-            medical_core::error::AppError::security(format!("audio encrypt failed: {e}"))
-        })?;
+        let result = (|| -> Result<(), medical_core::error::AppError> {
+            // Encrypt the plaintext bytes in memory (no disk I/O).
+            let ciphertext = file_crypto::encrypt_bytes_in_memory(&body_vec).map_err(|e| {
+                medical_core::error::AppError::security(format!("audio encrypt failed: {e}"))
+            })?;
 
-        // Write ciphertext to a unique temp file, then atomic rename.
-        let tmp_path = target_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&tmp_path, &ciphertext)?;
-        if let Err(e) = std::fs::rename(&tmp_path, &target_path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(medical_core::error::AppError::Io(e));
+            // Write ciphertext to a unique temp file, then atomic rename
+            // over the placeholder. A mid-write failure removes the tmp.
+            let tmp_path =
+                target_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+            if let Err(e) = std::fs::write(&tmp_path, &ciphertext) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(medical_core::error::AppError::Io(e));
+            }
+            if let Err(e) = std::fs::rename(&tmp_path, &target_path) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(medical_core::error::AppError::Io(e));
+            }
+
+            // Update audio_path on the recording row. Targeted update only —
+            // a whole-row update would bump `updated_at`, inflating the
+            // per-field LWW wire stamps (max(revision, row)) with the audio
+            // arrival time and silently overwriting concurrent field edits on
+            // other machines with older stored values.
+            let conn = db2.conn()?;
+            RecordingsRepo::update_audio_location(
+                &conn,
+                &uuid,
+                &path_for_db,
+                Some(body_vec.len() as u64),
+            )
+            .map_err(medical_core::error::AppError::from)?;
+            Ok(())
+        })();
+
+        // On ANY failure after the placeholder claim, remove it so retries
+        // aren't permanently wedged on the 409 above and no orphaned
+        // ciphertext is left on disk.
+        if result.is_err() {
+            let _ = std::fs::remove_file(&target_path);
         }
-
-        // Update audio_path on the recording row. Targeted update only —
-        // a whole-row update would bump `updated_at`, inflating the
-        // per-field LWW wire stamps (max(revision, row)) with the audio
-        // arrival time and silently overwriting concurrent field edits on
-        // other machines with older stored values.
-        let conn = db2.conn()?;
-        RecordingsRepo::update_audio_location(
-            &conn,
-            &uuid,
-            &path_for_db,
-            Some(body_vec.len() as u64),
-        )
-        .map_err(medical_core::error::AppError::from)?;
-        Ok(())
+        result
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

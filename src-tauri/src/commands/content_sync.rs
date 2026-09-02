@@ -834,13 +834,15 @@ pub async fn subscribe_content_sync(
 ) -> AppResult<()> {
     // When the gates fail (unpaired / sync disabled), cancel any existing
     // subscriber rather than leaving it reconnecting with stale credentials.
-    let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
+    // The probe result is otherwise unused — the spawned task re-resolves
+    // the target (connection + fresh bearer) on EVERY reconnect.
+    if content_sync_target(&state).is_none() {
         return crate::commands::swap_sse_cancel_token(
             &state.content_sse_cancel,
             "content_sse_cancel",
             None,
         );
-    };
+    }
 
     // Cancel any existing SSE subscriber task before spawning a new one (H1).
     let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -851,12 +853,33 @@ pub async fn subscribe_content_sync(
     )?;
 
     let mut backoff = Duration::from_secs(5);
-    let conn_owned = conn;
+    let db_for_task = Arc::clone(&state.db);
+    let http_for_task = state.http_client.clone();
     tokio::spawn(async move {
         loop {
             if cancel_token.is_cancelled() {
                 break;
             }
+            // Re-evaluate the sync target on EVERY reconnect: pairing may
+            // have changed since the last connection (re-pair issued a new
+            // token, a revoke killed the old one, sync was disabled). The
+            // subscribe_events_async contract requires exactly this — a
+            // captured subscribe-time connection+bearer 401-loops with
+            // dead credentials forever.
+            let target = tokio::task::spawn_blocking({
+                let db = Arc::clone(&db_for_task);
+                let http_client = http_for_task.clone();
+                move || content_sync_target_parts(&db, http_client)
+            })
+            .await
+            .ok()
+            .flatten();
+            let Some((conn_owned, bearer, http_client)) = target else {
+                // Unpaired / sync disabled / no token — nothing to
+                // subscribe to anymore. Exit instead of looping.
+                tracing::info!("content SSE: sync target no longer available; subscriber exiting");
+                break;
+            };
             let remote = match crate::content_remote::ContentRemote::from(
                 &conn_owned,
                 Some(bearer.clone()),

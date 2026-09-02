@@ -43,7 +43,10 @@ pub async fn discover_via_tailscale(timeout_ms: u64) -> AppResult<Vec<Discovered
     let probes = peers.into_iter().map(|peer| {
         let client = client.clone();
         async move {
-            let url = format!("http://{}:11436/info", peer.dial);
+            // http_url brackets IPv6 literals — a raw format! makes reqwest
+            // fail URL parsing with an opaque "Builder error" (the same trap
+            // the pair handshake documents).
+            let url = format!("{}/info", medical_core::types::http_url(&peer.dial, 11436));
             let resp = client.get(&url).send().await.ok()?;
             if !resp.status().is_success() {
                 return None;

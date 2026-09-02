@@ -149,7 +149,12 @@ pub(super) async fn update_handler<R: tauri::Runtime>(
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .map_err(|_| StatusCode::NOT_FOUND)?;
+    .map_err(|e| match e {
+        // Only a genuinely missing row is a 404 — a transient DB failure
+        // must surface as 500, not masquerade as "deleted on the server".
+        medical_core::error::AppError::Database { .. } => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    })?;
 
     let entry = VocabularyEntry {
         id: existing.id,
