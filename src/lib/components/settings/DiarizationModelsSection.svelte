@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ModelInfo as WhisperModelInfo } from '../../api/models';
+  import type { DownloadableModel as WhisperModelInfo } from '../../api/models';
 
   interface Props {
     pyannoteModels: WhisperModelInfo[];

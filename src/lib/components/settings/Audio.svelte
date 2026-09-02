@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { settings } from '../../stores/settings.svelte';
   import { listAudioDevices } from '../../api/audio';
-  import { listWhisperModels, listPyannoteModels, downloadModel, deleteModel, type ModelInfo as WhisperModelInfo } from '../../api/models';
+  import { listWhisperModels, listPyannoteModels, downloadModel, deleteModel, type DownloadableModel as WhisperModelInfo } from '../../api/models';
   import { reinitProviders } from '../../api/chat';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { AudioDevice } from '../../types';

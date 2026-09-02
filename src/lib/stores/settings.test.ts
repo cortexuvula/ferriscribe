@@ -153,6 +153,33 @@ describe('SettingsStore — updateField save-queue resurrection', () => {
     expect(payloadB.lmstudio_host).toBe('10.0.0.10');
   });
 
+  it('a queued save does not resurrect a rolled-back change or clobber a landed updateField', async () => {
+    mockGetSettings.mockResolvedValue(sampleConfig);
+    await settings.load();
+
+    // saveA intends a whole-config change (two fields) but fails and is
+    // rolled back by the reload; updateField lands a different field while
+    // a second save sits queued behind it.
+    const base = { ...settings.state };
+    const saveA = settings.save({ ...base, ollama_host: '10.9.9.9', ai_model: 'x' });
+    mockSaveSettings.mockRejectedValueOnce(new Error('save a failed'));
+    const fieldB = settings.updateField('temperature', 0.5);
+    const saveC = settings.save({ ...settings.state, ai_model: 'y' });
+
+    await expect(saveA).rejects.toThrow('save a failed');
+    await fieldB;
+    await saveC;
+
+    // C's payload: derived from the drained server state (temperature
+    // landed; ollama_host rolled back) plus ONLY C's intended delta
+    // (ai_model). The old behavior sent C's call-time snapshot, which
+    // contained A's rejected ollama_host and predated B's temperature.
+    const payloadC = mockSaveSettings.mock.calls[2][0] as AppConfig;
+    expect(payloadC.ollama_host).toBe(sampleConfig.ollama_host);
+    expect(payloadC.temperature).toBe(0.5);
+    expect(payloadC.ai_model).toBe('y');
+  });
+
   it('successful updateFields chain onto the persisted state', async () => {
     mockGetSettings.mockResolvedValue(sampleConfig);
     await settings.load();
