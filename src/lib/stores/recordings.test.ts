@@ -147,3 +147,34 @@ describe('RecordingsStore — pagination + dedup', () => {
     expect(recordings.loading).toBe(false);
   });
 });
+
+describe('RecordingsStore — edit protection on remote updates', () => {
+  it('a protected recording is not re-selected by handleRemoteUpdate', async () => {
+    vi.resetModules();
+    const mockGetRecording = vi.fn(async () => ({ id: 'rec-1' }));
+    vi.doMock('../api/recordings', () => ({
+      listRecordings: () => Promise.resolve([]),
+      searchRecordings: () => Promise.resolve([]),
+      getRecording: mockGetRecording,
+    }));
+    const { recordings } = await import('./recordings.svelte');
+    vi.useFakeTimers();
+
+    recordings.selectedRecording = { id: 'rec-1' } as never;
+    recordings.protectFromRemoteUpdate('rec-1');
+    expect(recordings.isEditProtected('rec-1')).toBe(true);
+
+    recordings.handleRemoteUpdate('rec-1');
+    await Promise.resolve(); // let any (wrongly) started selectRecording run
+    expect(mockGetRecording).not.toHaveBeenCalled(),
+      'protected recording must not be re-fetched';
+
+    recordings.unprotectFromRemoteUpdate('rec-1');
+    recordings.handleRemoteUpdate('rec-1');
+    await Promise.resolve();
+    expect(mockGetRecording).toHaveBeenCalledWith('rec-1');
+
+    vi.useRealTimers();
+    vi.doUnmock('../api/recordings');
+  });
+});

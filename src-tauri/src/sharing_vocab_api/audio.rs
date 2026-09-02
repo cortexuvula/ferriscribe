@@ -182,13 +182,19 @@ pub(super) async fn content_audio_put_handler<R: tauri::Runtime>(
             return Err(medical_core::error::AppError::Io(e));
         }
 
-        // Update audio_path on the recording row.
+        // Update audio_path on the recording row. Targeted update only —
+        // a whole-row update would bump `updated_at`, inflating the
+        // per-field LWW wire stamps (max(revision, row)) with the audio
+        // arrival time and silently overwriting concurrent field edits on
+        // other machines with older stored values.
         let conn = db2.conn()?;
-        let mut rec =
-            RecordingsRepo::get_by_id(&conn, &uuid).map_err(medical_core::error::AppError::from)?;
-        rec.audio_path = path_for_db;
-        rec.file_size_bytes = Some(body_vec.len() as u64);
-        RecordingsRepo::update(&conn, &rec).map_err(medical_core::error::AppError::from)?;
+        RecordingsRepo::update_audio_location(
+            &conn,
+            &uuid,
+            &path_for_db,
+            Some(body_vec.len() as u64),
+        )
+        .map_err(medical_core::error::AppError::from)?;
         Ok(())
     })
     .await
