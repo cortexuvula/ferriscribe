@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 use super::{
-    GenerationProgress, MAX_CONTEXT_CHARS, MAX_SOAP_NOTE_CHARS, PATIENT_CTX_MAX_ITEM_CHARS,
-    PATIENT_CTX_MAX_ITEMS_PER_LIST, format_progress_error,
+    GenerationProgress, MAX_CONTEXT_CHARS, MAX_SOAP_NOTE_CHARS, MAX_TRANSCRIPT_CHARS,
+    PATIENT_CTX_MAX_ITEM_CHARS, PATIENT_CTX_MAX_ITEMS_PER_LIST, format_progress_error,
 };
 
 /// Loaded settings needed for generation.
@@ -226,23 +226,7 @@ where
 
     let provider = resolve_provider(state, &settings.ai_provider).await?;
 
-    let soap_note = recording
-        .soap_note
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            AppError::processing(
-                "Recording has no SOAP note. Generate a SOAP note first.".to_string(),
-            )
-        })?;
-
-    if soap_note.len() > MAX_SOAP_NOTE_CHARS {
-        return Err(AppError::InvalidInput(format!(
-            "SOAP note too large: {} chars, limit is {}",
-            soap_note.len(),
-            MAX_SOAP_NOTE_CHARS
-        )));
-    }
+    let soap_note = require_soap_note(recording)?;
 
     let (system_prompt, user_prompt) = build_prompt(soap_note, settings);
 
@@ -262,17 +246,95 @@ where
     );
 
     let recording_id_str = recording.id.to_string();
+    let (response, generation_elapsed) =
+        stream_with_events(&provider, app, stats_key, &recording_id_str, request).await?;
+
+    let text = document_generator::strip_markdown(&response.content);
+    ensure_nonempty_output(&text, doc_type_label)?;
+
+    set_field(recording, text.clone());
+
+    record_completion_stat(
+        &mut recording.metadata,
+        stats_key,
+        provider.name(),
+        &settings.model,
+        &response.usage,
+        generation_elapsed,
+    );
+
+    Ok(text)
+}
+
+/// Borrow the recording's transcript, rejecting recordings without one and
+/// transcripts over the size cap. Shared by the transcript-based
+/// generators (SOAP, peer discussion).
+pub(super) fn require_transcript(recording: &Recording) -> AppResult<&str> {
+    let transcript = recording
+        .transcript
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| {
+            AppError::processing(
+                "Recording has no transcript. Run transcription first.".to_string(),
+            )
+        })?;
+    if transcript.len() > MAX_TRANSCRIPT_CHARS {
+        return Err(AppError::InvalidInput(format!(
+            "Transcript too large: {} chars, limit is {}",
+            transcript.len(),
+            MAX_TRANSCRIPT_CHARS
+        )));
+    }
+    Ok(transcript)
+}
+
+/// Borrow the recording's SOAP note, rejecting recordings without one and
+/// notes over the size cap. Shared by the SOAP-derived generators
+/// (referral, letter, synopsis).
+pub(super) fn require_soap_note(recording: &Recording) -> AppResult<&str> {
+    let soap_note = recording
+        .soap_note
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::processing(
+                "Recording has no SOAP note. Generate a SOAP note first.".to_string(),
+            )
+        })?;
+    if soap_note.len() > MAX_SOAP_NOTE_CHARS {
+        return Err(AppError::InvalidInput(format!(
+            "SOAP note too large: {} chars, limit is {}",
+            soap_note.len(),
+            MAX_SOAP_NOTE_CHARS
+        )));
+    }
+    Ok(soap_note)
+}
+
+/// Drive the streamed completion with live `generation-progress` events,
+/// preserving `EndpointOffline` verbatim (the frontend dialog keys on it),
+/// and time the call for the generation stat. Shared by every streaming
+/// generator; the command-specific pieces (prompt building, post-processing,
+/// persistence) stay at the call sites.
+pub(super) async fn stream_with_events(
+    provider: &Arc<dyn AiProvider>,
+    app: Option<&tauri::AppHandle>,
+    doc_type: &str,
+    recording_id: &str,
+    request: CompletionRequest,
+) -> AppResult<(medical_core::types::CompletionResponse, std::time::Duration)> {
     let generation_start = std::time::Instant::now();
     let response = super::stream::stream_to_completion(
-        &provider,
+        provider,
         |stats| {
             if let Some(app) = app {
                 let _ = app.emit(
                     "generation-progress",
                     GenerationProgress {
-                        doc_type: stats_key.into(),
+                        doc_type: doc_type.to_string(),
                         status: "generating".into(),
-                        recording_id: recording_id_str.clone(),
+                        recording_id: recording_id.to_string(),
                         progress: Some(*stats),
                     },
                 );
@@ -290,27 +352,25 @@ where
             crate::commands::unwrap_app_error_message(e)
         )),
     })?;
-    let generation_elapsed = generation_start.elapsed();
+    Ok((response, generation_start.elapsed()))
+}
 
-    let text = document_generator::strip_markdown(&response.content);
+/// Reject an empty (or whitespace-only) completion with the shared wording.
+pub(super) fn ensure_nonempty_output(text: &str, doc_type_label: &str) -> AppResult<()> {
     if text.trim().is_empty() {
         return Err(AppError::ai_provider(format!(
             "AI returned an empty {doc_type_label}."
         )));
     }
+    Ok(())
+}
 
-    set_field(recording, text.clone());
-
-    record_completion_stat(
-        &mut recording.metadata,
-        stats_key,
-        provider.name(),
-        &settings.model,
-        &response.usage,
-        generation_elapsed,
-    );
-
-    Ok(text)
+/// Guarantee the recording's metadata JSON is an object so callers can
+/// insert fields (recordings may start with a JSON `null` metadata column).
+pub(super) fn ensure_metadata_object(metadata: &mut serde_json::Value) {
+    if metadata.is_null() {
+        *metadata = serde_json::json!({});
+    }
 }
 
 /// Parse a template string into the `SoapTemplate` enum.
