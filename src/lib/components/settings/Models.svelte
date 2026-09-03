@@ -75,7 +75,14 @@
     }
     await settings.updateField('ai_provider', newProvider);
     await setActiveProvider(newProvider);
+    // Fence the whole post-fetch chain on the request token: fetch already
+    // discards superseded results, but the WRITES below used to run anyway —
+    // a slow stale chain resolving after a newer switch saw `models = []`
+    // and cleared ai_model/ocr_model that the newer chain had just set,
+    // breaking every subsequent generation while the dropdown looked fine.
+    const token = ++modelFetchToken;
     const models = await fetchModelsForProvider(newProvider);
+    if (token !== modelFetchToken) return; // superseded mid-flight
     const remembered = modelMemory[newProvider];
     if (remembered && models.some((m) => m.id === remembered)) {
       await settings.updateField('ai_model', remembered);

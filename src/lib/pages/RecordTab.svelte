@@ -31,6 +31,7 @@
   import { useOcr } from '../composables/useOcr.svelte';
   import { getBackupStatus, isProtected } from '../api/backup';
   import { settingsNav } from '../stores/settingsNav.svelte';
+  import { anyOverlayOpen } from '../stores/overlay';
 
   type Props = {
     onopenSettings?: (target: 'models' | 'audio') => void;
@@ -291,7 +292,11 @@
 
   async function resolveSilenceInfo(recordingId: string): Promise<SilenceInfo | null> {
     const verdict = audio.state.lastRecordingHealth;
-    if (verdict && audio.state.lastRecordingId === recordingId) {
+    // Match on the verdict's OWN id, not just lastRecordingId — during the
+    // optimistic stop window lastRecordingId already points at the new
+    // recording while the verdict (if any) still belongs to the previous
+    // one. startRecording clears the verdict; this guard is belt-and-braces.
+    if (verdict && verdict.recording_id === recordingId) {
       return {
         rms: verdict.rms,
         is_silent: verdict.is_silent,
@@ -397,11 +402,25 @@
     });
   }
 
+  /** Re-entry guard for Process Recording: maybeLaunchPipeline can park
+   *  for up to 60 s (OCR settle) before pipeline.launch swaps the view —
+   *  without this, extra clicks during that window double-invoke
+   *  process_recording (duplicate transcription + SOAP). */
+  let processLaunching = $state(false);
+
   function handleProcessRecording() {
+    if (processLaunching) return;
+    // A start/stop/cancel still resolving on the backend: the row may not
+    // exist yet (stop inserts it) — processing now would fail with
+    // "recording not found" while the UI claims it was saved.
+    if (audio.busy) return;
     const recordingId = audio.state.lastRecordingId ?? importedRecordingId;
     if (!recordingId) return;
     pipelineRecordingId = recordingId;
-    maybeLaunchPipeline(recordingId);
+    processLaunching = true;
+    void maybeLaunchPipeline(recordingId).finally(() => {
+      processLaunching = false;
+    });
   }
 
   function handleRetry() {
@@ -522,13 +541,24 @@
   // Both bail out when the user is typing in an input, textarea, or
   // contenteditable element so the shortcuts don't hijack normal text entry.
   function handleGlobalKeydown(e: KeyboardEvent) {
+    // Stand down while ANY overlay is open (settings modal, confirm
+    // dialog, manager dialogs, RSVP reader): a stray Space here would
+    // otherwise start a hidden recording AND wipe the typed patient
+    // context via handleStartRecording's clearAllContextFields().
+    if (anyOverlayOpen()) return;
+
     const target = e.target as HTMLElement | null;
     if (
       target &&
       (target.tagName === 'INPUT' ||
         target.tagName === 'TEXTAREA' ||
+        target.tagName === 'BUTTON' ||
+        target.tagName === 'SELECT' ||
+        target.tagName === 'SUMMARY' ||
         target.isContentEditable)
     ) {
+      // Focused interactive control: Space has native meaning (activate
+      // the button / open the select) — don't hijack it as record-toggle.
       return;
     }
 

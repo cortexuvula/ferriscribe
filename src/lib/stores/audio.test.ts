@@ -6,7 +6,16 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 vi.mock('../api/audio', () => ({
   startRecording: vi.fn().mockResolvedValue('rec-123'),
-  stopRecording: vi.fn().mockResolvedValue('rec-123'),
+  stopRecording: vi.fn().mockResolvedValue({
+    recording_id: 'rec-123',
+    peak: 0.5,
+    rms: 0.05,
+    duration_secs: 10,
+    signal_secs: 9,
+    is_silent: false,
+    stream_error: null,
+    write_error: null,
+  }),
   pauseRecording: vi.fn().mockResolvedValue(undefined),
   resumeRecording: vi.fn().mockResolvedValue(undefined),
   cancelRecording: vi.fn().mockResolvedValue(undefined),
@@ -66,6 +75,33 @@ describe('AudioStore', () => {
     await audio.startRecording();
     await audio.stop();
     expect(audio.state.state).toBe('stopped');
+  });
+
+  it('stop keeps the watchdog verdict keyed by its own recording id', async () => {
+    await audio.startRecording();
+    const id = await audio.stop();
+    expect(id).toBe('rec-123');
+    expect(audio.state.lastRecordingHealth?.recording_id).toBe('rec-123');
+    expect(audio.state.lastRecordingHealth?.is_silent).toBe(false);
+  });
+
+  it('startRecording clears a stale verdict from the previous recording', async () => {
+    await audio.startRecording();
+    await audio.stop();
+    expect(audio.state.lastRecordingHealth).not.toBeNull();
+
+    // Next recording must begin without the previous verdict — the
+    // silence dialog reads it, and a stale one mis-diagnoses the new one.
+    await audio.startRecording();
+    expect(audio.state.lastRecordingHealth).toBeNull();
+  });
+
+  it('busy is false at rest and exposes the in-flight guard', async () => {
+    expect(audio.busy).toBe(false);
+    await audio.startRecording();
+    expect(audio.busy).toBe(false);
+    await audio.stop();
+    expect(audio.busy).toBe(false);
   });
 
   it('pause transitions to paused state', async () => {

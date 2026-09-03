@@ -8,8 +8,8 @@ use tracing::{debug, info};
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, ensure_metadata_object, ensure_nonempty_output,
-    load_recording_and_settings, persist_recording, require_transcript, resolve_provider,
+    build_completion_request, ensure_nonempty_output, fresh_stats_patch,
+    load_recording_and_settings, persist_producer_patch, require_transcript, resolve_provider,
     run_generation_command, stream_with_events,
 };
 
@@ -120,18 +120,10 @@ async fn generate_peer_discussion_inner(
     let discussion_text = response.content;
     ensure_nonempty_output(&discussion_text, "peer discussion note")?;
 
-    ensure_metadata_object(&mut recording.metadata);
-    if let Some(obj) = recording.metadata.as_object_mut() {
-        obj.insert(
-            "peer_discussion_context".to_string(),
-            serde_json::json!({
-                "physician_name": physician_name,
-                "specialty": specialty,
-                "reason": reason,
-            }),
-        );
-    }
-
+    // Record the stats on the in-memory recording (the patch source), then
+    // persist ONLY this document's column plus fresh metadata. A whole-row
+    // update on the stale snapshot would revert concurrent column writes
+    // (editor saves, another generator's output).
     medical_core::types::recording::record_completion_stat(
         &mut recording.metadata,
         "peer_discussion",
@@ -140,9 +132,26 @@ async fn generate_peer_discussion_inner(
         &response.usage,
         generation_elapsed,
     );
+    let mut metadata_patch = vec![(
+        "peer_discussion_context".to_string(),
+        serde_json::json!({
+            "physician_name": physician_name,
+            "specialty": specialty,
+            "reason": reason,
+        }),
+    )];
+    metadata_patch.extend(fresh_stats_patch(&recording, "peer_discussion"));
 
-    recording.peer_discussion = Some(discussion_text.clone());
-    persist_recording(&state.db, recording).await?;
+    persist_producer_patch(
+        state,
+        recording.id,
+        medical_db::recordings::ProducerPersist {
+            peer_discussion: Some(discussion_text.clone()),
+            metadata_patch,
+            ..Default::default()
+        },
+    )
+    .await?;
 
     Ok(discussion_text)
 }

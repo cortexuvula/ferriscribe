@@ -399,6 +399,13 @@ impl WhisperSupervisor {
                         match self.spawn_once_at(&bin).await {
                             Ok(child) => {
                                 *self.child.lock().await = Some(child);
+                                // Reset the ratchet: this crash-restart
+                                // succeeded, so the NEXT crash (however
+                                // long the child ran) starts from the
+                                // 1 s floor again. Without this the delay
+                                // climbed monotonically to the 60 s cap
+                                // over the supervisor's lifetime.
+                                backoff = Duration::from_secs(1);
                                 break;
                             }
                             Err(e) => {

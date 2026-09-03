@@ -102,17 +102,46 @@ pub async fn resolve_provider(
 }
 
 /// Persist a recording update on a blocking thread.
-pub(super) async fn persist_recording(
-    db: &Arc<medical_db::Database>,
-    recording: Recording,
+/// Column-scoped producer persist (see
+/// [`RecordingsRepo::persist_producer_update`]) for the document
+/// generators. These hold their recording snapshot across a long LLM
+/// call — a whole-row update would silently revert any column another
+/// writer changed in the window (the editor's autosave, a concurrent
+/// generator). Runs the DB write on a blocking worker.
+pub(super) async fn persist_producer_patch(
+    state: &AppState,
+    recording_id: Uuid,
+    update: medical_db::recordings::ProducerPersist,
 ) -> AppResult<()> {
-    let db = Arc::clone(db);
-    tokio::task::spawn_blocking(move || {
+    let db = Arc::clone(&state.db);
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
         let conn = db.conn()?;
-        RecordingsRepo::update(&conn, &recording).map_err(AppError::from)
+        RecordingsRepo::persist_producer_update(&conn, &recording_id, &update)
+            .map_err(AppError::from)
     })
     .await
     .map_err(crate::commands::join_err)?
+}
+
+/// Build the metadata patch carrying just this doc-type's FRESH
+/// generation stats — extracted from the in-memory recording where
+/// `record_completion_stat` wrote them moments ago. The persist-time
+/// one-level merge preserves sibling doc-type stats in the DB row.
+pub(super) fn fresh_stats_patch(
+    recording: &Recording,
+    stats_key: &str,
+) -> Vec<(String, serde_json::Value)> {
+    recording
+        .metadata
+        .get("generation_stats")
+        .and_then(|stats| stats.get(stats_key))
+        .map(|stat| {
+            vec![(
+                "generation_stats".to_string(),
+                serde_json::json!({ stats_key: stat.clone() }),
+            )]
+        })
+        .unwrap_or_default()
 }
 
 /// Runs a generation command with the standard progress-event lifecycle:
@@ -363,14 +392,6 @@ pub(super) fn ensure_nonempty_output(text: &str, doc_type_label: &str) -> AppRes
         )));
     }
     Ok(())
-}
-
-/// Guarantee the recording's metadata JSON is an object so callers can
-/// insert fields (recordings may start with a JSON `null` metadata column).
-pub(super) fn ensure_metadata_object(metadata: &mut serde_json::Value) {
-    if metadata.is_null() {
-        *metadata = serde_json::json!({});
-    }
 }
 
 /// Parse a template string into the `SoapTemplate` enum.

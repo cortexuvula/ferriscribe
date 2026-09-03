@@ -171,7 +171,10 @@ class ChatStore {
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
-      this._activeStreamId = null;
+      // cancel() FIRST — it fires the backend chat_cancel_stream using the
+      // active stream id. The old order nulled the id before calling it, so
+      // the guard inside cancel() was always false and a timed-out worker
+      // kept consuming the inference server with no listener attached.
       this.cancel();
     };
 

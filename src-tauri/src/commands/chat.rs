@@ -936,6 +936,7 @@ mod preflight_tests {
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             sharing: Arc::new(RwLock::new(None)),
+            sharing_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             vocab_api: RwLock::new(None),
             ollama_provider: RwLock::new(None),
             lmstudio_provider: RwLock::new(None),

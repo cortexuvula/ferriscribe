@@ -44,7 +44,7 @@ use crate::state::{self, AppState};
 ///
 /// Returns `None` otherwise, in which case commands fall back to the local
 /// SQLite repo.
-fn paired_dict_target(
+async fn paired_dict_target(
     state: &AppState,
 ) -> Option<(crate::commands::sharing::PairedConnection, String)> {
     // Gate 1: the user must opt in to dictionary sync.
@@ -54,9 +54,9 @@ fn paired_dict_target(
     }
     // Gate 2: this client must be paired with a server that advertises the
     // vocab port (the dictionary API rides on the same port as the vocab API).
-    let conn = state::load_paired_connection()?;
+    let conn = state::load_paired_connection_offload().await?;
     conn.ports.vocab?;
-    let bearer = state::load_sharing_bearer()?;
+    let bearer = state::load_sharing_bearer_offload().await?;
     Some((conn, bearer))
 }
 
@@ -82,7 +82,7 @@ fn now_iso() -> String {
 #[tauri::command]
 #[instrument(skip(state), name = "user_dict::list")]
 pub async fn user_dict_list(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
-    if let Some((conn, bearer)) = paired_dict_target(&state)
+    if let Some((conn, bearer)) = paired_dict_target(&state).await
         && let Some(remote) = crate::user_dict_remote::UserDictRemote::from(
             &conn,
             Some(bearer),
@@ -158,7 +158,7 @@ pub async fn user_dict_add(state: tauri::State<'_, AppState>, word: String) -> A
     //    `PairedConnection` is moved into the task and `UserDictRemote`
     //    borrows it from within the task's scope (it cannot borrow from this
     //    frame because `tokio::spawn` requires `'static`).
-    if let Some((conn, bearer)) = paired_dict_target(&state) {
+    if let Some((conn, bearer)) = paired_dict_target(&state).await {
         let http_client = state.http_client.clone();
         let db2 = Arc::clone(&state.db);
         tokio::spawn(async move {
@@ -221,7 +221,7 @@ pub async fn user_dict_remove(state: tauri::State<'_, AppState>, word: String) -
     // 2. Best-effort background sync — push ALL entries (including tombstones)
     //    so the server records the deletion. The owned `PairedConnection` is
     //    moved into the task and `UserDictRemote` borrows it there.
-    if let Some((conn, bearer)) = paired_dict_target(&state) {
+    if let Some((conn, bearer)) = paired_dict_target(&state).await {
         let http_client = state.http_client.clone();
         let db2 = Arc::clone(&state.db);
         tokio::spawn(async move {
@@ -276,7 +276,7 @@ pub async fn user_dict_remove(state: tauri::State<'_, AppState>, word: String) -
 pub async fn sync_user_dictionary_cmd(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
     let local_all = load_all_local(&state.db).await?;
 
-    if let Some((conn, bearer)) = paired_dict_target(&state)
+    if let Some((conn, bearer)) = paired_dict_target(&state).await
         && let Some(remote) = crate::user_dict_remote::UserDictRemote::from(
             &conn,
             Some(bearer),
@@ -338,7 +338,7 @@ pub async fn subscribe_user_dictionary(
     // paired + sync enabled. When not paired, also cancel any existing
     // subscriber — the user may have just unpaired, and the old task must
     // not keep reconnecting with stale credentials.
-    let Some((conn, bearer)) = paired_dict_target(&state) else {
+    let Some((conn, bearer)) = paired_dict_target(&state).await else {
         return crate::commands::swap_sse_cancel_token(
             &state.dict_sse_cancel,
             "dict_sse_cancel",

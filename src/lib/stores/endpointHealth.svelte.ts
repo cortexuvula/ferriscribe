@@ -84,6 +84,9 @@ class EndpointHealthStore {
   private primed = false;
   private lastProbedKey = '';
   private consumerCount = 0;
+  /// Monotonic probe epoch — only the most recently STARTED probe may write
+  /// state (see probeAll).
+  private probeEpoch = 0;
 
   private probedKey(cfg: AppConfig): string {
     return [
@@ -162,7 +165,14 @@ class EndpointHealthStore {
     const cfg = settings.state;
     this.lastProbedKey = this.probedKey(cfg);
     this.primed = true;
+    // Epoch fence: three independent triggers (interval, settings edit,
+    // visibility re-entry) can overlap, and a probe against a dead LAN host
+    // takes seconds. Without the fence a STALE probe resolving last would
+    // overwrite the newer probe's result — flashing a false "office server
+    // offline" banner exactly when the user is deciding whether to record.
+    const epoch = ++this.probeEpoch;
     const [ai, stt] = await Promise.all([this.probeAi(cfg), this.probeStt(cfg)]);
+    if (epoch !== this.probeEpoch) return; // superseded mid-flight
     const overall = computeOverall(ai, stt);
     this.state = { ai, stt, lastCheckedAt: Date.now(), overall };
   }

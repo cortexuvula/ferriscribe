@@ -22,6 +22,7 @@ pub mod m015_sync_state;
 pub mod m016_user_dictionary_sync;
 pub mod m017_condition_chip_use_count;
 pub mod m018_purge_ledger;
+pub mod m019_recordings_sync_cursor_index;
 
 use rusqlite::Connection;
 
@@ -135,6 +136,11 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 18,
             name: "purge_ledger",
             up: m018_purge_ledger::up,
+        },
+        Migration {
+            version: 19,
+            name: "recordings_sync_cursor_index",
+            up: m019_recordings_sync_cursor_index::up,
         },
     ]
 }

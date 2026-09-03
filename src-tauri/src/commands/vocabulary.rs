@@ -17,10 +17,10 @@ use crate::vocab_remote::{UpsertBody as RemoteUpsert, VocabRemote};
 /// server that advertised a vocab CRUD API. Vocabulary commands route
 /// through HTTP in that case; otherwise they operate on the local SQLite
 /// repo.
-fn paired_vocab_target() -> Option<(crate::commands::sharing::PairedConnection, String)> {
-    let conn = state::load_paired_connection()?;
+async fn paired_vocab_target() -> Option<(crate::commands::sharing::PairedConnection, String)> {
+    let conn = state::load_paired_connection_offload().await?;
     conn.ports.vocab?;
-    let bearer = state::load_sharing_bearer()?;
+    let bearer = state::load_sharing_bearer_offload().await?;
     Some((conn, bearer))
 }
 
@@ -33,7 +33,7 @@ pub async fn list_vocabulary_entries(
     state: tauri::State<'_, AppState>,
     category: Option<String>,
 ) -> AppResult<Vec<VocabularyEntry>> {
-    if let Some((conn, bearer)) = paired_vocab_target() {
+    if let Some((conn, bearer)) = paired_vocab_target().await {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         return remote.list(category.as_deref()).await;
@@ -68,7 +68,7 @@ pub async fn add_vocabulary_entry(
     priority: Option<i32>,
     enabled: Option<bool>,
 ) -> AppResult<VocabularyEntry> {
-    if let Some((conn, bearer)) = paired_vocab_target() {
+    if let Some((conn, bearer)) = paired_vocab_target().await {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         let body = RemoteUpsert {
@@ -138,7 +138,7 @@ pub async fn update_vocabulary_entry(
     enabled: Option<bool>,
 ) -> AppResult<VocabularyEntry> {
     let uuid = Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("Invalid ID: {e}")))?;
-    if let Some((conn, bearer)) = paired_vocab_target() {
+    if let Some((conn, bearer)) = paired_vocab_target().await {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         let body = RemoteUpsert {
@@ -192,7 +192,7 @@ pub async fn delete_vocabulary_entry(
     id: String,
 ) -> AppResult<()> {
     let uuid = Uuid::parse_str(&id).map_err(|e| AppError::Other(format!("Invalid ID: {e}")))?;
-    if let Some((conn, bearer)) = paired_vocab_target() {
+    if let Some((conn, bearer)) = paired_vocab_target().await {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         return remote.delete(uuid).await;
@@ -209,7 +209,7 @@ pub async fn delete_vocabulary_entry(
 /// Delete all vocabulary entries.
 #[tauri::command]
 pub async fn delete_all_vocabulary_entries(state: tauri::State<'_, AppState>) -> AppResult<u32> {
-    if let Some((conn, bearer)) = paired_vocab_target() {
+    if let Some((conn, bearer)) = paired_vocab_target().await {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         return remote.delete_all().await;
@@ -226,7 +226,7 @@ pub async fn delete_all_vocabulary_entries(state: tauri::State<'_, AppState>) ->
 /// Get vocabulary counts as `(total, enabled)`.
 #[tauri::command]
 pub async fn get_vocabulary_count(state: tauri::State<'_, AppState>) -> AppResult<(u32, u32)> {
-    if let Some((conn, bearer)) = paired_vocab_target() {
+    if let Some((conn, bearer)) = paired_vocab_target().await {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         return remote.count().await;
@@ -297,7 +297,7 @@ pub async fn import_vocabulary_json(
         .collect();
 
     let count = entries.len() as u32;
-    if let Some((conn, bearer)) = paired_vocab_target() {
+    if let Some((conn, bearer)) = paired_vocab_target().await {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         for entry in &entries {
@@ -340,7 +340,7 @@ pub async fn export_vocabulary_json(
     file_path: String,
 ) -> AppResult<u32> {
     let file_path = crate::commands::validate_user_path(&file_path)?;
-    let entries: Vec<VocabularyEntry> = if let Some((conn, bearer)) = paired_vocab_target() {
+    let entries: Vec<VocabularyEntry> = if let Some((conn, bearer)) = paired_vocab_target().await {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         remote.list(None).await?
@@ -383,7 +383,7 @@ pub async fn test_vocabulary_correction(
     state: tauri::State<'_, AppState>,
     text: String,
 ) -> AppResult<CorrectionResult> {
-    let entries: Vec<VocabularyEntry> = if let Some((conn, bearer)) = paired_vocab_target() {
+    let entries: Vec<VocabularyEntry> = if let Some((conn, bearer)) = paired_vocab_target().await {
         let remote = VocabRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired vocab target unavailable".into()))?;
         remote

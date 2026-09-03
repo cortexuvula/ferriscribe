@@ -107,7 +107,7 @@
   </div>
 {/if}
 
-{#if generationState.progressStatus}
+{#if generationState.generating && generationState.progressStatus}
   <div class="progress-banner">{generationState.progressStatus}</div>
 {/if}
 

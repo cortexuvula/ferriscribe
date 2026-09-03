@@ -25,6 +25,13 @@ export function isTopmostOverlay(el: HTMLElement): boolean {
   return openStack[openStack.length - 1] === el;
 }
 
+/** True when ANY overlay (modal, confirm, manager dialog, RSVP reader) is
+ *  open — global page shortcuts (e.g. the Record tab's Space-to-toggle)
+ *  must stand down while one is. */
+export function anyOverlayOpen(): boolean {
+  return openStack.length > 0;
+}
+
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 

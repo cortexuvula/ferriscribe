@@ -6,7 +6,8 @@ use medical_processing::document_generator;
 use crate::state::AppState;
 
 use super::helpers::{
-    generate_from_soap, load_recording_and_settings, persist_recording, run_generation_command,
+    fresh_stats_patch, generate_from_soap, load_recording_and_settings, persist_producer_patch,
+    run_generation_command,
 };
 
 /// Generate a referral letter from a recording's SOAP note.
@@ -56,7 +57,19 @@ pub async fn generate_referral(
         )
         .await?;
 
-        persist_recording(&state.db, recording).await?;
+        // Column-scoped persist: the recording snapshot is stale by however
+        // long the LLM ran — a whole-row update would revert concurrent
+        // column writes (editor saves, another generator's output).
+        persist_producer_patch(
+            &state,
+            recording.id,
+            medical_db::recordings::ProducerPersist {
+                referral: Some(text.clone()),
+                metadata_patch: fresh_stats_patch(&recording, "referral"),
+                ..Default::default()
+            },
+        )
+        .await?;
         Ok(text)
     })
     .await

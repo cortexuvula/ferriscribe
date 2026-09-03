@@ -111,7 +111,7 @@ pub async fn save_recording_field(
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let st = app_clone.state::<AppState>();
         if let Some((conn, bearer, client)) =
-            crate::commands::content_sync::content_sync_target(&st)
+            crate::commands::content_sync::content_sync_target(&st).await
             && let Some(remote) =
                 crate::content_remote::ContentRemote::from(&conn, Some(bearer), client)
         {

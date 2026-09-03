@@ -211,15 +211,19 @@ pub async fn delete_all_recordings(state: tauri::State<'_, AppState>) -> AppResu
             let count = paths.len() as u32;
 
             // Reset content-sync cursors so the next sync re-syncs everything.
+            // These are hard errors, not best-effort: the cursor reset is the
+            // only thing keeping Delete All from permanently breaking sync —
+            // committing the deletes while a cursor survives would silently
+            // diverge every paired machine. Fail the transaction instead;
+            // the user can retry Delete All.
             if let Err(e) = medical_db::content_sync::ContentSyncRepo::set_cursor(&conn, None) {
-                tracing::warn!(error = %e, "failed to reset pull cursor after Delete All");
+                return Err(AppError::from(e));
             }
-            if let Err(e) = conn.execute(
+            conn.execute(
                 "UPDATE sync_state SET value = NULL WHERE key = 'content_sync_push_cursor'",
                 [],
-            ) {
-                tracing::warn!(error = %e, "failed to reset push cursor after Delete All");
-            }
+            )
+            .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
             tracing::info!("Delete All: content-sync cursors reset, next sync will re-pull everything");
 
             Ok((paths, count))

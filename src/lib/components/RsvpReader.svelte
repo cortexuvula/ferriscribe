@@ -2,6 +2,7 @@
 import { onMount, onDestroy, untrack } from 'svelte';
 import { rsvp } from '../stores/rsvp.svelte';
 import { settings } from '../stores/settings.svelte';
+import { pushOverlay, isTopmostOverlay } from '../stores/overlay';
 import {
   tokenize,
   orpIndex,
@@ -139,8 +140,23 @@ function close(): void {
   rsvp.closeAll();
 }
 
+// Overlay-stack membership: the reader is a modal (role=dialog, fixed,
+// z-1600). Registering it makes global page shortcuts (the Record tab's
+// Space-to-toggle) stand down while it is open, and lets a confirm
+// dialog stacked above own its keystrokes.
+let backdropEl: HTMLElement | undefined = $state();
+
+$effect(() => {
+  if (rsvp.state.reader.open && backdropEl) {
+    return pushOverlay(backdropEl);
+  }
+});
+
 function onKeydown(e: KeyboardEvent): void {
   if (!rsvp.state.reader.open) return;
+  // Only act when the reader is the topmost overlay — a confirm dialog
+  // stacked above owns Space/Escape instead.
+  if (backdropEl && !isTopmostOverlay(backdropEl)) return;
   switch (e.key) {
     case ' ': e.preventDefault(); togglePlay(); break;
     case 'ArrowLeft': e.preventDefault(); stepBack(); break;
@@ -202,6 +218,7 @@ function formatEta(secs: number): string {
     class:dark={settings.state.rsvp_dark_theme}
     onclick={close}
     role="presentation"
+    bind:this={backdropEl}
   >
     <div class="dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()}>
       <div class="header">
