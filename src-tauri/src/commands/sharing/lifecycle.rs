@@ -241,9 +241,9 @@ pub async fn stop_sharing_inner(state: &AppState) -> AppResult<()> {
     let allow_public = crate::commands::load_app_config(&state.db, "sharing stop")
         .await?
         .allow_public_endpoint;
-    let paired = crate::state::load_paired_connection();
+    let paired = crate::state::load_paired_connection_offload().await;
     let bearer = if paired.is_some() {
-        crate::state::load_sharing_bearer()
+        crate::state::load_sharing_bearer_offload().await
     } else {
         None
     };

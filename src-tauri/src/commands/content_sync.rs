@@ -93,10 +93,15 @@ fn advance_cursor(ts: &str) -> String {
 ///
 /// `pub(crate)` so other command files (e.g. a future recording-edit command
 /// that wants to push on save) can reuse the same gating.
-pub(crate) fn content_sync_target(
+pub(crate) async fn content_sync_target(
     state: &AppState,
 ) -> Option<(PairedConnection, String, Arc<reqwest::Client>)> {
-    content_sync_target_parts(&state.db, state.http_client.clone())
+    let db = Arc::clone(&state.db);
+    let http_client = state.http_client.clone();
+    tokio::task::spawn_blocking(move || content_sync_target_parts(&db, http_client))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Same gates as [`content_sync_target`], split out for `spawn_blocking`
@@ -380,10 +385,10 @@ async fn run_sync(
     // without it (audio_path is empty). Best-effort: errors are logged
     // and don't abort the sync. Limit to 10 per cycle to bound latency.
     let audio_fetch_db = Arc::clone(&db);
-    let audio_conn = crate::state::load_paired_connection();
+    let audio_conn = crate::state::load_paired_connection_offload().await;
     let audio_tailscale = audio_conn.as_ref().and_then(|c| c.tailscale.clone());
     let audio_vocab_port = audio_conn.as_ref().and_then(|c| c.ports.vocab);
-    let audio_bearer = crate::state::load_sharing_bearer();
+    let audio_bearer = crate::state::load_sharing_bearer_offload().await;
     if let (Some(ts), Some(vp), Some(bearer)) = (audio_tailscale, audio_vocab_port, audio_bearer) {
         let audio_conn = crate::commands::sharing::PairedConnection {
             lan: None,
@@ -694,14 +699,15 @@ pub async fn sync_content_now(
     // Self-heal: backfill a missing Tailscale address before re-evaluating
     // the sync gate. Only runs when the paired connection doesn't already
     // have a Tailscale address, avoiding up to 5s latency per sync.
-    if state::load_paired_connection()
+    if state::load_paired_connection_offload()
+        .await
         .and_then(|c| c.tailscale)
         .is_none()
     {
         let _ = crate::commands::sharing::pairing::backfill_tailscale().await;
     }
 
-    let Some((conn, bearer, http_client)) = content_sync_target(&state) else {
+    let Some((conn, bearer, http_client)) = content_sync_target(&state).await else {
         tracing::warn!(
             "content sync skipped: gates failed (see preceding debug logs for the reason)"
         );
@@ -767,13 +773,13 @@ pub async fn run_initial_sync(app: tauri::AppHandle, db: Arc<Database>) {
     // Runs on every startup so it retries until the server is reachable.
     let _ = crate::commands::sharing::pairing::backfill_tailscale().await;
 
-    let Some(conn) = state::load_paired_connection() else {
+    let Some(conn) = state::load_paired_connection_offload().await else {
         return;
     };
     if conn.ports.vocab.is_none() || conn.tailscale.is_none() {
         return;
     }
-    let Some(bearer) = state::load_sharing_bearer() else {
+    let Some(bearer) = state::load_sharing_bearer_offload().await else {
         return;
     };
     let http_client = Arc::new(
@@ -855,7 +861,7 @@ pub async fn subscribe_content_sync(
     // subscriber rather than leaving it reconnecting with stale credentials.
     // The probe result is otherwise unused — the spawned task re-resolves
     // the target (connection + fresh bearer) on EVERY reconnect.
-    if content_sync_target(&state).is_none() {
+    if content_sync_target(&state).await.is_none() {
         return crate::commands::swap_sse_cancel_token(
             &state.content_sse_cancel,
             "content_sse_cancel",
@@ -999,6 +1005,7 @@ pub async fn fetch_audio_from_server(
     recording_id: String,
 ) -> AppResult<String> {
     let (conn, bearer, http_client) = content_sync_target(&state)
+        .await
         .ok_or_else(|| AppError::Other("content sync target unavailable".into()))?;
     let remote = crate::content_remote::ContentRemote::from(&conn, Some(bearer), http_client)
         .ok_or_else(|| AppError::Other("content remote unavailable (no tailscale?)".into()))?;
@@ -1082,6 +1089,7 @@ pub async fn upload_audio_to_server(
     recording_id: String,
 ) -> AppResult<()> {
     let (conn, bearer, http_client) = content_sync_target(&state)
+        .await
         .ok_or_else(|| AppError::Other("content sync target unavailable".into()))?;
     let remote = crate::content_remote::ContentRemote::from(&conn, Some(bearer), http_client)
         .ok_or_else(|| AppError::Other("content remote unavailable (no tailscale?)".into()))?;
