@@ -32,7 +32,16 @@ export interface AudioHealthAlert {
 export function audioHealthAlert(h: AudioHealthEvent | null): AudioHealthAlert | null {
   if (!h) return null;
 
-  // OS-level stream failure trumps everything — the capture may be
+  // The file on disk isn't being written (disk full, unwritable recordings
+  // folder) — nothing will be saved regardless of how healthy the mic is.
+  if (h.write_error) {
+    return {
+      level: 'danger',
+      message: `The recording cannot be saved — ${h.write_error}. Free up disk space or check the recordings folder, then start a new recording.`,
+    };
+  }
+
+  // OS-level stream failure trumps everything else — the capture may be
   // truncated regardless of what arrived before.
   if (h.stream_error) {
     return {
@@ -58,13 +67,14 @@ export function audioHealthAlert(h: AudioHealthEvent | null): AudioHealthAlert |
   }
 
   // Data flowing but nothing ever qualified as speech, past the grace
-  // window: mic live but silent (muted at the OS/hardware level, or the
-  // wrong input picked up only ambient zeros).
+  // window: mic live but silent. A denied microphone PERMISSION presents
+  // exactly like this on macOS (the system hands the app silence instead
+  // of an error), so the hint points at privacy settings too.
   if (!h.has_signal && h.elapsed_secs >= FIRST_SIGNAL_GRACE_SECS) {
     return {
       level: 'warning',
       message:
-        'No speech detected yet — the microphone is delivering silence. Check that it is unmuted and positioned correctly.',
+        'No speech detected yet — the microphone is delivering silence. Check that it is unmuted and that FerriScribe has microphone permission in your OS privacy settings.',
     };
   }
 

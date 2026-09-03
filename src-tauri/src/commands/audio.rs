@@ -31,6 +31,7 @@ pub struct AudioHealthEvent {
     pub secs_since_last_data: Option<f64>,
     pub secs_since_last_sound: Option<f64>,
     pub stream_error: Option<String>,
+    pub write_error: Option<String>,
 }
 
 impl From<CaptureHealthSnapshot> for AudioHealthEvent {
@@ -47,6 +48,7 @@ impl From<CaptureHealthSnapshot> for AudioHealthEvent {
             secs_since_last_data: s.secs_since_last_data,
             secs_since_last_sound: s.secs_since_last_sound,
             stream_error: s.stream_error,
+            write_error: s.write_error,
         }
     }
 }
@@ -337,6 +339,9 @@ pub struct StopRecordingResult {
     pub is_silent: bool,
     /// First OS-level stream error reported during the capture, if any.
     pub stream_error: Option<String>,
+    /// First WAV-file write failure (disk full, unwritable recordings
+    /// folder). The file on disk is empty or truncated — not usable.
+    pub write_error: Option<String>,
 }
 
 /// Stop the active recording and finalize the WAV file.
@@ -539,12 +544,16 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stop
         signal_secs: health_snap.signal_secs,
         is_silent: verdict_is_silent(&health_snap, duration_secs),
         stream_error: health_snap.stream_error,
+        write_error: health_snap.write_error,
     })
 }
 
 /// The stop-time "is this recording effectively silent" verdict.
 ///
 /// Silent when ANY of:
+/// - the WAV file could not be written (disk full, unwritable recordings
+///   folder, failed finalize) — the file is empty or truncated regardless
+///   of what the microphone delivered;
 /// - no samples were captured at all (dead stream / empty WAV);
 /// - the whole-file RMS is below the Whisper-hallucination floor
 ///   (~-60 dBFS) — the same threshold `check_recording_audio_levels`
@@ -554,7 +563,15 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stop
 /// - a long recording (≥30 s) whose detected signal spans <5% of its
 ///   duration — e.g. 2 s of speech diluted into 12 minutes of silence,
 ///   which passes the RMS floor but will not produce a usable transcript.
+///
+/// A `stream_error` alone does NOT force the verdict: the OS error may
+/// have struck after minutes of good audio, and the live banner already
+/// warned the user — the stop dialog stays reserved for recordings that
+/// cannot transcribe.
 fn verdict_is_silent(snap: &CaptureHealthSnapshot, duration_secs: f64) -> bool {
+    if snap.write_error.is_some() {
+        return true;
+    }
     if snap.total_samples == 0 || snap.rms < 0.001 {
         return true;
     }
@@ -930,6 +947,34 @@ mod tests {
             ..Default::default()
         };
         assert!(verdict_is_silent(&quiet, 30.0));
+    }
+
+    #[test]
+    fn verdict_silent_when_wav_write_failed_even_with_healthy_signal() {
+        // Disk-full / unwritable-folder case: the microphone delivered
+        // perfectly healthy signal, but nothing usable reached the file.
+        let unwritten = CaptureHealthSnapshot {
+            total_samples: 480_000 * 3,
+            rms: 0.05,
+            signal_secs: Some(170.0),
+            write_error: Some("audio file write failed: disk full".to_string()),
+            ..Default::default()
+        };
+        assert!(verdict_is_silent(&unwritten, 180.0));
+    }
+
+    #[test]
+    fn verdict_stream_error_alone_does_not_force_silent() {
+        // An OS stream error may strike after minutes of good audio — the
+        // live banner warned; the stop dialog stays for unusable files.
+        let truncated = CaptureHealthSnapshot {
+            total_samples: 480_000 * 3,
+            rms: 0.05,
+            signal_secs: Some(170.0),
+            stream_error: Some("device disconnected".to_string()),
+            ..Default::default()
+        };
+        assert!(!verdict_is_silent(&truncated, 180.0));
     }
 
     #[test]
