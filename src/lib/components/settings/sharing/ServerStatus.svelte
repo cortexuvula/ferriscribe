@@ -4,6 +4,7 @@
   import { onMount, tick } from 'svelte';
   import PairingQr from './PairingQr.svelte';
   import { renameClient } from '../../../api/sharing';
+  import { confirmDialog } from '../../../stores/confirm.svelte';
   import { formatError } from '../../../types/errors';
 
   type Props = {
@@ -97,13 +98,14 @@
   }
 
   async function stop() {
-    if (
-      !confirm(
-        "Stop sharing? Paired clinicians will lose access to this server's AI models until it is restarted.",
-      )
-    ) {
-      return;
-    }
+    const ok = await confirmDialog({
+      title: 'Stop sharing?',
+      message:
+        "Paired clinicians will lose access to this server's AI models until it is restarted.",
+      confirmLabel: 'Stop sharing',
+      danger: true,
+    });
+    if (!ok) return;
     await invoke('stop_sharing');
     onstopped?.();
   }

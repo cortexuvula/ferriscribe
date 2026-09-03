@@ -13,6 +13,7 @@
   import { formatError } from '../../types/errors';
   import BackupWizard from './BackupWizard.svelte';
   import Callout from './Callout.svelte';
+  import { confirmDialog } from '../../stores/confirm.svelte';
 
   let status = $state<BackupStatus | null>(null);
   let statusError = $state<string | null>(null);
@@ -46,13 +47,14 @@
   });
 
   async function handleUninstallSchedule() {
-    if (
-      !confirm(
+    const ok = await confirmDialog({
+      title: 'Remove backup schedule?',
+      message:
         'Remove the daily backup schedule? Backups will stop running automatically. Existing backups are kept.',
-      )
-    ) {
-      return;
-    }
+      confirmLabel: 'Remove schedule',
+      danger: true,
+    });
+    if (!ok) return;
     message = null;
     busy = 'schedule';
     try {

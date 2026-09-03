@@ -1,6 +1,7 @@
 <script lang="ts">
   import { settings } from '../../../stores/settings.svelte';
   import { reinitProviders } from '../../../api/chat';
+  import { confirmDialog } from '../../../stores/confirm.svelte';
 </script>
 
 <details class="advanced-section">
@@ -12,18 +13,21 @@
         checked={settings.state.allow_public_endpoint}
         onchange={async (e) => {
           const input = e.target as HTMLInputElement;
-          if (
-            input.checked &&
-            !confirm(
-              'Allow public AI / STT endpoints?\n\n' +
+          if (input.checked) {
+            const ok = await confirmDialog({
+              title: 'Allow public AI / STT endpoints?',
+              message:
                 'By default FerriScribe blocks public-internet AI or STT hosts to keep PHI on-device. ' +
                 'Enabling this lets transcripts and AI requests leave this machine to servers on the public internet.\n\n' +
                 "Continue only if your clinic's privacy policy permits it.",
-            )
-          ) {
-            // Refused: restore the checkbox — the setting was never written.
-            input.checked = false;
-            return;
+              confirmLabel: 'Allow',
+              danger: true,
+            });
+            if (!ok) {
+              // Refused: restore the checkbox — the setting was never written.
+              input.checked = false;
+              return;
+            }
           }
           await settings.updateField('allow_public_endpoint', input.checked);
           try { await reinitProviders(); } catch (err) { console.error('Failed to reinit providers after allow_public change:', err); }

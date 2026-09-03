@@ -80,6 +80,7 @@ describe('ModelList', () => {
       },
     });
     expect(screen.getByText('50%')).toBeTruthy();
+    expect(screen.getByRole('progressbar', { name: 'Downloading test-model' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Download' })).toBeNull();
   });
 

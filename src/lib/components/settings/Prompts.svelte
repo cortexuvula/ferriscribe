@@ -3,6 +3,7 @@
   import { settings } from '../../stores/settings.svelte';
   import { getDefaultPrompt, type DocType } from '../../api/prompts';
   import { toasts } from '../../stores/toasts.svelte';
+  import { confirmDialog } from '../../stores/confirm.svelte';
   import { formatError } from '../../types/errors';
 
   type PromptInfo = {
@@ -114,19 +115,24 @@
   /**
    * Guard for leaving the editor with unsaved changes — shared by the
    * prompt-type switcher here and by the settings-dialog close path
-   * (SettingsContent.confirmDiscardEdits → SettingsDialog). Returns true
+   * (SettingsContent.confirmDiscardEdits → SettingsDialog). Resolves true
    * when it is safe to leave (nothing dirty, a save in flight, or the user
    * confirmed the discard).
    */
-  export function confirmDiscard(): boolean {
+  export async function confirmDiscard(): Promise<boolean> {
     if (promptDirty && promptSaveStatus !== 'saving') {
-      return confirm('You have unsaved prompt changes. Discard them?');
+      return confirmDialog({
+        title: 'Discard prompt changes?',
+        message: 'You have unsaved changes to this prompt. Discard them?',
+        confirmLabel: 'Discard',
+        danger: true,
+      });
     }
     return true;
   }
 
   async function handlePromptSelect(docType: DocType) {
-    if (!confirmDiscard()) return;
+    if (!(await confirmDiscard())) return;
     activePromptKey = docType;
   }
 
@@ -159,7 +165,17 @@
   async function handlePromptReset() {
     const info = PROMPT_TYPES.find((p) => p.key === activePromptKey)!;
     const gen = promptLoadGen;
-    if (promptIsCustom && !confirm('Clear the custom prompt and restore the default?')) return;
+    if (
+      promptIsCustom &&
+      !(await confirmDialog({
+        title: 'Reset prompt?',
+        message: 'Clear the custom prompt and restore the default?',
+        confirmLabel: 'Reset',
+        danger: true,
+      }))
+    ) {
+      return;
+    }
     try {
       await settings.updateField(info.configField, null);
       const defaultText = await getDefaultPrompt(info.key);
@@ -193,6 +209,7 @@
         <button
           class="prompts-nav-item"
           class:active={activePromptKey === pt.key}
+          aria-current={activePromptKey === pt.key ? 'true' : undefined}
           onclick={() => handlePromptSelect(pt.key)}
         >
           {pt.label}

@@ -123,12 +123,16 @@ describe('ProviderServerSection', () => {
     expect(mockReinit).toHaveBeenCalled();
   });
 
-  it('rejects out-of-range ports without persisting', async () => {
+  it('rejects out-of-range ports without persisting, and says why', async () => {
     render(ProviderServerSection, { props: props() });
     const port = screen.getByLabelText('Port');
     await fireEvent.change(port, { target: { value: '99999' } });
     expect(mockUpdateField).not.toHaveBeenCalled();
     expect(mockReinit).not.toHaveBeenCalled();
+    // The failure is visible AND the field reverts to the persisted value
+    // (an unsaved invalid port must not linger in the input).
+    expect(screen.getByRole('alert').textContent).toBe('Port must be between 1 and 65535.');
+    expect((port as HTMLInputElement).value).toBe('8000');
   });
 
   it('warns on public-internet hosts', () => {

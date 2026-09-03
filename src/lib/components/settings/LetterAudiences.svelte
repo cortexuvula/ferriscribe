@@ -3,6 +3,7 @@
   import { letterAudiences } from '../../stores/letterAudiences.svelte';
   import type { LetterAudience } from '../../types/letterAudience';
   import Callout from './Callout.svelte';
+  import { confirmDialog } from '../../stores/confirm.svelte';
 
   type EditingAudience = {
     id: string;
@@ -76,7 +77,13 @@
 
   async function handleDelete(audience: LetterAudience) {
     if (audience.is_builtin) return;
-    if (!confirm(`Delete audience "${audience.name}"? This cannot be undone.`)) return;
+    const ok = await confirmDialog({
+      title: 'Delete audience?',
+      message: `Delete "${audience.name}"? This cannot be undone.`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await letterAudiences.delete(audience.id);
     } catch (e) {
@@ -85,7 +92,13 @@
   }
 
   function viewPrompt(audience: LetterAudience) {
-    alert(audience.system_prompt);
+    // Informational styled dialog (replaces the old native alert(), which
+    // couldn't scroll long prompts).
+    void confirmDialog({
+      title: `Prompt — ${audience.name}`,
+      message: audience.system_prompt,
+      confirmOnly: true,
+    });
   }
 </script>
 

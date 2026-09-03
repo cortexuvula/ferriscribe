@@ -13,6 +13,10 @@
   const test = useTestConnection();
   let sttRemoteApiKey = $state('');
 
+  /** Inline port-validation message — an invalid port is never persisted,
+   *  so the field is reverted and told why instead of silently lying. */
+  let portError = $state('');
+
   onMount(() => {
     getApiKey('stt_remote_api_key').then((key) => {
       if (key) sttRemoteApiKey = key;
@@ -50,15 +54,24 @@
     min="1"
     max="65535"
     onchange={async (e) => {
-      const value = parseInt((e.target as HTMLInputElement).value, 10);
+      const input = e.target as HTMLInputElement;
+      const value = parseInt(input.value, 10);
       if (value >= 1 && value <= 65535) {
+        portError = '';
         await settings.updateField('stt_remote_port', value);
         test.reset();
         await reinitProviders();
+      } else {
+        portError = 'Port must be between 1 and 65535.';
+        input.value = String(settings.state.stt_remote_port ?? 8080);
       }
     }}
     class="text-input port-input"
+    aria-invalid={portError ? 'true' : undefined}
   />
+  {#if portError}
+    <span class="field-error" role="alert">{portError}</span>
+  {/if}
 </div>
 <div class="form-group">
   <label for="stt-remote-model" class="form-label">Model</label>
@@ -147,6 +160,11 @@
     max-width: 120px;
   }
 
+  .field-error {
+    font-size: 11px;
+    color: var(--danger);
+  }
+
   .btn-test-connection {
     align-self: flex-start;
     padding: 6px 14px;
@@ -177,7 +195,7 @@
   }
 
   .test-success {
-    color: #22c55e;
+    color: var(--success);
   }
 
   .test-error {

@@ -11,6 +11,7 @@
   import SttRemoteSection from './SttRemoteSection.svelte';
   import DiarizationModelsSection from './DiarizationModelsSection.svelte';
   import { toasts } from '../../stores/toasts.svelte';
+  import { confirmDialog } from '../../stores/confirm.svelte';
   import { formatError } from '../../types/errors';
 
   let audioDevices = $state<AudioDevice[]>([]);
@@ -83,9 +84,13 @@
     const diarizationNote = isDiarization
       ? '\n\nBoth diarization models are required for speaker labels — transcripts will lose speaker labels until it is re-downloaded.'
       : '';
-    if (!confirm(`Delete ${modelId}${size} from disk? You can re-download it later.${diarizationNote}`)) {
-      return;
-    }
+    const ok = await confirmDialog({
+      title: 'Delete model?',
+      message: `Delete ${modelId}${size} from disk? You can re-download it later.${diarizationNote}`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await deleteModel(modelId);
       toasts.success(`Deleted ${modelId}`);
@@ -152,6 +157,14 @@
     const value = parseInt((e.target as HTMLSelectElement).value, 10);
     await settings.updateField('sample_rate', value);
   }
+
+  /** Live drag value — max speakers persists on release, not per tick
+   *  (every oninput tick would queue a full-config IPC save). */
+  let maxSpeakersDraft = $state(settings.state.max_speakers ?? 3);
+
+  async function handleMaxSpeakersCommit() {
+    await settings.updateField('max_speakers', maxSpeakersDraft);
+  }
 </script>
 
 <section class="settings-section">
@@ -214,18 +227,18 @@
   <div class="form-group">
     <label for="max-speakers" class="form-label">
       Max speakers
-      <span class="badge-value">{settings.state.max_speakers ?? 'Auto'}</span>
+      <span class="badge-value">{maxSpeakersDraft}</span>
     </label>
     <input
       id="max-speakers"
       type="range"
       min={1}
       max={8}
-      value={settings.state.max_speakers ?? 3}
+      value={maxSpeakersDraft}
       oninput={(e: Event) => {
-        const value = parseInt((e.target as HTMLInputElement).value, 10);
-        settings.updateField('max_speakers', value);
+        maxSpeakersDraft = parseInt((e.target as HTMLInputElement).value, 10);
       }}
+      onchange={handleMaxSpeakersCommit}
     />
     <span class="form-hint">Limits the number of speaker clusters. Set to the expected number of people in the conversation (typically 2–3).</span>
   </div>

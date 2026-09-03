@@ -28,6 +28,7 @@
   import { audio } from './lib/stores/audio.svelte';
   import { toasts } from './lib/stores/toasts.svelte';
   import ToastContainer from './lib/components/ToastContainer.svelte';
+  import ConfirmHost from './lib/components/ConfirmHost.svelte';
   import RsvpReader from './lib/components/RsvpReader.svelte';
   import RsvpSectionPicker from './lib/components/RsvpSectionPicker.svelte';
   import { rsvp } from './lib/stores/rsvp.svelte';
@@ -423,6 +424,7 @@
   </footer>
 
   <ToastContainer onNavigate={navigateToSoap} />
+  <ConfirmHost />
   </div><!-- /.app-shell-grid -->
 </div>
 

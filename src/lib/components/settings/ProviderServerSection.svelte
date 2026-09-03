@@ -34,6 +34,10 @@
     idPrefix: string;
     /** Section heading, e.g. "oMLX Server". */
     title: string;
+    /** Hide the built-in heading (callers that embed this section under
+     *  their own header, e.g. the collapsible provider <details> in
+     *  Models.svelte, own the title markup). */
+    hideTitle?: boolean;
     /** Intro hint rendered under the heading (optional). */
     hint?: Snippet;
     /** AppConfig field names this section edits. */
@@ -54,6 +58,7 @@
   let {
     idPrefix,
     title,
+    hideTitle = false,
     hint,
     hostField,
     portField,
@@ -90,6 +95,10 @@
   const endpointOk = $derived(isLocalOrAllowed(host ?? '', settings.state.allow_public_endpoint));
   const endpointKind = $derived(classifyEndpoint(host ?? ''));
 
+  /** Inline port-validation message — an invalid port is never persisted,
+   *  so the field is reverted and told why instead of silently lying. */
+  let portError = $state('');
+
   async function onHostChange(e: Event) {
     await settings.updateField(hostField, (e.target as HTMLInputElement).value);
     test.reset();
@@ -99,9 +108,13 @@
   async function onPortChange(e: Event) {
     const value = parseInt((e.target as HTMLInputElement).value, 10);
     if (value >= 1 && value <= 65535) {
+      portError = '';
       await settings.updateField(portField, value);
       test.reset();
       await reinitProviders();
+    } else {
+      portError = 'Port must be between 1 and 65535.';
+      (e.target as HTMLInputElement).value = String(port);
     }
   }
 
@@ -141,7 +154,9 @@
 </script>
 
 <div class="form-group-divider"></div>
-<h4 class="subsection-title">{title}</h4>
+{#if !hideTitle}
+  <h4 class="subsection-title">{title}</h4>
+{/if}
 {#if hint}
   <p class="subsection-hint">{@render hint()}</p>
 {/if}
@@ -175,7 +190,11 @@
     max="65535"
     onchange={onPortChange}
     class="text-input port-input"
+    aria-invalid={portError ? 'true' : undefined}
   />
+  {#if portError}
+    <span class="field-error" role="alert">{portError}</span>
+  {/if}
 </div>
 
 <div class="form-group">
@@ -251,6 +270,11 @@
     max-width: 120px;
   }
 
+  .field-error {
+    font-size: 11px;
+    color: var(--danger);
+  }
+
   .form-group-divider {
     border-top: 1px solid var(--border);
     margin: 20px 0 16px;
@@ -310,7 +334,7 @@
   }
 
   .test-result.test-success {
-    color: #22c55e;
+    color: var(--success);
   }
 
   .test-result.test-error {

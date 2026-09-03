@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
   import { settings } from '../../../stores/settings.svelte';
+  import { confirmDialog } from '../../../stores/confirm.svelte';
   import { formatError } from '../../../types/errors';
   import { usePairing, friendlyName, type PairedConnection } from '../../../composables/usePairing.svelte';
 
@@ -22,9 +23,13 @@
   const pairing = usePairing(loadPaired);
 
   async function unpair() {
-    if (!confirm('Unpair from this office server? Content sync with the server will stop.')) {
-      return;
-    }
+    const ok = await confirmDialog({
+      title: 'Unpair from office server?',
+      message: 'Unpair from this office server? Content sync with the server will stop.',
+      confirmLabel: 'Unpair',
+      danger: true,
+    });
+    if (!ok) return;
     unpairBusy = true;
     pairing.error = null;
     try {
@@ -125,7 +130,13 @@
 
     <div class="paste">
       <h4>Or paste a pairing URL</h4>
-      <input bind:value={pairing.pasteUrl} placeholder="ferriscribe://pair?..." />
+      <input
+        bind:value={pairing.pasteUrl}
+        placeholder="ferriscribe://pair?..."
+        onkeydown={(e) => {
+          if (e.key === 'Enter' && !pairing.busy) void pairing.pairFromUrl();
+        }}
+      />
       <button class="btn btn-primary" disabled={pairing.busy} onclick={() => pairing.pairFromUrl()}>
         {pairing.busy ? 'Pairing…' : 'Pair'}
       </button>

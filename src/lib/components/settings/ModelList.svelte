@@ -58,13 +58,26 @@
             Delete
           </button>
         {:else if downloadingModels.has(model.id)}
-          <span class="download-progress">
+          <div class="download-progress">
             {#if downloadProgress[model.id]}
-              {Math.round((downloadProgress[model.id].downloaded / (downloadProgress[model.id].total || 1)) * 100)}%
+              {@const pct = Math.round(
+                (downloadProgress[model.id].downloaded / (downloadProgress[model.id].total || 1)) * 100,
+              )}
+              <div
+                class="progress-track"
+                role="progressbar"
+                aria-label={`Downloading ${model.id}`}
+                aria-valuenow={pct}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <div class="progress-fill" style={`width: ${pct}%`}></div>
+              </div>
+              <span class="progress-pct">{pct}%</span>
             {:else}
-              Starting...
+              <span class="progress-pct">Starting...</span>
             {/if}
-          </span>
+          </div>
         {:else}
           <button
             class="btn-download-model"
@@ -140,9 +153,33 @@
   }
 
   .download-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 120px;
+  }
+
+  .progress-track {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background-color: var(--bg-hover);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background-color: var(--accent);
+    transition: width 0.2s ease;
+  }
+
+  .progress-pct {
     font-size: 12px;
     font-weight: 500;
     color: var(--accent);
+    min-width: 3ch;
+    text-align: right;
   }
 
   .btn-download-model {
