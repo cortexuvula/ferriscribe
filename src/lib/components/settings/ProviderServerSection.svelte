@@ -2,8 +2,9 @@
   /**
    * Shared "provider server" subsection of Settings → Models: host input
    * with the public-endpoint PHI warning, port input with 1–65535
-   * validation, a Test Connection button (useTestConnection state machine),
-   * and the disable-thinking toggle. One component instead of three
+   * validation, an optional API key (persisted to the keychain slot),
+   * a Test Connection button (useTestConnection state machine), and the
+   * disable-thinking toggle. One component instead of three
    * hand-maintained copies (LM Studio / Ollama / oMLX).
    *
    * All edits persist via `settings.updateField` and re-init providers so
@@ -12,12 +13,14 @@
    * without an {@html} XSS surface.
    */
   import type { Snippet } from 'svelte';
-  import { getApiKey } from '../../api/settings';
+  import { onMount } from 'svelte';
+  import { getApiKey, setApiKey } from '../../api/settings';
   import { reinitProviders } from '../../api/chat';
   import { settings } from '../../stores/settings.svelte';
   import type { AppConfig } from '../../types';
   import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
   import { useTestConnection } from '../../composables/useTestConnection.svelte';
+  import Callout from './Callout.svelte';
 
   type HostField = Extract<keyof AppConfig, `${'lmstudio' | 'ollama' | 'omlx'}_host`>;
   type PortField = Extract<keyof AppConfig, `${'lmstudio' | 'ollama' | 'omlx'}_port`>;
@@ -63,6 +66,21 @@
 
   const test = useTestConnection();
 
+  /** Draft key for the optional bearer-token field. Pre-filled from the
+   *  keychain on mount; persisted only when "Save key" is clicked (mirrors
+   *  SttRemoteSection's flow — the keychain write must never be implicit). */
+  let apiKey = $state('');
+
+  onMount(() => {
+    getApiKey(apiKeySlot)
+      .then((key) => {
+        if (key) apiKey = key;
+      })
+      .catch(() => {
+        // Keychain unavailable/empty — leave the field blank.
+      });
+  });
+
   const host = $derived(settings.state[hostField]);
   const port = $derived(settings.state[portField] ?? defaultPort);
   const thinkingDisabled = $derived(
@@ -89,13 +107,25 @@
 
   async function onTestConnection() {
     await test.run(async () => {
-      let apiKey: string | null = null;
-      try {
-        apiKey = await getApiKey(apiKeySlot);
-      } catch {
-        // Keychain unavailable — try without auth.
+      // Prefer the key currently in the field: a just-typed (but unsaved)
+      // key should be what gets verified. Fall back to the stored one.
+      let key: string | null = apiKey || null;
+      if (!key) {
+        try {
+          key = await getApiKey(apiKeySlot);
+        } catch {
+          // Keychain unavailable — try without auth.
+        }
       }
-      return testConnection(host || 'localhost', port, apiKey);
+      return testConnection(host || 'localhost', port, key);
+    });
+  }
+
+  async function onSaveKey() {
+    await test.run(async () => {
+      await setApiKey(apiKeySlot, apiKey);
+      await reinitProviders();
+      return 'Key saved.';
     });
   }
 
@@ -127,10 +157,10 @@
     class="text-input"
   />
   {#if !endpointOk}
-    <div class="endpoint-warning" role="alert">
+    <Callout kind="warning">
       ⚠ This is a public-internet address ({endpointKind}). PHI may leave your device.
       Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
-    </div>
+    </Callout>
   {/if}
 </div>
 
@@ -146,6 +176,21 @@
     onchange={onPortChange}
     class="text-input port-input"
   />
+</div>
+
+<div class="form-group">
+  <label for="{idPrefix}-api-key" class="form-label">API key (optional)</label>
+  <input
+    id="{idPrefix}-api-key"
+    type="password"
+    bind:value={apiKey}
+    autocomplete="off"
+    class="text-input"
+  />
+  <button class="btn-test-connection" type="button" onclick={onSaveKey}>
+    Save key
+  </button>
+  <span class="form-hint">Sent as a Bearer token to the server. Leave blank and click Save key to clear.</span>
 </div>
 
 <div class="form-group">
@@ -230,16 +275,6 @@
     background-color: var(--bg-tertiary, #374151);
     padding: 1px 5px;
     border-radius: 3px;
-  }
-
-  .endpoint-warning {
-    color: #b45309;
-    background: #fef3c7;
-    border: 1px solid #fbbf24;
-    border-radius: 4px;
-    padding: 6px 10px;
-    margin-top: 4px;
-    font-size: 0.85rem;
   }
 
   .btn-test-connection {

@@ -97,6 +97,13 @@
   }
 
   async function stop() {
+    if (
+      !confirm(
+        "Stop sharing? Paired clinicians will lose access to this server's AI models until it is restarted.",
+      )
+    ) {
+      return;
+    }
     await invoke('stop_sharing');
     onstopped?.();
   }
@@ -235,9 +242,9 @@
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 0.5rem;
     padding: 0.75rem;
-    border: 1px solid var(--border, #d0d0d0);
+    border: 1px solid var(--border);
     border-radius: 0.5rem;
-    background: var(--surface-2, #f7f7f7);
+    background: var(--bg-card);
   }
   .status-row {
     display: flex;
@@ -253,45 +260,45 @@
     justify-content: center;
     border-radius: 50%;
     font-weight: 700;
-    color: white;
+    color: var(--text-inverse);
   }
-  .status-row.ok .status-icon { background: #16a34a; }
-  .status-row.fail .status-icon { background: #c0392b; }
+  .status-row.ok .status-icon { background: var(--success); }
+  .status-row.fail .status-icon { background: var(--danger); }
   .status-label { font-weight: 600; }
   .status-state { color: var(--text-muted, #888); margin-left: auto; }
-  .status-row.fail .status-state { color: #c0392b; }
+  .status-row.fail .status-state { color: var(--danger); }
 
   .btn {
-    border: 1px solid var(--border, #c8c8c8);
-    background: var(--surface-1, #fff);
-    color: inherit;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
     padding: 0.4rem 0.9rem;
     border-radius: 0.375rem;
     font-weight: 500;
-    transition: background 0.12s ease, border-color 0.12s ease;
+    transition: background-color 0.12s ease, border-color 0.12s ease;
   }
   .btn:hover:not(:disabled) {
-    background: var(--surface-2, #f0f0f0);
-    border-color: var(--border-strong, #a0a0a0);
+    background: var(--bg-hover);
+    border-color: var(--accent);
   }
   .btn-revoke { padding: 0.2rem 0.6rem; font-size: 0.85rem; }
   .btn-danger {
     margin-top: 1rem;
-    border-color: #c0392b;
-    color: #c0392b;
+    border-color: var(--danger);
+    color: var(--danger);
   }
   .btn-danger:hover:not(:disabled) {
-    background: #c0392b;
-    color: white;
+    background: var(--danger);
+    color: var(--text-inverse);
   }
   .client-label { flex: 1; }
   .edit-input {
     flex: 1;
     padding: 0.2rem 0.45rem;
-    border: 1px solid var(--border, #c8c8c8);
+    border: 1px solid var(--border);
     border-radius: 0.3rem;
-    background: var(--surface-1, transparent);
-    color: inherit;
+    background: var(--bg-input);
+    color: var(--text-primary);
     font: inherit;
   }
   .btn-icon {
@@ -300,7 +307,7 @@
     line-height: 1;
   }
   .edit-error {
-    color: #c0392b;
+    color: var(--danger);
     font-size: 0.85rem;
     padding-left: 0.25rem;
   }

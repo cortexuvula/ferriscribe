@@ -13,6 +13,23 @@
 
   type Section = SettingsSection;
   let activeSection = $state<Section>('general');
+  // Instance of the Prompts pane — the only settings pane with unsaved
+  // draft state — so section switches away from it can run the discard
+  // guard. Null whenever the pane isn't mounted.
+  let prompts: Prompts | null = $state(null);
+
+  /**
+   * Guard for leaving settings with unsaved draft edits (currently only the
+   * Prompts editor). Called by the section nav here and by the settings
+   * dialog's close path (×, Escape, backdrop). Returns true when it is safe
+   * to leave.
+   */
+  export function confirmDiscardEdits(): boolean {
+    if (activeSection === 'prompts') {
+      return prompts?.confirmDiscard() ?? true;
+    }
+    return true;
+  }
 
   // Consume navigation requests from settingsNav store (e.g. from the
   // EndpointOfflineDialog "Open Settings" button). The write-back
@@ -44,7 +61,12 @@
       <button
         class="nav-item"
         class:active={activeSection === item.id}
-        onclick={() => (activeSection = item.id)}
+        aria-current={activeSection === item.id ? 'true' : undefined}
+        onclick={() => {
+          if (activeSection !== item.id && confirmDiscardEdits()) {
+            activeSection = item.id;
+          }
+        }}
       >
         {item.label}
       </button>
@@ -56,7 +78,7 @@
       <General />
 
     {:else if activeSection === 'prompts'}
-      <Prompts />
+      <Prompts bind:this={prompts} />
 
     {:else if activeSection === 'models'}
       <Models />

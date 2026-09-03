@@ -12,6 +12,7 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { formatError } from '../../types/errors';
   import BackupWizard from './BackupWizard.svelte';
+  import Callout from './Callout.svelte';
 
   let status = $state<BackupStatus | null>(null);
   let statusError = $state<string | null>(null);
@@ -45,6 +46,13 @@
   });
 
   async function handleUninstallSchedule() {
+    if (
+      !confirm(
+        'Remove the daily backup schedule? Backups will stop running automatically. Existing backups are kept.',
+      )
+    ) {
+      return;
+    }
     message = null;
     busy = 'schedule';
     try {
@@ -116,13 +124,17 @@
   </p>
 
   {#if statusError}
-    <div class="endpoint-warning" role="alert">⚠ {statusError}</div>
+    <div class="callout-slot">
+      <Callout kind="warning">⚠ {statusError}</Callout>
+    </div>
   {/if}
 
   {#if status && status.everRan && !isProtected(status)}
-    <div class="endpoint-warning" role="alert">
-      ⚠ Backups currently protect this Mac only. Connect a backup drive or server to be safe
-      against disk failure.
+    <div class="callout-slot">
+      <Callout kind="warning">
+        ⚠ Backups currently protect this Mac only. Connect a backup drive or server to be safe
+        against disk failure.
+      </Callout>
     </div>
   {/if}
 
@@ -234,5 +246,5 @@
   }
   .btn-secondary:disabled { opacity: 0.5; cursor: default; }
   .btn-secondary.danger { border-color: var(--danger, #ef4444); color: var(--danger, #ef4444); }
-  .endpoint-warning { color: #b45309; background: #fef3c7; border: 1px solid #fbbf24; border-radius: 4px; padding: 6px 10px; margin-bottom: 10px; font-size: 0.85rem; }
+  .callout-slot { margin-bottom: 10px; }
 </style>

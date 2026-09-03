@@ -4,6 +4,7 @@
   import CandidatesList from './training_corpus/CandidatesList.svelte';
   import PromotedList from './training_corpus/PromotedList.svelte';
   import RejectedList from './training_corpus/RejectedList.svelte';
+  import Callout from './Callout.svelte';
   import { formatError } from '../../types/errors';
 
   type CorpusCounts = {
@@ -66,7 +67,7 @@
   </div>
 
   {#if error}
-    <div class="tc-error">{error}</div>
+    <Callout kind="danger">{error}</Callout>
   {/if}
 
   <div class="tc-view">
@@ -83,17 +84,16 @@
 <style>
   .training-corpus { display: flex; flex-direction: column; gap: 1rem; padding: 1rem; }
   .tc-header h2 { margin: 0 0 0.25rem 0; }
-  .tc-summary { color: var(--muted-foreground, #888); margin: 0; }
-  .tc-tabs { display: flex; gap: 0.5rem; border-bottom: 1px solid var(--border, #ddd); }
+  .tc-summary { color: var(--text-muted); margin: 0; }
+  .tc-tabs { display: flex; gap: 0.5rem; border-bottom: 1px solid var(--border); }
   .tc-tabs button {
     background: none;
     border: none;
     padding: 0.5rem 1rem;
     cursor: pointer;
     border-bottom: 2px solid transparent;
-    color: var(--muted-foreground, #888);
+    color: var(--text-muted);
   }
-  .tc-tabs button.active { color: var(--foreground, #222); border-bottom-color: var(--accent, #0066cc); }
-  .tc-error { background: #fee; border: 1px solid #fbb; padding: 0.5rem; border-radius: 4px; }
+  .tc-tabs button.active { color: var(--text-primary); border-bottom-color: var(--accent); }
   .tc-view { flex: 1; overflow: auto; }
 </style>

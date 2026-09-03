@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { letterAudiences } from '../../stores/letterAudiences.svelte';
   import type { LetterAudience } from '../../types/letterAudience';
+  import Callout from './Callout.svelte';
 
   type EditingAudience = {
     id: string;
@@ -105,7 +106,7 @@
         <h4 class="la-form-title">{editing.id ? 'Edit Audience' : 'Add Custom Audience'}</h4>
 
         {#if error}
-          <div class="la-errors">{error}</div>
+          <Callout kind="danger">{error}</Callout>
         {/if}
 
         <div class="form-group">
@@ -162,7 +163,7 @@
     {/if}
 
     {#if error && !editing}
-      <div class="la-errors">{error}</div>
+      <Callout kind="danger">{error}</Callout>
     {/if}
 
     <div class="la-list">
@@ -224,14 +225,6 @@
     padding: 2rem;
     text-align: center;
     color: var(--text-secondary);
-  }
-
-  .la-errors {
-    background: #fee;
-    border: 1px solid #fbb;
-    padding: 0.5rem;
-    border-radius: 4px;
-    font-size: 13px;
   }
 
   .la-list {

@@ -19,7 +19,8 @@ const mockState = vi.hoisted(() => ({
 
 const mockUpdateField = vi.hoisted(() => vi.fn(async () => {}));
 const mockReinit = vi.hoisted(() => vi.fn(async () => {}));
-const mockGetApiKey = vi.hoisted(() => vi.fn(async () => null));
+const mockGetApiKey = vi.hoisted(() => vi.fn(async (): Promise<string | null> => null));
+const mockSetApiKey = vi.hoisted(() => vi.fn(async () => {}));
 const mockTestConnection = vi.hoisted(() => vi.fn(async () => '3 models visible'));
 
 vi.mock('../../stores/settings.svelte', () => ({
@@ -32,6 +33,7 @@ vi.mock('../../api/chat', () => ({
 
 vi.mock('../../api/settings', () => ({
   getApiKey: mockGetApiKey,
+  setApiKey: mockSetApiKey,
 }));
 
 function props() {
@@ -76,6 +78,34 @@ describe('ProviderServerSection', () => {
     await waitFor(() => expect(screen.getByText('✓ 3 models visible')).toBeTruthy());
     expect(mockGetApiKey).toHaveBeenCalledWith('omlx_api_key');
     expect(mockTestConnection).toHaveBeenCalledWith('localhost', 8000, null);
+  });
+
+  it('renders an optional API key field pre-filled from the keychain', async () => {
+    mockGetApiKey.mockResolvedValueOnce('secret-key');
+    render(ProviderServerSection, { props: props() });
+    await waitFor(() =>
+      expect((screen.getByLabelText('API key (optional)') as HTMLInputElement).value).toBe('secret-key'),
+    );
+  });
+
+  it('saves the typed key to the keychain slot and re-inits providers', async () => {
+    render(ProviderServerSection, { props: props() });
+    const keyField = screen.getByLabelText('API key (optional)');
+    await fireEvent.input(keyField, { target: { value: 'new-key' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save key' }));
+    await waitFor(() => expect(screen.getByText('✓ Key saved.')).toBeTruthy());
+    expect(mockSetApiKey).toHaveBeenCalledWith('omlx_api_key', 'new-key');
+    expect(mockReinit).toHaveBeenCalled();
+  });
+
+  it('tests with the key typed in the field over the stored one', async () => {
+    render(ProviderServerSection, { props: props() });
+    const keyField = screen.getByLabelText('API key (optional)');
+    await fireEvent.input(keyField, { target: { value: 'typed-key' } });
+    mockGetApiKey.mockClear(); // drop the onMount prefill call
+    await fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }));
+    await waitFor(() => expect(mockTestConnection).toHaveBeenCalledWith('localhost', 8000, 'typed-key'));
+    expect(mockGetApiKey).not.toHaveBeenCalled();
   });
 
   it('shows the error message when the test rejects', async () => {

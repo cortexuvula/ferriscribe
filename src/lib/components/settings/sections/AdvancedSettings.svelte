@@ -11,7 +11,21 @@
         type="checkbox"
         checked={settings.state.allow_public_endpoint}
         onchange={async (e) => {
-          await settings.updateField('allow_public_endpoint', (e.target as HTMLInputElement).checked);
+          const input = e.target as HTMLInputElement;
+          if (
+            input.checked &&
+            !confirm(
+              'Allow public AI / STT endpoints?\n\n' +
+                'By default FerriScribe blocks public-internet AI or STT hosts to keep PHI on-device. ' +
+                'Enabling this lets transcripts and AI requests leave this machine to servers on the public internet.\n\n' +
+                "Continue only if your clinic's privacy policy permits it.",
+            )
+          ) {
+            // Refused: restore the checkbox — the setting was never written.
+            input.checked = false;
+            return;
+          }
+          await settings.updateField('allow_public_endpoint', input.checked);
           try { await reinitProviders(); } catch (err) { console.error('Failed to reinit providers after allow_public change:', err); }
         }}
       />

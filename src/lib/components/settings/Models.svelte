@@ -7,6 +7,7 @@
   import { officeServedHint, providerStartHint } from '../../utils/providerHints';
   import { formatError } from '../../types/errors';
   import ProviderServerSection from './ProviderServerSection.svelte';
+  import Callout from './Callout.svelte';
 
   let availableModels = $state<ModelInfo[]>([]);
   let modelsLoading = $state(false);
@@ -136,14 +137,14 @@
       </button>
     </div>
     {#if modelsError && !modelsLoading}
-      <div class="endpoint-warning model-list-error" role="alert">
+      <Callout kind="warning">
         <p class="model-list-error-message">{modelsError}</p>
         <p class="model-list-error-hint">
           {isPaired
             ? officeServedHint(settings.state.ai_provider)
             : providerStartHint(settings.state.ai_provider)}
         </p>
-      </div>
+      </Callout>
     {/if}
   </div>
 
@@ -329,22 +330,12 @@
     color: var(--text-muted);
   }
 
-  .endpoint-warning {
-    color: #b45309;
-    background: #fef3c7;
-    border: 1px solid #fbbf24;
-    border-radius: 4px;
-    padding: 6px 10px;
-    margin-top: 4px;
-    font-size: 0.85rem;
-  }
-
-  .model-list-error p {
+  .model-list-error-message {
     margin: 0;
   }
 
-  .model-list-error p + p {
-    margin-top: 4px;
+  .model-list-error-hint {
+    margin: 4px 0 0;
     font-weight: 600;
   }
 

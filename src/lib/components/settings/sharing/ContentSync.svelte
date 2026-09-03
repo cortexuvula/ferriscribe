@@ -135,7 +135,7 @@
           between this machine and the server over your encrypted Tailscale
           connection. Background sync runs every 5 minutes.
         </p>
-        <p class="hint" style="color: var(--color-warning, #e8a835);">
+        <p class="hint hint-warn">
           Requires Tailscale on both this machine and the server.
         </p>
       </span>
@@ -174,6 +174,7 @@
   .content-sync-section { margin-top: 1rem; }
   .form-row { display: flex; gap: 10px; align-items: flex-start; }
   .hint { color: var(--text-muted, #888); font-size: 0.8rem; margin: 4px 0 0 0; }
+  .hint-warn { color: var(--warning); }
 
   .sync-controls {
     display: flex;

@@ -22,6 +22,9 @@
   const pairing = usePairing(loadPaired);
 
   async function unpair() {
+    if (!confirm('Unpair from this office server? Content sync with the server will stop.')) {
+      return;
+    }
     unpairBusy = true;
     pairing.error = null;
     try {
@@ -133,7 +136,7 @@
 </section>
 
 <style>
-  .error { color: #c00; margin-top: 0.5rem; }
+  .error { color: var(--danger); margin-top: 0.5rem; }
   .hint { color: var(--text-muted, #888); }
 
   .servers { list-style: none; padding: 0; margin: 0 0 0.5rem 0; }
@@ -143,7 +146,7 @@
     justify-content: space-between;
     gap: 1rem;
     padding: 0.6rem 0;
-    border-bottom: 1px solid var(--border, #ddd);
+    border-bottom: 1px solid var(--border);
   }
   .server-info { display: flex; flex-direction: column; gap: 0.15rem; }
   .server-name { font-size: 1rem; }
@@ -162,26 +165,26 @@
   .label-row label { font-weight: 600; font-size: 0.95rem; }
   .label-row input {
     padding: 0.4rem 0.6rem;
-    border: 1px solid var(--border, #c8c8c8);
+    border: 1px solid var(--border);
     border-radius: 0.375rem;
-    background: var(--surface-1, transparent);
-    color: inherit;
+    background: var(--bg-input);
+    color: var(--text-primary);
   }
 
   .paste { margin-top: 1.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
   .paste input {
     padding: 0.4rem 0.6rem;
-    border: 1px solid var(--border, #c8c8c8);
+    border: 1px solid var(--border);
     border-radius: 0.375rem;
-    background: var(--surface-1, transparent);
-    color: inherit;
+    background: var(--bg-input);
+    color: var(--text-primary);
   }
 
   .paired-status {
     padding: 1rem;
-    border: 1px solid var(--border, #d0d0d0);
+    border: 1px solid var(--border);
     border-radius: 0.5rem;
-    background: var(--surface-2, #f7f7f7);
+    background: var(--bg-card);
   }
   .status-line {
     display: flex;
@@ -197,8 +200,8 @@
     align-items: center;
     justify-content: center;
     border-radius: 50%;
-    background: #16a34a;
-    color: white;
+    background: var(--success);
+    color: var(--text-inverse);
     font-weight: 700;
   }
   .paired-details {
@@ -215,34 +218,34 @@
   }
 
   .btn {
-    border: 1px solid var(--border, #c8c8c8);
-    background: var(--surface-1, #fff);
-    color: inherit;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
     padding: 0.4rem 0.9rem;
     border-radius: 0.375rem;
     font-weight: 500;
     cursor: pointer;
-    transition: background 0.12s ease, border-color 0.12s ease;
+    transition: background-color 0.12s ease, border-color 0.12s ease;
   }
   .btn:hover:not(:disabled) {
-    background: var(--surface-2, #f0f0f0);
-    border-color: var(--border-strong, #a0a0a0);
+    background: var(--bg-hover);
+    border-color: var(--accent);
   }
   .btn-primary {
-    background: #2563eb;
-    border-color: #2563eb;
-    color: white;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--text-inverse);
   }
   .btn-primary:hover:not(:disabled) {
-    background: #1d4ed8;
-    border-color: #1d4ed8;
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
   }
   .btn-danger {
-    border-color: #c0392b;
-    color: #c0392b;
+    border-color: var(--danger);
+    color: var(--danger);
   }
   .btn-danger:hover:not(:disabled) {
-    background: #c0392b;
-    color: white;
+    background: var(--danger);
+    color: var(--text-inverse);
   }
 </style>

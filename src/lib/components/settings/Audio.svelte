@@ -11,6 +11,7 @@
   import SttRemoteSection from './SttRemoteSection.svelte';
   import DiarizationModelsSection from './DiarizationModelsSection.svelte';
   import { toasts } from '../../stores/toasts.svelte';
+  import { formatError } from '../../types/errors';
 
   let audioDevices = $state<AudioDevice[]>([]);
   let devicesLoading = $state(false);
@@ -60,9 +61,11 @@
     downloadingModels = new Set([...downloadingModels, modelId]);
     try {
       await downloadModel(modelId);
+      toasts.success(`Downloaded ${modelId}`);
       await Promise.all([fetchWhisperModels(), fetchPyannoteModels()]);
     } catch (e) {
       console.error(`Failed to download model ${modelId}:`, e);
+      toasts.error(`Could not download ${modelId}: ${formatError(e)}`);
     } finally {
       // eslint-disable-next-line svelte/prefer-svelte-reactivity -- transient local Set, not reactive state
       const next = new Set(downloadingModels);
@@ -72,11 +75,24 @@
   }
 
   async function handleDeleteModel(modelId: string) {
+    const entry =
+      whisperModels.find((m) => m.id === modelId) ??
+      pyannoteModels.find((m) => m.id === modelId);
+    const isDiarization = pyannoteModels.some((m) => m.id === modelId) && !whisperModels.some((m) => m.id === modelId);
+    const size = entry ? ` (${formatBytes(entry.size_bytes)})` : '';
+    const diarizationNote = isDiarization
+      ? '\n\nBoth diarization models are required for speaker labels — transcripts will lose speaker labels until it is re-downloaded.'
+      : '';
+    if (!confirm(`Delete ${modelId}${size} from disk? You can re-download it later.${diarizationNote}`)) {
+      return;
+    }
     try {
       await deleteModel(modelId);
+      toasts.success(`Deleted ${modelId}`);
       await Promise.all([fetchWhisperModels(), fetchPyannoteModels()]);
     } catch (e) {
       console.error(`Failed to delete model ${modelId}:`, e);
+      toasts.error(`Could not delete ${modelId}: ${formatError(e)}`);
     }
   }
 

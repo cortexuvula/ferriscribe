@@ -182,15 +182,15 @@
   }
   .dir-row code {
     font-size: 0.85rem;
-    color: var(--muted-foreground, #888);
+    color: var(--text-muted);
   }
   .hint {
-    color: var(--muted-foreground, #888);
+    color: var(--text-muted);
     font-size: 0.85rem;
   }
   .error {
-    background: #fee;
-    color: #991b1b;
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    color: var(--danger);
     padding: 0.5rem;
     border-radius: 4px;
   }

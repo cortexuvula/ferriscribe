@@ -5,6 +5,7 @@
   import { reinitProviders } from '../../api/chat';
   import { classifyEndpoint, isLocalOrAllowed } from '../../utils/endpointPolicy';
   import { useTestConnection } from '../../composables/useTestConnection.svelte';
+  import Callout from './Callout.svelte';
 
   const sttOk = $derived(isLocalOrAllowed(settings.state.stt_remote_host ?? '', settings.state.allow_public_endpoint));
   const sttKind = $derived(classifyEndpoint(settings.state.stt_remote_host ?? ''));
@@ -34,10 +35,10 @@
     class="text-input"
   />
   {#if !sttOk}
-    <div class="endpoint-warning" role="alert">
+    <Callout kind="warning">
       ⚠ This is a public-internet address ({sttKind}). PHI may leave your device.
       Enable <em>Allow public endpoints</em> in Advanced settings to use this anyway.
-    </div>
+    </Callout>
   {/if}
 </div>
 <div class="form-group">
@@ -181,16 +182,6 @@
 
   .test-error {
     color: var(--danger, #ef4444);
-  }
-
-  .endpoint-warning {
-    color: #b45309;
-    background: #fef3c7;
-    border: 1px solid #fbbf24;
-    border-radius: 4px;
-    padding: 6px 10px;
-    margin-top: 4px;
-    font-size: 0.85rem;
   }
 
   .text-input {
