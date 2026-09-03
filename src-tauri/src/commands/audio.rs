@@ -1,12 +1,12 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::Emitter;
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
 
-use medical_audio::capture::CaptureConfig;
+use medical_audio::capture::{CaptureConfig, CaptureHealth, CaptureHealthSnapshot};
 use medical_audio::device::{AudioDevice, get_input_device, list_input_devices};
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::recording::{ProcessingStatus, Recording};
@@ -14,6 +14,42 @@ use medical_db::recordings::RecordingsRepo;
 
 use super::resolve_recordings_dir;
 use crate::state::{AppState, CurrentRecording, SendCaptureHandle};
+
+/// Health snapshot forwarded verbatim to the frontend (`audio-health`
+/// event, ~1 Hz). Mirrors `CaptureHealthSnapshot`; numbers only — no
+/// audio content, so it is PHI-safe to emit and log.
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioHealthEvent {
+    pub paused: bool,
+    pub elapsed_secs: f64,
+    pub duration_secs: f64,
+    pub signal_secs: Option<f64>,
+    pub peak: f32,
+    pub rms: f32,
+    pub total_samples: u64,
+    pub has_signal: bool,
+    pub secs_since_last_data: Option<f64>,
+    pub secs_since_last_sound: Option<f64>,
+    pub stream_error: Option<String>,
+}
+
+impl From<CaptureHealthSnapshot> for AudioHealthEvent {
+    fn from(s: CaptureHealthSnapshot) -> Self {
+        Self {
+            paused: s.paused,
+            elapsed_secs: s.elapsed_secs,
+            duration_secs: s.duration_secs,
+            signal_secs: s.signal_secs,
+            peak: s.peak,
+            rms: s.rms,
+            total_samples: s.total_samples,
+            has_signal: s.has_signal,
+            secs_since_last_data: s.secs_since_last_data,
+            secs_since_last_sound: s.secs_since_last_sound,
+            stream_error: s.stream_error,
+        }
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 1. list_audio_devices
@@ -102,12 +138,21 @@ pub async fn start_recording(
     let wav_path_for_log = wav_path.display().to_string();
 
     // Start capture on a dedicated std::thread so the !Send CaptureHandle
-    // never crosses a thread boundary via tokio::spawn_blocking.  We wrap
-    // it in SendCaptureHandle (which has an unsafe Send impl) and send it
-    // back through a oneshot channel.
+    // never crosses a thread boundary via tokio::spawn_blocking.  We wrap it
+    // in SendCaptureHandle (which has an unsafe Send impl) and send it
+    // back through a oneshot channel. The capture's health accumulator
+    // comes back too (Arc, genuinely Send) so the event-emitter task and
+    // the eventual stop can both read the watchdog.
     let wav_path_clone = wav_path.clone();
     let (tx, rx) = std::sync::mpsc::channel::<
-        Result<(SendCaptureHandle, std::sync::mpsc::Receiver<Vec<f32>>), AppError>,
+        Result<
+            (
+                SendCaptureHandle,
+                std::sync::mpsc::Receiver<Vec<f32>>,
+                Arc<CaptureHealth>,
+            ),
+            AppError,
+        >,
     >();
 
     std::thread::spawn(move || {
@@ -121,14 +166,19 @@ pub async fn start_recording(
             let (handle, waveform_rx) =
                 medical_audio::capture::start_capture(&device, config, &wav_path_clone)
                     .map_err(|e| AppError::audio_with_source(e.to_string(), e))?;
-            Ok((SendCaptureHandle(Some(handle)), waveform_rx))
+            let health = handle.health();
+            Ok((
+                SendCaptureHandle(Some(handle), Some(Arc::clone(&health))),
+                waveform_rx,
+                health,
+            ))
         })();
         let _ = tx.send(result);
     });
 
     // Receive the capture result on a blocking thread so we don't stall
     // the Tokio async runtime worker while waiting for audio device init.
-    let (send_handle, waveform_rx) = try_or_reset!(
+    let (send_handle, waveform_rx, capture_health) = try_or_reset!(
         state,
         tokio::task::spawn_blocking(move || {
             rx.recv()
@@ -176,21 +226,35 @@ pub async fn start_recording(
         "Audio recording started"
     );
 
-    // Spawn a blocking task to consume waveform data and emit Tauri events.
+    // Spawn a blocking task to consume waveform data and emit Tauri events,
+    // plus a ~1 Hz `audio-health` watchdog snapshot.
     //
-    // Lifecycle: this task exits when `waveform_rx.recv()` returns `Err`, which
-    // happens when every `waveform_tx` sender has been dropped. The only
-    // sender lives inside the capture drain thread (see `crates/audio/src/
-    // capture.rs`); that thread exits when the `CaptureHandle` is dropped —
-    // which `stop_recording` / `cancel_recording` do synchronously before
-    // returning. So by the time the next `start_recording` could run, the
-    // previous emit task has already unwound. No JoinHandle needed, but the
-    // invariant is load-bearing: if you change the sender ownership in
-    // capture.rs, revisit this site.
+    // Lifecycle: this task exits when the waveform channel closes (every
+    // sender dropped), which happens when the capture drain thread exits —
+    // i.e. when `CaptureHandle` is dropped by stop/cancel. See the longer
+    // comment previously attached here; that invariant is unchanged.
+    //
+    // The loop uses recv_timeout rather than a blocking recv so that a
+    // device delivering NOTHING (dead stream, wrong device, revoked
+    // permission) still produces health events — the watchdog's
+    // `secs_since_last_data` then grows and the UI can alert while the
+    // recording is still salvageable, instead of at transcription time.
     let app_clone = app.clone();
     tokio::task::spawn_blocking(move || {
-        while let Ok(data) = waveform_rx.recv() {
-            let _ = app_clone.emit("waveform-data", &data);
+        let mut last_health_emit: Option<Instant> = None;
+        loop {
+            match waveform_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(data) => {
+                    let _ = app_clone.emit("waveform-data", &data);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            if last_health_emit.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+                last_health_emit = Some(Instant::now());
+                let event = AudioHealthEvent::from(capture_health.snapshot(Instant::now()));
+                let _ = app_clone.emit("audio-health", &event);
+            }
         }
     });
 
@@ -231,7 +295,7 @@ async fn take_capture_handle_for_stop(state: &AppState) -> AppResult<Option<Send
                 .capture_handle
                 .lock()
                 .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
-            SendCaptureHandle(handle_lock.0.take())
+            SendCaptureHandle(handle_lock.0.take(), handle_lock.1.take())
         };
         if wrapper.0.is_some() {
             return Ok(Some(wrapper));
@@ -253,14 +317,36 @@ async fn take_capture_handle_for_stop(state: &AppState) -> AppResult<Option<Send
     }
 }
 
+/// Structured result of `stop_recording`: the recording ID plus the
+/// capture watchdog's verdict, so the UI can warn with actionable detail
+/// ("0:00 of signal in a 3:12 recording") without re-reading the WAV.
+#[derive(Debug, Clone, Serialize)]
+pub struct StopRecordingResult {
+    pub recording_id: String,
+    /// Peak absolute sample over the whole capture (0.0–1.0).
+    pub peak: f32,
+    /// RMS level over the whole capture.
+    pub rms: f32,
+    /// Wall-clock duration excluding pauses.
+    pub duration_secs: f64,
+    /// Span between the first and last detected signal, if any.
+    pub signal_secs: Option<f64>,
+    /// True when the capture was effectively silent — the same threshold
+    /// as `check_recording_audio_levels` (rms < 0.001) plus the
+    /// zero-samples case.
+    pub is_silent: bool,
+    /// First OS-level stream error reported during the capture, if any.
+    pub stream_error: Option<String>,
+}
+
 /// Stop the active recording and finalize the WAV file.
 ///
 /// Drains the audio buffer, closes the capture stream, and updates the
 /// recording's DB row with the final file size and duration. Returns the
-/// recording ID.
+/// recording ID plus the watchdog's signal-health verdict.
 #[tauri::command]
 #[instrument(skip(state), name = "audio::stop_recording")]
-pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<String> {
+pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<StopRecordingResult> {
     // Take the CaptureHandle out of AppState as a SendCaptureHandle (which is
     // Send+Sync).  We must NOT hold a bare CaptureHandle across an .await
     // because CaptureHandle is !Send.
@@ -268,12 +354,21 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
         Some(wrapper) => wrapper,
         None => return Err(AppError::audio("No active recording to stop".to_string())),
     };
+    // Keep the health accumulator past the drop: the drain thread folds its
+    // final samples in as it joins, and this Arc stays readable after.
+    let capture_health = wrapper.1.clone();
 
     // Drop the wrapper on a blocking worker so CaptureHandle::drop (which
     // joins the drain thread) doesn't block the async runtime.
     tokio::task::spawn_blocking(move || drop(wrapper))
         .await
         .map_err(|e| AppError::Other(format!("Stop task panicked: {e}")))?;
+
+    // Final watchdog snapshot — post-join, so all drain-thread writes are in.
+    let health_snap = capture_health
+        .as_ref()
+        .map(|h| h.snapshot(Instant::now()))
+        .unwrap_or_default();
 
     // Atomically consume `current_recording` and clear `recording_active`
     // in one step. The old order (clear active → take slot) left a window
@@ -428,11 +523,23 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stri
         recording_id = %current.id,
         duration_secs = %format!("{:.1}", duration_secs),
         file_size_bytes = file_size,
+        peak = %format!("{:.6}", health_snap.peak),
+        rms = %format!("{:.6}", health_snap.rms),
+        signal_secs = ?health_snap.signal_secs,
+        stream_error = ?health_snap.stream_error,
         wav_path = %current.wav_path.display(),
         "Recording stopped and saved"
     );
 
-    Ok(current.id)
+    Ok(StopRecordingResult {
+        recording_id: current.id,
+        peak: health_snap.peak,
+        rms: health_snap.rms,
+        duration_secs,
+        signal_secs: health_snap.signal_secs,
+        is_silent: health_snap.total_samples == 0 || health_snap.rms < 0.001,
+        stream_error: health_snap.stream_error,
+    })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -710,6 +817,72 @@ fn compute_audio_levels(path: &std::path::Path) -> AppResult<RecordingAudioLevel
         peak,
         rms,
         is_silent: count > 0 && rms < 0.001,
+    })
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 9. run_microphone_probe
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Result of the Settings → Audio "Test microphone" probe.
+#[derive(Debug, Clone, Serialize)]
+pub struct MicrophoneProbeResult {
+    pub peak: f32,
+    pub rms: f32,
+    /// True when the probe captured effectively no signal — a muted or
+    /// misrouted mic. (A probe that captures NOTHING at all errors out
+    /// instead: that means the device never delivered samples.)
+    pub is_silent: bool,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub samples: usize,
+}
+
+/// Capture ~1.2 s from the given (or default) input device and report its
+/// level stats — the pre-flight "is this mic actually capturing" check so
+/// a dead input can be caught before clinic starts, not at transcription
+/// time. Refuses to run while a recording is in progress.
+#[tauri::command]
+pub async fn run_microphone_probe(
+    state: tauri::State<'_, AppState>,
+    device: Option<String>,
+    duration_ms: Option<u64>,
+) -> AppResult<MicrophoneProbeResult> {
+    if *state.recording_active.lock().await {
+        return Err(AppError::audio(
+            "Stop the recording before testing the microphone".to_string(),
+        ));
+    }
+    let duration = Duration::from_millis(duration_ms.unwrap_or(1_200).clamp(300, 3_000));
+
+    // cpal streams are !Send — resolve + probe on a dedicated std::thread
+    // (same pattern as start_recording's capture thread).
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = get_input_device(device.as_deref())
+            .map_err(|e| AppError::audio_with_source(e.to_string(), e))
+            .and_then(|dev| {
+                medical_audio::capture::probe_device(&dev, duration)
+                    .map_err(|e| AppError::audio_with_source(e.to_string(), e))
+            });
+        let _ = tx.send(result);
+    });
+
+    let probe = tokio::task::spawn_blocking(move || {
+        rx.recv()
+            .map_err(|_| AppError::audio("Microphone probe thread panicked".to_string()))
+            .and_then(|r| r)
+    })
+    .await
+    .map_err(super::join_err)??;
+
+    Ok(MicrophoneProbeResult {
+        is_silent: probe.rms < 0.001,
+        peak: probe.peak,
+        rms: probe.rms as f32,
+        sample_rate: probe.sample_rate,
+        channels: probe.channels,
+        samples: probe.samples,
     })
 }
 

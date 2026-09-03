@@ -930,7 +930,9 @@ mod preflight_tests {
             stt_providers: Arc::new(Mutex::new(None)),
             orchestrator,
             chat_doc_index: Arc::new(tokio::sync::Mutex::new(None)),
-            capture_handle: Arc::new(std::sync::Mutex::new(crate::state::SendCaptureHandle(None))),
+            capture_handle: Arc::new(std::sync::Mutex::new(crate::state::SendCaptureHandle(
+                None, None,
+            ))),
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             sharing: Arc::new(RwLock::new(None)),

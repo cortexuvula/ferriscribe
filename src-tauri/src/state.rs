@@ -18,7 +18,7 @@ use medical_core::types::settings::AppConfig;
 use medical_agents::orchestrator::AgentOrchestrator;
 use medical_agents::tools::ToolRegistry;
 
-use medical_audio::capture::CaptureHandle;
+use medical_audio::capture::{CaptureHandle, CaptureHealth};
 
 use medical_db::Database;
 
@@ -165,7 +165,14 @@ impl FatalErrorState {
 /// Given those, marking the wrapper `Send + Sync` is sound. If a future
 /// refactor removes the mutex guard or introduces parallel access, revisit
 /// this.
-pub struct SendCaptureHandle(pub Option<CaptureHandle>);
+pub struct SendCaptureHandle(
+    pub Option<CaptureHandle>,
+    /// The capture's health accumulator, kept alongside the handle so
+    /// `stop_recording` can read a final watchdog verdict after the drain
+    /// thread joins. `Arc<CaptureHealth>` is genuinely Send/Sync — only
+    /// the handle half needs the unsafe impl.
+    pub Option<Arc<CaptureHealth>>,
+);
 
 // SAFETY: see the doc comment above. Access is serialised through the
 // `AppState::capture_handle` Mutex; the underlying platform audio APIs are
@@ -797,7 +804,7 @@ impl AppState {
             stt_providers: Arc::new(Mutex::new(stt_handles.provider)),
             orchestrator: Arc::new(orchestrator),
             chat_doc_index: Arc::new(tokio::sync::Mutex::new(None)),
-            capture_handle: Arc::new(std::sync::Mutex::new(SendCaptureHandle(None))),
+            capture_handle: Arc::new(std::sync::Mutex::new(SendCaptureHandle(None, None))),
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             sharing: Arc::new(RwLock::new(None)),

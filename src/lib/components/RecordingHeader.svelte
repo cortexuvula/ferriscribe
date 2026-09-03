@@ -1,6 +1,7 @@
 <script lang="ts">
   import { audio } from '../stores/audio.svelte';
   import { formatDuration } from '../utils/format';
+  import { audioHealthAlert } from '../utils/audioHealth';
   import Waveform from './Waveform.svelte';
   import OfflineRecordBanner from './OfflineRecordBanner.svelte';
 
@@ -46,6 +47,18 @@
   {/if}
 
   <OfflineRecordBanner {onopenSettings} />
+
+  {#if audio.state.state === 'recording' || audio.state.state === 'paused'}
+    {@const healthAlert = audioHealthAlert(audio.state.health)}
+    {#if healthAlert}
+      <div class="health-banner {healthAlert.level}" role="alert">
+        <span class="health-text">{healthAlert.message}</span>
+        <button class="health-settings" onclick={() => onopenSettings('audio')}>
+          Audio settings
+        </button>
+      </div>
+    {/if}
+  {/if}
 
   <div class="controls-row">
     <div class="timer">
@@ -129,6 +142,50 @@
   .error-dismiss:hover {
     background-color: var(--danger, #ef4444);
     color: white;
+  }
+
+  /* Capture-health watchdog banner (dead stream, silent mic, signal lost). */
+  .health-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+  }
+
+  .health-banner.warning {
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+    color: var(--text-primary);
+  }
+
+  .health-banner.danger {
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+    color: var(--text-primary);
+  }
+
+  .health-text {
+    flex: 1;
+  }
+
+  .health-settings {
+    flex-shrink: 0;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .health-settings:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
   }
 
   .controls-row {
