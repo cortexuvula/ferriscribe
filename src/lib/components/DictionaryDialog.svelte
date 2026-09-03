@@ -3,6 +3,7 @@
   import { requestSpellcheckRescan } from './rich_editor/spellcheck/spellcheck_extension';
   import { listUserDict } from '../api/userDictionary';
   import { toasts } from '../stores/toasts.svelte';
+  import { pushOverlay, isTopmostOverlay } from '../stores/overlay';
   import { formatError } from '../types/errors';
   import { onEscape } from '../actions/onEscape';
 
@@ -13,14 +14,30 @@
 
   const { open, onclose }: Props = $props();
 
+  let root: HTMLElement | undefined = $state();
+
+  // Overlay-stack membership: this dialog stacks on the Settings modal —
+  // the stack decides whose Escape is whose.
+  $effect(() => {
+    if (open && root) {
+      return pushOverlay(root);
+    }
+  });
+
+  /** Escape closes only when this dialog is open AND topmost. When it
+   *  didn't handle the keypress, the action lets it pass through (e.g. to
+   *  the Settings modal behind it). */
+  function handleEscape(): boolean {
+    if (!open || !root || !isTopmostOverlay(root)) return false;
+    onclose();
+    return true;
+  }
+
   let words = $state<string[]>([]);
   let loading = $state(false);
   let searchText = $state('');
   let newWord = $state('');
   let addError = $state('');
-
-  // Escape-to-close is handled by the onEscape action (see <svelte:window>
-  // below). The open guard prevents close when the dialog is hidden.
 
   async function loadWords() {
     loading = true;
@@ -82,12 +99,12 @@
   );
 </script>
 
-<svelte:window use:onEscape={() => open && onclose()} />
+<svelte:window use:onEscape={handleEscape} />
 
 {#if open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="dict-overlay" onclick={onclose}>
+  <div class="dict-overlay" bind:this={root} onclick={onclose}>
     <div class="dict-dialog" role="dialog" aria-modal="true" tabindex="-1" aria-label="Manage dictionary" onclick={(e) => e.stopPropagation()}>
       <div class="dict-header">
         <h2>Manage Dictionary</h2>
