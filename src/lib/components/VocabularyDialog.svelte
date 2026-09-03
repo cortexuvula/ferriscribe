@@ -8,6 +8,8 @@
     type VocabularyEntry,
   } from '../api/vocabulary';
   import { toasts } from '../stores/toasts.svelte';
+  import { confirmDialog } from '../stores/confirm.svelte';
+  import { pushOverlay, isTopmostOverlay } from '../stores/overlay';
   import { untrack } from 'svelte';
   import VocabularyForm from './VocabularyForm.svelte';
   import VocabularyTable from './VocabularyTable.svelte';
@@ -22,8 +24,25 @@
 
   const { open, onclose }: Props = $props();
 
-  // Escape-to-close is handled by the onEscape action (see <svelte:window>
-  // below). The open guard prevents close when the dialog is hidden.
+  let root: HTMLElement | undefined = $state();
+
+  // Overlay-stack membership: this dialog stacks on the Settings modal
+  // (and a confirm dialog can stack on it) — the stack decides whose
+  // Escape is whose.
+  $effect(() => {
+    if (open && root) {
+      return pushOverlay(root);
+    }
+  });
+
+  /** Escape closes only when this dialog is open AND topmost. When it
+   *  didn't handle the keypress, the action lets it pass through (e.g. to
+   *  the Settings modal behind it, or the confirm dialog above it). */
+  function handleEscape(): boolean {
+    if (!open || !root || !isTopmostOverlay(root)) return false;
+    onclose();
+    return true;
+  }
 
   let entries = $state<VocabularyEntry[]>([]);
   let loading = $state(false);
@@ -73,7 +92,13 @@
   }
 
   async function handleDelete(entry: VocabularyEntry) {
-    if (!confirm(`Delete correction "${entry.find_text}" \u2192 "${entry.replacement}"?`)) return;
+    const ok = await confirmDialog({
+      title: 'Delete correction?',
+      message: `Delete correction "${entry.find_text}" \u2192 "${entry.replacement}"?`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await deleteVocabularyEntry(entry.id);
       await loadEntries();
@@ -84,7 +109,13 @@
   }
 
   async function handleDeleteAll() {
-    if (!confirm(`Delete ALL ${entries.length} vocabulary entries? This cannot be undone.`)) return;
+    const ok = await confirmDialog({
+      title: 'Delete all vocabulary entries?',
+      message: `Delete ALL ${entries.length} vocabulary entries? This cannot be undone.`,
+      confirmLabel: `Delete all ${entries.length}`,
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await deleteAllVocabularyEntries();
       await loadEntries();
@@ -129,12 +160,12 @@
   });
 </script>
 
-<svelte:window use:onEscape={() => open && onclose()} />
+<svelte:window use:onEscape={handleEscape} />
 
 {#if open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="vocab-overlay" onclick={onclose}>
+  <div class="vocab-overlay" bind:this={root} onclick={onclose}>
     <div class="vocab-dialog" role="dialog" aria-modal="true" tabindex="-1" aria-label="Manage vocabulary" onclick={(e) => e.stopPropagation()}>
       <div class="vocab-header">
         <h2>Manage Vocabulary</h2>

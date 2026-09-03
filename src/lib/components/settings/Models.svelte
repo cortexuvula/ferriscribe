@@ -7,6 +7,7 @@
   import { officeServedHint, providerStartHint } from '../../utils/providerHints';
   import { formatError } from '../../types/errors';
   import ProviderServerSection from './ProviderServerSection.svelte';
+  import Callout from './Callout.svelte';
 
   let availableModels = $state<ModelInfo[]>([]);
   let modelsLoading = $state(false);
@@ -18,9 +19,19 @@
   let isPaired = $state(false);
   const modelMemory = $state<Record<string, string>>({});
   /** Request token: rapid provider switches resolve out of order — only
-   * the most recent fetch may render its list (same discipline as the
-   * recordings store's load/search). */
+   *  the most recent fetch may render its list (same discipline as the
+   *  recordings store's load/search). */
   let modelFetchToken = 0;
+
+  /** Which provider server sections are expanded. Only the ACTIVE
+   *  provider's section auto-opens; the others stay collapsed (all three
+   *  expanded made the pane a wall of mostly-irrelevant host/port fields).
+   *  Users can still open any of them manually. */
+  let openSections = $state({ lmstudio: false, ollama: false, omlx: false });
+  $effect(() => {
+    const provider = settings.state.ai_provider;
+    openSections = { lmstudio: provider === 'lmstudio', ollama: provider === 'ollama', omlx: provider === 'omlx' };
+  });
 
   async function fetchModelsForProvider(provider: string) {
     const token = ++modelFetchToken;
@@ -77,6 +88,12 @@
       // tells the user why the dropdown is empty.
       await settings.updateField('ai_model', '');
     }
+    // Same staleness class for the OCR model: an id from the old
+    // provider's list isn't offered by the new one and would silently 404
+    // at generation time.
+    if (settings.state.ocr_model && !models.some((m) => m.id === settings.state.ocr_model)) {
+      await settings.updateField('ocr_model', null);
+    }
   }
 
   async function handleAiModelChange(e: Event) {
@@ -85,9 +102,12 @@
     modelMemory[settings.state.ai_provider] = value;
   }
 
-  async function handleTemperatureChange(e: Event) {
-    const value = parseFloat((e.target as HTMLInputElement).value);
-    await settings.updateField('temperature', value);
+  /** Live drag value — the temperature persists on release, not per tick
+   *  (every oninput tick would queue a full-config IPC save). */
+  let temperatureDraft = $state(settings.state.temperature);
+
+  async function handleTemperatureCommit() {
+    await settings.updateField('temperature', temperatureDraft);
   }
 </script>
 
@@ -136,14 +156,14 @@
       </button>
     </div>
     {#if modelsError && !modelsLoading}
-      <div class="endpoint-warning model-list-error" role="alert">
+      <Callout kind="warning">
         <p class="model-list-error-message">{modelsError}</p>
         <p class="model-list-error-hint">
           {isPaired
             ? officeServedHint(settings.state.ai_provider)
             : providerStartHint(settings.state.ai_provider)}
         </p>
-      </div>
+      </Callout>
     {/if}
   </div>
 
@@ -173,7 +193,7 @@
   <div class="form-group">
     <label for="temperature" class="form-label">
       Temperature
-      <span class="value-display">{settings.state.temperature.toFixed(1)}</span>
+      <span class="value-display">{temperatureDraft.toFixed(1)}</span>
     </label>
     <input
       id="temperature"
@@ -181,8 +201,11 @@
       min="0"
       max="2"
       step="0.1"
-      value={settings.state.temperature}
-      oninput={handleTemperatureChange}
+      value={temperatureDraft}
+      oninput={(e: Event) => {
+        temperatureDraft = parseFloat((e.target as HTMLInputElement).value);
+      }}
+      onchange={handleTemperatureCommit}
       class="range-input"
     />
     <div class="range-labels">
@@ -192,75 +215,105 @@
   </div>
 
   <!-- LM Studio Server -->
-  <ProviderServerSection
-    idPrefix="lmstudio"
-    title="LM Studio Server"
-    hostField="lmstudio_host"
-    portField="lmstudio_port"
-    defaultPort={1234}
-    apiKeySlot="lmstudio_api_key"
-    testConnection={testLmStudioConnection}
-    thinkingField="lmstudio_disable_thinking"
-  >
+  <details class="provider-section" bind:open={openSections.lmstudio}>
+    <summary>LM Studio Server</summary>
+    <ProviderServerSection
+      idPrefix="lmstudio"
+      title="LM Studio Server"
+      hideTitle
+      hostField="lmstudio_host"
+      portField="lmstudio_port"
+      defaultPort={1234}
+      apiKeySlot="lmstudio_api_key"
+      testConnection={testLmStudioConnection}
+      thinkingField="lmstudio_disable_thinking"
+    >
     {#snippet hint()}
       Configure the LM Studio server address. Use <code>localhost</code> if LM Studio runs on this
       machine, or enter a remote IP for a network server.
     {/snippet}
-    {#snippet thinkingHint()}
+      {#snippet thinkingHint()}
       Skips the minutes-long reasoning/"thinking" phase on models like Qwen3 before they write a
       SOAP note. LM Studio ignores API thinking parameters, so FerriScribe injects a pre-closed
       think block instead. For a fix that covers every app, edit the model's Prompt Template in LM
       Studio (Model Settings → Prompt Template, add
       <code>{'{%- set enable_thinking = false %}'}</code>).
-    {/snippet}
+      {/snippet}
   </ProviderServerSection>
+  </details>
 
   <!-- Ollama Server -->
-  <ProviderServerSection
-    idPrefix="ollama"
-    title="Ollama Server"
-    hostField="ollama_host"
-    portField="ollama_port"
-    defaultPort={11434}
-    apiKeySlot="ollama_api_key"
-    testConnection={testOllamaConnection}
-    thinkingField="ollama_disable_thinking"
-  >
-    {#snippet hint()}
+  <details class="provider-section" bind:open={openSections.ollama}>
+    <summary>Ollama Server</summary>
+    <ProviderServerSection
+      idPrefix="ollama"
+      title="Ollama Server"
+      hideTitle
+      hostField="ollama_host"
+      portField="ollama_port"
+      defaultPort={11434}
+      apiKeySlot="ollama_api_key"
+      testConnection={testOllamaConnection}
+      thinkingField="ollama_disable_thinking"
+    >
+      {#snippet hint()}
       Configure the Ollama server address. Use <code>localhost</code> if Ollama runs on this
       machine, or enter a remote IP / Tailscale hostname for a network server.
-    {/snippet}
-    {#snippet thinkingHint()}
+      {/snippet}
+      {#snippet thinkingHint()}
       Skips the minutes-long reasoning/"thinking" phase on models like Qwen3 before they write a
       SOAP note. Sends <code>reasoning_effort: "none"</code> to Ollama's OpenAI-compatible endpoint.
-    {/snippet}
+      {/snippet}
   </ProviderServerSection>
+  </details>
 
   <!-- oMLX Server -->
-  <ProviderServerSection
-    idPrefix="omlx"
-    title="oMLX Server"
-    hostField="omlx_host"
-    portField="omlx_port"
-    defaultPort={8000}
-    apiKeySlot="omlx_api_key"
-    testConnection={testOmlxConnection}
-    thinkingField="omlx_disable_thinking"
-  >
-    {#snippet hint()}
+  <details class="provider-section" bind:open={openSections.omlx}>
+    <summary>oMLX Server</summary>
+    <ProviderServerSection
+      idPrefix="omlx"
+      title="oMLX Server"
+      hideTitle
+      hostField="omlx_host"
+      portField="omlx_port"
+      defaultPort={8000}
+      apiKeySlot="omlx_api_key"
+      testConnection={testOmlxConnection}
+      thinkingField="omlx_disable_thinking"
+    >
+      {#snippet hint()}
       Configure the oMLX server address (MLX inference for Apple Silicon). Use
       <code>localhost</code> if oMLX runs on this machine, or enter a remote IP for a network
       server.
-    {/snippet}
-    {#snippet thinkingHint()}
+      {/snippet}
+      {#snippet thinkingHint()}
       Skips the minutes-long reasoning/"thinking" phase on models like Qwen3 before they write a
       SOAP note. oMLX ignores API thinking parameters, so FerriScribe injects a pre-closed think
       block instead.
-    {/snippet}
+      {/snippet}
   </ProviderServerSection>
+  </details>
 </section>
 
 <style>
+  .provider-section {
+    border-top: 1px solid var(--border);
+    margin-top: 20px;
+  }
+
+  .provider-section summary {
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    padding: 4px 0 8px;
+    user-select: none;
+  }
+
+  .provider-section[open] summary {
+    padding-bottom: 0;
+  }
+
   .model-select-row {
     display: flex;
     gap: 8px;
@@ -329,22 +382,12 @@
     color: var(--text-muted);
   }
 
-  .endpoint-warning {
-    color: #b45309;
-    background: #fef3c7;
-    border: 1px solid #fbbf24;
-    border-radius: 4px;
-    padding: 6px 10px;
-    margin-top: 4px;
-    font-size: 0.85rem;
-  }
-
-  .model-list-error p {
+  .model-list-error-message {
     margin: 0;
   }
 
-  .model-list-error p + p {
-    margin-top: 4px;
+  .model-list-error-hint {
+    margin: 4px 0 0;
     font-weight: 600;
   }
 

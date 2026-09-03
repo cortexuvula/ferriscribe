@@ -29,10 +29,19 @@
     }
   }
 
+  /** Inline validation — an out-of-range interval is never persisted, so
+   *  the field is reverted and told why instead of silently lying. */
+  let autosaveError = $state('');
+
   async function handleAutosaveIntervalChange(e: Event) {
-    const value = parseInt((e.target as HTMLInputElement).value, 10);
+    const input = e.target as HTMLInputElement;
+    const value = parseInt(input.value, 10);
     if (!isNaN(value) && value >= 10 && value <= 600) {
+      autosaveError = '';
       await settings.updateField('autosave_interval_secs', value);
+    } else {
+      autosaveError = 'Interval must be between 10 and 600 seconds.';
+      input.value = String(settings.state.autosave_interval_secs);
     }
   }
 
@@ -112,8 +121,13 @@
     value={settings.state.autosave_interval_secs}
     onchange={handleAutosaveIntervalChange}
     disabled={!settings.state.autosave_enabled}
+    aria-invalid={autosaveError ? 'true' : undefined}
   />
-  <span class="form-hint">Between 10 and 600 seconds</span>
+  {#if autosaveError}
+    <span class="field-error" role="alert">{autosaveError}</span>
+  {:else}
+    <span class="form-hint">Between 10 and 600 seconds</span>
+  {/if}
 </div>
 
 <div class="form-group">
@@ -133,7 +147,7 @@
 <div class="form-group">
   <span class="form-label">Setup Wizard</span>
   <div class="storage-path-row">
-    <button class="btn-browse" onclick={handleRerunSetup}>Re-run setup</button>
+    <button class="btn-reset" onclick={handleRerunSetup}>Re-run setup</button>
   </div>
   <span class="form-hint">Walk through the first-run setup again to reconfigure your AI provider, transcription model, or office-server pairing.</span>
 </div>
@@ -187,5 +201,10 @@
   .btn-reset:hover {
     background-color: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  .field-error {
+    font-size: 12px;
+    color: var(--danger);
   }
 </style>

@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { letterAudiences } from '../../stores/letterAudiences.svelte';
   import type { LetterAudience } from '../../types/letterAudience';
+  import Callout from './Callout.svelte';
+  import { confirmDialog } from '../../stores/confirm.svelte';
 
   type EditingAudience = {
     id: string;
@@ -75,7 +77,13 @@
 
   async function handleDelete(audience: LetterAudience) {
     if (audience.is_builtin) return;
-    if (!confirm(`Delete audience "${audience.name}"? This cannot be undone.`)) return;
+    const ok = await confirmDialog({
+      title: 'Delete audience?',
+      message: `Delete "${audience.name}"? This cannot be undone.`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await letterAudiences.delete(audience.id);
     } catch (e) {
@@ -84,7 +92,13 @@
   }
 
   function viewPrompt(audience: LetterAudience) {
-    alert(audience.system_prompt);
+    // Informational styled dialog (replaces the old native alert(), which
+    // couldn't scroll long prompts).
+    void confirmDialog({
+      title: `Prompt — ${audience.name}`,
+      message: audience.system_prompt,
+      confirmOnly: true,
+    });
   }
 </script>
 
@@ -105,7 +119,7 @@
         <h4 class="la-form-title">{editing.id ? 'Edit Audience' : 'Add Custom Audience'}</h4>
 
         {#if error}
-          <div class="la-errors">{error}</div>
+          <Callout kind="danger">{error}</Callout>
         {/if}
 
         <div class="form-group">
@@ -162,7 +176,7 @@
     {/if}
 
     {#if error && !editing}
-      <div class="la-errors">{error}</div>
+      <Callout kind="danger">{error}</Callout>
     {/if}
 
     <div class="la-list">
@@ -224,14 +238,6 @@
     padding: 2rem;
     text-align: center;
     color: var(--text-secondary);
-  }
-
-  .la-errors {
-    background: #fee;
-    border: 1px solid #fbb;
-    padding: 0.5rem;
-    border-radius: 4px;
-    font-size: 13px;
   }
 
   .la-list {

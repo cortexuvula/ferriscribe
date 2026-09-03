@@ -12,7 +12,35 @@
   import { settingsNav, type SettingsSection } from '../stores/settingsNav.svelte';
 
   type Section = SettingsSection;
-  let activeSection = $state<Section>('general');
+  // Reopen on the section the user last viewed (module-level store state
+  // survives dialog close) instead of always snapping back to General.
+  let activeSection = $state<Section>(settingsNav.state.lastSection);
+  // Instance of the Prompts pane — the only settings pane with unsaved
+  // draft state — so section switches away from it can run the discard
+  // guard. Null whenever the pane isn't mounted.
+  let prompts: Prompts | null = $state(null);
+
+  /**
+   * Guard for leaving settings with unsaved draft edits (currently only the
+   * Prompts editor). Called by the section nav here and by the settings
+   * dialog's close path (×, Escape, backdrop). Resolves true when it is
+   * safe to leave.
+   */
+  export async function confirmDiscardEdits(): Promise<boolean> {
+    if (activeSection === 'prompts') {
+      return (await prompts?.confirmDiscard()) ?? true;
+    }
+    return true;
+  }
+
+  function switchSection(next: Section) {
+    void confirmDiscardEdits().then((ok) => {
+      if (ok) {
+        activeSection = next;
+        settingsNav.state.lastSection = next;
+      }
+    });
+  }
 
   // Consume navigation requests from settingsNav store (e.g. from the
   // EndpointOfflineDialog "Open Settings" button). The write-back
@@ -21,6 +49,7 @@
   $effect(() => {
     if (settingsNav.state.requestedSection) {
       activeSection = settingsNav.state.requestedSection;
+      settingsNav.state.lastSection = settingsNav.state.requestedSection;
       untrack(() => settingsNav.clear());
     }
   });
@@ -44,7 +73,10 @@
       <button
         class="nav-item"
         class:active={activeSection === item.id}
-        onclick={() => (activeSection = item.id)}
+        aria-current={activeSection === item.id ? 'true' : undefined}
+        onclick={() => {
+          if (activeSection !== item.id) switchSection(item.id);
+        }}
       >
         {item.label}
       </button>
@@ -56,7 +88,7 @@
       <General />
 
     {:else if activeSection === 'prompts'}
-      <Prompts />
+      <Prompts bind:this={prompts} />
 
     {:else if activeSection === 'models'}
       <Models />
@@ -90,7 +122,7 @@
   }
 
   .settings-nav {
-    width: 130px;
+    width: 168px;
     flex-shrink: 0;
     background-color: var(--bg-secondary);
     border-right: 1px solid var(--border);

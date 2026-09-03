@@ -97,6 +97,7 @@ export default [
       'dist/**',
       'build/**',
       'target/**',
+      'coverage/**',
       'src-tauri/**',
       'node_modules/**',
       '.svelte-kit/**',

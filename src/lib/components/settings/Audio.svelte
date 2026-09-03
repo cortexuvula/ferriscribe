@@ -11,6 +11,8 @@
   import SttRemoteSection from './SttRemoteSection.svelte';
   import DiarizationModelsSection from './DiarizationModelsSection.svelte';
   import { toasts } from '../../stores/toasts.svelte';
+  import { confirmDialog } from '../../stores/confirm.svelte';
+  import { formatError } from '../../types/errors';
 
   let audioDevices = $state<AudioDevice[]>([]);
   let devicesLoading = $state(false);
@@ -60,9 +62,11 @@
     downloadingModels = new Set([...downloadingModels, modelId]);
     try {
       await downloadModel(modelId);
+      toasts.success(`Downloaded ${modelId}`);
       await Promise.all([fetchWhisperModels(), fetchPyannoteModels()]);
     } catch (e) {
       console.error(`Failed to download model ${modelId}:`, e);
+      toasts.error(`Could not download ${modelId}: ${formatError(e)}`);
     } finally {
       // eslint-disable-next-line svelte/prefer-svelte-reactivity -- transient local Set, not reactive state
       const next = new Set(downloadingModels);
@@ -72,11 +76,28 @@
   }
 
   async function handleDeleteModel(modelId: string) {
+    const entry =
+      whisperModels.find((m) => m.id === modelId) ??
+      pyannoteModels.find((m) => m.id === modelId);
+    const isDiarization = pyannoteModels.some((m) => m.id === modelId) && !whisperModels.some((m) => m.id === modelId);
+    const size = entry ? ` (${formatBytes(entry.size_bytes)})` : '';
+    const diarizationNote = isDiarization
+      ? '\n\nBoth diarization models are required for speaker labels — transcripts will lose speaker labels until it is re-downloaded.'
+      : '';
+    const ok = await confirmDialog({
+      title: 'Delete model?',
+      message: `Delete ${modelId}${size} from disk? You can re-download it later.${diarizationNote}`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await deleteModel(modelId);
+      toasts.success(`Deleted ${modelId}`);
       await Promise.all([fetchWhisperModels(), fetchPyannoteModels()]);
     } catch (e) {
       console.error(`Failed to delete model ${modelId}:`, e);
+      toasts.error(`Could not delete ${modelId}: ${formatError(e)}`);
     }
   }
 
@@ -135,6 +156,14 @@
   async function handleSampleRateChange(e: Event) {
     const value = parseInt((e.target as HTMLSelectElement).value, 10);
     await settings.updateField('sample_rate', value);
+  }
+
+  /** Live drag value — max speakers persists on release, not per tick
+   *  (every oninput tick would queue a full-config IPC save). */
+  let maxSpeakersDraft = $state(settings.state.max_speakers ?? 3);
+
+  async function handleMaxSpeakersCommit() {
+    await settings.updateField('max_speakers', maxSpeakersDraft);
   }
 </script>
 
@@ -198,18 +227,18 @@
   <div class="form-group">
     <label for="max-speakers" class="form-label">
       Max speakers
-      <span class="badge-value">{settings.state.max_speakers ?? 'Auto'}</span>
+      <span class="badge-value">{maxSpeakersDraft}</span>
     </label>
     <input
       id="max-speakers"
       type="range"
       min={1}
       max={8}
-      value={settings.state.max_speakers ?? 3}
+      value={maxSpeakersDraft}
       oninput={(e: Event) => {
-        const value = parseInt((e.target as HTMLInputElement).value, 10);
-        settings.updateField('max_speakers', value);
+        maxSpeakersDraft = parseInt((e.target as HTMLInputElement).value, 10);
       }}
+      onchange={handleMaxSpeakersCommit}
     />
     <span class="form-hint">Limits the number of speaker clusters. Set to the expected number of people in the conversation (typically 2–3).</span>
   </div>

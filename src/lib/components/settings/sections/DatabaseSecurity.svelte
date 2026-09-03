@@ -62,14 +62,14 @@
   }
 
   .status-pill.encrypted {
-    background: rgba(40, 167, 69, 0.1);
-    color: #155724;
-    border-color: rgba(40, 167, 69, 0.3);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }
 
   .status-pill.plaintext {
-    background: rgba(255, 193, 7, 0.1);
-    color: #856404;
-    border-color: rgba(255, 193, 7, 0.3);
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
   }
 </style>

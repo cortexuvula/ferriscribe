@@ -2,6 +2,9 @@
   import { onDestroy, untrack } from 'svelte';
   import { settings } from '../../stores/settings.svelte';
   import { getDefaultPrompt, type DocType } from '../../api/prompts';
+  import { toasts } from '../../stores/toasts.svelte';
+  import { confirmDialog } from '../../stores/confirm.svelte';
+  import { formatError } from '../../types/errors';
 
   type PromptInfo = {
     key: DocType;
@@ -109,13 +112,27 @@
     }
   }
 
-  async function handlePromptSelect(docType: DocType) {
-    // Suppress the discard dialog while a save is in flight — the dirty flag
-    // will be cleared once the save resolves, so prompting mid-save is spurious.
+  /**
+   * Guard for leaving the editor with unsaved changes — shared by the
+   * prompt-type switcher here and by the settings-dialog close path
+   * (SettingsContent.confirmDiscardEdits → SettingsDialog). Resolves true
+   * when it is safe to leave (nothing dirty, a save in flight, or the user
+   * confirmed the discard).
+   */
+  export async function confirmDiscard(): Promise<boolean> {
     if (promptDirty && promptSaveStatus !== 'saving') {
-      const confirmed = confirm('You have unsaved changes. Discard them?');
-      if (!confirmed) return;
+      return confirmDialog({
+        title: 'Discard prompt changes?',
+        message: 'You have unsaved changes to this prompt. Discard them?',
+        confirmLabel: 'Discard',
+        danger: true,
+      });
     }
+    return true;
+  }
+
+  async function handlePromptSelect(docType: DocType) {
+    if (!(await confirmDiscard())) return;
     activePromptKey = docType;
   }
 
@@ -141,13 +158,24 @@
     } catch (e) {
       console.error('Failed to save custom prompt:', e);
       if (gen === promptLoadGen) promptSaveStatus = 'error';
+      toasts.error(`Could not save the prompt: ${formatError(e)}`);
     }
   }
 
   async function handlePromptReset() {
     const info = PROMPT_TYPES.find((p) => p.key === activePromptKey)!;
     const gen = promptLoadGen;
-    if (promptIsCustom && !confirm('Clear the custom prompt and restore the default?')) return;
+    if (
+      promptIsCustom &&
+      !(await confirmDialog({
+        title: 'Reset prompt?',
+        message: 'Clear the custom prompt and restore the default?',
+        confirmLabel: 'Reset',
+        danger: true,
+      }))
+    ) {
+      return;
+    }
     try {
       await settings.updateField(info.configField, null);
       const defaultText = await getDefaultPrompt(info.key);
@@ -159,6 +187,7 @@
     } catch (e) {
       console.error('Failed to reset prompt:', e);
       if (gen === promptLoadGen) promptSaveStatus = 'error';
+      toasts.error(`Could not reset the prompt: ${formatError(e)}`);
     }
   }
 
@@ -180,6 +209,7 @@
         <button
           class="prompts-nav-item"
           class:active={activePromptKey === pt.key}
+          aria-current={activePromptKey === pt.key ? 'true' : undefined}
           onclick={() => handlePromptSelect(pt.key)}
         >
           {pt.label}
@@ -236,9 +266,6 @@
             Reset to default
           </button>
         </div>
-        {#if promptSaveStatus === 'error'}
-          <p class="error-message">Failed to save. See console for details.</p>
-        {/if}
       {/if}
     </div>
   </div>

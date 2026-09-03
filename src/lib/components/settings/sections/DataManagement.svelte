@@ -13,17 +13,20 @@
   import { listUserDict } from '../../../api/userDictionary';
 
   let vocabDialogOpen = $state(false);
-  let vocabCount = $state<[number, number]>([0, 0]);
+  /** null = the count couldn't be loaded (distinct from a real 0). */
+  let vocabCount = $state<[number, number] | null>(null);
   let ctxTemplateDialogOpen = $state(false);
   const ctxTemplateCount = $derived(contextTemplates.list.length);
   let dictDialogOpen = $state(false);
-  let dictCount = $state(0);
+  /** null = the count couldn't be loaded (distinct from a real 0). */
+  let dictCount = $state<number | null>(null);
 
   async function loadVocabCount() {
     try {
       vocabCount = await getVocabularyCount();
     } catch (err) {
       console.error('Failed to load vocabulary count:', err);
+      vocabCount = null;
     }
   }
 
@@ -71,6 +74,7 @@
       dictCount = words.length;
     } catch (err) {
       console.error('Failed to load dictionary count:', err);
+      dictCount = null;
     }
   }
 
@@ -149,11 +153,13 @@
 </div>
 
 <div class="form-group">
-  <span class="form-label">{vocabCount[0]} entries ({vocabCount[1]} enabled)</span>
+  <span class="form-label">
+    {#if vocabCount}{vocabCount[0]} entries ({vocabCount[1]} enabled){:else}Count unavailable{/if}
+  </span>
   <div class="vocab-buttons">
     <button class="btn-browse" onclick={() => { vocabDialogOpen = true; }}>Manage Vocabulary</button>
-    <button class="btn-browse" onclick={handleImportVocabulary}>Import JSON</button>
-    <button class="btn-browse" onclick={handleExportVocabulary}>Export JSON</button>
+    <button class="btn-browse secondary" onclick={handleImportVocabulary}>Import JSON</button>
+    <button class="btn-browse secondary" onclick={handleExportVocabulary}>Export JSON</button>
   </div>
 </div>
 
@@ -164,8 +170,8 @@
   <span class="form-label">{ctxTemplateCount} template{ctxTemplateCount === 1 ? '' : 's'} saved</span>
   <div class="vocab-buttons">
     <button class="btn-browse" onclick={() => { ctxTemplateDialogOpen = true; }}>Manage Templates</button>
-    <button class="btn-browse" onclick={handleImportCtxTemplates}>Import JSON</button>
-    <button class="btn-browse" onclick={handleExportCtxTemplates}>Export JSON</button>
+    <button class="btn-browse secondary" onclick={handleImportCtxTemplates}>Import JSON</button>
+    <button class="btn-browse secondary" onclick={handleExportCtxTemplates}>Export JSON</button>
   </div>
 </div>
 
@@ -185,7 +191,9 @@
 </div>
 
 <div class="form-group">
-  <span class="form-label">{dictCount} word{dictCount === 1 ? '' : 's'} saved</span>
+  <span class="form-label">
+    {#if dictCount === null}Count unavailable{:else}{dictCount} word{dictCount === 1 ? '' : 's'} saved{/if}
+  </span>
   <div class="vocab-buttons">
     <button class="btn-browse" onclick={() => { dictDialogOpen = true; }}>Manage Dictionary</button>
   </div>
@@ -238,6 +246,18 @@
 
   .btn-browse:hover {
     background-color: var(--accent-hover);
+  }
+
+  /* Secondary actions (Import/Export) — one accent-primary per group. */
+  .btn-browse.secondary {
+    background-color: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+  }
+
+  .btn-browse.secondary:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
   }
 
   .toggle-label {

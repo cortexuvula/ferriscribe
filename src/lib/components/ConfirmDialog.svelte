@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { pushOverlay, isTopmostOverlay, trapTabWithin } from '../stores/overlay';
+
   interface Props {
     open: boolean;
     title?: string;
@@ -6,6 +8,10 @@
     confirmLabel?: string;
     cancelLabel?: string;
     danger?: boolean;
+    /** Informational mode: hides the cancel button (replaces alert()). */
+    confirmOnly?: boolean;
+    /** Scrollable monospace body for long text (e.g. stored prompts). */
+    tallBody?: boolean;
     onConfirm: () => void;
     onCancel: () => void;
   }
@@ -17,13 +23,42 @@
     confirmLabel = 'Delete',
     cancelLabel = 'Cancel',
     danger = true,
+    confirmOnly = false,
+    tallBody = false,
     onConfirm,
     onCancel,
   }: Props = $props();
 
+  let root: HTMLElement | undefined = $state();
+  let unregister: (() => void) | null = null;
+  let restoreFocus: HTMLElement | null = null;
+
+  // Overlay-stack membership + focus management: only the topmost overlay
+  // in the app may act on Escape, focus starts on the safe action, and the
+  // invoker's focus is restored on close.
+  $effect(() => {
+    if (open && root) {
+      unregister = pushOverlay(root);
+      restoreFocus = (document.activeElement as HTMLElement) ?? null;
+      const cancel = root.querySelector<HTMLButtonElement>('.btn-cancel');
+      (cancel ?? root.querySelector<HTMLButtonElement>('.btn-confirm'))?.focus();
+      return () => {
+        unregister?.();
+        unregister = null;
+        restoreFocus?.focus();
+        restoreFocus = null;
+      };
+    }
+  });
+
   function handleKeydown(e: KeyboardEvent) {
-    if (!open) return;
-    if (e.key === 'Escape') onCancel();
+    if (!open || !root) return;
+    if (e.key === 'Escape') {
+      if (!isTopmostOverlay(root)) return;
+      onCancel();
+      return;
+    }
+    trapTabWithin(root, e);
   }
 
   function handleBackdrop(e: MouseEvent) {
@@ -34,18 +69,27 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if open}
-  <div class="confirm-backdrop" onclick={handleBackdrop} role="presentation">
+  <div class="confirm-backdrop" bind:this={root} onclick={handleBackdrop} role="presentation" tabindex="-1">
     <div class="confirm-dialog" role="alertdialog" aria-modal="true" aria-label={title}>
       <div class="confirm-header">
         <span class="confirm-icon" class:danger>{danger ? '⚠' : '?'}</span>
         <span class="confirm-title">{title}</span>
       </div>
-      <div class="confirm-body">
+      <div class="confirm-body" class:tall={tallBody}>
         <p>{message}</p>
       </div>
       <div class="confirm-actions">
-        <button class="btn-cancel" onclick={onCancel}>{cancelLabel}</button>
-        <button class="btn-confirm" class:danger onclick={onConfirm}>{confirmLabel}</button>
+        {#if !confirmOnly}
+          <button class="btn-cancel" onclick={onCancel}>{cancelLabel}</button>
+        {/if}
+        <button
+          class="btn-confirm"
+          class:danger={!confirmOnly && danger}
+          class:solo={confirmOnly}
+          onclick={onConfirm}
+        >
+          {confirmOnly ? (confirmLabel === 'Delete' ? 'Close' : confirmLabel) : confirmLabel}
+        </button>
       </div>
     </div>
   </div>
@@ -61,6 +105,10 @@
     justify-content: center;
     z-index: 2000;
     animation: fadeIn 0.15s ease;
+  }
+
+  .confirm-backdrop:focus {
+    outline: none;
   }
 
   @keyframes fadeIn {
@@ -124,6 +172,23 @@
     line-height: 1.6;
     color: var(--text-muted);
     margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .confirm-body.tall {
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+
+  .confirm-body.tall p {
+    font-family: var(--font-mono, monospace);
+    font-size: 12px;
+    color: var(--text-primary);
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
   }
 
   .confirm-actions {
