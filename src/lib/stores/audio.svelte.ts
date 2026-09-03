@@ -46,13 +46,21 @@ class AudioStore {
   private timer: ReturnType<typeof setInterval> | null = null;
   private waveformUnlisten: UnlistenFn | null = null;
   private healthUnlisten: UnlistenFn | null = null;
-  private busy = false;
+  private _busy = false;
 
   private clearTimer() {
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
     }
+  }
+
+  /** True while a start/stop/cancel is resolving on the backend. Callers
+   *  gate user actions on this (e.g. RecordTab's Process button) so they
+   *  can't race the optimistic UI — clicking Process mid-stop would hit a
+   *  row the backend hasn't inserted yet. */
+  get busy(): boolean {
+    return this._busy;
   }
 
   /** Unsubscribe both capture-event listeners (waveform + health). */
@@ -102,8 +110,8 @@ class AudioStore {
   }
 
   async startRecording(device: string | null = null) {
-    if (this.busy) return;
-    this.busy = true;
+    if (this._busy) return;
+    this._busy = true;
     try {
       // Subscribe to waveform + health events BEFORE starting recording.
       await this.subscribeCaptureEvents();
@@ -118,6 +126,9 @@ class AudioStore {
         health: null,
         deviceName: device,
         lastRecordingId: recordingId,
+        // Clear the previous recording's verdict — a stale one must never
+        // be consulted for this recording (the silence dialog reads it).
+        lastRecordingHealth: null,
         error: null,
       };
       this.startTimer();
@@ -130,7 +141,7 @@ class AudioStore {
         error: message || 'Failed to start recording',
       };
     } finally {
-      this.busy = false;
+      this._busy = false;
     }
   }
 
@@ -166,8 +177,8 @@ class AudioStore {
    *  watchdog verdict is kept on `state.lastRecordingHealth` for the
    *  silence-dialog flow. */
   async stop(): Promise<string | null> {
-    if (this.busy) return null;
-    this.busy = true;
+    if (this._busy) return null;
+    this._busy = true;
     this.clearTimer();
     // Stop listening for capture events immediately so the visualizer
     // freezes and health alerts stop.
@@ -213,13 +224,13 @@ class AudioStore {
       // caller must not launch the pipeline against it.
       return null;
     } finally {
-      this.busy = false;
+      this._busy = false;
     }
   }
 
   async cancel() {
-    if (this.busy) return;
-    this.busy = true;
+    if (this._busy) return;
+    this._busy = true;
     this.clearTimer();
     try {
       await audioApi.cancelRecording();
@@ -228,7 +239,7 @@ class AudioStore {
     }
     this.teardownListeners();
     this.state = { ...initialState };
-    this.busy = false;
+    this._busy = false;
   }
 
   reset() {

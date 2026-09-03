@@ -24,6 +24,9 @@ pub struct RecordingsRepo;
 pub struct ProducerPersist {
     pub transcript: Option<String>,
     pub soap_note: Option<String>,
+    pub referral: Option<String>,
+    pub letter: Option<String>,
+    pub peer_discussion: Option<String>,
     pub stt_provider: Option<String>,
     /// Pre-serialized `ProcessingStatus` JSON.
     pub processing_status: Option<String>,
@@ -315,6 +318,21 @@ impl RecordingsRepo {
         if let Some(soap_note) = &update.soap_note {
             sets.push(format!("soap_note = ?{next_idx}"));
             params.push(Box::new(soap_note.clone()));
+            next_idx += 1;
+        }
+        if let Some(referral) = &update.referral {
+            sets.push(format!("referral = ?{next_idx}"));
+            params.push(Box::new(referral.clone()));
+            next_idx += 1;
+        }
+        if let Some(letter) = &update.letter {
+            sets.push(format!("letter = ?{next_idx}"));
+            params.push(Box::new(letter.clone()));
+            next_idx += 1;
+        }
+        if let Some(peer_discussion) = &update.peer_discussion {
+            sets.push(format!("peer_discussion = ?{next_idx}"));
+            params.push(Box::new(peer_discussion.clone()));
             next_idx += 1;
         }
         if let Some(stt_provider) = &update.stt_provider {
@@ -1039,6 +1057,55 @@ mod tests {
             after.referral.as_deref(),
             Some("edited referral"),
             "concurrent column edit must survive the producer persist"
+        );
+    }
+
+    #[test]
+    fn persist_producer_update_writes_doc_columns_without_touching_siblings() {
+        let conn = migrated_conn();
+        let mut rec = new_rec();
+        rec.soap_note = Some("S: stable SOAP".into());
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        // Each of the three document columns persists, and none disturbs
+        // the SOAP column or the other doc columns (each writes only its own).
+        let columns = [
+            (
+                "referral",
+                ProducerPersist {
+                    referral: Some("referral text".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "letter",
+                ProducerPersist {
+                    letter: Some("letter text".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "peer",
+                ProducerPersist {
+                    peer_discussion: Some("peer discussion text".into()),
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (_label, update) in &columns {
+            RecordingsRepo::persist_producer_update(&conn, &rec.id, update).unwrap();
+            let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+            assert_eq!(after.soap_note.as_deref(), Some("S: stable SOAP"));
+        }
+        // After all three producers ran, each column carries its own text —
+        // no whole-row revert, no sibling disturbance.
+        let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(after.soap_note.as_deref(), Some("S: stable SOAP"));
+        assert_eq!(after.referral.as_deref(), Some("referral text"));
+        assert_eq!(after.letter.as_deref(), Some("letter text"));
+        assert_eq!(
+            after.peer_discussion.as_deref(),
+            Some("peer discussion text")
         );
     }
 

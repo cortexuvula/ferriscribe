@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 use super::helpers::{
-    generate_from_soap, load_recording_and_settings, persist_recording, run_generation_command,
+    fresh_stats_patch, generate_from_soap, load_recording_and_settings, persist_producer_patch,
+    run_generation_command,
 };
 
 /// Generate a patient letter from a recording's SOAP note.
@@ -73,7 +74,19 @@ pub async fn generate_letter(
         )
         .await?;
 
-        persist_recording(&state.db, recording).await?;
+        // Column-scoped persist: the recording snapshot is stale by however
+        // long the LLM ran — a whole-row update would revert concurrent
+        // column writes (editor saves, another generator's output).
+        persist_producer_patch(
+            &state,
+            recording.id,
+            medical_db::recordings::ProducerPersist {
+                letter: Some(text.clone()),
+                metadata_patch: fresh_stats_patch(&recording, "letter"),
+                ..Default::default()
+            },
+        )
+        .await?;
         Ok(text)
     })
     .await

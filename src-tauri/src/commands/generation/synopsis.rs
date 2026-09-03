@@ -7,8 +7,8 @@ use tracing::debug;
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, ensure_metadata_object, ensure_nonempty_output,
-    load_recording_and_settings, persist_recording, require_soap_note, resolve_provider,
+    build_completion_request, ensure_nonempty_output, fresh_stats_patch,
+    load_recording_and_settings, persist_producer_patch, require_soap_note, resolve_provider,
     stream_with_events,
 };
 
@@ -73,15 +73,10 @@ async fn generate_synopsis_inner(
     let synopsis_text = response.content;
     ensure_nonempty_output(&synopsis_text, "synopsis")?;
 
-    // Store synopsis in the metadata JSON object.
-    ensure_metadata_object(&mut recording.metadata);
-    if let Some(obj) = recording.metadata.as_object_mut() {
-        obj.insert(
-            "synopsis".to_string(),
-            serde_json::Value::String(synopsis_text.clone()),
-        );
-    }
-
+    // Record the stats on the in-memory recording (the patch source), then
+    // persist ONLY the fresh metadata — the synopsis text and this run's
+    // stats. A whole-row update on the stale snapshot would revert
+    // concurrent column writes (editor saves, another generator's output).
     medical_core::types::recording::record_completion_stat(
         &mut recording.metadata,
         "synopsis",
@@ -90,8 +85,21 @@ async fn generate_synopsis_inner(
         &response.usage,
         generation_elapsed,
     );
+    let mut metadata_patch = vec![(
+        "synopsis".to_string(),
+        serde_json::Value::String(synopsis_text.clone()),
+    )];
+    metadata_patch.extend(fresh_stats_patch(&recording, "synopsis"));
 
-    persist_recording(&state.db, recording).await?;
+    persist_producer_patch(
+        state,
+        recording.id,
+        medical_db::recordings::ProducerPersist {
+            metadata_patch,
+            ..Default::default()
+        },
+    )
+    .await?;
 
     Ok(synopsis_text)
 }
