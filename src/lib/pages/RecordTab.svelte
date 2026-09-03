@@ -277,43 +277,85 @@
     audio.reset();
   }
 
-  function describeSilence(rms: number): string {
-    const rmsDb = rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+  /** Silence info driving the post-stop dialog — the capture watchdog's
+   *  verdict when available (signal span, stream errors, no file re-read),
+   *  falling back to the WAV-reading check for imported recordings. */
+  interface SilenceInfo {
+    rms: number;
+    is_silent: boolean;
+    signal_secs: number | null;
+    duration_secs: number | null;
+    stream_error: string | null;
+  }
+
+  async function resolveSilenceInfo(recordingId: string): Promise<SilenceInfo | null> {
+    const verdict = audio.state.lastRecordingHealth;
+    if (verdict && audio.state.lastRecordingId === recordingId) {
+      return {
+        rms: verdict.rms,
+        is_silent: verdict.is_silent,
+        signal_secs: verdict.signal_secs,
+        duration_secs: verdict.duration_secs,
+        stream_error: verdict.stream_error,
+      };
+    }
+    try {
+      const levels = await checkRecordingAudioLevels(recordingId);
+      return {
+        rms: levels.rms,
+        is_silent: levels.is_silent,
+        signal_secs: null,
+        duration_secs: null,
+        stream_error: null,
+      };
+    } catch (_e) {
+      // If the silence check itself fails, don't block the pipeline.
+      return null;
+    }
+  }
+
+  function describeSilence(info: SilenceInfo): string {
+    const rmsDb = info.rms > 0 ? 20 * Math.log10(info.rms) : -Infinity;
     const formatted = isFinite(rmsDb) ? `${rmsDb.toFixed(1)} dBFS` : 'digital silence';
+    const stream = info.stream_error
+      ? `The microphone reported an error mid-recording (${info.stream_error}). `
+      : '';
+    const signal =
+      info.signal_secs !== null && info.signal_secs < 1
+        ? `Only ${info.signal_secs.toFixed(1)}s of signal was detected${
+            info.duration_secs != null && info.duration_secs >= 1
+              ? ` in a ${Math.round(info.duration_secs / 60)}:${String(Math.round(info.duration_secs) % 60).padStart(2, '0')} recording`
+              : ''
+          }. `
+        : '';
     return (
-      `The recording appears to contain no audio (${formatted}). ` +
+      `${stream}${signal}The recording appears to contain no usable audio (${formatted}). ` +
       "Your microphone or audio routing likely isn't capturing sound — " +
       'processing this file will probably produce an unreliable transcript.'
     );
   }
 
+  function openSilenceDialog(recordingId: string, info: SilenceInfo) {
+    silenceDialogRecordingId = recordingId;
+    silenceDialogMessage = describeSilence(info);
+    silenceDialogOpen = true;
+  }
+
   async function maybeLaunchPipeline(recordingId: string) {
     // Wait for any in-flight OCR to finish so its text is included.
     await waitForOcrSettled();
-    try {
-      const levels = await checkRecordingAudioLevels(recordingId);
-      if (levels.is_silent) {
-        silenceDialogRecordingId = recordingId;
-        silenceDialogMessage = describeSilence(levels.rms);
-        silenceDialogOpen = true;
-        return;
-      }
-    } catch (_e) {
-      // If the silence check itself fails, don't block the pipeline.
+    const info = await resolveSilenceInfo(recordingId);
+    if (info?.is_silent) {
+      openSilenceDialog(recordingId, info);
+      return;
     }
     pipeline.launch(recordingId, buildPipelineContext(), undefined, buildPatientContext(medicationsText, allergiesText, conditionsText));
   }
 
   async function warnIfSilent(recordingId: string) {
-    try {
-      const levels = await checkRecordingAudioLevels(recordingId);
-      if (levels.is_silent) {
-        silenceDialogRecordingId = recordingId;
-        silenceDialogMessage = describeSilence(levels.rms);
-        silenceDialogOpen = true;
-      }
-    } catch (_e) {
-      // Silent failure is fine — this is advisory only.
+    const info = await resolveSilenceInfo(recordingId);
+    if (info?.is_silent) {
+      openSilenceDialog(recordingId, info);
     }
   }
 

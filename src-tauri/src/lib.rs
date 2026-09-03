@@ -342,6 +342,7 @@ pub fn run() {
             commands::audio::pause_recording,
             commands::audio::resume_recording,
             commands::audio::check_recording_audio_levels,
+            commands::audio::run_microphone_probe,
             commands::audio::get_recording_state,
             commands::chat::chat_send,
             commands::chat::chat_stream,

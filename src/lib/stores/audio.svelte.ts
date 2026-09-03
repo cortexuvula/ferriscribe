@@ -1,5 +1,6 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import * as audioApi from '../api/audio';
+import type { AudioHealthEvent, StopRecordingResult } from '../api/audio';
 import { log } from '../api/logging';
 import { formatError } from '../types/errors';
 
@@ -9,8 +10,12 @@ export interface AudioStoreState {
   state: RecordingState;
   elapsed: number;
   waveformData: number[];
+  /** Latest watchdog snapshot (null when not recording). */
+  health: AudioHealthEvent | null;
   deviceName: string | null;
   lastRecordingId: string | null;
+  /** Watchdog verdict returned by the last stop (id + health summary). */
+  lastRecordingHealth: StopRecordingResult | null;
   error: string | null;
 }
 
@@ -18,8 +23,10 @@ const initialState: AudioStoreState = {
   state: 'idle',
   elapsed: 0,
   waveformData: [],
+  health: null,
   deviceName: null,
   lastRecordingId: null,
+  lastRecordingHealth: null,
   error: null,
 };
 
@@ -28,14 +35,17 @@ class AudioStore {
     state: 'idle',
     elapsed: 0,
     waveformData: [],
+    health: null,
     deviceName: null,
     lastRecordingId: null,
+    lastRecordingHealth: null,
     error: null,
   });
 
   // Private non-reactive internal state
   private timer: ReturnType<typeof setInterval> | null = null;
   private waveformUnlisten: UnlistenFn | null = null;
+  private healthUnlisten: UnlistenFn | null = null;
   private busy = false;
 
   private clearTimer() {
@@ -45,18 +55,43 @@ class AudioStore {
     }
   }
 
-  /**
-   * Tear down all background resources (elapsed-seconds timer + waveform
-   * listener). Called from App.svelte onDestroy so a webview reload or app
-   * exit doesn't orphan the interval or the Tauri event listener. Safe to
-   * call when idle — both fields are null-checked.
-   */
-  destroy() {
-    this.clearTimer();
+  /** Unsubscribe both capture-event listeners (waveform + health). */
+  private teardownListeners() {
     if (this.waveformUnlisten) {
       this.waveformUnlisten();
       this.waveformUnlisten = null;
     }
+    if (this.healthUnlisten) {
+      this.healthUnlisten();
+      this.healthUnlisten = null;
+    }
+  }
+
+  /** Subscribe to the backend capture events (waveform visualizer + the
+   *  ~1 Hz audio-health watchdog). Must be called BEFORE startRecording so
+   *  no early frames are missed. Cleans up stale listeners first. */
+  private async subscribeCaptureEvents() {
+    this.teardownListeners();
+    this.waveformUnlisten = await listen<number[]>('waveform-data', (event) => {
+      this.state = {
+        ...this.state,
+        waveformData: [...this.state.waveformData, ...event.payload].slice(-256),
+      };
+    });
+    this.healthUnlisten = await listen<AudioHealthEvent>('audio-health', (event) => {
+      this.state = { ...this.state, health: event.payload };
+    });
+  }
+
+  /**
+   * Tear down all background resources (elapsed-seconds timer + event
+   * listeners). Called from App.svelte onDestroy so a webview reload or app
+   * exit doesn't orphan the interval or the Tauri event listeners. Safe to
+   * call when idle — everything is null-checked.
+   */
+  destroy() {
+    this.clearTimer();
+    this.teardownListeners();
   }
 
   private startTimer() {
@@ -70,15 +105,8 @@ class AudioStore {
     if (this.busy) return;
     this.busy = true;
     try {
-      // Clean up any stale listener before attaching a new one
-      if (this.waveformUnlisten) { this.waveformUnlisten(); this.waveformUnlisten = null; }
-      // Listen for waveform events BEFORE starting recording
-      this.waveformUnlisten = await listen<number[]>('waveform-data', (event) => {
-        this.state = {
-          ...this.state,
-          waveformData: [...this.state.waveformData, ...event.payload].slice(-256),
-        };
-      });
+      // Subscribe to waveform + health events BEFORE starting recording.
+      await this.subscribeCaptureEvents();
 
       const recordingId = await audioApi.startRecording();
       log.info('Recording started', { recordingId, device: device ?? 'default' });
@@ -87,6 +115,7 @@ class AudioStore {
         state: 'recording',
         elapsed: 0,
         waveformData: [],
+        health: null,
         deviceName: device,
         lastRecordingId: recordingId,
         error: null,
@@ -95,10 +124,7 @@ class AudioStore {
     } catch (e) {
       const message = formatError(e);
       log.error('Failed to start recording', { error: message, device: device ?? 'default' });
-      if (this.waveformUnlisten) {
-        this.waveformUnlisten();
-        this.waveformUnlisten = null;
-      }
+      this.teardownListeners();
       this.state = {
         ...this.state,
         error: message || 'Failed to start recording',
@@ -135,17 +161,17 @@ class AudioStore {
   }
 
   /** Stop the recording. Resolves to the backend-confirmed recording id,
-   * or null when the stop failed / was already busy — callers must NOT
-   * launch the pipeline on null (the row may not exist). */
+   *  or null when the stop failed / was already busy — callers must NOT
+   *  launch the pipeline on null (the row may not exist). The backend's
+   *  watchdog verdict is kept on `state.lastRecordingHealth` for the
+   *  silence-dialog flow. */
   async stop(): Promise<string | null> {
     if (this.busy) return null;
     this.busy = true;
     this.clearTimer();
-    // Stop listening for waveform events immediately so the visualizer freezes.
-    if (this.waveformUnlisten) {
-      this.waveformUnlisten();
-      this.waveformUnlisten = null;
-    }
+    // Stop listening for capture events immediately so the visualizer
+    // freezes and health alerts stop.
+    this.teardownListeners();
     // Optimistically flip the UI to 'stopped' BEFORE awaiting the backend.
     // This makes the Stop button feel instant — the button set swaps from
     // "Pause/Stop/Cancel" to "New Recording" immediately. The backend stop
@@ -155,17 +181,23 @@ class AudioStore {
       ...this.state,
       state: 'stopped',
       waveformData: [], // clear the visualizer so it returns to a flat line
+      health: null,
       lastRecordingId: this.state.lastRecordingId, // keep existing until backend confirms
     };
     try {
-      const recordingId = await audioApi.stopRecording();
-      log.info('Recording stopped', { recordingId });
+      const result = await audioApi.stopRecording();
+      log.info('Recording stopped', {
+        recordingId: result.recording_id,
+        isSilent: result.is_silent,
+        signalSecs: result.signal_secs,
+      });
       // Reconcile with the actual recording ID from the backend.
       this.state = {
         ...this.state,
-        lastRecordingId: recordingId,
+        lastRecordingId: result.recording_id,
+        lastRecordingHealth: result,
       };
-      return recordingId;
+      return result.recording_id;
     } catch (e) {
       const message = formatError(e);
       log.error('Failed to stop recording', { error: message });
@@ -194,20 +226,14 @@ class AudioStore {
     } catch (_e) {
       // Best-effort — even if backend fails, reset the frontend state
     }
-    if (this.waveformUnlisten) {
-      this.waveformUnlisten();
-      this.waveformUnlisten = null;
-    }
+    this.teardownListeners();
     this.state = { ...initialState };
     this.busy = false;
   }
 
   reset() {
     this.clearTimer();
-    if (this.waveformUnlisten) {
-      this.waveformUnlisten();
-      this.waveformUnlisten = null;
-    }
+    this.teardownListeners();
     this.state = { ...initialState };
   }
 
@@ -219,26 +245,16 @@ class AudioStore {
   }
 
   /** Recover state from the backend on startup — if a recording is still
-   * running (e.g. after a webview reload), rehydrate the store so the Stop
-   * button is visible and the timer keeps ticking. */
+   *  running (e.g. after a webview reload), rehydrate the store so the Stop
+   *  button is visible and the timer keeps ticking. */
   async rehydrate() {
     try {
       const snap = await audioApi.getRecordingState();
       if (!snap.active || !snap.recording_id) return;
 
-      // Clean up any prior listener before attaching a new one. Without this,
-      // repeated rehydrate calls (HMR, future reconnect flows) would stack
-      // listeners and produce duplicate waveform updates.
-      if (this.waveformUnlisten) {
-        this.waveformUnlisten();
-        this.waveformUnlisten = null;
-      }
-      this.waveformUnlisten = await listen<number[]>('waveform-data', (event) => {
-        this.state = {
-          ...this.state,
-          waveformData: [...this.state.waveformData, ...event.payload].slice(-256),
-        };
-      });
+      // Re-subscribe to capture events (waveform + health) — the backend
+      // emitter task keeps running across webview reloads.
+      await this.subscribeCaptureEvents();
 
       const initialElapsed = Math.floor(snap.elapsed_secs ?? 0);
       this.state = {
@@ -246,6 +262,7 @@ class AudioStore {
         state: 'recording',
         elapsed: initialElapsed,
         waveformData: [],
+        health: null,
         lastRecordingId: snap.recording_id,
         error: null,
       };
