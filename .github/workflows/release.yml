@@ -71,7 +71,10 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             clang \
-            cmake
+            cmake \
+            libfuse2t64
+          # libfuse2t64 (= libfuse2 on 24.04's t64 naming): linuxdeploy needs
+          # FUSE on the build host to assemble the AppImage.
 
       - name: Build ferriscribe-backup sidecar
         # The backup sidecar is bundled via externalBin and must be staged
@@ -181,6 +184,11 @@ jobs:
           );
 
           const platforms = {};
+          // Prefer the AppImage for the linux updater target: Tauri's
+          // auto-updater on Linux only installs AppImages, so deb/rpm URLs
+          // (kept for pre-AppImage releases / manual installs) lose when
+          // both exist.
+          const hasAppImage = assetNames.some((n) => n.endsWith('.AppImage'));
 
           for (const name of assetNames) {
             if (!name.endsWith('.sig')) continue;
@@ -192,7 +200,9 @@ jobs:
 
             // Map filename to Tauri platform key
             let platform = null;
-            if (name.includes('.deb') || name.includes('.rpm')) platform = 'linux-x86_64';
+            if (name.endsWith('.AppImage')) platform = 'linux-x86_64';
+            else if ((name.includes('.deb') || name.includes('.rpm')) && !hasAppImage)
+              platform = 'linux-x86_64';
             else if (name.includes('.msi') || name.includes('-setup.exe')) platform = 'windows-x86_64';
             else if (name.includes('aarch64.app')) platform = 'darwin-aarch64';
             else if (name.includes('x86_64.app')) platform = 'darwin-x86_64';
