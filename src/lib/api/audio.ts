@@ -28,6 +28,9 @@ export interface AudioHealthEvent {
   /** Seconds since the last signal-qualifying chunk; null = never. */
   secs_since_last_sound: number | null;
   stream_error: string | null;
+  /** First WAV write failure (disk full, unwritable folder) — the file on
+   *  disk is empty/truncated even though the mic may be delivering. */
+  write_error: string | null;
 }
 
 /** Structured stop result: recording id + the capture watchdog's verdict. */
@@ -39,6 +42,7 @@ export interface StopRecordingResult {
   signal_secs: number | null;
   is_silent: boolean;
   stream_error: string | null;
+  write_error: string | null;
 }
 
 export async function stopRecording(): Promise<StopRecordingResult> {

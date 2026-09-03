@@ -101,6 +101,7 @@ struct HealthInner {
     last_sound_at: Option<Instant>,
     last_data_at: Option<Instant>,
     stream_error: Option<String>,
+    write_error: Option<String>,
 }
 
 /// Point-in-time view of a capture's signal health.
@@ -127,6 +128,10 @@ pub struct CaptureHealthSnapshot {
     pub secs_since_last_sound: Option<f64>,
     /// First OS-level stream error, if the capture callback reported one.
     pub stream_error: Option<String>,
+    /// First WAV-file write failure (disk full, unwritable recordings
+    /// folder, failed finalize). The capture keeps draining so health
+    /// events continue, but the file on disk is empty or truncated.
+    pub write_error: Option<String>,
 }
 
 impl CaptureHealth {
@@ -180,6 +185,16 @@ impl CaptureHealth {
         }
     }
 
+    /// Record the first WAV write failure (see `CaptureHealthSnapshot::
+    /// write_error`). First-wins, same as stream errors.
+    fn note_write_error(&self, message: String) {
+        if let Ok(mut inner) = self.inner.lock()
+            && inner.write_error.is_none()
+        {
+            inner.write_error = Some(message);
+        }
+    }
+
     /// Compute the current snapshot. Call after the drain thread has joined
     /// for the authoritative final stats.
     pub fn snapshot(&self, now: Instant) -> CaptureHealthSnapshot {
@@ -212,6 +227,7 @@ impl CaptureHealth {
                 .last_sound_at
                 .map(|t| now.duration_since(t).as_secs_f64()),
             stream_error: inner.stream_error.clone(),
+            write_error: inner.write_error.clone(),
         }
     }
 }
@@ -445,13 +461,21 @@ pub fn start_capture(
     // ── Drain thread ──────────────────────────────────────────────────────────
     let health_drain = Arc::clone(&health);
     let drain_handle = thread::spawn(move || {
+        // The writer is Option so a write failure (disk full, unwritable
+        // recordings folder) doesn't kill the drain thread: the capture
+        // keeps draining so waveform + health events keep flowing, and the
+        // failure is flagged on the watchdog for live alerting. The old
+        // behavior returned early on a create failure — the channel closed
+        // instantly and the UI got NO signal at all until the stop dialog.
         let mut writer = match hound::WavWriter::create(&output_path, wav_spec) {
-            Ok(w) => w,
+            Ok(w) => Some(w),
             Err(e) => {
                 tracing::error!("failed to create WAV writer: {e}");
-                return;
+                health_drain.note_write_error(format!("could not create the audio file: {e}"));
+                None
             }
         };
+        let mut write_failed = writer.is_none();
 
         let mut acc: Vec<f32> = Vec::with_capacity(waveform_chunk * 2);
         let mut batch: Vec<f32> = Vec::with_capacity(waveform_chunk * 4);
@@ -466,12 +490,28 @@ pub fn start_capture(
                 // "no data arriving" side of the watchdog.
                 health_drain.note_data(Instant::now());
 
-                for &s in &batch {
-                    if let Err(e) = writer.write_sample(s) {
-                        tracing::error!("WAV write error: {e}");
+                if !write_failed {
+                    let mut failed: Option<hound::Error> = None;
+                    if let Some(w) = writer.as_mut() {
+                        for &s in &batch {
+                            if let Err(e) = w.write_sample(s) {
+                                failed = Some(e);
+                                break;
+                            }
+                        }
                     }
-                    acc.push(s);
+                    if let Some(e) = failed {
+                        tracing::error!("WAV write error: {e}");
+                        health_drain.note_write_error(format!("audio file write failed: {e}"));
+                        write_failed = true;
+                        writer = None; // abandon the file; keep draining for health
+                    }
                 }
+                // All delivered samples count toward stats/waveform even
+                // after a write failure — the watchdog's duration reflects
+                // what the MICROPHONE delivered, while write_error says the
+                // file on disk is empty or truncated.
+                acc.extend_from_slice(&batch);
 
                 // Emit waveform snapshot(s). try_send drops on full so a
                 // stalled UI consumer can't grow the channel without bound.
@@ -496,9 +536,21 @@ pub fn start_capture(
                     if batch.is_empty() {
                         break;
                     }
-                    for &s in &batch {
-                        if let Err(e) = writer.write_sample(s) {
+                    if !write_failed {
+                        let mut failed: Option<hound::Error> = None;
+                        if let Some(w) = writer.as_mut() {
+                            for &s in &batch {
+                                if let Err(e) = w.write_sample(s) {
+                                    failed = Some(e);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(e) = failed {
                             tracing::error!("WAV write error (final drain): {e}");
+                            health_drain.note_write_error(format!("audio file write failed: {e}"));
+                            write_failed = true;
+                            writer = None;
                         }
                     }
                     health_drain.note_chunk(&batch, Instant::now());
@@ -509,8 +561,11 @@ pub fn start_capture(
             }
         }
 
-        if let Err(e) = writer.finalize() {
+        if let Some(w) = writer
+            && let Err(e) = w.finalize()
+        {
             tracing::error!("WAV finalize error: {e}");
+            health_drain.note_write_error(format!("audio file finalize failed: {e}"));
         }
     });
 
@@ -728,6 +783,21 @@ mod tests {
         // No samples: duration 0, rms 0.
         assert_eq!(snap.duration_secs, 0.0);
         assert_eq!(snap.rms, 0.0);
+    }
+
+    #[test]
+    fn capture_health_records_first_write_error_only() {
+        let health = CaptureHealth::new(16_000, 1, Arc::new(AtomicBool::new(false)));
+        let t0 = Instant::now();
+        health.note_write_error("audio file write failed: disk full".to_string());
+        health.note_write_error("later failure".to_string());
+        let snap = health.snapshot(t0 + Duration::from_secs(1));
+        assert_eq!(
+            snap.write_error.as_deref(),
+            Some("audio file write failed: disk full")
+        );
+        // Independent of stream errors.
+        assert_eq!(snap.stream_error, None);
     }
 
     #[test]

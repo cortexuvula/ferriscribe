@@ -70,7 +70,8 @@
     {#if probeResult.is_silent}
       <Callout kind="danger">
         No signal detected ({dbfs(probeResult.rms)}). The microphone is delivering silence —
-        check that it is connected, unmuted, and not held by another app.
+        check that it is connected and unmuted, and that FerriScribe has microphone permission
+        in your OS privacy settings.
       </Callout>
     {:else}
       <Callout kind="success" role="status">

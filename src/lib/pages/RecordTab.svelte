@@ -286,6 +286,7 @@
     signal_secs: number | null;
     duration_secs: number | null;
     stream_error: string | null;
+    write_error: string | null;
   }
 
   async function resolveSilenceInfo(recordingId: string): Promise<SilenceInfo | null> {
@@ -297,6 +298,7 @@
         signal_secs: verdict.signal_secs,
         duration_secs: verdict.duration_secs,
         stream_error: verdict.stream_error,
+        write_error: verdict.write_error,
       };
     }
     try {
@@ -307,6 +309,7 @@
         signal_secs: null,
         duration_secs: null,
         stream_error: null,
+        write_error: null,
       };
     } catch (_e) {
       // If the silence check itself fails, don't block the pipeline.
@@ -317,6 +320,9 @@
   function describeSilence(info: SilenceInfo): string {
     const rmsDb = info.rms > 0 ? 20 * Math.log10(info.rms) : -Infinity;
     const formatted = isFinite(rmsDb) ? `${rmsDb.toFixed(1)} dBFS` : 'digital silence';
+    const write = info.write_error
+      ? `The recording could not be written to disk (${info.write_error}). `
+      : '';
     const stream = info.stream_error
       ? `The microphone reported an error mid-recording (${info.stream_error}). `
       : '';
@@ -329,7 +335,7 @@
           }. `
         : '';
     return (
-      `${stream}${signal}The recording appears to contain no usable audio (${formatted}). ` +
+      `${write}${stream}${signal}The recording appears to contain no usable audio (${formatted}). ` +
       "Your microphone or audio routing likely isn't capturing sound — " +
       'processing this file will probably produce an unreliable transcript.'
     );

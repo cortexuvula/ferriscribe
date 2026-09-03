@@ -15,6 +15,7 @@ function event(overrides: Partial<AudioHealthEvent> = {}): AudioHealthEvent {
     secs_since_last_data: 0.2,
     secs_since_last_sound: 0.5,
     stream_error: null,
+    write_error: null,
     ...overrides,
   };
 }
@@ -36,6 +37,16 @@ describe('audioHealthAlert', () => {
     expect(alert?.message).toContain('device disconnected');
   });
 
+  it('flags a WAV write failure as danger, even with perfectly healthy signal', () => {
+    // Disk-full: mic delivered fine, but nothing is reaching the file.
+    const alert = audioHealthAlert(
+      event({ write_error: 'audio file write failed: disk full', paused: true }),
+    );
+    expect(alert?.level).toBe('danger');
+    expect(alert?.message).toContain('cannot be saved');
+    expect(alert?.message).toContain('disk full');
+  });
+
   it('flags a dead stream (no data arriving) as danger', () => {
     const never = audioHealthAlert(
       event({ secs_since_last_data: null, elapsed_secs: 12, has_signal: false }),
@@ -43,7 +54,7 @@ describe('audioHealthAlert', () => {
     expect(never?.level).toBe('danger');
     expect(never?.message).toContain('not capturing');
 
-    const stopped = audioHealthAlert(event({ secs_since_last_data: 7, has_signal: true }));
+    const stopped = audioHealthAlert(event({ secs_since_last_data: 10, has_signal: true }));
     expect(stopped?.level).toBe('danger');
     expect(stopped?.message).toContain('not capturing');
   });
@@ -53,20 +64,29 @@ describe('audioHealthAlert', () => {
       event({ secs_since_last_data: null, elapsed_secs: 2, has_signal: false }),
     );
     expect(early).toBeNull();
+    // Bluetooth HFP negotiation can delay the first buffer by several
+    // seconds — 7 s without data must NOT trigger the danger banner.
+    const negotiating = audioHealthAlert(
+      event({ secs_since_last_data: null, elapsed_secs: 7, has_signal: false }),
+    );
+    expect(negotiating).toBeNull();
   });
 
   it('warns when data flows but no speech has ever been detected (past grace)', () => {
-    // Muted mic: samples (zeros) arrive, none qualify as sound.
+    // Muted mic: samples (zeros) arrive, none qualify as sound. A denied
+    // macOS microphone permission presents identically — the message must
+    // point at OS privacy settings.
     const alert = audioHealthAlert(
       event({ has_signal: false, secs_since_last_sound: null, rms: 0.0, peak: 0.0 }),
     );
     expect(alert?.level).toBe('warning');
     expect(alert?.message).toContain('delivering silence');
+    expect(alert?.message).toContain('microphone permission');
   });
 
   it('does not warn about missing speech within the grace window', () => {
     const early = audioHealthAlert(
-      event({ has_signal: false, secs_since_last_sound: null, elapsed_secs: 5 }),
+      event({ has_signal: false, secs_since_last_sound: null, elapsed_secs: 10 }),
     );
     expect(early).toBeNull();
   });
