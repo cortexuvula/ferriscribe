@@ -258,6 +258,14 @@ pub struct AppState {
     pub pipeline_cancels: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>>,
     /// Lazy-initialized sharing service. `None` until `start_sharing` is called.
     pub sharing: Arc<RwLock<Option<Arc<medical_sharing::SharingService>>>>,
+    /// Serializes sharing start/stop across their whole bodies. The
+    /// sharing-slot RwLock alone couldn't stop a Stop landing mid-start:
+    /// the start hadn't registered yet, the Stop found an empty slot,
+    /// returned Ok, and the start then finished installing a fully-running
+    /// server the user believed they had stopped (and re-wrote the deleted
+    /// auto-resume marker). Holds are long (multi-second start) — status
+    /// polling still reads the RwLock and never takes this.
+    pub sharing_lifecycle: Arc<tokio::sync::Mutex<()>>,
     /// JoinHandle for the vocab CRUD HTTP API task spawned alongside the
     /// sharing service. Held here (rather than in SharingService) because
     /// the API handlers need DB access that lives in the Tauri layer.
@@ -350,6 +358,35 @@ pub fn load_sharing_bearer() -> Option<String> {
         .ok()?
         .get_password()
         .ok()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Blocking-safe (async) variants for hot async paths
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// Keychain reads can block for hundreds of ms (and a Security-framework
+// prompt would freeze the worker for the prompt's lifetime), so async
+// command bodies on hot paths — every transcription on a paired machine,
+// the vocab/dict/conditions/template lists, content-sync target gating —
+// must use these instead of calling the sync fns directly on the Tokio
+// worker. Sync fns remain for genuinely blocking contexts
+// (spawn_blocking closures, e.g. content_sync_target_parts).
+
+/// [`load_paired_connection`] on a blocking worker (file read).
+pub async fn load_paired_connection_offload() -> Option<crate::commands::sharing::PairedConnection>
+{
+    tokio::task::spawn_blocking(load_paired_connection)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// [`load_sharing_bearer`] on a blocking worker (keychain read).
+pub async fn load_sharing_bearer_offload() -> Option<String> {
+    tokio::task::spawn_blocking(load_sharing_bearer)
+        .await
+        .ok()
+        .flatten()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -808,6 +845,7 @@ impl AppState {
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             sharing: Arc::new(RwLock::new(None)),
+            sharing_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             vocab_api: RwLock::new(None),
             ollama_provider,
             lmstudio_provider,

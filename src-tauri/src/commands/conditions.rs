@@ -35,7 +35,7 @@ use crate::state::{self, AppState};
 ///
 /// Returns `None` otherwise, in which case commands fall back to the local
 /// SQLite repo.
-fn paired_conditions_target(
+async fn paired_conditions_target(
     state: &AppState,
 ) -> Option<(crate::commands::sharing::PairedConnection, String)> {
     // Gate 1: the user must opt in to condition-chip sync.
@@ -45,9 +45,9 @@ fn paired_conditions_target(
     }
     // Gate 2: this client must be paired with a server that advertises the
     // vocab port (condition chips ride on the same port as the dictionary API).
-    let conn = state::load_paired_connection()?;
+    let conn = state::load_paired_connection_offload().await?;
     conn.ports.vocab?;
-    let bearer = state::load_sharing_bearer()?;
+    let bearer = state::load_sharing_bearer_offload().await?;
     Some((conn, bearer))
 }
 
@@ -70,7 +70,7 @@ fn now_iso() -> String {
 pub async fn list_condition_chips(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<Vec<ConditionChip>> {
-    if let Some((conn, bearer)) = paired_conditions_target(&state)
+    if let Some((conn, bearer)) = paired_conditions_target(&state).await
         && let Some(remote) = crate::conditions_remote::ConditionsRemote::from(
             &conn,
             Some(bearer),
@@ -135,7 +135,7 @@ pub async fn add_condition_chip(
     //    `PairedConnection` is moved into the task and the `ConditionsRemote`
     //    borrows it from within the task's scope (it cannot borrow from this
     //    frame because `tokio::spawn` requires `'static`).
-    if let Some((conn, bearer)) = paired_conditions_target(&state) {
+    if let Some((conn, bearer)) = paired_conditions_target(&state).await {
         let http_client = state.http_client.clone();
         let chips_to_push = local_list.clone();
         tokio::spawn(async move {
@@ -190,7 +190,7 @@ pub async fn remove_condition_chip(
     // 2. Best-effort background sync — push ALL chips (including tombstones)
     //    so the server records the deletion. The owned `PairedConnection` is
     //    moved into the task and `ConditionsRemote` borrows it there.
-    if let Some((conn, bearer)) = paired_conditions_target(&state) {
+    if let Some((conn, bearer)) = paired_conditions_target(&state).await {
         let http_client = state.http_client.clone();
         let db2 = Arc::clone(&state.db);
         tokio::spawn(async move {
@@ -262,7 +262,7 @@ pub async fn sync_condition_chips_cmd(
     .await
     .map_err(crate::commands::join_err)??;
 
-    if let Some((conn, bearer)) = paired_conditions_target(&state)
+    if let Some((conn, bearer)) = paired_conditions_target(&state).await
         && let Some(remote) = crate::conditions_remote::ConditionsRemote::from(
             &conn,
             Some(bearer),
@@ -320,7 +320,7 @@ pub async fn increment_condition_chip_use(
 
     // 2. Best-effort background sync push (non-blocking). The increment only
     //    touches an active chip, so pushing the active list is sufficient.
-    if let Some((conn, bearer)) = paired_conditions_target(&state) {
+    if let Some((conn, bearer)) = paired_conditions_target(&state).await {
         let http_client = state.http_client.clone();
         let chips_to_push = local_list.clone();
         tokio::spawn(async move {
@@ -374,7 +374,7 @@ pub async fn subscribe_condition_chips(
     // paired + sync enabled. When not paired, also cancel any existing
     // subscriber — the user may have just unpaired, and the old task must
     // not keep reconnecting with stale credentials.
-    let Some((conn, bearer)) = paired_conditions_target(&state) else {
+    let Some((conn, bearer)) = paired_conditions_target(&state).await else {
         return crate::commands::swap_sse_cancel_token(
             &state.condition_sse_cancel,
             "condition_sse_cancel",

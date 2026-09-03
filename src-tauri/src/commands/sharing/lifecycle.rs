@@ -42,11 +42,12 @@ pub async fn start_sharing_inner(
     friendly_name: String,
     app_handle: tauri::AppHandle,
 ) -> AppResult<()> {
-    // Acquire the write lock BEFORE binding ports / spawning proxies so that a
-    // concurrent stop_sharing cannot return Ok while we are mid-start and leave
-    // the service running with no future cleanup path. We only hold the write
-    // lock briefly to check + assign — NOT across the multi-second start(),
-    // so sharing_status polling and stop() aren't frozen during startup.
+    // Serialize the WHOLE start against stop/other starts. The old slot
+    // check alone let a Stop land mid-start (slot still empty), return Ok,
+    // and the start then finished installing a running server the user had
+    // stopped. Holding this across start() only delays concurrent
+    // lifecycle ops — status polling reads the sharing slot, never this.
+    let _lifecycle = state.sharing_lifecycle.lock().await;
     {
         let sharing_slot = state.sharing.read().await;
         if sharing_slot.is_some() {
@@ -218,6 +219,11 @@ pub async fn stop_sharing(state: State<'_, AppState>) -> AppResult<()> {
 /// Core stop logic, factored out so the app-close / window-close handler can
 /// call it without the Tauri command wrapper.
 pub async fn stop_sharing_inner(state: &AppState) -> AppResult<()> {
+    // Wait out an in-flight start (see start_sharing_inner): a Stop clicked
+    // during a slow start now blocks until the service registers, then
+    // cleanly stops it — instead of racing to an empty slot and returning
+    // Ok while the start installs a running server behind us.
+    let _lifecycle = state.sharing_lifecycle.lock().await;
     // Clear the auto-resume marker first so an explicit Stop wins over an
     // unrelated startup race (e.g. user stops sharing immediately on launch
     // before the resume hook fires).

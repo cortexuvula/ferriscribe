@@ -402,7 +402,14 @@
     });
   }
 
+  /** Re-entry guard for Process Recording: maybeLaunchPipeline can park
+   *  for up to 60 s (OCR settle) before pipeline.launch swaps the view —
+   *  without this, extra clicks during that window double-invoke
+   *  process_recording (duplicate transcription + SOAP). */
+  let processLaunching = $state(false);
+
   function handleProcessRecording() {
+    if (processLaunching) return;
     // A start/stop/cancel still resolving on the backend: the row may not
     // exist yet (stop inserts it) — processing now would fail with
     // "recording not found" while the UI claims it was saved.
@@ -410,7 +417,10 @@
     const recordingId = audio.state.lastRecordingId ?? importedRecordingId;
     if (!recordingId) return;
     pipelineRecordingId = recordingId;
-    maybeLaunchPipeline(recordingId);
+    processLaunching = true;
+    void maybeLaunchPipeline(recordingId).finally(() => {
+      processLaunching = false;
+    });
   }
 
   function handleRetry() {

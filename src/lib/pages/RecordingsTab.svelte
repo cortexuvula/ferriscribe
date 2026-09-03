@@ -25,6 +25,10 @@
     // nulling deleteTarget can no longer null them out from under the Undo
     // callback (Bug H8).
     const targetId = deleteTarget.id;
+    // Null the dialog state BEFORE awaiting: the confirm buttons stay
+    // rendered during the delete, and a second click would pass the
+    // guard above and fire a duplicate destructive invoke.
+    deleteTarget = null;
     try {
       await recordings.remove(targetId);
       // Show the Undo toast — the 8s auto-dismiss acts as the "commit" window.
@@ -45,19 +49,17 @@
     } catch (err) {
       console.error('Failed to delete recording:', err);
       toasts.error(`Failed to delete recording: ${err}`);
-    } finally {
-      deleteTarget = null;
     }
   }
 
   async function confirmDeleteAll() {
+    // Clear BEFORE awaiting — same double-click shape as confirmDelete.
+    showDeleteAll = false;
     try {
       await recordings.removeAll();
     } catch (err) {
       console.error('Failed to delete all recordings:', err);
       toasts.error(`Failed to delete all recordings: ${err}`);
-    } finally {
-      showDeleteAll = false;
     }
   }
 

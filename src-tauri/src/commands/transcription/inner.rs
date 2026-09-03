@@ -240,8 +240,17 @@ pub async fn transcribe_recording_inner(
         Ok(t) => t,
         Err(e) => {
             // Preserve EndpointOffline as-is so the frontend dialog can fire.
-            // All other STT errors go through mark_recording_failed.
+            // All other STT errors go through mark_recording_failed. The DB
+            // row still flips to Failed (db-only, no "failed" progress event
+            // — the offline dialog owns the UX) so it isn't stuck spinning
+            // "Processing" until the next boot sweep.
             if matches!(e, AppError::EndpointOffline { .. }) {
+                mark_recording_failed_db_only(
+                    &state.db,
+                    recording,
+                    "Transcription failed: AI/STT endpoint offline".to_string(),
+                )
+                .await;
                 return Err(e);
             }
             let err_msg = format!("Transcription failed: {e}");
@@ -364,9 +373,9 @@ pub async fn transcribe_recording_inner(
 
     let remote_entries: Option<Vec<medical_core::types::vocabulary::VocabularyEntry>> =
         if vocab_enabled {
-            if let Some(conn) = crate::state::load_paired_connection() {
+            if let Some(conn) = crate::state::load_paired_connection_offload().await {
                 if conn.ports.vocab.is_some() {
-                    let bearer = crate::state::load_sharing_bearer();
+                    let bearer = crate::state::load_sharing_bearer_offload().await;
                     if let Some(remote) = crate::vocab_remote::VocabRemote::from(
                         &conn,
                         bearer,

@@ -84,9 +84,9 @@ pub async fn download_model(
     // Re-load the paired RemoteEndpoint (if any) so the reinitialised STT
     // provider routes to the office server rather than silently falling back
     // to localhost.
-    let paired = crate::state::load_paired_connection();
+    let paired = crate::state::load_paired_connection_offload().await;
     let bearer = if paired.is_some() {
-        crate::state::load_sharing_bearer()
+        crate::state::load_sharing_bearer_offload().await
     } else {
         None
     };

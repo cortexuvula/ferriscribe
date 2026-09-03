@@ -199,6 +199,12 @@
     }>(
       'generation-progress',
       (event) => {
+        // Only track progress for a generation THIS UI layer started
+        // (Generate tab buttons / regenerate-SOAP) — the record pipeline
+        // emits the same events, and routing them here left a permanent
+        // "Soap: completed" banner on the Generate tab after every
+        // pipeline run.
+        if (generation.state.generating === null) return;
         const prettyType = event.payload.type === 'peer_discussion' ? 'Peer discussion'
           : event.payload.type.charAt(0).toUpperCase() + event.payload.type.slice(1);
         generation.setProgress(`${prettyType}: ${event.payload.status}`);

@@ -45,6 +45,13 @@ class RecordingsStore {
   /// Load the first page, replacing the list. Called on mount and after
   /// mutations that change ordering (new recording, generation, etc.).
   async load(limit = PAGE_SIZE, offset = 0): Promise<void> {
+    // An active search must survive background refreshes (post-sync load(),
+    // content-changed debounces): an unfiltered page here would silently
+    // un-filter the list while the search box still shows the query.
+    if (this.searchQuery.trim() !== '') {
+      await this.search(this.searchQuery);
+      return;
+    }
     // Request token: overlapping load/search calls must not resolve out of
     // order — a stale response landing last would clobber the fresh list.
     const token = ++this.listRequestId;
@@ -66,9 +73,15 @@ class RecordingsStore {
   async loadMore(): Promise<void> {
     if (this.loadingMore || !this.hasMore) return;
     this.loadingMore = true;
+    // Snapshot the request id: if a load()/search() replaces the list while
+    // this page is in flight, the stale page must NOT be appended onto the
+    // fresh results (unfiltered rows under an active query, abandoned
+    // pagination state).
+    const tokenAtStart = this.listRequestId;
     try {
       const offset = this.list.length;
       const items = await listRecordings(PAGE_SIZE, offset);
+      if (tokenAtStart !== this.listRequestId) return;
       // Dedup by id in case a new recording landed between pages and shifted
       // offsets — keeps the list stable without dropping anything.
       const existing = new Set(this.list.map((r) => r.id));

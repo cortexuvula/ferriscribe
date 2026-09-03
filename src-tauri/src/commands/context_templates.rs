@@ -14,10 +14,10 @@ use crate::templates_remote::TemplatesRemote;
 /// Returns `Some((conn, bearer))` when this client is paired with an office
 /// server that exposes the templates API. Context-templates commands route
 /// through HTTP in that case; otherwise they operate on local SettingsRepo.
-fn paired_templates_target() -> Option<(crate::commands::sharing::PairedConnection, String)> {
-    let conn = state::load_paired_connection()?;
+async fn paired_templates_target() -> Option<(crate::commands::sharing::PairedConnection, String)> {
+    let conn = state::load_paired_connection_offload().await?;
     conn.ports.vocab?;
-    let bearer = state::load_sharing_bearer()?;
+    let bearer = state::load_sharing_bearer_offload().await?;
     Some((conn, bearer))
 }
 
@@ -176,7 +176,7 @@ async fn save_config(
 pub async fn list_context_templates(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<Vec<ContextTemplate>> {
-    if let Some((conn, bearer)) = paired_templates_target() {
+    if let Some((conn, bearer)) = paired_templates_target().await {
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         return remote.list().await;
@@ -205,7 +205,7 @@ pub async fn upsert_context_template(
             "Template body cannot be empty".to_string(),
         ));
     }
-    if let Some((conn, bearer)) = paired_templates_target() {
+    if let Some((conn, bearer)) = paired_templates_target().await {
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         let entry = remote.upsert(&name, &body).await?;
@@ -237,7 +237,7 @@ pub async fn rename_context_template(
             "Template name cannot be empty".to_string(),
         ));
     }
-    if let Some((conn, bearer)) = paired_templates_target() {
+    if let Some((conn, bearer)) = paired_templates_target().await {
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         let entry = remote.rename(&old_name, &new_name).await?;
@@ -262,7 +262,7 @@ pub async fn delete_context_template(
     state: tauri::State<'_, AppState>,
     name: String,
 ) -> AppResult<()> {
-    if let Some((conn, bearer)) = paired_templates_target() {
+    if let Some((conn, bearer)) = paired_templates_target().await {
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         remote.delete(&name).await?;
@@ -285,7 +285,7 @@ pub async fn import_context_templates_json(
     let file_path = crate::commands::validate_user_path(&file_path)?;
     let content = tokio::fs::read_to_string(&file_path).await?;
     let imported = parse_import_json(&content)?;
-    if let Some((conn, bearer)) = paired_templates_target() {
+    if let Some((conn, bearer)) = paired_templates_target().await {
         let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
             .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
         let mut count = 0u32;
@@ -315,14 +315,15 @@ pub async fn export_context_templates_json(
     file_path: String,
 ) -> AppResult<u32> {
     let file_path = crate::commands::validate_user_path(&file_path)?;
-    let templates: Vec<ContextTemplate> = if let Some((conn, bearer)) = paired_templates_target() {
-        let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
-            .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
-        remote.list().await?
-    } else {
-        let config = load_config(&state.db).await?;
-        config.custom_context_templates
-    };
+    let templates: Vec<ContextTemplate> =
+        if let Some((conn, bearer)) = paired_templates_target().await {
+            let remote = TemplatesRemote::from(&conn, Some(bearer), state.http_client.clone())
+                .ok_or_else(|| AppError::Other("paired templates target unavailable".into()))?;
+            remote.list().await?
+        } else {
+            let config = load_config(&state.db).await?;
+            config.custom_context_templates
+        };
     let count = templates.len() as u32;
     let json = export_json(&templates)?;
     tokio::fs::write(&file_path, json).await?;
