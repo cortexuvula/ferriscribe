@@ -43,7 +43,7 @@ describe('audioHealthAlert', () => {
     expect(never?.level).toBe('danger');
     expect(never?.message).toContain('not capturing');
 
-    const stopped = audioHealthAlert(event({ secs_since_last_data: 7, has_signal: true }));
+    const stopped = audioHealthAlert(event({ secs_since_last_data: 10, has_signal: true }));
     expect(stopped?.level).toBe('danger');
     expect(stopped?.message).toContain('not capturing');
   });
@@ -53,6 +53,12 @@ describe('audioHealthAlert', () => {
       event({ secs_since_last_data: null, elapsed_secs: 2, has_signal: false }),
     );
     expect(early).toBeNull();
+    // Bluetooth HFP negotiation can delay the first buffer by several
+    // seconds — 7 s without data must NOT trigger the danger banner.
+    const negotiating = audioHealthAlert(
+      event({ secs_since_last_data: null, elapsed_secs: 7, has_signal: false }),
+    );
+    expect(negotiating).toBeNull();
   });
 
   it('warns when data flows but no speech has ever been detected (past grace)', () => {
@@ -66,7 +72,7 @@ describe('audioHealthAlert', () => {
 
   it('does not warn about missing speech within the grace window', () => {
     const early = audioHealthAlert(
-      event({ has_signal: false, secs_since_last_sound: null, elapsed_secs: 5 }),
+      event({ has_signal: false, secs_since_last_sound: null, elapsed_secs: 10 }),
     );
     expect(early).toBeNull();
   });

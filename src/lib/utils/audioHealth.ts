@@ -15,11 +15,14 @@
 import type { AudioHealthEvent } from '../api/audio';
 
 /** Grace period before warning that no speech has been detected. */
-export const FIRST_SIGNAL_GRACE_SECS = 8;
+export const FIRST_SIGNAL_GRACE_SECS = 15;
 /** Quiet period after signal was established before warning it went away. */
 export const SIGNAL_LOST_SECS = 10;
-/** Time without ANY samples from the device before treating it as dead. */
-export const NO_DATA_SECS = 5;
+/** Time without ANY samples from the device before treating it as dead.
+ *  Generous: Bluetooth headsets renegotiating to HFP can take several
+ *  seconds to deliver their first buffer — a shorter window flashes a
+ *  false "not capturing" danger banner on a healthy setup. */
+export const NO_DATA_SECS = 8;
 
 export interface AudioHealthAlert {
   level: 'warning' | 'danger';

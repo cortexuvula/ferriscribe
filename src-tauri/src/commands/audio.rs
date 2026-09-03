@@ -537,9 +537,31 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stop
         rms: health_snap.rms,
         duration_secs,
         signal_secs: health_snap.signal_secs,
-        is_silent: health_snap.total_samples == 0 || health_snap.rms < 0.001,
+        is_silent: verdict_is_silent(&health_snap, duration_secs),
         stream_error: health_snap.stream_error,
     })
+}
+
+/// The stop-time "is this recording effectively silent" verdict.
+///
+/// Silent when ANY of:
+/// - no samples were captured at all (dead stream / empty WAV);
+/// - the whole-file RMS is below the Whisper-hallucination floor
+///   (~-60 dBFS) — the same threshold `check_recording_audio_levels`
+///   uses;
+/// - the watchdog never saw a speech-qualifying chunk (a constant low
+///   hum can pass the RMS floor while containing nothing transcribable);
+/// - a long recording (≥30 s) whose detected signal spans <5% of its
+///   duration — e.g. 2 s of speech diluted into 12 minutes of silence,
+///   which passes the RMS floor but will not produce a usable transcript.
+fn verdict_is_silent(snap: &CaptureHealthSnapshot, duration_secs: f64) -> bool {
+    if snap.total_samples == 0 || snap.rms < 0.001 {
+        return true;
+    }
+    let Some(signal_secs) = snap.signal_secs else {
+        return true;
+    };
+    duration_secs >= 30.0 && signal_secs < duration_secs * 0.05
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -703,7 +725,8 @@ pub async fn get_recording_state(
 /// `peak` is the maximum absolute sample value (0.0–1.0 for float PCM).
 /// `rms` is the root-mean-square level across all samples.
 /// `is_silent` is true when rms < 0.001 (about -60 dBFS) — a threshold at which
-/// Whisper tends to hallucinate rather than transcribe real content.
+/// Whisper tends to hallucinate rather than transcribe real content — or when
+/// the file contains no samples at all (empty/corrupt import).
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordingAudioLevels {
     pub peak: f32,
@@ -816,7 +839,11 @@ fn compute_audio_levels(path: &std::path::Path) -> AppResult<RecordingAudioLevel
     Ok(RecordingAudioLevels {
         peak,
         rms,
-        is_silent: count > 0 && rms < 0.001,
+        // Zero samples (empty/corrupt import) must count as silent — the
+        // old `count > 0 &&` guard let an empty WAV report NOT silent,
+        // skipping the silence dialog and failing later at transcription
+        // with a dead-end error. rms is 0.0 when count is 0.
+        is_silent: rms < 0.001,
     })
 }
 
@@ -889,6 +916,63 @@ pub async fn run_microphone_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verdict_silent_for_empty_or_below_floor() {
+        // Dead stream: zero samples.
+        let empty = CaptureHealthSnapshot::default();
+        assert!(verdict_is_silent(&empty, 0.0));
+
+        // Samples but digital/very quiet silence (rms below the -60 dBFS floor).
+        let quiet = CaptureHealthSnapshot {
+            total_samples: 480_000,
+            rms: 0.0004,
+            ..Default::default()
+        };
+        assert!(verdict_is_silent(&quiet, 30.0));
+    }
+
+    #[test]
+    fn verdict_silent_when_no_speech_chunk_ever_detected() {
+        // A constant low hum passes the RMS floor but never qualified as a
+        // speech chunk (signal_secs None) — nothing transcribable.
+        let hum = CaptureHealthSnapshot {
+            total_samples: 960_000,
+            rms: 0.002,
+            signal_secs: None,
+            ..Default::default()
+        };
+        assert!(verdict_is_silent(&hum, 60.0));
+    }
+
+    #[test]
+    fn verdict_silent_when_signal_diluted_in_long_recording() {
+        // 2 s of speech in a 12-minute recording: rms ≈ 0.0026 passes the
+        // floor, but <5% signal span on a ≥30 s recording is not usable.
+        let dilute = CaptureHealthSnapshot {
+            total_samples: 480_000 * 12,
+            rms: 0.0026,
+            signal_secs: Some(2.0),
+            ..Default::default()
+        };
+        assert!(verdict_is_silent(&dilute, 720.0));
+
+        // The same 2 s span in a SHORT recording is fine (ratio gate only
+        // applies to ≥30 s — a brief consult snippet with real speech).
+        let short = CaptureHealthSnapshot { ..dilute };
+        assert!(!verdict_is_silent(&short, 10.0));
+    }
+
+    #[test]
+    fn verdict_healthy_for_normal_speech() {
+        let healthy = CaptureHealthSnapshot {
+            total_samples: 480_000 * 3,
+            rms: 0.05,
+            signal_secs: Some(170.0),
+            ..Default::default()
+        };
+        assert!(!verdict_is_silent(&healthy, 180.0));
+    }
 
     /// Simulates a poisoned `std::sync::Mutex` and verifies the lock attempt
     /// produces an `AppError::MutexPoisoned` rather than panicking.
