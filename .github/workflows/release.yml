@@ -198,9 +198,10 @@ jobs:
             // Read the signature content
             const signature = gh('release', 'download', tag, '--pattern', name, '--output', '-').trim();
 
-            // Map filename to Tauri platform key
+            // Map filename to Tauri platform key. NOTE: `name` is the .sig
+            // file — match platform shapes against the BASE asset.
             let platform = null;
-            if (name.endsWith('.AppImage')) platform = 'linux-x86_64';
+            if (baseAsset.endsWith('.AppImage')) platform = 'linux-x86_64';
             else if ((name.includes('.deb') || name.includes('.rpm')) && !hasAppImage)
               platform = 'linux-x86_64';
             else if (name.includes('.msi') || name.includes('-setup.exe')) platform = 'windows-x86_64';
