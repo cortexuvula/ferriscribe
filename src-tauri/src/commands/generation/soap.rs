@@ -11,9 +11,9 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, load_recording_and_settings, patient_context_is_empty,
-    require_transcript, resolve_provider, resolve_soap_template, run_generation_command,
-    stream_with_events, validate_patient_context,
+    build_completion_request, ensure_nonempty_output, load_recording_and_settings,
+    patient_context_is_empty, require_transcript, resolve_provider, resolve_soap_template,
+    run_generation_command, stream_with_events, validate_patient_context,
 };
 
 /// Generate a SOAP note from a recording's transcript.
@@ -165,6 +165,14 @@ async fn generate_soap_inner(
     // copying, and export. (postprocess_soap extracts around the paragraph
     // formatter so the bullet splitter can't orphan code descriptions.)
     let (soap_text, icd_codes) = soap_generator::postprocess_soap(&raw_soap);
+    // Post-processing can empty a completion the raw check above let through:
+    // whitespace-only output (trimmed by clean_text), a note consisting solely
+    // of ICD code lines (extracted to metadata), or one wrapped entirely in a
+    // fenced code block (clean_text removes fences with their content).
+    // Reject BEFORE persisting — otherwise an empty note is stored and
+    // reported as success. Same trimmed-empty rule the other generators
+    // enforce via this shared helper.
+    ensure_nonempty_output(&soap_text, "SOAP note")?;
     info!(
         icd_codes_extracted = icd_codes.len(),
         "ICD codes extracted from SOAP note"
@@ -198,27 +206,33 @@ async fn generate_soap_inner(
     // metadata write would drop concurrent key writes). `icd_codes` is
     // always written (even when empty) so the frontend can tell a
     // new-format recording (codes in metadata, clean note) from a legacy
-    // one (codes inline in the note, mined as fallback).
+    // one (codes inline in the note, mined as fallback). `context` and
+    // `patient_context` are likewise written unconditionally — null when
+    // absent — so the metadata always mirrors the inputs of the CURRENT
+    // note. Writing them only when non-empty left a prior generation's
+    // context attached to a note that was regenerated without it (the
+    // fields repopulate from metadata on the next recording switch). All
+    // readers treat null like an absent key (frontend
+    // `contextFromMetadata` type-checks strings; the sync wire builder
+    // reads via `as_str()`).
     let mut metadata_patch: Vec<(String, serde_json::Value)> = vec![(
         "icd_codes".to_string(),
         serde_json::to_value(&icd_codes).unwrap_or_else(|_| serde_json::json!([])),
     )];
-    if let Some(ctx) = context
-        && !ctx.is_empty()
-    {
-        metadata_patch.push((
-            "context".to_string(),
-            serde_json::Value::String(ctx.to_string()),
-        ));
-    }
-    if let Some(pc) = patient_context
-        && !patient_context_is_empty(pc)
-    {
-        metadata_patch.push((
-            "patient_context".to_string(),
-            serde_json::to_value(pc).unwrap_or(serde_json::Value::Null),
-        ));
-    }
+    metadata_patch.push((
+        "context".to_string(),
+        context
+            .filter(|c| !c.is_empty())
+            .map(|c| serde_json::Value::String(c.to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    ));
+    metadata_patch.push((
+        "patient_context".to_string(),
+        patient_context
+            .filter(|pc| !patient_context_is_empty(pc))
+            .and_then(|pc| serde_json::to_value(pc).ok())
+            .unwrap_or(serde_json::Value::Null),
+    ));
 
     // The stat merges under generation_stats.soap — record it on a scratch
     // object and ship just that sub-object as the patch entry (the persist
@@ -606,5 +620,168 @@ mod stats_tests {
         // Capture id present but recording id missing — returns after the
         // warn, without touching the DB.
         finalize_training_generation(&Arc::new(db), Some(Uuid::new_v4()), None, "S: ok");
+    }
+}
+
+/// Regression tests (SOAP pipeline review 2026-09-04): a completion that
+/// post-processing empties must be rejected before anything is persisted,
+/// and a regeneration without context must clear the stale metadata keys.
+#[cfg(test)]
+mod postprocess_rejection_tests {
+    use super::super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
+    use super::*;
+    use medical_core::types::settings::AppConfig;
+
+    fn base_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        // Loopback → preflight probe is skipped; the mock serves completions.
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+        config
+    }
+
+    fn note_provider() -> std::sync::Arc<MockCompletionProvider> {
+        std::sync::Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Subjective:\n- Chief complaint: back pain\n\nPlan:\n- Rest",
+            200,
+        ))
+    }
+
+    async fn loaded_recording(
+        state: &AppState,
+        recording_id: &str,
+    ) -> medical_core::types::recording::Recording {
+        let uuid = Uuid::parse_str(recording_id).expect("valid uuid");
+        let conn = state.db.conn().expect("conn");
+        medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid).expect("recording row")
+    }
+
+    /// A completion consisting solely of ICD code lines passes the raw
+    /// emptiness check (the model DID return content) but post-processing
+    /// extracts every line away. Previously the empty note was persisted,
+    /// a "completed" progress event emitted, and the success toast shown.
+    #[tokio::test]
+    async fn generate_soap_rejects_codes_only_completion_without_persisting() {
+        let provider = std::sync::Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "ICD-9 Code: 847.2 — Sprain of lumbar\nICD-9 Code: 724.5 — Lumbago",
+            200,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            base_config(),
+            "Patient reports back pain after lifting boxes.",
+            provider,
+        )
+        .await;
+
+        let result = generate_soap_inner(&state, None, &recording_id, None, None, None).await;
+        let err = result.expect_err("codes-only completion must be rejected");
+        assert!(
+            err.to_string().contains("empty"),
+            "expected empty-note error, got: {err}"
+        );
+
+        let rec = loaded_recording(&state, &recording_id).await;
+        assert!(
+            rec.soap_note.is_none(),
+            "no empty note persisted: {:?}",
+            rec.soap_note
+        );
+        assert!(
+            rec.metadata.get("icd_codes").is_none(),
+            "no metadata patch applied on rejection: {}",
+            rec.metadata
+        );
+    }
+
+    /// Whitespace-only output also becomes an empty note after clean_text
+    /// trims it — same "rejected like empty everywhere" rule the other
+    /// generators already enforce.
+    #[tokio::test]
+    async fn generate_soap_rejects_whitespace_only_completion() {
+        let provider = std::sync::Arc::new(MockCompletionProvider::new("ollama", "   \n\t  ", 200));
+        let (state, recording_id) = build_test_state_with_provider(
+            base_config(),
+            "Patient reports headache and fatigue.",
+            provider,
+        )
+        .await;
+
+        let result = generate_soap_inner(&state, None, &recording_id, None, None, None).await;
+        assert!(
+            result.is_err(),
+            "whitespace-only completion must be rejected"
+        );
+
+        let rec = loaded_recording(&state, &recording_id).await;
+        assert!(rec.soap_note.is_none(), "no empty note persisted");
+    }
+
+    /// Regenerating without context/patient-context must CLEAR the previous
+    /// generation's values from metadata — writing them only when non-empty
+    /// left a stale prior context attached to the new note, and the fields
+    /// repopulate from metadata on the next recording switch.
+    #[tokio::test]
+    async fn generate_soap_clears_stale_context_metadata_when_regenerated_without() {
+        let (state, recording_id) = build_test_state_with_provider(
+            base_config(),
+            "Patient reports back pain after lifting boxes.",
+            note_provider(),
+        )
+        .await;
+
+        let pc = PatientContext {
+            patient_name: None,
+            prior_soap_notes: vec![],
+            medications: vec!["Lisinopril 10mg PO daily".into()],
+            allergies: vec![],
+            conditions: vec!["Hypertension".into()],
+        };
+
+        // First generation WITH context — metadata records both inputs.
+        generate_soap_inner(
+            &state,
+            None,
+            &recording_id,
+            None,
+            Some("prior visit notes"),
+            Some(&pc),
+        )
+        .await
+        .expect("first generation succeeds");
+        let rec = loaded_recording(&state, &recording_id).await;
+        assert_eq!(
+            rec.metadata["context"],
+            serde_json::json!("prior visit notes")
+        );
+        assert_eq!(
+            rec.metadata["patient_context"]["medications"][0],
+            serde_json::json!("Lisinopril 10mg PO daily")
+        );
+
+        // Regeneration WITHOUT them — the stale values must be cleared to
+        // null, not silently retained.
+        generate_soap_inner(&state, None, &recording_id, None, None, None)
+            .await
+            .expect("second generation succeeds");
+        let rec = loaded_recording(&state, &recording_id).await;
+        assert!(
+            rec.metadata
+                .get("context")
+                .is_none_or(serde_json::Value::is_null),
+            "stale context must be cleared: {}",
+            rec.metadata
+        );
+        assert!(
+            rec.metadata
+                .get("patient_context")
+                .is_none_or(serde_json::Value::is_null),
+            "stale patient_context must be cleared: {}",
+            rec.metadata
+        );
+        // The note itself survives both runs.
+        assert!(rec.soap_note.is_some_and(|n| n.contains("back pain")));
     }
 }
