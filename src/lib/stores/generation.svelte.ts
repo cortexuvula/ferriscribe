@@ -5,6 +5,9 @@ export type GeneratingType = 'soap' | 'referral' | 'letter' | 'peer_discussion' 
 interface GenerationState {
   /** Which document type is currently being generated, or null if idle. */
   generating: GeneratingType;
+  /** Recording the UI-started generation belongs to — progress events for
+   *  any other recording (e.g. a background pipeline run) are ignored. */
+  generatingRecordingId: string | null;
   /** Live progress text from the backend event. */
   progressStatus: string | null;
   /** Live streaming throughput while a generation is in flight, else null.
@@ -19,14 +22,22 @@ interface GenerationState {
 class GenerationStore {
   state = $state<GenerationState>({
     generating: null,
+    generatingRecordingId: null,
     progressStatus: null,
     progress: null,
     error: null,
     lastFailedType: null,
   });
 
-  startGenerating(type: 'soap' | 'referral' | 'letter' | 'peer_discussion') {
-    this.state = { ...this.state, generating: type, error: null, progressStatus: null, progress: null };
+  startGenerating(type: 'soap' | 'referral' | 'letter' | 'peer_discussion', recordingId: string) {
+    this.state = {
+      ...this.state,
+      generating: type,
+      generatingRecordingId: recordingId,
+      error: null,
+      progressStatus: null,
+      progress: null,
+    };
   }
 
   setProgress(status: string) {
@@ -35,7 +46,7 @@ class GenerationStore {
 
   /** Set live streaming stats, or pass null to clear them. Cleared on every
    *  lifecycle transition (start/finish/error) so the UI never depends on a
-   *  terminal backend event — some flows (e.g. synopsis) never emit one. */
+   *  terminal backend event — some flows emit only live stats. */
   setProgressStats(p: GenerationProgressStats | null) {
     this.state = { ...this.state, progress: p };
   }
@@ -46,6 +57,7 @@ class GenerationStore {
     this.state = {
       ...this.state,
       generating: null,
+      generatingRecordingId: null,
       progressStatus: null,
       progress: null,
       error,
@@ -54,7 +66,14 @@ class GenerationStore {
   }
 
   finish() {
-    this.state = { ...this.state, generating: null, progressStatus: null, progress: null, lastFailedType: null };
+    this.state = {
+      ...this.state,
+      generating: null,
+      generatingRecordingId: null,
+      progressStatus: null,
+      progress: null,
+      lastFailedType: null,
+    };
   }
 
   clearError() {

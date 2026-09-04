@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 use super::helpers::{
-    acquire_generation_lock, fresh_stats_patch, generate_from_soap, load_recording_and_settings,
-    persist_producer_patch, run_generation_command,
+    acquire_generation_lock, ensure_prompt_within_cap, fresh_stats_patch, generate_from_soap,
+    load_recording_and_settings, persist_producer_patch, run_generation_command,
 };
 
 /// Generate a patient letter from a recording's SOAP note.
@@ -37,10 +37,22 @@ pub async fn generate_letter(
         let (mut recording, settings, config) =
             load_recording_and_settings(&state.db, &recording_id).await?;
 
+        // Same generation-time cap every custom prompt gets — covers configs
+        // that arrived via sync.
+        ensure_prompt_within_cap(settings.custom_letter_prompt.as_deref(), "letter")?;
+
+        // Audience lookup on a blocking worker — rusqlite never runs on the
+        // async runtime (the invariant every other generation DB access
+        // follows; this one predates the helper layer).
         let audience_context: Option<LetterAudienceContext> = match audience_id {
             Some(id) => {
-                let conn = state.db.conn()?;
-                let audience = LetterAudiencesRepo::get_by_id(&conn, &id)?;
+                let db = std::sync::Arc::clone(&state.db);
+                let audience = tokio::task::spawn_blocking(move || -> AppResult<_> {
+                    let conn = db.conn()?;
+                    Ok(LetterAudiencesRepo::get_by_id(&conn, &id)?)
+                })
+                .await
+                .map_err(crate::commands::join_err)??;
                 Some(LetterAudienceContext {
                     name: audience.name,
                     system_prompt: audience.system_prompt,

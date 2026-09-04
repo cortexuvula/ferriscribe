@@ -471,26 +471,45 @@ pub(crate) fn load_wav_to_audio_data(path: &std::path::Path) -> Result<AudioData
 /// Persist `Failed` status for a recording. Ignores DB errors — the caller is
 /// already returning the original error, so a DB write failure here would only
 /// obscure it. This is the testable half of `mark_recording_failed`.
+///
+/// Column-scoped persist: the caller's in-memory snapshot predates the
+/// (possibly minutes-long) STT call, so a whole-row update would revert any
+/// column another writer saved meanwhile (editor autosave, a concurrent
+/// generator). Only the status column (plus the updated_at stamp) is written.
 pub(super) async fn mark_recording_failed_db_only(
     db: &Arc<medical_db::Database>,
-    mut recording: medical_core::types::recording::Recording,
+    recording: medical_core::types::recording::Recording,
     err_msg: String,
 ) {
-    recording.status = ProcessingStatus::Failed {
+    let status_json = match serde_json::to_string(&ProcessingStatus::Failed {
         error: err_msg,
         retry_count: 0,
+    }) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not serialize Failed status; recording stays Processing");
+            return;
+        }
     };
+    let recording_id = recording.id;
     let db = Arc::clone(db);
     let _ = tokio::task::spawn_blocking(move || {
         if let Ok(conn) = db.conn()
-            && let Err(e) = RecordingsRepo::update(&conn, &recording)
+            && let Err(e) = RecordingsRepo::persist_producer_update(
+                &conn,
+                &recording_id,
+                &medical_db::recordings::ProducerPersist {
+                    processing_status: Some(status_json),
+                    ..Default::default()
+                },
+            )
         {
             // The failure-marker write itself failed. The recording will stay
             // stuck in `Processing` in the DB; surface this in the log so it's
             // debuggable instead of silently dropping the error.
             tracing::warn!(
                 error = %e,
-                rec = %recording.id,
+                rec = %recording_id,
                 "failed to mark recording Failed in DB"
             );
         }
@@ -554,6 +573,42 @@ mod tests {
             }
             other => panic!("expected Failed, got {:?}", other),
         }
+    }
+
+    /// Regression (generate-pipeline review 2026-09-04): the failure marker
+    /// used to whole-row write the pre-STT snapshot, reverting any column
+    /// another writer saved during the STT call. It must write ONLY the
+    /// status — a concurrent patient-name edit survives.
+    #[tokio::test]
+    async fn mark_recording_failed_preserves_concurrent_column_edits() {
+        let db = Arc::new(Database::open_in_memory().expect("open in-memory db"));
+        let stale_snapshot = mk_recording();
+        let id = stale_snapshot.id;
+        {
+            let conn = db.conn().expect("conn");
+            RecordingsRepo::insert(&conn, &stale_snapshot).expect("insert");
+        }
+
+        // A concurrent writer renames the patient AFTER our snapshot was
+        // taken (i.e. during the STT call our failure marker ends).
+        {
+            let conn = db.conn().expect("conn");
+            let mut current = RecordingsRepo::get_by_id(&conn, &id).expect("get");
+            current.patient_name = Some("Renamed During STT".to_string());
+            RecordingsRepo::update(&conn, &current).expect("concurrent edit");
+        }
+
+        mark_recording_failed_db_only(&db, stale_snapshot, "boom".to_string()).await;
+
+        let conn = db.conn().expect("conn");
+        let loaded = RecordingsRepo::get_by_id(&conn, &id).expect("get");
+        assert_eq!(
+            loaded.patient_name.as_deref(),
+            Some("Renamed During STT"),
+            "concurrent edit must survive the failure marker: {:?}",
+            loaded.patient_name
+        );
+        assert!(matches!(loaded.status, ProcessingStatus::Failed { .. }));
     }
 
     #[test]

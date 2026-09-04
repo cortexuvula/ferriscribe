@@ -196,6 +196,7 @@
     progressUnlisten = await listen<{
       type: string;
       status: string;
+      recording_id: string;
       progress?: GenerationProgressStats;
     }>(
       'generation-progress',
@@ -204,8 +205,12 @@
         // (Generate tab buttons / regenerate-SOAP) — the record pipeline
         // emits the same events, and routing them here left a permanent
         // "Soap: completed" banner on the Generate tab after every
-        // pipeline run.
+        // pipeline run. Events are ALSO filtered by recording id: a
+        // UI-started generation and a concurrent background pipeline for a
+        // different recording would otherwise interleave their progress
+        // text and throughput stats.
         if (generation.state.generating === null) return;
+        if (event.payload.recording_id !== generation.state.generatingRecordingId) return;
         const prettyType = event.payload.type === 'peer_discussion' ? 'Peer discussion'
           : event.payload.type.charAt(0).toUpperCase() + event.payload.type.slice(1);
         generation.setProgress(`${prettyType}: ${event.payload.status}`);

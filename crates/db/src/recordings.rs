@@ -315,7 +315,13 @@ impl RecordingsRepo {
         id: &Uuid,
         update: &ProducerPersist,
     ) -> DbResult<()> {
-        let tx = conn.unchecked_transaction()?;
+        // IMMEDIATE: the metadata patch is a read-modify-write of the row's
+        // CURRENT metadata. A DEFERRED transaction snapshots the metadata at
+        // the SELECT; a concurrent writer committing before our UPDATE then
+        // fails this persist with non-retryable SQLITE_BUSY_SNAPSHOT — after
+        // the caller's (possibly minutes-long) LLM call. Taking the write
+        // lock up front serializes the metadata writers instead.
+        let tx = crate::unchecked_transaction_immediate(conn)?;
 
         // Persist-time metadata merge: read the row's CURRENT metadata
         // (not the producer's stale snapshot) and apply the patch. When

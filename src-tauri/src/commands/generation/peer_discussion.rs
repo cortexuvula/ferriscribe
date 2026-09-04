@@ -2,15 +2,17 @@
 //! into a structured peer discussion note.
 
 use medical_core::error::{AppError, AppResult};
+use medical_processing::document_generator;
 use medical_processing::peer_discussion::{self, PeerDiscussionPromptConfig};
 use tracing::{debug, info};
 
 use crate::state::AppState;
 
 use super::helpers::{
-    acquire_generation_lock, build_completion_request, ensure_nonempty_output, fresh_stats_patch,
-    load_recording_and_settings, persist_producer_patch, require_transcript, resolve_provider,
-    run_generation_command, stream_with_events,
+    acquire_generation_lock, build_completion_request, ensure_nonempty_output,
+    ensure_prompt_within_cap, fresh_stats_patch, load_recording_and_settings,
+    persist_producer_patch, require_transcript, resolve_provider, run_generation_command,
+    stream_with_events,
 };
 
 /// Generate a peer discussion note from a recording's transcript.
@@ -72,6 +74,13 @@ async fn generate_peer_discussion_inner(
     let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
 
+    // Same generation-time cap every custom prompt gets — covers configs
+    // that arrived via sync.
+    ensure_prompt_within_cap(
+        settings.custom_peer_discussion_prompt.as_deref(),
+        "peer discussion",
+    )?;
+
     medical_core::preflight::preflight_for_command(
         medical_core::preflight::CommandKind::GeneratePeerDiscussion,
         &config,
@@ -120,7 +129,10 @@ async fn generate_peer_discussion_inner(
     let (response, generation_elapsed) =
         stream_with_events(&provider, app, "peer_discussion", recording_id, request).await?;
 
-    let discussion_text = response.content;
+    // Same plain-text safety net referral/letter get: the system prompt
+    // demands plain text, but a model that ignores it must not leak markdown
+    // into the stored note and exports.
+    let discussion_text = document_generator::strip_markdown(&response.content);
     ensure_nonempty_output(&discussion_text, "peer discussion note")?;
 
     // Record the stats on the in-memory recording (the patch source), then
@@ -243,5 +255,47 @@ mod stats_tests {
             serde_json::json!("llama3")
         );
         assert!(rec.metadata["peer_discussion_context"].is_object());
+    }
+
+    /// Regression (generate-pipeline review 2026-09-04): peer discussion
+    /// kept referral/letter's "plain text only" prompt but never ran their
+    /// markdown-stripping safety net — a model that ignored the instruction
+    /// leaked markdown into the stored note.
+    #[tokio::test]
+    async fn generate_peer_discussion_strips_markdown() {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+
+        let provider = Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "## Discussion\n\n- **Agreed** on outpatient workup",
+            48,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports headache and fatigue.",
+            provider,
+        )
+        .await;
+
+        let text = generate_peer_discussion_inner(
+            &state,
+            None,
+            &recording_id,
+            "Smith",
+            "Cardiology",
+            "chest pain evaluation",
+            None,
+        )
+        .await
+        .expect("peer discussion generation succeeds");
+        assert!(
+            !text.contains("##"),
+            "headings uppercased, not kept: {text}"
+        );
+        assert!(!text.contains("**"), "bold markers stripped: {text}");
+        assert!(text.contains("Agreed"), "content survives: {text}");
     }
 }

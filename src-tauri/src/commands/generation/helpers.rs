@@ -456,6 +456,24 @@ pub(super) fn ensure_nonempty_output(text: &str, doc_type_label: &str) -> AppRes
     Ok(())
 }
 
+/// Reject an oversized custom prompt at generation time. Mirrors the
+/// save-time check (`commands::settings::validate_prompt_overrides`) so a
+/// config that arrived via sync — which bypasses save-time validation — is
+/// caught before any provider call. `label` names the doc type in the error
+/// ("SOAP", "referral", …).
+pub(super) fn ensure_prompt_within_cap(custom: Option<&str>, label: &str) -> AppResult<()> {
+    if let Some(custom) = custom
+        && custom.len() > MAX_CONTEXT_CHARS
+    {
+        return Err(AppError::InvalidInput(format!(
+            "Custom {label} prompt too large: {} chars, limit is {MAX_CONTEXT_CHARS}. \
+             Shorten it in Settings → AI.",
+            custom.len(),
+        )));
+    }
+    Ok(())
+}
+
 /// Parse a template string into the `SoapTemplate` enum.
 ///
 /// Returns `None` for unrecognized strings — [`resolve_soap_template`]
