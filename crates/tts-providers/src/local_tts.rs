@@ -139,6 +139,17 @@ mod inner {
         }
     }
 
+    /// Scale a "multiplier of normal" value (1.0 = normal) onto the
+    /// backend's native [min, max] range.
+    ///
+    /// The `tts` crate passes rate/volume through RAW — no normalization —
+    /// and its backends use native scales: AVFoundation's utterance rate is
+    /// 0.0–1.0 with normal at 0.5, so an unconverted multiplier of 1.0
+    /// meant MAXIMUM speech speed (unintelligible output).
+    fn scaled_to_native(multiplier: f32, normal: f32, min: f32, max: f32) -> f32 {
+        (normal * multiplier).clamp(min, max)
+    }
+
     fn speak_on_thread(
         engine: &mut tts::Tts,
         text: &str,
@@ -146,14 +157,27 @@ mod inner {
         volume: f32,
         voice_id: Option<String>,
     ) -> AppResult<()> {
-        // Apply speech rate if supported.
-        if let Err(e) = engine.set_rate(rate) {
-            warn!("Could not set TTS rate to {rate}: {e}");
+        // Apply speech rate if supported — TtsConfig's rate is a multiplier
+        // of the backend's normal rate, converted to its native scale above.
+        let native_rate = scaled_to_native(
+            rate,
+            engine.normal_rate(),
+            engine.min_rate(),
+            engine.max_rate(),
+        );
+        if let Err(e) = engine.set_rate(native_rate) {
+            warn!("Could not set TTS rate to {native_rate}: {e}");
         }
 
-        // Apply volume if supported.
-        if let Err(e) = engine.set_volume(volume) {
-            warn!("Could not set TTS volume to {volume}: {e}");
+        // Apply volume if supported (same multiplier→native conversion).
+        let native_volume = scaled_to_native(
+            volume,
+            engine.normal_volume(),
+            engine.min_volume(),
+            engine.max_volume(),
+        );
+        if let Err(e) = engine.set_volume(native_volume) {
+            warn!("Could not set TTS volume to {native_volume}: {e}");
         }
 
         // Set voice if requested.
@@ -223,6 +247,32 @@ mod inner {
 
             // Return empty bytes -- audio is played directly by the OS.
             Ok(Vec::new())
+        }
+    }
+
+    #[cfg(test)]
+    mod rate_scaling_tests {
+        use super::scaled_to_native;
+
+        #[test]
+        fn multiplier_one_is_the_backend_normal_not_its_max() {
+            // AVFoundation scale: 0.0–1.0, normal 0.5. The bug this pins:
+            // a raw 1.0 multiplier landed as MAXIMUM rate.
+            assert_eq!(scaled_to_native(1.0, 0.5, 0.0, 1.0), 0.5);
+        }
+
+        #[test]
+        fn faster_multipliers_scale_up_and_clamp_to_max() {
+            assert_eq!(scaled_to_native(1.5, 0.5, 0.0, 1.0), 0.75);
+            assert_eq!(scaled_to_native(2.0, 0.5, 0.0, 1.0), 1.0);
+            assert_eq!(scaled_to_native(4.0, 0.5, 0.0, 1.0), 1.0);
+        }
+
+        #[test]
+        fn identity_scale_passes_the_multiplier_through() {
+            // Backends whose normal IS 1.0 behave as before.
+            assert_eq!(scaled_to_native(1.0, 1.0, 0.0, 2.0), 1.0);
+            assert_eq!(scaled_to_native(0.5, 1.0, 0.0, 2.0), 0.5);
         }
     }
 }
