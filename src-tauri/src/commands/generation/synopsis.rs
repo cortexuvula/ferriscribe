@@ -7,7 +7,7 @@ use tracing::debug;
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, ensure_nonempty_output, fresh_stats_patch,
+    acquire_generation_lock, build_completion_request, ensure_nonempty_output, fresh_stats_patch,
     load_recording_and_settings, persist_producer_patch, require_soap_note, resolve_provider,
     stream_with_events,
 };
@@ -22,6 +22,9 @@ pub async fn generate_synopsis(
     state: tauri::State<'_, AppState>,
     recording_id: String,
 ) -> AppResult<String> {
+    // One generation per recording at a time (see acquire_generation_lock).
+    let _generation_lock = acquire_generation_lock(&state, &recording_id)?;
+
     generate_synopsis_inner(&state, Some(&app), &recording_id).await
 }
 

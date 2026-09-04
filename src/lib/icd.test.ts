@@ -432,6 +432,38 @@ describe('icdCodesFromMetadata — structured codes to list rows', () => {
     expect(rows[0].description).toBe('Lumbar');
   });
 
+  it('keys rows by code — duplicate metadata entries render once', () => {
+    // Regression (SOAP pipeline review 2026-09-04): the Rust two-pass
+    // extractor could emit the same code twice (standalone line + mid-line
+    // occurrence); metadata synced from an older peer can still carry
+    // duplicates. The list must render one row, keeping the first
+    // occurrence's description.
+    const rows = icdCodesFromMetadata(
+      [
+        { code: '847.2', description: 'Sprain of lumbar', kind: 'icd9' },
+        { code: '847.2', description: null, kind: 'icd9' },
+      ],
+      mspSet,
+      'icd9',
+      mspDescs,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].description).toBe('Sprain of lumbar');
+  });
+
+  it('backfills a missing description from a later duplicate', () => {
+    const rows = icdCodesFromMetadata(
+      [
+        { code: '847.2', description: null, kind: 'icd9' },
+        { code: '847.2', description: 'Sprain of lumbar', kind: 'icd9' },
+      ],
+      mspSet,
+      'icd9',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].description).toBe('Sprain of lumbar');
+  });
+
   it('missing kind defaults to icd9 treatment', () => {
     const rows = icdCodesFromMetadata([{ code: '847.2' }], mspSet, 'icd9');
     expect(rows[0].valid).toBe(true);

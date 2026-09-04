@@ -246,6 +246,12 @@ export function icdCodeMetadataEntries(metadata: unknown): IcdCodeMetadataEntry[
  * validate against the MSP set in icd9/both modes; ICD-10 codes render
  * neutral. Titles come from the entry's description, with the official
  * MSP description as fallback.
+ *
+ * Rows are keyed by code (first occurrence wins; a later duplicate only
+ * backfills a missing description) — the Rust two-pass extractor could
+ * emit the same code twice when it appeared both standalone and mid-line,
+ * and metadata arriving via sync from an older peer can still carry
+ * duplicates. Without keying, the billing list rendered the code twice.
  */
 export function icdCodesFromMetadata(
   entries: IcdCodeMetadataEntry[],
@@ -254,7 +260,8 @@ export function icdCodesFromMetadata(
   mspDescriptions: ReadonlyMap<string, string> | null = null,
 ): ValidatedIcdCode[] {
   const validateIcd9 = mode === 'icd9' || mode === 'both';
-  return entries.map((entry) => {
+  const byCode = new Map<string, ValidatedIcdCode>();
+  for (const entry of entries) {
     const bare = entry.code;
     const isIcd10 = entry.kind === 'icd10';
     const valid =
@@ -262,13 +269,20 @@ export function icdCodesFromMetadata(
     const description =
       entry.description?.trim() ||
       resolveDescription(bare, new Map(), mspDescriptions);
-    return {
+    const row: ValidatedIcdCode = {
       raw: `ICD-${isIcd10 ? '10' : '9'} Code: ${bare}`,
       bare,
       valid,
       description,
     };
-  });
+    const existing = byCode.get(bare);
+    if (!existing) {
+      byCode.set(bare, row);
+    } else if (!existing.description && row.description) {
+      existing.description = row.description;
+    }
+  }
+  return [...byCode.values()];
 }
 
 /**

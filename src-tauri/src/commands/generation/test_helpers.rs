@@ -134,6 +134,7 @@ async fn build_test_state_inner(
         ))),
         current_recording: Arc::new(std::sync::Mutex::new(None)),
         pipeline_cancels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        generation_locks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         sharing: Arc::new(RwLock::new(None)),
         sharing_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         vocab_api: RwLock::new(None),

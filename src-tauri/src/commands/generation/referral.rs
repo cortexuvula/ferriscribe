@@ -6,8 +6,8 @@ use medical_processing::document_generator;
 use crate::state::AppState;
 
 use super::helpers::{
-    fresh_stats_patch, generate_from_soap, load_recording_and_settings, persist_producer_patch,
-    run_generation_command,
+    acquire_generation_lock, fresh_stats_patch, generate_from_soap, load_recording_and_settings,
+    persist_producer_patch, run_generation_command,
 };
 
 /// Generate a referral letter from a recording's SOAP note.
@@ -22,6 +22,9 @@ pub async fn generate_referral(
     urgency: Option<String>,
     context: Option<String>,
 ) -> AppResult<String> {
+    // One generation per recording at a time (see acquire_generation_lock).
+    let _generation_lock = acquire_generation_lock(&state, &recording_id)?;
+
     let recipient = recipient_type.unwrap_or_else(|| "Specialist".to_string());
     let urg = urgency.unwrap_or_else(|| "routine".to_string());
     let ctx = context.clone();

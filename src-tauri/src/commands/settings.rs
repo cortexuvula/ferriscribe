@@ -72,6 +72,26 @@ pub async fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppRes
     .map_err(super::join_err)?
 }
 
+/// Validate a config's user-supplied prompt overrides before saving.
+///
+/// A custom SOAP prompt replaces the ~12K-char default system prompt
+/// wholesale; bound it to the app-wide user-text budget so a pathological
+/// paste can't silently consume the model's whole context window. The
+/// generation path re-checks (configs can arrive via sync), but rejecting
+/// at save time gives the settings UI immediate feedback.
+pub(super) fn validate_prompt_overrides(config: &AppConfig) -> AppResult<()> {
+    let cap = crate::commands::generation::MAX_CONTEXT_CHARS;
+    if let Some(ref custom) = config.custom_soap_prompt
+        && custom.len() > cap
+    {
+        return Err(AppError::InvalidInput(format!(
+            "Custom SOAP prompt too large: {} chars, limit is {cap}.",
+            custom.len()
+        )));
+    }
+    Ok(())
+}
+
 /// Persist updated application settings to the database.
 ///
 /// Validates that configured AI/STT hosts are local (private/LAN addresses)
@@ -79,6 +99,7 @@ pub async fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppRes
 /// like `api.openai.com` to enforce the local-only PHI constraint.
 #[tauri::command]
 pub async fn save_settings(state: tauri::State<'_, AppState>, config: AppConfig) -> AppResult<()> {
+    validate_prompt_overrides(&config)?;
     let db = state.db.clone();
     // Host validation may resolve DNS — blocking — so it rides along in the
     // same spawn_blocking as the save.
@@ -171,6 +192,21 @@ mod tests {
             }
             _ => panic!("expected InvalidEndpoint"),
         }
+    }
+
+    #[test]
+    fn oversized_custom_soap_prompt_rejected_at_save() {
+        let mut cfg = config_with_hosts("localhost", "localhost", "");
+        cfg.custom_soap_prompt =
+            Some("p".repeat(crate::commands::generation::MAX_CONTEXT_CHARS + 1));
+        let err = validate_prompt_overrides(&cfg).expect_err("oversized prompt rejected");
+        assert!(matches!(err, AppError::InvalidInput(_)));
+
+        // At the cap (and absent) both pass.
+        cfg.custom_soap_prompt = Some("p".repeat(crate::commands::generation::MAX_CONTEXT_CHARS));
+        assert!(validate_prompt_overrides(&cfg).is_ok());
+        cfg.custom_soap_prompt = None;
+        assert!(validate_prompt_overrides(&cfg).is_ok());
     }
 }
 

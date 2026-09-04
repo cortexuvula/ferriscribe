@@ -29,14 +29,19 @@ static CITATION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\[\d+\])+")
 
 /// Precomputed per-header regex triples: (mid-line-with-colon, header-at-end,
 /// header-then-bullet). One triple per SECTION_HEADERS entry, same order.
+///
+/// The char captured before a promoted header excludes list markers
+/// (`-`, `*`, `+`, `•`): with a bare `(\S)`, the dash of a bullet like
+/// "- Follow up: return in two weeks" matched, and the replacement tore the
+/// bullet into an orphaned `-` line plus the de-bulleted text.
 static SECTION_HEADER_RES: LazyLock<Vec<(Regex, Regex, Regex)>> = LazyLock::new(|| {
     SECTION_HEADERS
         .iter()
         .map(|header| {
             let escaped = regex::escape(header);
             (
-                Regex::new(&format!(r"(?i)(\S)\s+({escaped}:)")).unwrap(),
-                Regex::new(&format!(r"(?im)(\S)\s+({escaped})\s*$")).unwrap(),
+                Regex::new(&format!(r"(?i)([^\s\-*+•])\s+({escaped}:)")).unwrap(),
+                Regex::new(&format!(r"(?im)([^\s\-*+•])\s+({escaped})\s*$")).unwrap(),
                 Regex::new(&format!(r"(?i)({escaped}:)\s*(- )")).unwrap(),
             )
         })
@@ -147,7 +152,12 @@ fn format_soap_paragraphs(text: &str) -> String {
 /// `- Pain in ankle` bullet in the stored note. A second extraction pass
 /// AFTER formatting then catches codes the model emitted mid-line: the
 /// mid-line header split only promotes them onto their own line during
-/// formatting. Captures from both passes are deduplicated by code.
+/// formatting. Captures from both passes are deduplicated by code, under
+/// the same first-occurrence-wins rule [`extract_icd_codes`] applies
+/// within a single pass (a code legitimately captured twice — once from a
+/// standalone line in pass 1, once from a mid-line/bulleted occurrence
+/// promoted by the formatter in pass 2 — must not be emitted twice into
+/// `metadata.icd_codes`).
 ///
 /// This is the final transformation step before the generated SOAP note is
 /// persisted and displayed to the user; the returned codes go to
@@ -157,7 +167,16 @@ pub fn postprocess_soap(raw: &str) -> (String, Vec<ExtractedIcdCode>) {
     let (stripped, mut codes) = extract_icd_codes(&cleaned);
     let formatted = format_soap_paragraphs(&stripped);
     let (note, late_codes) = extract_icd_codes(&formatted);
-    codes.extend(late_codes);
+    for late in late_codes {
+        match codes.iter_mut().find(|c| c.code == late.code) {
+            Some(existing) => {
+                if existing.description.is_none() {
+                    existing.description = late.description;
+                }
+            }
+            None => codes.push(late),
+        }
+    }
     (note, codes)
 }
 
@@ -346,6 +365,61 @@ mod tests {
         assert_eq!(codes.len(), 1);
         assert_eq!(codes[0].code, "847.2");
         assert_eq!(codes[0].description.as_deref(), Some("Sprain of lumbar"));
+    }
+
+    #[test]
+    fn postprocess_dedupes_code_captured_by_both_extraction_passes() {
+        // Regression (SOAP pipeline review 2026-09-04): the same code emitted
+        // both as a standalone line (captured by the pre-format pass) and
+        // mid-line (promoted onto its own line by the formatter, captured by
+        // the post-format pass) was extend()ed into metadata twice. The
+        // merge must keep one entry, preserving the first pass's description.
+        let raw = "ICD-9 Code: 847.2 — Sprain of lumbar\n\nAssessment: strain improving ICD-9 Code: 847.2\n\nPlan:\n- Rest";
+        let (note, codes) = postprocess_soap(raw);
+        assert!(!note.contains("ICD-9"), "note must be code-free: {note}");
+        assert_eq!(codes.len(), 1, "duplicate code collapsed: {codes:?}");
+        assert_eq!(codes[0].code, "847.2");
+        assert_eq!(
+            codes[0].description.as_deref(),
+            Some("Sprain of lumbar"),
+            "first pass's description preserved"
+        );
+    }
+
+    #[test]
+    fn postprocess_backfills_description_from_late_duplicate() {
+        // Mirror of the dedup test with the description on the LATE capture
+        // only: the standalone line carries no description, the mid-line
+        // occurrence does — the merge adopts it (same backfill rule
+        // extract_icd_codes applies to repeats within a single pass).
+        let raw = "ICD-9 Code: 847.2\n\nAssessment: strain improving ICD-9 Code: 847.2 — Sprain of lumbar\n\nPlan:\n- Rest";
+        let (_, codes) = postprocess_soap(raw);
+        assert_eq!(codes.len(), 1, "duplicate code collapsed: {codes:?}");
+        assert_eq!(
+            codes[0].description.as_deref(),
+            Some("Sprain of lumbar"),
+            "late duplicate's description adopted"
+        );
+    }
+
+    #[test]
+    fn format_does_not_tear_bullet_starting_with_header_word() {
+        // Regression (SOAP pipeline review 2026-09-04): the mid-line header
+        // split matched the bullet dash of "- Follow up: …" itself, tearing
+        // the line into an orphaned "-" plus the de-bulleted text. The char
+        // before a promoted header must not be a list marker.
+        let raw = "Follow up:\n- Follow up: return in two weeks\n- Return sooner if worsening";
+        let (note, _) = postprocess_soap(raw);
+        let lines: Vec<&str> = note.lines().collect();
+        assert!(
+            lines.contains(&"- Follow up: return in two weeks"),
+            "bullet must stay intact on one line: {note}"
+        );
+        assert!(!lines.contains(&"-"), "no orphaned bullet dash: {note}");
+        assert!(
+            lines.contains(&"- Return sooner if worsening"),
+            "sibling bullet untouched: {note}"
+        );
     }
 
     #[test]

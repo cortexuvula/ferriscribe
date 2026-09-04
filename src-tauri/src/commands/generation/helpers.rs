@@ -51,7 +51,12 @@ pub(super) async fn load_recording_and_settings(
     tokio::task::spawn_blocking(move || {
         let conn = db.conn()?;
 
-        let recording = RecordingsRepo::get_by_id(&conn, &uuid)?;
+        // Active-only lookup: generation holds this snapshot across a
+        // minutes-long LLM call, and the persist at the end filters
+        // `deleted_at IS NULL` — loading a trashed row here would spend the
+        // whole completion and then fail with a bare NotFound
+        // (get_by_id_active names the deletion instead).
+        let recording = RecordingsRepo::get_by_id_active(&conn, &uuid)?;
 
         let mut config = medical_db::settings::SettingsRepo::load_config(&conn)?;
         config.migrate();
@@ -207,6 +212,63 @@ pub(super) async fn run_generation_command(
     }
 
     result
+}
+
+/// RAII guard: removes the recording's key from the in-flight set on drop
+/// (success, error, or panic unwind) so an aborted generation never
+/// permanently blocks future ones for that recording.
+#[derive(Debug)]
+pub(super) struct GenerationLockGuard {
+    locks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    key: String,
+}
+
+impl Drop for GenerationLockGuard {
+    fn drop(&mut self) {
+        match self.locks.lock() {
+            Ok(mut guard) => {
+                guard.remove(&self.key);
+            }
+            Err(poisoned) => {
+                tracing::error!(
+                    key = %self.key,
+                    "generation lock set poisoned; entry leaked. \
+                     Subsequent generations for this recording may be rejected."
+                );
+                // Best-effort cleanup using the poisoned inner.
+                poisoned.into_inner().remove(&self.key);
+            }
+        }
+    }
+}
+
+/// Reject a second concurrent generation for the same recording.
+///
+/// The UI's `generation` store serializes same-tab clicks, but the
+/// background pipeline and the Generate/Record tabs go through different
+/// stores — without this, the backend could run two LLM generations on one
+/// row at once (interleaved `generation-progress` events, double provider
+/// cost, last-writer-wins persist, and with training capture on,
+/// `update_final_text`'s latest-row semantics could cross-finalize the
+/// other run's draft).
+pub(super) fn acquire_generation_lock(
+    state: &AppState,
+    recording_id: &str,
+) -> AppResult<GenerationLockGuard> {
+    let mut guard = state
+        .generation_locks
+        .lock()
+        .map_err(|e| AppError::MutexPoisoned(format!("generation_locks: {e}")))?;
+    if guard.contains(recording_id) {
+        return Err(AppError::Other(
+            "a generation is already running for this recording".to_string(),
+        ));
+    }
+    guard.insert(recording_id.to_string());
+    Ok(GenerationLockGuard {
+        locks: Arc::clone(&state.generation_locks),
+        key: recording_id.to_string(),
+    })
 }
 
 /// Shared inner logic for document types generated from a SOAP note (referral,
@@ -395,14 +457,20 @@ pub(super) fn ensure_nonempty_output(text: &str, doc_type_label: &str) -> AppRes
 }
 
 /// Parse a template string into the `SoapTemplate` enum.
-pub(super) fn parse_soap_template(s: &str) -> SoapTemplate {
+///
+/// Returns `None` for unrecognized strings — [`resolve_soap_template`]
+/// then falls back to the user's stored preference rather than a hard-coded
+/// default. Accepts the enum's snake_case wire forms (plus common
+/// punctuation variants of follow-up).
+pub(super) fn parse_soap_template(s: &str) -> Option<SoapTemplate> {
     match s.to_lowercase().as_str() {
-        "new_patient" | "newpatient" => SoapTemplate::NewPatient,
-        "telehealth" => SoapTemplate::Telehealth,
-        "emergency" => SoapTemplate::Emergency,
-        "pediatric" => SoapTemplate::Pediatric,
-        "geriatric" => SoapTemplate::Geriatric,
-        _ => SoapTemplate::FollowUp, // default
+        "follow_up" | "followup" | "follow-up" => Some(SoapTemplate::FollowUp),
+        "new_patient" | "newpatient" => Some(SoapTemplate::NewPatient),
+        "telehealth" => Some(SoapTemplate::Telehealth),
+        "emergency" => Some(SoapTemplate::Emergency),
+        "pediatric" => Some(SoapTemplate::Pediatric),
+        "geriatric" => Some(SoapTemplate::Geriatric),
+        _ => None,
     }
 }
 
@@ -414,9 +482,13 @@ pub(super) fn parse_soap_template(s: &str) -> SoapTemplate {
 /// the stored setting. Previously only the pipeline did its own settings
 /// lookup, and a silent error there (or a direct `generate_soap` call)
 /// fell back to FollowUp regardless of the user's configured template.
+///
+/// An explicit but unparseable string ALSO falls back to the stored
+/// preference (2026-09-04 review): silently discarding it in favor of
+/// FollowUp ignored the user's configured default.
 pub(super) fn resolve_soap_template(template: Option<&str>, config: &AppConfig) -> SoapTemplate {
     match template {
-        Some(t) => parse_soap_template(t),
+        Some(t) => parse_soap_template(t).unwrap_or_else(|| config.soap_template.clone()),
         None => config.soap_template.clone(),
     }
 }
@@ -523,13 +595,87 @@ mod tests {
     }
 
     #[test]
-    fn resolve_soap_template_unparseable_string_defaults_to_follow_up() {
+    fn resolve_soap_template_unparseable_string_falls_back_to_stored_preference() {
+        // 2026-09-04 review: an explicit-but-garbage string previously
+        // silently discarded the user's stored preference in favor of the
+        // hard-coded FollowUp default.
         let mut config = AppConfig::default();
         config.soap_template = SoapTemplate::Geriatric;
         assert_eq!(
             resolve_soap_template(Some("not-a-template"), &config),
-            SoapTemplate::FollowUp
+            SoapTemplate::Geriatric
         );
+    }
+
+    #[test]
+    fn resolve_soap_template_explicit_follow_up_wins_over_stored_preference() {
+        let mut config = AppConfig::default();
+        config.soap_template = SoapTemplate::Geriatric;
+        assert_eq!(
+            resolve_soap_template(Some("follow_up"), &config),
+            SoapTemplate::FollowUp,
+            "an explicit FollowUp must not fall through to the stored preference"
+        );
+    }
+
+    #[test]
+    fn parse_soap_template_accepts_snake_case_wire_forms() {
+        // The enum serializes snake_case (serde rename_all) — every wire
+        // form must parse now that None means "use stored preference".
+        assert_eq!(
+            parse_soap_template("follow_up"),
+            Some(SoapTemplate::FollowUp)
+        );
+        assert_eq!(
+            parse_soap_template("new_patient"),
+            Some(SoapTemplate::NewPatient)
+        );
+        assert_eq!(
+            parse_soap_template("telehealth"),
+            Some(SoapTemplate::Telehealth)
+        );
+        assert_eq!(
+            parse_soap_template("emergency"),
+            Some(SoapTemplate::Emergency)
+        );
+        assert_eq!(
+            parse_soap_template("pediatric"),
+            Some(SoapTemplate::Pediatric)
+        );
+        assert_eq!(
+            parse_soap_template("geriatric"),
+            Some(SoapTemplate::Geriatric)
+        );
+        assert_eq!(
+            parse_soap_template("Telehealth"),
+            Some(SoapTemplate::Telehealth)
+        );
+        assert_eq!(parse_soap_template("nonsense"), None);
+    }
+
+    #[tokio::test]
+    async fn generation_lock_serializes_per_recording_and_releases_on_drop() {
+        let (state, recording_id) = super::super::test_helpers::build_test_state_with_recording(
+            AppConfig::default(),
+            "transcript",
+        )
+        .await;
+
+        let first = acquire_generation_lock(&state, &recording_id).expect("first acquire");
+        let err = acquire_generation_lock(&state, &recording_id).expect_err("second acquire");
+        assert!(
+            err.to_string().contains("already running"),
+            "expected already-running error: {err}"
+        );
+        // A different recording is unaffected.
+        let other = acquire_generation_lock(&state, "other-recording")
+            .expect("different recording acquires");
+        drop(other);
+
+        drop(first);
+        let reacquired = acquire_generation_lock(&state, &recording_id)
+            .expect("lock released on drop, re-acquire works");
+        drop(reacquired);
     }
 
     #[test]
