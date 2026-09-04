@@ -73,7 +73,7 @@ fn chunk_qualifies_as_sound(chunk: &[f32]) -> bool {
         return false;
     }
     let (peak, sum_sq) = sample_stats(chunk);
-    let rms = (sum_sq / chunk.len() as f64) as f32;
+    let rms = (sum_sq / chunk.len() as f64).sqrt() as f32;
     rms >= SOUND_CHUNK_RMS || peak >= SOUND_CHUNK_PEAK
 }
 
@@ -214,7 +214,7 @@ impl CaptureHealth {
                 .map(|(first, last)| last.duration_since(first).as_secs_f64()),
             peak: inner.peak,
             rms: if inner.total_samples > 0 {
-                (inner.sum_sq / inner.total_samples as f64) as f32
+                (inner.sum_sq / inner.total_samples as f64).sqrt() as f32
             } else {
                 0.0
             },
@@ -454,9 +454,14 @@ pub fn start_capture(
     // cheap to drop if the consumer is gone.
     let (waveform_tx, waveform_rx) = mpsc::sync_channel::<Vec<f32>>(32);
 
-    // Chunk size to accumulate before computing & sending a waveform snapshot.
-    // ~50 ms worth of samples.
-    let waveform_chunk = (actual_rate / 20) as usize;
+    // Chunk size to accumulate before computing & sending a waveform
+    // snapshot: ~50 ms of FRAMES. The ring buffer carries interleaved
+    // samples, so a stereo capture needs rate × channels / 20 samples for
+    // 50 ms of audio — without the channel factor the chunks were
+    // half-length and straddled frame boundaries (cosmetic for the
+    // waveform, but it also halved the watchdog's sound-chunk cadence).
+    let waveform_chunk =
+        ((actual_rate as usize).saturating_mul(actual_channels as usize) / 20).max(1);
 
     // ── Drain thread ──────────────────────────────────────────────────────────
     let health_drain = Arc::clone(&health);
@@ -717,6 +722,15 @@ mod tests {
         let speech: Vec<f32> = (0..800).map(|i| 0.05 * (i as f32 * 0.1).sin()).collect();
         assert!(chunk_qualifies_as_sound(&speech));
         assert!(!chunk_qualifies_as_sound(&[]));
+
+        // Quiet-but-real signal that qualifies ONLY via the RMS path: its
+        // constant 0.005 level is above SOUND_CHUNK_RMS (0.002, a true RMS
+        // — sqrt of the mean square) yet below SOUND_CHUNK_PEAK (0.02).
+        // This pins the sqrt: without it the comparison sees a mean square
+        // of 0.000025 and the chunk would be misclassified as silence.
+        assert!(chunk_qualifies_as_sound(&[0.005f32; 800]));
+        // And a level below both thresholds stays silent.
+        assert!(!chunk_qualifies_as_sound(&[0.001f32; 800]));
     }
 
     #[test]
@@ -743,7 +757,14 @@ mod tests {
         // 3200 samples (1600 silence + 1600 speech) at 16 kHz mono = 0.2 s.
         assert!((snap.duration_secs - 0.2).abs() < 0.001);
         assert!((snap.peak - 0.1).abs() < 0.01);
-        assert!(snap.rms > 0.0);
+        // True RMS, not mean square: 1600 silence + 1600 samples of
+        // mean-square 0.005 (0.1·sin) → overall mean square 0.0025 →
+        // rms √0.0025 = 0.05. A missing sqrt would report 0.0025.
+        assert!(
+            (snap.rms - 0.05).abs() < 0.001,
+            "snapshot rms should be root-mean-square, got {}",
+            snap.rms
+        );
         assert_eq!(snap.total_samples, 3200);
         // Data last arrived at t0+5 → 7 s stale at snapshot time.
         assert!((snap.secs_since_last_data.unwrap() - 7.0).abs() < 0.1);
@@ -766,6 +787,24 @@ mod tests {
         assert_eq!(snap.secs_since_last_sound, None);
         assert!(snap.secs_since_last_data.is_some());
         assert_eq!(snap.rms, 0.0);
+    }
+
+    /// Quiet-but-real speech (true RMS 0.01, below SOUND_CHUNK_PEAK) must
+    /// qualify as signal via the RMS path, and the snapshot must report the
+    /// true RMS. Before the sqrt fix both the mean-square comparison and the
+    /// snapshot value silently divided every level by its own scale — quiet
+    /// consults were misread as silence by the stop-time verdict.
+    #[test]
+    fn capture_health_reports_true_rms_for_quiet_speech() {
+        let health = CaptureHealth::new(16_000, 1, Arc::new(AtomicBool::new(false)));
+        let t0 = Instant::now();
+        let quiet_speech = vec![0.01f32; 800];
+        health.note_data(t0);
+        health.note_chunk(&quiet_speech, t0);
+        let snap = health.snapshot(t0 + Duration::from_secs(1));
+        assert!(snap.has_signal, "constant 0.01 exceeds SOUND_CHUNK_RMS");
+        assert!((snap.rms - 0.01).abs() < 0.0005, "got {}", snap.rms);
+        assert!((snap.peak - 0.01).abs() < 1e-6);
     }
 
     #[test]

@@ -6,6 +6,16 @@ export function formatDuration(seconds: number | null): string {
   return `${m}:${s}`;
 }
 
+/** Format seconds as M:SS (minutes unpadded) for prose like "a 3:12
+ *  recording". Rounds the TOTAL once before splitting: rounding minutes and
+ *  seconds independently rendered 59.4 s as "1:59". */
+export function formatMinsSecs(seconds: number): string {
+  const total = Math.round(seconds);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 /** Format an ISO timestamp to a locale time string (HH:MM). */
 export function formatTimestamp(iso: string): string {
   const d = new Date(iso);

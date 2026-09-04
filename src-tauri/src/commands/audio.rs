@@ -196,28 +196,59 @@ pub async fn start_recording(
     // take_capture_handle_for_stop below). Once the handle is visible, the
     // recording info must already be there, or a racing stop would take the
     // handle and then find no duration/path to finalize.
+    //
+    // Both locks below follow try_or_reset!'s reset-on-error discipline but
+    // spell it out: the lock/assign run in their own statement so the
+    // !Send-on-macOS MutexGuard is dropped at the semicolon — a guard alive
+    // at the reset path's `.await` would make this command's future !Send
+    // and fail tauri's handler bound. Failing here also drops the handle
+    // (stopping the capture we just started), so recording_active must NOT
+    // stay set — a stuck flag wedges every later stop/cancel in
+    // take_capture_handle_for_stop's 15-second startup poll for a capture
+    // that no longer exists.
     {
-        let mut rec_lock = state
-            .current_recording
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
-        *rec_lock = Some(CurrentRecording {
-            id: recording_id.to_string(),
-            wav_path,
-            started_at: Instant::now(),
-            paused_at: None,
-            accumulated_pause: std::time::Duration::ZERO,
-        });
+        let rec_store_err = match state.current_recording.lock() {
+            Ok(mut rec_lock) => {
+                *rec_lock = Some(CurrentRecording {
+                    id: recording_id.to_string(),
+                    wav_path,
+                    started_at: Instant::now(),
+                    paused_at: None,
+                    accumulated_pause: std::time::Duration::ZERO,
+                });
+                None
+            }
+            Err(e) => Some(AppError::MutexPoisoned(format!("current_recording: {e}"))),
+        };
+        if let Some(e) = rec_store_err {
+            *state.recording_active.lock().await = false;
+            return Err(e);
+        }
     }
 
     // Store capture handle in AppState — the last step, publishing the
     // recording as stoppable/cancelable.
-    {
-        let mut handle_lock = state
-            .capture_handle
-            .lock()
-            .map_err(|e| AppError::MutexPoisoned(format!("capture_handle: {e}")))?;
-        *handle_lock = send_handle;
+    //
+    // The lock/assign live in their own statement so the !Send MutexGuard
+    // (it wraps the cpal stream) is dropped at the semicolon — a guard
+    // still alive at the poisoned-path `.await` below would make this
+    // command's future !Send and fail tauri's handler bound.
+    let handle_store_err = match state.capture_handle.lock() {
+        Ok(mut handle_lock) => {
+            *handle_lock = send_handle;
+            None
+        }
+        Err(e) => Some(AppError::MutexPoisoned(format!("capture_handle: {e}"))),
+    };
+    if let Some(e) = handle_store_err {
+        // The slot stored above is now stale (its capture is being dropped
+        // with the handle) — clear it best-effort; the lock is poisoned, so
+        // a second failure is ignored.
+        if let Ok(mut rec_lock) = state.current_recording.lock() {
+            *rec_lock = None;
+        }
+        *state.recording_active.lock().await = false;
+        return Err(e);
     }
 
     info!(
@@ -702,14 +733,20 @@ pub fn resume_recording(state: tauri::State<'_, AppState>) -> AppResult<()> {
 pub struct RecordingStateSnapshot {
     pub active: bool,
     pub recording_id: Option<String>,
+    /// Elapsed recording time EXCLUDING paused intervals, so the recovered
+    /// timer doesn't drift from the duration that stop_recording will
+    /// persist (which subtracts pause time).
     pub elapsed_secs: Option<f64>,
+    /// True while the orphan capture is paused — the frontend restores the
+    /// paused button state instead of showing a running timer.
+    pub paused: bool,
 }
 
 /// Get the current recording state for the frontend's boot recovery.
 ///
-/// Returns whether a recording is active, its ID, and elapsed time so the
-/// frontend can recover from a webview reload that left an orphan capture
-/// running.
+/// Returns whether a recording is active, its ID, pause-aware elapsed time,
+/// and whether it is currently paused, so the frontend can recover from a
+/// webview reload that left an orphan capture running.
 #[tauri::command]
 pub async fn get_recording_state(
     state: tauri::State<'_, AppState>,
@@ -720,16 +757,26 @@ pub async fn get_recording_state(
             .current_recording
             .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
-        guard.as_ref().map(|c| (c.id.clone(), c.started_at))
+        guard.as_ref().map(|c| {
+            // Mirror stop_recording's duration math: wall clock minus every
+            // pause interval, including one still in progress.
+            let total_pause = c.accumulated_pause
+                + c.paused_at
+                    .map(|p| p.elapsed())
+                    .unwrap_or(std::time::Duration::ZERO);
+            let elapsed = c.started_at.elapsed().saturating_sub(total_pause);
+            (c.id.clone(), c.paused_at.is_some(), elapsed.as_secs_f64())
+        })
     };
-    let (recording_id, elapsed_secs) = match current {
-        Some((id, started_at)) => (Some(id), Some(started_at.elapsed().as_secs_f64())),
-        None => (None, None),
+    let (recording_id, paused, elapsed_secs) = match current {
+        Some((id, paused, elapsed)) => (Some(id), paused, Some(elapsed)),
+        None => (None, false, None),
     };
     Ok(RecordingStateSnapshot {
         active,
         recording_id,
         elapsed_secs,
+        paused,
     })
 }
 
@@ -1017,6 +1064,32 @@ mod tests {
             ..Default::default()
         };
         assert!(!verdict_is_silent(&healthy, 180.0));
+    }
+
+    /// Quiet-but-valid consult: true RMS 0.02 sits inside the "conversational
+    /// speech" band (0.02–0.3) with detected signal — it must NOT be flagged
+    /// silent. Pins the sqrt in `CaptureHealthSnapshot::rms`: when the
+    /// snapshot carried a mean square instead, 0.02² = 0.0004 fell below the
+    /// 0.001 floor and every quiet recording tripped the silence dialog.
+    #[test]
+    fn verdict_not_silent_for_quiet_real_speech() {
+        let quiet = CaptureHealthSnapshot {
+            total_samples: 480_000 * 3,
+            rms: 0.02,
+            signal_secs: Some(170.0),
+            ..Default::default()
+        };
+        assert!(!verdict_is_silent(&quiet, 180.0));
+
+        // The floor itself stays a true-RMS -60 dBFS threshold: below it is
+        // still silent.
+        let below_floor = CaptureHealthSnapshot {
+            total_samples: 480_000 * 3,
+            rms: 0.0009,
+            signal_secs: Some(170.0),
+            ..Default::default()
+        };
+        assert!(verdict_is_silent(&below_floor, 180.0));
     }
 
     /// Simulates a poisoned `std::sync::Mutex` and verifies the lock attempt

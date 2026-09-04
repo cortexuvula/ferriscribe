@@ -538,14 +538,31 @@ mod tests {
     #[test]
     fn orphaned_wav_sweep_encrypts_rowless_wavs() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let scratch = tmp.path().join("probe.txt");
-        std::fs::write(&scratch, b"probe").expect("probe");
-        let crypto_available =
-            medical_security::file_crypto::encrypt_file_in_place(&scratch).is_ok();
-
         let orphan = write_aged_wav(tmp.path(), "crash-mid-recording.wav");
 
         let db = Database::open_in_memory().expect("db");
+
+        // Probe the keychain through the hang guard FIRST: the probe, the
+        // sweep, or both would otherwise sit forever on a securityd access
+        // prompt the harness can't dismiss (this exact test was one of the
+        // three that hung the workspace gate for ~35 min). When the probe
+        // times out, don't even run the sweep — its internal encrypt would
+        // block on the same call.
+        let probe = crate::testutil::with_keychain_guard(|| {
+            let probe_dir = tempfile::tempdir().expect("probe dir");
+            let scratch = probe_dir.path().join("probe.txt");
+            std::fs::write(&scratch, b"probe").expect("probe");
+            medical_security::file_crypto::encrypt_file_in_place(&scratch)
+        });
+        let Some(probe_result) = probe else {
+            assert!(
+                orphan.exists(),
+                "sweep must never delete the orphan, even when skipped"
+            );
+            return;
+        };
+        let crypto_available = probe_result.is_ok();
+
         orphaned_wav_sweep(&db, tmp.path());
 
         if crypto_available {

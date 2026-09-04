@@ -19,7 +19,9 @@ vi.mock('../api/audio', () => ({
   pauseRecording: vi.fn().mockResolvedValue(undefined),
   resumeRecording: vi.fn().mockResolvedValue(undefined),
   cancelRecording: vi.fn().mockResolvedValue(undefined),
-  getRecordingState: vi.fn().mockResolvedValue({ active: false, recording_id: null }),
+  getRecordingState: vi
+    .fn()
+    .mockResolvedValue({ active: false, recording_id: null, paused: false }),
   listAudioDevices: vi.fn().mockResolvedValue([]),
   checkRecordingAudioLevels: vi.fn().mockResolvedValue(null),
 }));
@@ -31,6 +33,8 @@ vi.mock('../types/errors', () => ({
 }));
 
 const { audio } = await import('./audio.svelte');
+
+import { getRecordingState } from '../api/audio';
 
 describe('AudioStore', () => {
   beforeEach(() => {
@@ -129,5 +133,38 @@ describe('AudioStore', () => {
     audio.destroy();
     // Should not throw; state unchanged by destroy (only internal cleanup)
     expect(audio.state.waveformData).toEqual([0.5]);
+  });
+
+  it('rehydrate recovers a running orphan recording', async () => {
+    vi.mocked(getRecordingState).mockResolvedValueOnce({
+      active: true,
+      recording_id: 'rec-999',
+      elapsed_secs: 65,
+      paused: false,
+    });
+    await audio.rehydrate();
+    expect(audio.state.state).toBe('recording');
+    expect(audio.state.elapsed).toBe(65);
+    expect(audio.state.lastRecordingId).toBe('rec-999');
+    audio.destroy();
+  });
+
+  it('rehydrate keeps a paused orphan paused without ticking the timer', async () => {
+    vi.mocked(getRecordingState).mockResolvedValueOnce({
+      active: true,
+      recording_id: 'rec-999',
+      elapsed_secs: 65,
+      paused: true,
+    });
+    await audio.rehydrate();
+    expect(audio.state.state).toBe('paused');
+    expect(audio.state.elapsed).toBe(65);
+    // The timer must stay stopped while paused — elapsed frozen just over a
+    // second later. (Before the paused flag existed, rehydrate always
+    // reported 'recording' and started the timer, drifting the display from
+    // the pause-aware duration the backend persists.)
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    expect(audio.state.elapsed).toBe(65);
+    audio.destroy();
   });
 });

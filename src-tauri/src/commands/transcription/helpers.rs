@@ -317,34 +317,40 @@ pub(crate) fn open_recording_wav(
         }
     };
 
-    match hound::WavReader::new(std::io::Cursor::new(wav_bytes.clone())) {
-        Ok(reader) => Ok(reader),
-        Err(first_err) => {
-            // hound is strict: a data-chunk length that isn't a whole
-            // number of frames, or that extends past the actual bytes,
-            // hard-fails the whole pipeline. Real files hit both cases —
-            // crash/force-quit mid-recording truncates the WAV after the
-            // header was flushed, and plenty of imported/streamed WAVs
-            // carry slightly-off lengths that every mainstream decoder
-            // (whisper.cpp included) tolerates. Salvage what's actually
-            // there: clamp the data chunk to whole frames present in the
-            // file, patch the header, and retry once.
-            match salvage_partial_wav(&wav_bytes) {
-                Some(fixed) => {
-                    tracing::warn!(
-                        original_len = wav_bytes.len(),
-                        salvaged_len = fixed.len(),
-                        "WAV failed strict parse; salvaged whole frames from partial data chunk"
-                    );
-                    hound::WavReader::new(std::io::Cursor::new(fixed))
-                        .map_err(|e| AppError::processing(format!("Failed to open WAV: {e}")))
-                }
-                None => Err(AppError::processing(format!(
-                    "Failed to open WAV: {first_err}"
-                ))),
+    // Validate the header on a borrowing cursor FIRST so the happy path
+    // never duplicates the buffer — the unconditional `wav_bytes.clone()`
+    // this replaces doubled peak memory for every transcription (a 1-hour
+    // 48 kHz stereo float capture is ~1.4 GB). hound's open reads only the
+    // chunk headers, so the second, owned parse below is cheap; only the
+    // salvage path allocates (it builds a patched copy anyway).
+    if let Err(first_err) = hound::WavReader::new(std::io::Cursor::new(wav_bytes.as_slice())) {
+        // hound is strict: a data-chunk length that isn't a whole
+        // number of frames, or that extends past the actual bytes,
+        // hard-fails the whole pipeline. Real files hit both cases —
+        // crash/force-quit mid-recording truncates the WAV after the
+        // header was flushed, and plenty of imported/streamed WAVs
+        // carry slightly-off lengths that every mainstream decoder
+        // (whisper.cpp included) tolerates. Salvage what's actually
+        // there: clamp the data chunk to whole frames present in the
+        // file, patch the header, and retry once.
+        return match salvage_partial_wav(&wav_bytes) {
+            Some(fixed) => {
+                tracing::warn!(
+                    original_len = wav_bytes.len(),
+                    salvaged_len = fixed.len(),
+                    "WAV failed strict parse; salvaged whole frames from partial data chunk"
+                );
+                hound::WavReader::new(std::io::Cursor::new(fixed))
+                    .map_err(|e| AppError::processing(format!("Failed to open WAV: {e}")))
             }
-        }
+            None => Err(AppError::processing(format!(
+                "Failed to open WAV: {first_err}"
+            ))),
+        };
     }
+
+    hound::WavReader::new(std::io::Cursor::new(wav_bytes))
+        .map_err(|e| AppError::processing(format!("Failed to open WAV: {e}")))
 }
 
 /// Best-effort repair of a RIFF/WAVE byte blob whose `data` chunk length is
@@ -726,7 +732,16 @@ mod tests {
         let id = Uuid::new_v4();
         let transcript = "patient says hello";
 
-        let path = persist_orphaned_transcript(tmp.path(), &id, transcript).expect("persist");
+        // The real keychain can sit on an access prompt the harness can't
+        // dismiss (which once hung the whole workspace gate) — run the
+        // keychain-touching persist under the guard and skip when it is
+        // unresponsive, same as the headless-CI no-keychain environment.
+        let dir = tmp.path().to_path_buf();
+        let Some(path) = crate::testutil::with_keychain_guard(move || {
+            persist_orphaned_transcript(&dir, &id, transcript).expect("persist")
+        }) else {
+            return;
+        };
 
         assert!(path.starts_with(tmp.path().join("orphaned_transcripts")));
         let fname = path.file_name().unwrap().to_string_lossy().into_owned();
@@ -759,7 +774,14 @@ mod tests {
         // Subdir doesn't exist yet
         assert!(!tmp.path().join("orphaned_transcripts").exists());
 
-        persist_orphaned_transcript(tmp.path(), &id, "x").expect("persist");
+        // Same keychain guard as the roundtrip test above — the persist
+        // call encrypts, and a blocked keychain must skip, not hang.
+        let dir = tmp.path().to_path_buf();
+        let Some(()) = crate::testutil::with_keychain_guard(move || {
+            persist_orphaned_transcript(&dir, &id, "x").expect("persist");
+        }) else {
+            return;
+        };
 
         assert!(tmp.path().join("orphaned_transcripts").is_dir());
     }
