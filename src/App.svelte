@@ -41,6 +41,7 @@
   import GenerateTab from './lib/pages/GenerateTab.svelte';
   import LetterWriterTab from './lib/pages/LetterWriterTab.svelte';
   import ChatTab from './lib/pages/ChatTab.svelte';
+  import TranslateTab from './lib/pages/TranslateTab.svelte';
   import EditorTab from './lib/pages/EditorTab.svelte';
 
   let activeTab = $state('record');
@@ -411,6 +412,8 @@
       <LetterWriterTab />
     {:else if activeTab === 'chat'}
       <ChatTab />
+    {:else if activeTab === 'translate'}
+      <TranslateTab />
     {:else if activeTab === 'transcript'}
       <EditorTab tabId="transcript" />
     {:else if activeTab === 'soap'}

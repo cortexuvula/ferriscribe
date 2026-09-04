@@ -101,6 +101,14 @@ import type { ContextTemplate } from '../api/contextTemplates';
 export interface AppConfig {
   theme: 'dark' | 'light';
   language: string;
+  /** Physician's language for the Translate tab (BCP-47 base code, e.g.
+   *  "en"). Mirrors `translation_provider_language` in
+   *  crates/core/src/types/settings.rs. */
+  translation_provider_language: string;
+  /** Patient's language for the Translate tab (BCP-47 base code, e.g. "zh");
+   *  empty string means "not chosen yet". Mirrors
+   *  `translation_patient_language` in crates/core/src/types/settings.rs. */
+  translation_patient_language: string;
   storage_path: string | null;
   ai_provider: string;
   ai_model: string;

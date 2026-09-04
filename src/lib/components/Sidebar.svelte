@@ -14,6 +14,7 @@
     { id: 'generate',      label: 'Generate',      icon: '⚡' },
     { id: 'letter_writer', label: 'Letter Writer', icon: '📝' },
     { id: 'chat',          label: 'Chat',          icon: '💬' },
+    { id: 'translate',     label: 'Translate',     icon: '🌐' },
   ];
 
   const documentNav = [

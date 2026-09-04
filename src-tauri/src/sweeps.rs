@@ -81,6 +81,55 @@ pub fn encryption_pending_sweep(db: &Database) {
     }
 }
 
+/// Sweep: delete stale utterance WAVs from the Translate tab's temp dir.
+///
+/// Translation utterances are throwaway by design — `capture_stop` deletes
+/// the WAV the moment its samples are read — but a crash or hard-quit
+/// mid-utterance leaves one behind forever. Unlike the recordings-dir
+/// orphans (which get encrypted for possible recovery), these have no DB
+/// row, no transcript, and no recovery value, so they are deleted.
+///
+/// Age guard: files modified in the last 10 minutes are skipped — they may
+/// belong to an in-progress capture on a very fast app restart. They'll be
+/// picked up on the NEXT boot. PHI-safe: logs carry counts only.
+pub fn translation_wav_sweep(translation_dir: &Path) {
+    let dir = match std::fs::read_dir(translation_dir) {
+        Ok(d) => d,
+        Err(_) => return, // dir doesn't exist yet — nothing ever captured
+    };
+
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for entry in dir.flatten() {
+        let path = entry.path();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        let name = match name {
+            Some(n) => n,
+            None => continue,
+        };
+        // Only our own utterance captures — never touch anything else a
+        // user may have put in this directory.
+        if !name.starts_with("utterance-")
+            || path.extension().and_then(|e| e.to_str()) != Some("wav")
+        {
+            continue;
+        }
+        let mtime = entry.metadata().and_then(|m| m.modified()).ok();
+        if let Some(t) = mtime
+            && now.duration_since(t).unwrap_or(Duration::ZERO) < Duration::from_secs(600)
+        {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(error = %e, "translation wav sweep: delete failed"),
+        }
+    }
+    if removed > 0 {
+        info!(count = removed, "Deleted stale translation utterance WAVs");
+    }
+}
+
 /// Sweep: encrypt any WAV in the recordings dir with NO database row.
 ///
 /// The capture path creates the WAV the moment recording starts, but the
@@ -606,5 +655,31 @@ mod tests {
             !medical_security::file_crypto::is_encrypted(&fresh),
             "recently-modified WAV may be an active capture — skip it"
         );
+    }
+
+    #[test]
+    fn translation_wav_sweep_deletes_stale_utterances_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Stale utterance (mtime an hour old) — crash leftover, delete it.
+        let stale = write_aged_wav(tmp.path(), "utterance-deadbeef.wav");
+        // Fresh utterance — could belong to an in-progress capture after a
+        // very fast restart; must survive.
+        let fresh = tmp.path().join("utterance-live.wav");
+        std::fs::write(&fresh, b"RIFF in flight").expect("write fresh");
+        // Aged file that is NOT one of ours — never touch it.
+        let foreign = write_aged_wav(tmp.path(), "user-notes.wav");
+
+        translation_wav_sweep(tmp.path());
+
+        assert!(!stale.exists(), "stale utterance WAV must be deleted");
+        assert!(fresh.exists(), "fresh utterance WAV must be kept");
+        assert!(
+            foreign.exists(),
+            "non-utterance files must never be touched"
+        );
+
+        // Missing directory is a no-op, not an error (nothing ever captured).
+        translation_wav_sweep(&tmp.path().join("does-not-exist"));
     }
 }

@@ -198,6 +198,59 @@ pub struct CurrentRecording {
     pub accumulated_pause: std::time::Duration,
 }
 
+/// An in-flight Translate-tab utterance capture. Mirrors `CurrentRecording`
+/// but writes to a throwaway WAV under the app data dir and never touches
+/// the recordings DB — translation utterances are ephemeral, deleted as soon
+/// as they have been transcribed.
+pub struct TranslationCapture {
+    /// The live capture stream. Wrapped in `SendCaptureHandle` for the same
+    /// `!Send`-on-macOS reasons as `AppState::capture_handle`.
+    pub handle: SendCaptureHandle,
+    /// Path of the temp WAV being written.
+    pub wav_path: PathBuf,
+    /// Who is speaking for this utterance — determines the STT language hint
+    /// and the translation direction.
+    pub speaker: medical_translation::session::Speaker,
+    /// When capture started (for a max-duration safety check).
+    pub started_at: Instant,
+}
+
+/// State for the Translate tab: the ephemeral conversation session plus the
+/// in-flight utterance capture, if any. Guarded by a tokio Mutex on
+/// `AppState::translation`.
+#[derive(Default)]
+pub struct TranslationState {
+    /// Active conversation session. `None` until the tab starts one; reset by
+    /// `translation_start_session` / `translation_clear_session`.
+    pub session: Option<medical_translation::session::TranslationSession>,
+    /// The utterance capture currently in progress, if any.
+    pub capture: Option<TranslationCapture>,
+    /// Number of utterance translations currently between "language pair
+    /// read" and "entry pushed" (the LLM call spans seconds with no lock
+    /// held). While > 0, `translation_clear_session` and
+    /// `translation_start_session` reject — otherwise a clear mid-translation
+    /// silently drops the completed entry, and a restart pushes it into the
+    /// new session with the wrong language pair.
+    pub in_flight: usize,
+}
+
+impl TranslationState {
+    /// The language the given speaker is expected to speak, from the active
+    /// session's language pair (provider = source, patient = target).
+    pub fn speaker_language(
+        &self,
+        speaker: medical_translation::session::Speaker,
+    ) -> Option<String> {
+        self.session.as_ref().map(|s| {
+            match speaker {
+                medical_translation::session::Speaker::Provider => &s.source_lang,
+                medical_translation::session::Speaker::Patient => &s.target_lang,
+            }
+            .clone()
+        })
+    }
+}
+
 /// Application state managed by Tauri and injected into every command via
 /// `tauri::State<'_, AppState>`.
 ///
@@ -251,6 +304,14 @@ pub struct AppState {
     /// Metadata about the currently active recording session (ID, WAV path,
     /// start time). `None` when no recording is in progress.
     pub current_recording: Arc<std::sync::Mutex<Option<CurrentRecording>>>,
+    /// Translate-tab state: the ephemeral conversation session and any
+    /// in-flight utterance capture. Translation capture shares the
+    /// `recording_active` flag with medical recordings so the two can never
+    /// run concurrently.
+    pub translation: Arc<Mutex<TranslationState>>,
+    /// Lazily-initialized local OS text-to-speech provider (Translate tab's
+    /// speak-aloud). `None` until the first `translation_speak` call.
+    pub tts: Arc<std::sync::Mutex<Option<Arc<medical_tts_providers::local_tts::LocalTtsProvider>>>>,
     /// Cancel tokens for in-flight pipelines, keyed by recording id. The
     /// pipeline inserts its own token on entry and removes it on exit;
     /// `cancel_pipeline` calls `.cancel()` to signal in-flight tasks and
@@ -776,6 +837,7 @@ impl AppState {
         if let Ok(dir) = crate::commands::resolve_recordings_dir(&db, &data_dir) {
             crate::sweeps::orphaned_wav_sweep(&db, &dir);
         }
+        crate::sweeps::translation_wav_sweep(&data_dir.join("translation"));
         crate::sweeps::spawn_retention_sweeper(Arc::clone(&db));
 
         let config_dir = data_dir.join("config");
@@ -851,6 +913,8 @@ impl AppState {
             chat_doc_index: Arc::new(tokio::sync::Mutex::new(None)),
             capture_handle: Arc::new(std::sync::Mutex::new(SendCaptureHandle(None, None))),
             current_recording: Arc::new(std::sync::Mutex::new(None)),
+            translation: Arc::new(Mutex::new(TranslationState::default())),
+            tts: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             generation_locks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             sharing: Arc::new(RwLock::new(None)),

@@ -23,6 +23,7 @@ pub mod support;
 pub mod training_corpus;
 pub mod training_corpus_export;
 pub mod transcription;
+pub mod translation;
 pub mod user_dictionary;
 pub mod vocabulary;
 

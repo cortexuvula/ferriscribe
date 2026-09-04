@@ -437,7 +437,10 @@ fn salvage_partial_wav(bytes: &[u8]) -> Option<Vec<u8>> {
 /// Handles both encrypted recordings (the default since at-rest encryption
 /// shipped) and legacy plaintext WAVs — `file_crypto::decrypt_file` returns
 /// `NotEncrypted` for the latter, in which case we read the file directly.
-pub(super) fn load_wav_to_audio_data(path: &std::path::Path) -> Result<AudioData, AppError> {
+///
+/// `pub(crate)` so the Translate tab's utterance capture
+/// (`commands::translation`) can reuse it for its temp WAVs.
+pub(crate) fn load_wav_to_audio_data(path: &std::path::Path) -> Result<AudioData, AppError> {
     let reader = open_recording_wav(path)?;
     let spec = reader.spec();
 
