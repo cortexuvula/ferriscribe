@@ -10,11 +10,11 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-use super::MAX_CONTEXT_CHARS;
 use super::helpers::{
     acquire_generation_lock, build_completion_request, ensure_nonempty_output,
-    load_recording_and_settings, patient_context_is_empty, require_transcript, resolve_provider,
-    resolve_soap_template, run_generation_command, stream_with_events, validate_patient_context,
+    ensure_prompt_within_cap, load_recording_and_settings, patient_context_is_empty,
+    require_transcript, resolve_provider, resolve_soap_template, run_generation_command,
+    stream_with_events, validate_patient_context,
 };
 
 /// Generate a SOAP note from a recording's transcript.
@@ -69,16 +69,7 @@ async fn generate_soap_inner(
     // can't silently consume the model's whole context window. Mirrors the
     // save-time check in `save_settings` (this one also covers configs
     // that arrived via sync).
-    if let Some(ref custom) = settings.custom_soap_prompt
-        && custom.len() > MAX_CONTEXT_CHARS
-    {
-        return Err(AppError::InvalidInput(format!(
-            "Custom SOAP prompt too large: {} chars, limit is {}. \
-             Shorten it in Settings → AI.",
-            custom.len(),
-            MAX_CONTEXT_CHARS
-        )));
-    }
+    ensure_prompt_within_cap(settings.custom_soap_prompt.as_deref(), "SOAP")?;
 
     // Pre-flight: probe the remote AI endpoint before doing any work.
     // Skipped for loopback hosts; returns EndpointOffline on failure
@@ -650,6 +641,7 @@ mod stats_tests {
 /// and a regeneration without context must clear the stale metadata keys.
 #[cfg(test)]
 mod postprocess_rejection_tests {
+    use super::super::MAX_CONTEXT_CHARS;
     use super::super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
     use super::*;
     use medical_core::types::settings::AppConfig;

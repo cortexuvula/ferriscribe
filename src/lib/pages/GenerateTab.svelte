@@ -155,7 +155,7 @@
   async function handleGenerate(type: 'soap' | 'referral' | 'letter' | 'peer_discussion') {
     if (!recordings.selectedRecording) return;
     const recordingId = recordings.selectedRecording.id;
-    generation.startGenerating(type);
+    generation.startGenerating(type, recordingId);
     // Combine structured patient context + notes context + OCR text into a
     // single context string threaded to every generation type. SOAP already
     // passes the structured fields via buildPatientContext, but including them

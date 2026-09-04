@@ -7,8 +7,9 @@ use tracing::debug;
 use crate::state::AppState;
 
 use super::helpers::{
-    acquire_generation_lock, build_completion_request, ensure_nonempty_output, fresh_stats_patch,
-    load_recording_and_settings, persist_producer_patch, require_soap_note, resolve_provider,
+    acquire_generation_lock, build_completion_request, ensure_nonempty_output,
+    ensure_prompt_within_cap, fresh_stats_patch, load_recording_and_settings,
+    persist_producer_patch, require_soap_note, resolve_provider, run_generation_command,
     stream_with_events,
 };
 
@@ -25,7 +26,17 @@ pub async fn generate_synopsis(
     // One generation per recording at a time (see acquire_generation_lock).
     let _generation_lock = acquire_generation_lock(&state, &recording_id)?;
 
-    generate_synopsis_inner(&state, Some(&app), &recording_id).await
+    // Same started/completed/failed lifecycle every other generator emits —
+    // previously only the live "generating" stats events went out, so a
+    // listener keying on the terminal statuses never saw one for synopsis.
+    run_generation_command(
+        &app,
+        &recording_id,
+        "synopsis",
+        None,
+        generate_synopsis_inner(&state, Some(&app), &recording_id),
+    )
+    .await
 }
 
 async fn generate_synopsis_inner(
@@ -35,6 +46,10 @@ async fn generate_synopsis_inner(
 ) -> AppResult<String> {
     let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
+
+    // Same generation-time cap every custom prompt gets — covers configs
+    // that arrived via sync.
+    ensure_prompt_within_cap(settings.custom_synopsis_prompt.as_deref(), "synopsis")?;
 
     // Pre-flight: probe the remote AI endpoint before doing any work.
     // Skipped for loopback hosts; returns EndpointOffline on failure
@@ -73,7 +88,9 @@ async fn generate_synopsis_inner(
     let (response, generation_elapsed) =
         stream_with_events(&provider, app, "synopsis", recording_id, request).await?;
 
-    let synopsis_text = response.content;
+    // Same plain-text safety net referral/letter get — the stored synopsis
+    // (metadata) and the UI render plain text.
+    let synopsis_text = document_generator::strip_markdown(&response.content);
     ensure_nonempty_output(&synopsis_text, "synopsis")?;
 
     // Record the stats on the in-memory recording (the patch source), then
@@ -187,5 +204,54 @@ mod stats_tests {
         );
         // The synopsis text itself stays where it always was.
         assert!(rec.metadata["synopsis"].is_string());
+    }
+
+    /// Regression (generate-pipeline review 2026-09-04): the synopsis never
+    /// ran the markdown-stripping safety net referral/letter get, so a model
+    /// that emitted markdown leaked it into the stored metadata.
+    #[tokio::test]
+    async fn generate_synopsis_strips_markdown() {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+
+        let provider = Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "## Synopsis\n\n- **Tension headache**, plan follow-up",
+            32,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports headache and fatigue.",
+            provider,
+        )
+        .await;
+
+        // Synopsis generation reads recording.soap_note.
+        {
+            let uuid = uuid::Uuid::parse_str(&recording_id).expect("uuid");
+            let conn = state.db.conn().expect("conn");
+            let mut rec =
+                medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid).expect("recording");
+            rec.soap_note = Some("S: Headache.\nA: Tension headache.\nP: Follow up.".to_string());
+            medical_db::recordings::RecordingsRepo::update(&conn, &rec).expect("update");
+        }
+
+        let synopsis = generate_synopsis_inner(&state, None, &recording_id)
+            .await
+            .expect("synopsis generation succeeds");
+        assert!(
+            !synopsis.contains("##"),
+            "headings uppercased, not kept: {synopsis}"
+        );
+        assert!(
+            !synopsis.contains("**"),
+            "bold markers stripped: {synopsis}"
+        );
+        assert!(
+            synopsis.contains("Tension headache"),
+            "content survives: {synopsis}"
+        );
     }
 }

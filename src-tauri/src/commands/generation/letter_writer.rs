@@ -14,7 +14,9 @@ use tracing::debug;
 use crate::state::AppState;
 
 use super::MAX_DOCUMENT_CHARS;
-use super::helpers::{build_completion_request, load_config, resolve_provider};
+use super::helpers::{
+    build_completion_request, ensure_prompt_within_cap, load_config, resolve_provider,
+};
 
 /// Draft a letter from a source document (e.g. OCR'd text) plus optional
 /// structured fields and freeform writer's instructions.
@@ -70,6 +72,13 @@ async fn generate_letter_from_document_inner(
     }
 
     let config = load_config(&state.db).await?;
+
+    // Same generation-time cap every custom prompt gets — covers configs
+    // that arrived via sync.
+    ensure_prompt_within_cap(
+        config.custom_letter_writer_prompt.as_deref(),
+        "letter writer",
+    )?;
 
     // Pre-flight: probe the remote AI endpoint before doing any work.
     // Reuses the GenerateLetter variant — same AI provider/model tier — so no

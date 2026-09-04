@@ -13,6 +13,7 @@
 //! | [`soap_generator`] | SOAP note system/user prompts and AI-output post-processing. |
 //! | [`document_generator`] | Prompt builders for referrals, letters, and synopses. |
 //! | [`prompt_resolver`] | `{key}` placeholder substitution in user-editable templates. |
+//! | [`sanitize`] | Shared prompt-injection filter for user-supplied prompt text. |
 //! | [`vocabulary_corrector`] | Word-boundary-aware find-and-replace for medical abbreviations. |
 //! | [`edit_distance`] | Word-level Levenshtein distance and ratio. |
 //!
@@ -42,6 +43,7 @@ pub mod ocr;
 pub mod peer_discussion;
 pub mod pipeline;
 pub mod prompt_resolver;
+pub mod sanitize;
 pub mod soap_generator;
 pub mod vocabulary_corrector;
 

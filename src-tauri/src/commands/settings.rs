@@ -74,20 +74,33 @@ pub async fn set_onboarding_started(state: tauri::State<'_, AppState>) -> AppRes
 
 /// Validate a config's user-supplied prompt overrides before saving.
 ///
-/// A custom SOAP prompt replaces the ~12K-char default system prompt
-/// wholesale; bound it to the app-wide user-text budget so a pathological
-/// paste can't silently consume the model's whole context window. The
-/// generation path re-checks (configs can arrive via sync), but rejecting
-/// at save time gives the settings UI immediate feedback.
+/// A custom prompt replaces the built-in system prompt wholesale (the SOAP
+/// default alone is ~12K chars); bound every override to the app-wide
+/// user-text budget so a pathological paste can't silently consume the
+/// model's whole context window. The generation path re-checks (configs can
+/// arrive via sync), but rejecting at save time gives the settings UI
+/// immediate feedback.
 pub(super) fn validate_prompt_overrides(config: &AppConfig) -> AppResult<()> {
     let cap = crate::commands::generation::MAX_CONTEXT_CHARS;
-    if let Some(ref custom) = config.custom_soap_prompt
-        && custom.len() > cap
-    {
-        return Err(AppError::InvalidInput(format!(
-            "Custom SOAP prompt too large: {} chars, limit is {cap}.",
-            custom.len()
-        )));
+    // All six overrides, not just SOAP (generate-pipeline review 2026-09-04 —
+    // the other five were uncapped at both save time and generation time).
+    let prompts: [(&str, &Option<String>); 6] = [
+        ("SOAP", &config.custom_soap_prompt),
+        ("referral", &config.custom_referral_prompt),
+        ("letter", &config.custom_letter_prompt),
+        ("letter writer", &config.custom_letter_writer_prompt),
+        ("synopsis", &config.custom_synopsis_prompt),
+        ("peer discussion", &config.custom_peer_discussion_prompt),
+    ];
+    for (label, prompt) in prompts {
+        if let Some(custom) = prompt
+            && custom.len() > cap
+        {
+            return Err(AppError::InvalidInput(format!(
+                "Custom {label} prompt too large: {} chars, limit is {cap}.",
+                custom.len()
+            )));
+        }
     }
     Ok(())
 }
@@ -207,6 +220,41 @@ mod tests {
         assert!(validate_prompt_overrides(&cfg).is_ok());
         cfg.custom_soap_prompt = None;
         assert!(validate_prompt_overrides(&cfg).is_ok());
+    }
+
+    /// Every prompt override is capped, not just SOAP (generate-pipeline
+    /// review 2026-09-04 — the other five flowed into system prompts
+    /// unbounded at both save time and generation time).
+    #[test]
+    fn oversized_custom_prompt_rejected_for_every_doc_type() {
+        fn assign_oversized(cfg: &mut AppConfig, label: &str) {
+            let oversized = || Some("p".repeat(crate::commands::generation::MAX_CONTEXT_CHARS + 1));
+            match label {
+                "referral" => cfg.custom_referral_prompt = oversized(),
+                "letter" => cfg.custom_letter_prompt = oversized(),
+                "letter writer" => cfg.custom_letter_writer_prompt = oversized(),
+                "synopsis" => cfg.custom_synopsis_prompt = oversized(),
+                "peer discussion" => cfg.custom_peer_discussion_prompt = oversized(),
+                other => panic!("unknown prompt label: {other}"),
+            }
+        }
+        for label in [
+            "referral",
+            "letter",
+            "letter writer",
+            "synopsis",
+            "peer discussion",
+        ] {
+            let mut cfg = config_with_hosts("localhost", "localhost", "");
+            assign_oversized(&mut cfg, label);
+            let err = validate_prompt_overrides(&cfg)
+                .expect_err("oversized prompt rejected")
+                .to_string();
+            assert!(
+                err.contains(label),
+                "error must name the prompt type ({label}): {err}"
+            );
+        }
     }
 }
 

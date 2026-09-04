@@ -438,7 +438,7 @@
     const rid = pipelineRecordingId;
     if (!rid || regenerating || generation.state.generating) return;
     regenerating = true;
-    generation.startGenerating('soap');
+    generation.startGenerating('soap', rid);
     try {
       const ctx = buildPipelineContext();
       const pc = buildPatientContext(medicationsText, allergiesText, conditionsText);
