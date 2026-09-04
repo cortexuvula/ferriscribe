@@ -10,10 +10,11 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+use super::MAX_CONTEXT_CHARS;
 use super::helpers::{
-    build_completion_request, ensure_nonempty_output, load_recording_and_settings,
-    patient_context_is_empty, require_transcript, resolve_provider, resolve_soap_template,
-    run_generation_command, stream_with_events, validate_patient_context,
+    acquire_generation_lock, build_completion_request, ensure_nonempty_output,
+    load_recording_and_settings, patient_context_is_empty, require_transcript, resolve_provider,
+    resolve_soap_template, run_generation_command, stream_with_events, validate_patient_context,
 };
 
 /// Generate a SOAP note from a recording's transcript.
@@ -29,6 +30,11 @@ pub async fn generate_soap(
     context: Option<String>,
     patient_context: Option<PatientContext>,
 ) -> AppResult<String> {
+    // One generation per recording at a time — the pipeline and the
+    // Generate/Record tabs go through different UI stores, so the backend
+    // enforces it. RAII guard releases on every exit path.
+    let _generation_lock = acquire_generation_lock(&state, &recording_id)?;
+
     // Reject a malformed structured context up front (the freeform-context
     // size cap runs inside run_generation_command, before "started").
     if let Some(ref pc) = patient_context {
@@ -57,6 +63,22 @@ async fn generate_soap_inner(
 ) -> AppResult<String> {
     let (recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
+
+    // A custom system prompt replaces the ~12K-char default wholesale;
+    // bound it to the app-wide user-text budget so a pathological paste
+    // can't silently consume the model's whole context window. Mirrors the
+    // save-time check in `save_settings` (this one also covers configs
+    // that arrived via sync).
+    if let Some(ref custom) = settings.custom_soap_prompt
+        && custom.len() > MAX_CONTEXT_CHARS
+    {
+        return Err(AppError::InvalidInput(format!(
+            "Custom SOAP prompt too large: {} chars, limit is {}. \
+             Shorten it in Settings → AI.",
+            custom.len(),
+            MAX_CONTEXT_CHARS
+        )));
+    }
 
     // Pre-flight: probe the remote AI endpoint before doing any work.
     // Skipped for loopback hosts; returns EndpointOffline on failure
@@ -783,5 +805,60 @@ mod postprocess_rejection_tests {
         );
         // The note itself survives both runs.
         assert!(rec.soap_note.is_some_and(|n| n.contains("back pain")));
+    }
+
+    /// A soft-deleted recording must fail FAST — previously the generation
+    /// loaded the trashed row, spent the whole LLM call, and only then
+    /// failed the persist (which filters deleted_at) with a bare NotFound.
+    #[tokio::test]
+    async fn generate_soap_fails_fast_for_soft_deleted_recording() {
+        let (state, recording_id) = build_test_state_with_provider(
+            base_config(),
+            "Patient reports back pain after lifting boxes.",
+            note_provider(),
+        )
+        .await;
+
+        let uuid = Uuid::parse_str(&recording_id).expect("valid uuid");
+        {
+            let conn = state.db.conn().expect("conn");
+            medical_db::recordings::RecordingsRepo::soft_delete(&conn, &uuid).expect("soft delete");
+        }
+
+        let result = generate_soap_inner(&state, None, &recording_id, None, None, None).await;
+        let err = result.expect_err("generation on trashed recording must fail");
+        assert!(
+            err.to_string().contains("deleted"),
+            "expected 'is deleted' error, got: {err}"
+        );
+
+        let rec = loaded_recording(&state, &recording_id).await;
+        assert!(rec.soap_note.is_none(), "no LLM output persisted");
+    }
+
+    /// An oversized custom SOAP prompt (synced in or saved before the cap
+    /// existed) is rejected at generation time before any provider call.
+    #[tokio::test]
+    async fn generate_soap_rejects_oversized_custom_prompt() {
+        let mut config = base_config();
+        config.custom_soap_prompt = Some("p".repeat(MAX_CONTEXT_CHARS + 1));
+
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports back pain after lifting boxes.",
+            note_provider(),
+        )
+        .await;
+
+        let result = generate_soap_inner(&state, None, &recording_id, None, None, None).await;
+        let err = result.expect_err("oversized custom prompt must be rejected");
+        assert!(
+            matches!(err, AppError::InvalidInput(_)),
+            "expected InvalidInput, got: {err}"
+        );
+        assert!(err.to_string().contains("Custom SOAP prompt too large"));
+
+        let rec = loaded_recording(&state, &recording_id).await;
+        assert!(rec.soap_note.is_none(), "no LLM output persisted");
     }
 }

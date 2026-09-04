@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 use super::helpers::{
-    fresh_stats_patch, generate_from_soap, load_recording_and_settings, persist_producer_patch,
-    run_generation_command,
+    acquire_generation_lock, fresh_stats_patch, generate_from_soap, load_recording_and_settings,
+    persist_producer_patch, run_generation_command,
 };
 
 /// Generate a patient letter from a recording's SOAP note.
@@ -24,6 +24,9 @@ pub async fn generate_letter(
     audience_id: Option<Uuid>,
     context: Option<String>,
 ) -> AppResult<String> {
+    // One generation per recording at a time (see acquire_generation_lock).
+    let _generation_lock = acquire_generation_lock(&state, &recording_id)?;
+
     let ltype = letter_type.unwrap_or_else(|| "follow-up".to_string());
     let ctx = context.clone();
 

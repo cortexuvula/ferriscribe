@@ -256,6 +256,14 @@ pub struct AppState {
     /// `cancel_pipeline` calls `.cancel()` to signal in-flight tasks and
     /// poll points to bail out.
     pub pipeline_cancels: Arc<std::sync::Mutex<HashMap<String, CancellationToken>>>,
+    /// Recording ids with a generation command currently in flight (SOAP,
+    /// referral, letter, synopsis, peer discussion). Insert-only under the
+    /// mutex — a second generation for the same recording is rejected with
+    /// a clear error instead of racing the first (interleaved progress
+    /// events, last-writer-wins persist, cross-finalized training captures).
+    /// The RAII guard in `commands::generation::helpers` removes the key on
+    /// every exit path.
+    pub generation_locks: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Lazy-initialized sharing service. `None` until `start_sharing` is called.
     pub sharing: Arc<RwLock<Option<Arc<medical_sharing::SharingService>>>>,
     /// Serializes sharing start/stop across their whole bodies. The
@@ -844,6 +852,7 @@ impl AppState {
             capture_handle: Arc::new(std::sync::Mutex::new(SendCaptureHandle(None, None))),
             current_recording: Arc::new(std::sync::Mutex::new(None)),
             pipeline_cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            generation_locks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             sharing: Arc::new(RwLock::new(None)),
             sharing_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             vocab_api: RwLock::new(None),

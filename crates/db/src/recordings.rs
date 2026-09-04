@@ -109,6 +109,55 @@ impl RecordingsRepo {
         })
     }
 
+    /// Fetch a single recording by its UUID, rejecting soft-deleted rows.
+    ///
+    /// Companion to [`Self::get_by_id`] for producer paths (generation,
+    /// transcription) that must not spend minutes of LLM work on a recording
+    /// the user has since moved to the trash: the persist at the end filters
+    /// `deleted_at IS NULL`, so a deleted-mid-generation run would otherwise
+    /// complete the whole completion and then fail with a bare `NotFound`.
+    /// Restore/sync flows that legitimately operate on trashed rows keep
+    /// using [`Self::get_by_id`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::NotFound`] — with an "is deleted" message when the
+    /// row exists but is trashed — if no active recording with the given ID
+    /// exists.
+    pub fn get_by_id_active(conn: &Connection, id: &Uuid) -> DbResult<Recording> {
+        let id_str = id.to_string();
+        match conn.query_row(
+            "SELECT id, filename, transcript, soap_note, referral, letter, peer_discussion, chat,
+                    patient_name, audio_path, duration_seconds, file_size_bytes,
+                    stt_provider, ai_provider, tags, processing_status, created_at, metadata,
+                    updated_at
+             FROM recordings
+             WHERE id = ?1 AND deleted_at IS NULL",
+            [&id_str],
+            Self::row_to_recording,
+        ) {
+            Ok(recording) => Ok(recording),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // Distinguish "never existed" from "soft-deleted" so the
+                // producer error is actionable. The existence probe is
+                // error-path-only — one extra query on failure.
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM recordings WHERE id = ?1)",
+                        [&id_str],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if exists {
+                    Err(DbError::NotFound(format!("recording {id_str} is deleted")))
+                } else {
+                    Err(DbError::NotFound(format!("recording {id_str}")))
+                }
+            }
+            Err(other) => Err(DbError::Sqlite(other)),
+        }
+    }
+
     /// Return a page of lightweight summaries, newest first.
     ///
     /// Results are ordered by `created_at DESC`. Use `limit` and `offset` for
@@ -977,6 +1026,44 @@ mod tests {
         let id = Uuid::new_v4();
         let result = RecordingsRepo::get_by_id(&conn, &id);
         assert!(matches!(result, Err(DbError::NotFound(_))));
+    }
+
+    // Regression (2026-09-04 SOAP pipeline review): producer paths must
+    // fail fast on soft-deleted rows instead of spending the whole LLM call
+    // and failing the persist afterwards.
+    #[test]
+    fn get_by_id_active_rejects_soft_deleted_with_distinct_message() {
+        let conn = migrated_conn();
+        let rec = new_rec();
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+        RecordingsRepo::soft_delete(&conn, &rec.id).unwrap();
+
+        // The plain lookup still sees the trashed row (restore flows).
+        assert!(RecordingsRepo::get_by_id(&conn, &rec.id).is_ok());
+        // The active-only lookup rejects it, saying why.
+        let err = RecordingsRepo::get_by_id_active(&conn, &rec.id)
+            .expect_err("soft-deleted row must be rejected");
+        let msg = format!("{err}");
+        assert!(matches!(err, DbError::NotFound(_)));
+        assert!(
+            msg.contains("deleted"),
+            "expected 'is deleted' message: {msg}"
+        );
+    }
+
+    #[test]
+    fn get_by_id_active_returns_live_rows_and_names_missing_ones() {
+        let conn = migrated_conn();
+        let rec = new_rec();
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+        let fetched = RecordingsRepo::get_by_id_active(&conn, &rec.id).unwrap();
+        assert_eq!(fetched.id, rec.id);
+
+        let err = RecordingsRepo::get_by_id_active(&conn, &Uuid::new_v4())
+            .expect_err("missing row must be NotFound");
+        let msg = format!("{err}");
+        assert!(matches!(err, DbError::NotFound(_)));
+        assert!(!msg.contains("deleted"), "missing is not deleted: {msg}");
     }
 
     // Regression (2026-09-02 bug review): audio-location writes must NOT

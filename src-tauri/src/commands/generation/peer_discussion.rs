@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use crate::state::AppState;
 
 use super::helpers::{
-    build_completion_request, ensure_nonempty_output, fresh_stats_patch,
+    acquire_generation_lock, build_completion_request, ensure_nonempty_output, fresh_stats_patch,
     load_recording_and_settings, persist_producer_patch, require_transcript, resolve_provider,
     run_generation_command, stream_with_events,
 };
@@ -27,6 +27,9 @@ pub async fn generate_peer_discussion(
     reason: String,
     context: Option<String>,
 ) -> AppResult<String> {
+    // One generation per recording at a time (see acquire_generation_lock).
+    let _generation_lock = acquire_generation_lock(&state, &recording_id)?;
+
     if physician_name.trim().is_empty() {
         return Err(AppError::InvalidInput(
             "Physician name is required.".to_string(),
