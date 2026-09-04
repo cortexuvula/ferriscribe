@@ -1,6 +1,6 @@
 [package]
 name = "rust-medical-assistant"
-version = "0.72.3"
+version = "0.73.0"
 description = "FerriScribe"
 authors = []
 edition = "2024"
@@ -45,7 +45,7 @@ medical-security = { path = "../crates/security" }
 medical-audio = { path = "../crates/audio" }
 medical-ai-providers = { path = "../crates/ai-providers" }
 medical-stt-providers = { path = "../crates/stt-providers" }
-medical-tts-providers = { path = "../crates/tts-providers" }
+medical-tts-providers = { path = "../crates/tts-providers", features = ["local-tts"] }
 medical-agents = { path = "../crates/agents" }
 medical-rag = { path = "../crates/rag" }
 medical-processing = { path = "../crates/processing" }

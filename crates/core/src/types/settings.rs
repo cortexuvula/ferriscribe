@@ -105,6 +105,10 @@ fn default_language() -> String {
     "en-US".into()
 }
 
+fn default_translation_provider_language() -> String {
+    "en".into()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -340,6 +344,15 @@ pub struct AppConfig {
     pub theme: Theme,
     #[serde(default = "default_language")]
     pub language: String,
+    /// Physician's language for the Translate tab (BCP-47 base code, e.g.
+    /// "en"). Provider utterances are translated from this language.
+    #[serde(default = "default_translation_provider_language")]
+    pub translation_provider_language: String,
+    /// Patient's language for the Translate tab (BCP-47 base code, e.g.
+    /// "zh"). Empty string means "not chosen yet" — the tab prompts on first
+    /// use and persists the choice here.
+    #[serde(default)]
+    pub translation_patient_language: String,
     #[serde(default)]
     pub storage_path: Option<String>,
 

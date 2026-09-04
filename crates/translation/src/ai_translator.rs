@@ -19,6 +19,11 @@ use medical_core::types::{CompletionRequest, Message, MessageContent, Role};
 /// prompts that preserve medical-domain accuracy.
 pub struct AiTranslationProvider {
     provider: Arc<dyn AiProvider>,
+    /// Model name sent on completion requests. `None` sends an empty string,
+    /// which the OpenAI-compatible servers treat as "no model" — Ollama
+    /// rejects it outright. Callers that resolve a configured model (e.g.
+    /// `AppConfig::ai_model`) must use [`Self::with_model`].
+    model: Option<String>,
 }
 
 impl AiTranslationProvider {
@@ -27,7 +32,26 @@ impl AiTranslationProvider {
     /// The given `provider` will receive completion requests whose prompts
     /// instruct the model to translate or detect languages.
     pub fn new(provider: Arc<dyn AiProvider>) -> Self {
-        Self { provider }
+        Self {
+            provider,
+            model: None,
+        }
+    }
+
+    /// Create a provider that sends `model` on every completion request.
+    ///
+    /// The AI-provider stack resolves no default on its own — the wire layer
+    /// sends the string verbatim — so anything with access to the app's
+    /// configured model should pass it here.
+    pub fn with_model(provider: Arc<dyn AiProvider>, model: impl Into<String>) -> Self {
+        Self {
+            provider,
+            model: Some(model.into()),
+        }
+    }
+
+    fn request_model(&self) -> String {
+        self.model.clone().unwrap_or_default()
     }
 }
 
@@ -38,56 +62,7 @@ impl TranslationProvider for AiTranslationProvider {
     }
 
     async fn supported_languages(&self) -> AppResult<Vec<Language>> {
-        Ok(vec![
-            Language {
-                code: "en".into(),
-                name: "English".into(),
-            },
-            Language {
-                code: "es".into(),
-                name: "Spanish".into(),
-            },
-            Language {
-                code: "fr".into(),
-                name: "French".into(),
-            },
-            Language {
-                code: "de".into(),
-                name: "German".into(),
-            },
-            Language {
-                code: "zh".into(),
-                name: "Chinese".into(),
-            },
-            Language {
-                code: "ja".into(),
-                name: "Japanese".into(),
-            },
-            Language {
-                code: "ko".into(),
-                name: "Korean".into(),
-            },
-            Language {
-                code: "pt".into(),
-                name: "Portuguese".into(),
-            },
-            Language {
-                code: "ar".into(),
-                name: "Arabic".into(),
-            },
-            Language {
-                code: "hi".into(),
-                name: "Hindi".into(),
-            },
-            Language {
-                code: "ru".into(),
-                name: "Russian".into(),
-            },
-            Language {
-                code: "it".into(),
-                name: "Italian".into(),
-            },
-        ])
+        Ok(crate::supported_languages())
     }
 
     async fn translate(
@@ -99,7 +74,7 @@ impl TranslationProvider for AiTranslationProvider {
         let source_desc = source_language.unwrap_or("the source language");
 
         let request = CompletionRequest {
-            model: String::new(), // provider will use its default
+            model: self.request_model(),
             messages: vec![Message {
                 role: Role::User,
                 content: MessageContent::Text(format!(
@@ -123,7 +98,7 @@ impl TranslationProvider for AiTranslationProvider {
 
     async fn detect_language(&self, text: &str) -> AppResult<String> {
         let request = CompletionRequest {
-            model: String::new(),
+            model: self.request_model(),
             messages: vec![Message {
                 role: Role::User,
                 content: MessageContent::Text(format!(
@@ -222,7 +197,6 @@ mod tests {
     async fn translate_constructs_correct_prompt() {
         let mock = Arc::new(MockAiProvider::new(vec!["Hola mundo"]));
         let translator = AiTranslationProvider::new(mock.clone());
-
         let result = translator
             .translate("Hello world", Some("en"), "es")
             .await
@@ -251,6 +225,28 @@ mod tests {
             assert!(text.contains("Hello world"));
         } else {
             panic!("Expected Text message content");
+        }
+    }
+
+    /// Regression: `with_model` must land the configured model on the wire —
+    /// an empty `model` is sent verbatim and Ollama rejects it ("model not
+    /// found"), so translation silently depended on server-specific
+    /// empty-model handling before this existed.
+    #[tokio::test]
+    async fn with_model_threads_model_into_every_request() {
+        let mock = Arc::new(MockAiProvider::new(vec!["Hola", "es"]));
+        let translator = AiTranslationProvider::with_model(mock.clone(), "qwen3:8b");
+
+        translator
+            .translate("Hello", Some("en"), "es")
+            .await
+            .unwrap();
+        translator.detect_language("Hola").await.unwrap();
+
+        let requests = mock.captured_requests();
+        assert_eq!(requests.len(), 2);
+        for req in &requests {
+            assert_eq!(req.model, "qwen3:8b");
         }
     }
 

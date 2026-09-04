@@ -4,6 +4,8 @@ import { getSettings, saveSettings } from '../api/settings';
 const defaults: AppConfig = {
   theme: 'dark',
   language: 'en-US',
+  translation_provider_language: 'en',
+  translation_patient_language: '',
   ai_provider: 'lmstudio',
   ai_model: '',
   ocr_model: null,
