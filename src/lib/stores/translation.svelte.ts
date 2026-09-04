@@ -14,6 +14,38 @@ export type TranslationPhase = 'idle' | 'recording' | 'transcribing' | 'translat
  *  forgotten tap writing an ever-growing utterance WAV. */
 export const MAX_UTTERANCE_SECS = 120;
 
+/** What the tab should do after a language-select change. Extracted as a
+ *  pure function so the selection policy is unit-testable independent of
+ *  the component wiring.
+ *
+ *  The selects' visible choices are ALWAYS recorded in the store first —
+ *  the UI is the source of truth for what the user picked. This decision
+ *  only governs the session side-effects. (Recording first matters: the
+ *  original silent-return guards on incomplete/equal pairs left the store
+ *  holding '' while the selects displayed real languages, so the tab got
+ *  stuck showing "Pick both languages" with both dropdowns filled in.) */
+export type LanguageChangeDecision =
+  | { action: 'none' }
+  | { action: 'invalid'; reason: string }
+  | { action: 'confirm' }
+  | { action: 'apply' };
+
+export function decideLanguageChange(
+  provider: string,
+  patient: string,
+  historyLength: number
+): LanguageChangeDecision {
+  if (!provider || !patient) return { action: 'none' };
+  if (provider === patient) {
+    return {
+      action: 'invalid',
+      reason: 'Patient and physician languages must differ.',
+    };
+  }
+  if (historyLength > 0) return { action: 'confirm' };
+  return { action: 'apply' };
+}
+
 /**
  * Singleton store for the Translate tab's conversation state.
  *
