@@ -619,21 +619,44 @@ pub async fn translation_capture_stop(
 // Speak (local OS TTS)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Pick the id of the first OS voice that speaks `language` (BCP-47 base
-/// code prefix match — `"zh"` matches `"zh-CN"`). `None` when the system
-/// has no voice for that language.
-fn pick_voice_for_language(
-    voices: &[medical_core::types::tts::VoiceInfo],
+/// macOS gimmick voices (Bad News, Bells, Bahh, Whisper, …) live under this
+/// identifier prefix. They report ordinary language tags and sort BEFORE the
+/// real voices (`com.apple.speech.*` < `com.apple.voice.*`), so an
+/// unfiltered first-match picks one — and renders speech through an effect
+/// pipeline that is unintelligible.
+const NOVELTY_VOICE_ID_PREFIX: &str = "com.apple.speech.synthesis.voice";
+
+/// Lower rank is better. Enhanced/premium are the downloadable
+/// high-quality voices; compact/siri are the built-ins; anything else
+/// (Windows SAPI tokens, etc.) ranks last and falls back to first-match
+/// order within that tier.
+fn voice_quality_rank(id: &str) -> u8 {
+    if id.contains(".enhanced.") || id.contains(".premium.") {
+        0
+    } else if id.contains(".compact.") || id.contains(".siri.") {
+        1
+    } else {
+        2
+    }
+}
+
+/// Pick the OS voice that speaks `language` (BCP-47 base code prefix match
+/// — `"zh"` matches `"zh-CN"`). Prefers the highest-quality non-novelty
+/// voice; ties keep the engine's list order (deterministic). Returns `None`
+/// when the system has no usable voice for that language.
+fn pick_voice_for_language<'a>(
+    voices: &'a [medical_core::types::tts::VoiceInfo],
     language: &str,
-) -> Option<String> {
+) -> Option<&'a medical_core::types::tts::VoiceInfo> {
     voices
         .iter()
-        .find(|v| {
+        .filter(|v| {
             v.language
                 .as_deref()
                 .is_some_and(|l| l.starts_with(language))
         })
-        .map(|v| v.id.clone())
+        .filter(|v| !v.id.starts_with(NOVELTY_VOICE_ID_PREFIX))
+        .min_by_key(|v| voice_quality_rank(&v.id))
 }
 
 /// Speak `text` aloud through the local OS speech engine in the given
@@ -686,10 +709,13 @@ pub async fn translation_speak(
              settings to hear translations read aloud"
         )));
     };
+    // Voice name + language only — never speech content (PHI discipline).
+    info!(language = %language, voice = %voice.name, "TTS voice selected");
+    let voice_id = voice.id.clone();
 
     tokio::spawn(async move {
         let config = TtsConfig {
-            voice: Some(voice),
+            voice: Some(voice_id),
             language: None,
             speed: 1.0,
             volume: 1.0,
@@ -820,8 +846,9 @@ mod tests {
         assert!(langs.iter().any(|l| l.code == "zh"));
     }
 
-    #[test]
-    fn pick_voice_prefix_matches_and_returns_none_without_a_match() {
+    /// A macOS-like voice list: novelty voices sort first, then compact,
+    /// then enhanced — the ordering trap the picker has to survive.
+    fn voice_fixture() -> Vec<medical_core::types::tts::VoiceInfo> {
         use medical_core::types::tts::VoiceInfo;
 
         let voice = |id: &str, lang: Option<&str>| VoiceInfo {
@@ -831,27 +858,55 @@ mod tests {
             gender: None,
             preview_url: None,
         };
-        let voices = vec![
-            voice("en-US-voice", Some("en-US")),
-            voice("zh-CN-voice", Some("zh-CN")),
+        vec![
+            voice("com.apple.speech.synthesis.voice.Bells", Some("en-US")),
+            voice("com.apple.speech.synthesis.voice.Bahh", Some("en-US")),
+            voice("com.apple.voice.compact.en-US.Samantha", Some("en-US")),
+            voice("com.apple.voice.enhanced.en-US.Zoe", Some("en-US")),
+            voice("com.apple.voice.compact.zh-CN.Tingting", Some("zh-CN")),
+            voice("com.apple.voice.enhanced.zh-CN.Tingting", Some("zh-CN")),
             voice("mystery", None),
-        ];
+        ]
+    }
 
-        // Base-code prefix match finds the regional variant…
+    #[test]
+    fn pick_voice_prefix_matches_and_returns_none_without_a_match() {
+        let voices = voice_fixture();
+
+        // Base-code prefix match finds the regional variant (best quality)…
         assert_eq!(
-            pick_voice_for_language(&voices, "zh").as_deref(),
-            Some("zh-CN-voice")
-        );
-        assert_eq!(
-            pick_voice_for_language(&voices, "en").as_deref(),
-            Some("en-US-voice")
+            pick_voice_for_language(&voices, "zh").map(|v| v.id.as_str()),
+            Some("com.apple.voice.enhanced.zh-CN.Tingting")
         );
         // …and an unmatched language yields None (caller errors — a wrong
         // voice would speak the text as gibberish).
-        assert_eq!(pick_voice_for_language(&voices, "ko"), None);
+        assert!(pick_voice_for_language(&voices, "ko").is_none());
         // Voices with no language tag never match by accident.
-        assert_eq!(pick_voice_for_language(&voices, "mystery"), None);
+        assert!(pick_voice_for_language(&voices, "mystery").is_none());
         assert!(pick_voice_for_language(&[], "en").is_none());
+    }
+
+    /// Regression: on macOS the gimmick/novelty voices (Bad News, Bells,
+    /// Bahh…) report ordinary language tags and sort BEFORE the real ones,
+    /// so a first-match picker selected one and spoke through its effect
+    /// pipeline — unintelligible audio.
+    #[test]
+    fn pick_voice_never_selects_a_macos_novelty_voice() {
+        let voices = voice_fixture();
+        // "Bells" is the first en-US voice in the fixture (real macOS list
+        // order); the picker must skip it for the best real voice.
+        let picked = pick_voice_for_language(&voices, "en").expect("an English voice");
+        assert!(!picked.id.starts_with("com.apple.speech.synthesis.voice"));
+        assert_eq!(picked.id, "com.apple.voice.enhanced.en-US.Zoe");
+    }
+
+    #[test]
+    fn pick_voice_prefers_enhanced_over_compact() {
+        let voices = voice_fixture();
+        let picked = pick_voice_for_language(&voices, "zh").expect("a Chinese voice");
+        // Tingting exists in both compact and enhanced forms; enhanced wins
+        // even though compact appears first.
+        assert!(picked.id.contains(".enhanced."));
     }
 
     #[tokio::test]
