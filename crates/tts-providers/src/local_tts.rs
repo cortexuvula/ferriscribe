@@ -252,3 +252,67 @@ impl Default for LocalTtsProvider {
         Self::new()
     }
 }
+
+/// The stub implements the full trait surface (with errors) so downstream
+/// code — e.g. the Translate tab's `translation_speak` — compiles and gets
+/// a clear runtime message instead of a build failure when the feature is
+/// off (the Linux builds: `tts`'s only backend there is speech-dispatcher,
+/// which the app doesn't ship).
+#[cfg(not(feature = "local-tts"))]
+#[async_trait::async_trait]
+impl medical_core::traits::TtsProvider for LocalTtsProvider {
+    fn name(&self) -> &str {
+        "local"
+    }
+
+    async fn available_voices(
+        &self,
+    ) -> medical_core::error::AppResult<Vec<medical_core::types::tts::VoiceInfo>> {
+        Err(stub_unavailable())
+    }
+
+    async fn synthesize(
+        &self,
+        _text: &str,
+        _config: medical_core::types::tts::TtsConfig,
+    ) -> medical_core::error::AppResult<Vec<u8>> {
+        Err(stub_unavailable())
+    }
+}
+
+#[cfg(not(feature = "local-tts"))]
+fn stub_unavailable() -> medical_core::error::AppError {
+    medical_core::error::AppError::tts_provider(
+        "Read-aloud speech is not compiled into this build".to_string(),
+    )
+}
+
+#[cfg(all(test, not(feature = "local-tts")))]
+mod stub_tests {
+    use super::*;
+    use medical_core::traits::TtsProvider;
+
+    #[tokio::test]
+    async fn stub_errors_clearly_on_both_trait_methods() {
+        let provider = LocalTtsProvider::new();
+        assert_eq!(provider.name(), "local");
+
+        let voices_err = provider.available_voices().await.unwrap_err();
+        let speak_err = provider
+            .synthesize("", medical_core::types::tts::TtsConfig::default())
+            .await
+            .unwrap_err();
+        assert!(
+            voices_err
+                .to_string()
+                .contains("not compiled into this build"),
+            "got: {voices_err}"
+        );
+        assert!(
+            speak_err
+                .to_string()
+                .contains("not compiled into this build"),
+            "got: {speak_err}"
+        );
+    }
+}

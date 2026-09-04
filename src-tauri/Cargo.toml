@@ -1,6 +1,6 @@
 [package]
 name = "rust-medical-assistant"
-version = "0.73.0"
+version = "0.73.1"
 description = "FerriScribe"
 authors = []
 edition = "2024"
@@ -45,7 +45,7 @@ medical-security = { path = "../crates/security" }
 medical-audio = { path = "../crates/audio" }
 medical-ai-providers = { path = "../crates/ai-providers" }
 medical-stt-providers = { path = "../crates/stt-providers" }
-medical-tts-providers = { path = "../crates/tts-providers", features = ["local-tts"] }
+medical-tts-providers = { path = "../crates/tts-providers" }
 medical-agents = { path = "../crates/agents" }
 medical-rag = { path = "../crates/rag" }
 medical-processing = { path = "../crates/processing" }
@@ -59,6 +59,15 @@ keyring = { workspace = true }
 axum = "0.8"
 async-stream = "0.3"
 urlencoding = { workspace = true }
+
+# The `tts` crate's only Linux backend is speech-dispatcher, whose
+# -dev headers (and runtime .so) aren't part of the app's dependency set —
+# enabling `local-tts` there would break every Linux build and force a new
+# system dependency on all Linux users for the Translate tab's read-aloud.
+# macOS/Windows OS speech engines are always present, so the feature is
+# enabled there only. Features union across applicable declarations.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+medical-tts-providers = { path = "../crates/tts-providers", features = ["local-tts"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
