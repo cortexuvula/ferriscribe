@@ -7,6 +7,7 @@
   import type { Recording } from '../types';
   import { checkRecordingAudioLevels } from '../api/audio';
   import { copyWithStatus } from '../utils/clipboard';
+  import { formatMinsSecs } from '../utils/format';
   import { clampSidebarWidth } from '../utils/resize';
   import { recordSidebar } from '../stores/recordSidebar.svelte';
   import RecordingHeader from '../components/RecordingHeader.svelte';
@@ -335,7 +336,7 @@
       info.signal_secs !== null && info.signal_secs < 1
         ? `Only ${info.signal_secs.toFixed(1)}s of signal was detected${
             info.duration_secs != null && info.duration_secs >= 1
-              ? ` in a ${Math.round(info.duration_secs / 60)}:${String(Math.round(info.duration_secs) % 60).padStart(2, '0')} recording`
+              ? ` in a ${formatMinsSecs(info.duration_secs)} recording`
               : ''
           }. `
         : '';

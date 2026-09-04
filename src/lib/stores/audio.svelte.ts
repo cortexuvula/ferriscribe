@@ -257,7 +257,9 @@ class AudioStore {
 
   /** Recover state from the backend on startup — if a recording is still
    *  running (e.g. after a webview reload), rehydrate the store so the Stop
-   *  button is visible and the timer keeps ticking. */
+   *  button is visible and the timer keeps ticking. A paused capture keeps
+   *  its paused state (and its timer stays stopped) so elapsed doesn't
+   *  drift from the pause-aware duration the backend will persist. */
   async rehydrate() {
     try {
       const snap = await audioApi.getRecordingState();
@@ -270,17 +272,20 @@ class AudioStore {
       const initialElapsed = Math.floor(snap.elapsed_secs ?? 0);
       this.state = {
         ...this.state,
-        state: 'recording',
+        state: snap.paused ? 'paused' : 'recording',
         elapsed: initialElapsed,
         waveformData: [],
         health: null,
         lastRecordingId: snap.recording_id,
         error: null,
       };
-      this.startTimer();
+      if (!snap.paused) {
+        this.startTimer();
+      }
       log.info('Recovered orphan recording after reload', {
         recordingId: snap.recording_id,
         elapsedSecs: initialElapsed,
+        paused: snap.paused,
       });
     } catch (e) {
       log.warn('Could not query recording state on startup', { error: formatError(e) });

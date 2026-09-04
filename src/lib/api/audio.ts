@@ -76,7 +76,11 @@ export async function checkRecordingAudioLevels(
 export interface RecordingStateSnapshot {
   active: boolean;
   recording_id: string | null;
+  /** Elapsed recording seconds EXCLUDING paused intervals (matches what
+   *  stop_recording persists as the duration). */
   elapsed_secs: number | null;
+  /** True while the orphan capture is paused. */
+  paused: boolean;
 }
 
 export async function getRecordingState(): Promise<RecordingStateSnapshot> {

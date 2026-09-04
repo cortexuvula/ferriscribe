@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   formatDuration,
+  formatMinsSecs,
   formatTimestamp,
   formatDate,
   formatTokensPerSecond,
@@ -33,6 +34,21 @@ describe('formatDuration', () => {
 
   it('handles large values without overflow', () => {
     expect(formatDuration(3600)).toBe('60:00');
+  });
+});
+
+describe('formatMinsSecs', () => {
+  it('formats whole values as M:SS with unpadded minutes', () => {
+    expect(formatMinsSecs(0)).toBe('0:00');
+    expect(formatMinsSecs(59)).toBe('0:59');
+    expect(formatMinsSecs(192)).toBe('3:12');
+  });
+
+  it('rounds the total once so minute and second parts agree', () => {
+    // Independent rounding previously produced "1:59" here.
+    expect(formatMinsSecs(59.4)).toBe('0:59');
+    expect(formatMinsSecs(59.6)).toBe('1:00');
+    expect(formatMinsSecs(119.6)).toBe('2:00');
   });
 });
 
