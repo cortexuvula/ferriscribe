@@ -43,6 +43,8 @@ mod state;
 mod sweeps;
 mod sync_sparse_fields;
 mod templates_remote;
+#[cfg(test)]
+pub(crate) mod testutil;
 mod user_dict_remote;
 mod vocab_remote;
 
