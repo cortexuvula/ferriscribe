@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { translation } from '../stores/translation.svelte';
+  import { translation, decideLanguageChange } from '../stores/translation.svelte';
   import { settings } from '../stores/settings.svelte';
   import { audio } from '../stores/audio.svelte';
   import { toasts } from '../stores/toasts.svelte';
@@ -14,7 +14,13 @@
   let typedSpeaker: 'provider' | 'patient' = $state('provider');
   let clearDialogOpen = $state(false);
   let langDialogOpen = $state(false);
-  let pendingLangChange: { provider: string; patient: string } | null = null;
+  let pendingLangChange: {
+    provider: string;
+    patient: string;
+    /** Store values before the change — restored when the user cancels the
+     *  confirm dialog, so the selects snap back to the session's pair. */
+    previous: { provider: string; patient: string };
+  } | null = null;
 
   // Medical recording and translation capture share one microphone slot —
   // disable tap-to-talk while a recording runs elsewhere in the app.
@@ -69,12 +75,27 @@
     return match ? match.name : code;
   }
 
-  /** Persist a language-pair change. With existing history it confirms
-   *  first — restarting the session clears the conversation. */
+  /** Handle a language-select change. The selects' visible choices are
+   *  recorded in the store FIRST (the UI is the source of truth — the old
+   *  silent-return guards left the store holding '' while the selects
+   *  showed real languages, wedging the tab in "Pick both languages");
+   *  then the session side-effect runs per decideLanguageChange. */
   function onLanguageChange(provider: string, patient: string) {
-    if (!provider || !patient || provider === patient) return;
-    if (translation.entries.length > 0) {
-      pendingLangChange = { provider, patient };
+    const previous = {
+      provider: translation.providerLang,
+      patient: translation.patientLang,
+    };
+    translation.providerLang = provider;
+    translation.patientLang = patient;
+
+    const decision = decideLanguageChange(provider, patient, translation.entries.length);
+    if (decision.action === 'none') return;
+    if (decision.action === 'invalid') {
+      translation.setNotice(decision.reason);
+      return;
+    }
+    if (decision.action === 'confirm') {
+      pendingLangChange = { provider, patient, previous };
       langDialogOpen = true;
       return;
     }
@@ -152,6 +173,9 @@
             onLanguageChange(e.currentTarget.value, translation.patientLang)}
           disabled={translation.phase !== 'idle'}
         >
+          {#if !translation.providerLang}
+            <option value="" disabled hidden>Pick a language…</option>
+          {/if}
           {#each translation.languages as lang (lang.code)}
             <option value={lang.code}>{lang.name}</option>
           {/each}
@@ -166,6 +190,9 @@
             onLanguageChange(translation.providerLang, e.currentTarget.value)}
           disabled={translation.phase !== 'idle'}
         >
+          {#if !translation.patientLang}
+            <option value="" disabled hidden>Pick a language…</option>
+          {/if}
           {#each translation.languages as lang (lang.code)}
             <option value={lang.code}>{lang.name}</option>
           {/each}
@@ -382,7 +409,12 @@
   }}
   onCancel={() => {
     langDialogOpen = false;
-    pendingLangChange = null;
+    if (pendingLangChange) {
+      // Snap the selects back to the session's language pair.
+      translation.providerLang = pendingLangChange.previous.provider;
+      translation.patientLang = pendingLangChange.previous.patient;
+      pendingLangChange = null;
+    }
   }}
 />
 

@@ -39,7 +39,33 @@ vi.mock('../types/errors', () => ({
 
 const { translation } = await import('./translation.svelte');
 
-import { MAX_UTTERANCE_SECS } from './translation.svelte';
+import { MAX_UTTERANCE_SECS, decideLanguageChange } from './translation.svelte';
+
+describe('decideLanguageChange', () => {
+  // Regression for the stuck-tab bug: picking Patient = English while
+  // Physician was still English used to silently no-op, leaving the store
+  // empty while the selects displayed real languages.
+  it('equal picks are invalid with a reason — not a silent none', () => {
+    const decision = decideLanguageChange('en', 'en', 0);
+    expect(decision.action).toBe('invalid');
+    if (decision.action === 'invalid') {
+      expect(decision.reason).toContain('must differ');
+    }
+  });
+
+  it('incomplete pairs are none (the selection is still recorded by the caller)', () => {
+    expect(decideLanguageChange('', 'en', 0).action).toBe('none');
+    expect(decideLanguageChange('fr', '', 0).action).toBe('none');
+  });
+
+  it('valid pair with history requires confirmation', () => {
+    expect(decideLanguageChange('fr', 'en', 3).action).toBe('confirm');
+  });
+
+  it('valid pair without history applies immediately', () => {
+    expect(decideLanguageChange('fr', 'en', 0).action).toBe('apply');
+  });
+});
 
 function makeEntry(
   speaker: 'provider' | 'patient',
