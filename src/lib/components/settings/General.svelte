@@ -1,6 +1,7 @@
 <script lang="ts">
   import { settings } from '../../stores/settings.svelte';
   import GeneralBasics from './sections/GeneralBasics.svelte';
+  import ScreenshotOcrSection from './sections/ScreenshotOcrSection.svelte';
   import DatabaseSecurity from './sections/DatabaseSecurity.svelte';
   import DataManagement from './sections/DataManagement.svelte';
   import AdvancedSettings from './sections/AdvancedSettings.svelte';
@@ -17,6 +18,7 @@
   {/if}
 
   <GeneralBasics />
+  <ScreenshotOcrSection />
   <DatabaseSecurity />
   <DataManagement />
   <AdvancedSettings />

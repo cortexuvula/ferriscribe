@@ -38,6 +38,7 @@ mod commands;
 mod conditions_remote;
 mod content_remote;
 pub mod corpus_export;
+mod screen_capture;
 mod sharing_vocab_api;
 mod state;
 mod sweeps;
@@ -211,6 +212,9 @@ pub fn run() {
     // always callable, even in the recovery or fatal-error boot branches.
     builder = builder.manage(recovery_state);
     builder = builder.manage(fatal_error_state);
+    // One-shot channel connecting the screen-region overlay window's submit
+    // invoke back to the awaiting capture future (X11/Windows path).
+    builder = builder.manage(screen_capture::OverlaySelection::default());
 
     // Auto-resume office-server mode if the user enabled it in a previous
     // session. We only consider this when AppState was successfully managed
@@ -288,6 +292,25 @@ pub fn run() {
                 });
             }
 
+            // Register the screenshot-OCR global hotkey (if enabled). Must
+            // run after ALL plugins initialize (the global-shortcut plugin
+            // registers in the plugin chain below while this setup hook runs
+            // after every plugin is ready). Failures degrade to a log line —
+            // under Wayland registration is impossible by design (X11-only
+            // plugin), and the in-app trigger still works everywhere.
+            {
+                let state = app.state::<crate::state::AppState>();
+                match crate::commands::settings::load_config_sync(&state.db) {
+                    Ok(config) => crate::commands::screenshot_ocr::sync_hotkey_registration(
+                        app.handle(),
+                        &config,
+                    ),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not load config for hotkey registration")
+                    }
+                }
+            }
+
             // Note: the pdfium renderer for scanned-PDF OCR is initialized
             // lazily by the `ocr_documents` command (it downloads the library
             // into the app data dir on first use), so there's nothing to do
@@ -297,6 +320,23 @@ pub fn run() {
         });
     }
 
+    // Single-instance MUST be the first registered plugin. The primary
+    // instance receives second-launch argv here: a `--capture-ocr` launch
+    // delegates the region capture into this running app (see main.rs);
+    // any other second launch just re-surfaces the window.
+    builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        if crate::commands::screenshot_ocr::wants_capture_ocr(&argv) {
+            tracing::debug!("second instance requested an OCR capture");
+            crate::commands::screenshot_ocr::trigger_capture(app);
+        } else {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
+    }));
+
     builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
@@ -304,6 +344,18 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(
+            // Screenshot-OCR global hotkey. The handler dispatches on Pressed
+            // only; registration itself happens in setup / on settings save
+            // (see commands::screenshot_ocr::sync_hotkey_registration).
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        crate::commands::screenshot_ocr::trigger_capture(app);
+                    }
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             commands::recordings::list_recordings,
             commands::recordings::get_recording,
@@ -383,6 +435,8 @@ pub fn run() {
             commands::models::download_model,
             commands::models::delete_model,
             commands::ocr::ocr_documents,
+            commands::screenshot_ocr::capture_region_ocr,
+            screen_capture::screen_region_submit,
             commands::logging::get_log_path,
             commands::logging::get_recent_logs,
             commands::logging::frontend_log,
@@ -440,8 +494,60 @@ pub fn run() {
             commands::content_sync::fetch_audio_from_server,
             commands::content_sync::upload_audio_to_server,
         ])
-        .run(tauri::generate_context!())
+        .run(app_context())
         .expect("error while running tauri application");
+}
+
+/// Build the app [`tauri::Context`]. The `generate_context!` macro may be
+/// expanded exactly ONCE per crate on macOS (it embeds an Info.plist symbol
+/// with a fixed name), so both the main run and the capture delegate funnel
+/// through this helper.
+fn app_context() -> tauri::Context {
+    tauri::generate_context!()
+}
+
+/// Handle a `--capture-ocr` launch when the full app is (maybe) already
+/// running. Never returns.
+///
+/// Boots the MINIMAL Tauri shell — single-instance plugin only, main window
+/// stripped from the config — so the running instance receives our argv via
+/// its `second-instance` callback and performs the capture. This MUST NOT
+/// boot a second full app shell (double keychain/SQLCipher/webview init).
+///
+/// **Cold-start rule:** when no instance is running, this process itself
+/// claims the single-instance lock, reaches `setup`, and exits nonzero with
+/// a desktop notification telling the user to start FerriScribe first —
+/// stdout is invisible under `windows_subsystem = "windows"`, so a
+/// notification is the only viable surface.
+pub fn delegate_capture_ocr() -> ! {
+    let mut context = app_context();
+    // Never create the main window in the delegate shell — without this, the
+    // cold-start path would flash a broken app (no AppState behind it).
+    context.config_mut().app.windows.clear();
+
+    let _ = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {
+            // Unreachable in practice: the delegate never becomes the
+            // primary long enough to receive further instances.
+        }))
+        .setup(|app| {
+            // Reached only when no primary was running (a primary's
+            // existence makes the plugin exit(0) during initialization,
+            // before setup).
+            tracing::info!("capture delegation cold start: no running FerriScribe");
+            // Release the single-instance socket we just claimed so the next
+            // real launch binds it directly (the plugin also self-heals off a
+            // stale socket via ConnectionRefused, but don't leave one).
+            tauri_plugin_single_instance::destroy(app.handle());
+            crate::commands::screenshot_ocr::notify_desktop(
+                "FerriScribe OCR",
+                "FerriScribe is not running. Start FerriScribe first, then retry the capture.",
+            );
+            std::process::exit(2);
+        })
+        .run(context);
+    // Unreachable defensive exit (run() returning is not expected).
+    std::process::exit(3);
 }
 
 /// Remove log files older than `keep_days`.

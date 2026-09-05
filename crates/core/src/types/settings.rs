@@ -628,11 +628,24 @@ pub struct AppConfig {
 
     // Content sync
     /// When true, patient content (transcripts, SOAP notes, letters, peer
-    /// discussions, audio) syncs two-way between this machine and the paired
+    /// discussions, audio) syncs two-way between this machine and a paired
     /// server over Tailscale. Requires Tailscale on both machines. Defaults
     /// to false.
     #[serde(default)]
     pub sync_content: bool,
+
+    // Screenshot-region OCR (v0.75)
+    /// When true, the app registers the screenshot-OCR global hotkey at
+    /// startup: press it, drag-select a screen region, the captured pixels
+    /// are OCR'd through the local vision model and the text lands on the
+    /// clipboard. Under Wayland the OS-level hotkey must instead be bound by
+    /// the compositor (the in-app trigger works everywhere).
+    #[serde(default = "default_true")]
+    pub screenshot_ocr_hotkey_enabled: bool,
+    /// Accelerator string for the screenshot-OCR hotkey (Tauri/global-hotkey
+    /// syntax, e.g. "CmdOrCtrl+Alt+O"). `None`/empty = the default binding.
+    #[serde(default)]
+    pub screenshot_ocr_hotkey: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -913,6 +926,23 @@ mod tests {
         let cfg: AppConfig =
             serde_json::from_str(old_json).expect("should parse with serde defaults");
         assert!(!cfg.sync_content, "default must be false");
+    }
+
+    #[test]
+    fn screenshot_ocr_hotkey_defaults_in_older_configs() {
+        // Hotkey ON with the default binding — additive fields, older configs
+        // parse with defaults.
+        let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
+        let cfg: AppConfig =
+            serde_json::from_str(old_json).expect("should parse with serde defaults");
+        assert!(cfg.screenshot_ocr_hotkey_enabled);
+        assert_eq!(cfg.screenshot_ocr_hotkey, None);
+
+        let json =
+            r#"{"screenshot_ocr_hotkey_enabled":false,"screenshot_ocr_hotkey":"Ctrl+Shift+O"}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("should parse with overrides");
+        assert!(!cfg.screenshot_ocr_hotkey_enabled);
+        assert_eq!(cfg.screenshot_ocr_hotkey.as_deref(), Some("Ctrl+Shift+O"));
     }
 
     #[test]

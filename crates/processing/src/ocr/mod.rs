@@ -148,11 +148,12 @@ fn build_image_ocr_request(image_data_url: &str, model: &str) -> CompletionReque
 
 /// OCR a single in-memory image via the vision model.
 ///
-/// Shared by the `Image` strategy (implicitly — same flow) and the scanned-PDF
-/// page loop. `format` is the MIME subtype for the data URL ("png", "jpeg",
-/// …). Returns the trimmed extracted text, or an `OcrError` on provider failure
-/// or per-file timeout.
-async fn ocr_image_bytes(
+/// Shared by the `Image` strategy (implicitly — same flow), the scanned-PDF
+/// page loop, and the screenshot-region-OCR feature in the app shell (which
+/// captures screen pixels, never a file). `format` is the MIME subtype for
+/// the data URL ("png", "jpeg", …). Returns the trimmed extracted text, or
+/// an `OcrError` on provider failure or per-file timeout.
+pub async fn ocr_image_bytes(
     image_bytes: &[u8],
     format: &str,
     ocr_model: &str,

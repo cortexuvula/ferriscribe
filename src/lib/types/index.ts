@@ -218,6 +218,14 @@ export interface AppConfig {
    *  null). Mirrors `retention_days: Option<u32>` in
    *  crates/core/src/types/settings.rs. */
   retention_days: number | null;
+  // Screenshot-region OCR (v0.75)
+  /** When true, the global hotkey is registered at startup (and on settings
+   *  save). Under Wayland the OS-level binding must be added to the
+   *  compositor instead — see Settings → General. */
+  screenshot_ocr_hotkey_enabled: boolean;
+  /** Custom hotkey accelerator (e.g. "Ctrl+Shift+O"). `null` = the default
+   *  "CmdOrCtrl+Alt+O". Mirrors `screenshot_ocr_hotkey: Option<String>`. */
+  screenshot_ocr_hotkey: string | null;
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
