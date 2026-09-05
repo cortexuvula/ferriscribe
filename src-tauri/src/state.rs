@@ -931,8 +931,14 @@ impl AppState {
         // session. Reads the handle slot each tick, so provider rebuilds
         // (reinit / model download / pairing) are picked up without
         // restarting the loop. Spawned ONCE — here, at boot.
+        //
+        // MUST be `tauri::async_runtime::spawn`, not `tokio::spawn`:
+        // `initialize` is a sync call on the main thread BEFORE any Tokio
+        // runtime exists — a bare `tokio::spawn` panics ("no reactor
+        // running"), which under the release profile's `panic = "abort"`
+        // hard-crashes the app at launch (the v0.74.1 boot crash).
         let sweeper_slot = Arc::clone(&local_stt_provider);
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(WHISPER_IDLE_SWEEP_INTERVAL);
             loop {
                 interval.tick().await;
