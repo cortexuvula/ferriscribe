@@ -11,6 +11,7 @@
 //! blocking stage — whisper-rs does not support mid-inference interrupt callbacks.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -26,13 +27,13 @@ use medical_core::types::{
 use crate::audio_prep;
 use crate::diarization::SpeakerDiarizer;
 use crate::merge;
-use crate::whisper::WhisperTranscriber;
+use crate::whisper::{WhisperContextCache, WhisperTranscriber};
 
 /// Local speech-to-text provider using whisper-rs + pyannote diarization.
 ///
 /// Implements [`medical_core::traits::SttProvider`] by running Whisper locally
-/// via whisper-rs and optionally running pyannote speaker diarization on the
-/// same audio buffer. All blocking inference runs inside `spawn_blocking`.
+/// via whisper-rs and optionally running pyannote diarization on the same
+/// audio buffer. All blocking inference runs inside `spawn_blocking`.
 ///
 /// # Model Paths
 ///
@@ -41,26 +42,52 @@ use crate::whisper::WhisperTranscriber;
 /// - `embedding_model_path` — path to `wespeaker_en_voxceleb_CAM++.onnx`
 ///
 /// Diarization is silently skipped if either pyannote model is missing.
+///
+/// The whisper model is loaded once into a [`WhisperContextCache`] (at
+/// first transcription or `prewarm`) and reused across calls — the per-call
+/// cost used to include the full model load (~1-2 s for base, ~5 s for
+/// large-v3-turbo), which dominated short utterances like the translate
+/// tab's.
 pub struct LocalSttProvider {
     whisper_model_path: PathBuf,
     segmentation_model_path: PathBuf,
     embedding_model_path: PathBuf,
+    whisper_cache: Arc<WhisperContextCache>,
 }
 
 impl LocalSttProvider {
-    /// Create a new local STT provider with the given model paths.
+    /// Create a new local STT provider with the given model paths and a
+    /// fresh (empty) whisper context cache.
     ///
-    /// No models are loaded at construction time — Whisper and pyannote models
-    /// are loaded lazily inside `transcribe()` via `spawn_blocking`.
+    /// No models are loaded at construction time — Whisper and pyannote
+    /// models are loaded lazily inside `transcribe()` via `spawn_blocking`,
+    /// or early via `prewarm()`.
     pub fn new(
         whisper_model_path: PathBuf,
         segmentation_model_path: PathBuf,
         embedding_model_path: PathBuf,
     ) -> Self {
+        Self::with_cache(
+            whisper_model_path,
+            segmentation_model_path,
+            embedding_model_path,
+            Arc::new(WhisperContextCache::new()),
+        )
+    }
+
+    /// Create a provider that shares `whisper_cache`, so a loaded model
+    /// context can outlive any one provider rebuild.
+    pub fn with_cache(
+        whisper_model_path: PathBuf,
+        segmentation_model_path: PathBuf,
+        embedding_model_path: PathBuf,
+        whisper_cache: Arc<WhisperContextCache>,
+    ) -> Self {
         Self {
             whisper_model_path,
             segmentation_model_path,
             embedding_model_path,
+            whisper_cache,
         }
     }
 }
@@ -106,13 +133,15 @@ impl SttProvider for LocalSttProvider {
         let audio_16k_raw = audio_prep::to_16k_mono_f32(&audio);
         let audio_16k = audio_prep::trim_trailing_silence(&audio_16k_raw, 0.01);
 
-        // Stage 2: Whisper transcription
+        // Stage 2: Whisper transcription (context from the shared cache —
+        // the model load happened once, at the first call or prewarm)
         let whisper_path = self.whisper_model_path.clone();
+        let whisper_cache = Arc::clone(&self.whisper_cache);
         let language = config.language.clone();
         let audio_for_whisper = audio_16k.clone();
 
         let whisper_segments = tokio::task::spawn_blocking(move || {
-            let transcriber = WhisperTranscriber::new(whisper_path);
+            let transcriber = WhisperTranscriber::new(whisper_path, whisper_cache);
             transcriber.transcribe(&audio_for_whisper, language.as_deref())
         })
         .await
@@ -207,6 +236,22 @@ impl SttProvider for LocalSttProvider {
             "Local provider does not support streaming transcription".to_owned(),
         ))
     }
+
+    /// Load the whisper model into the shared context cache ahead of the
+    /// next transcription (see [`SttProvider::prewarm`]). Errors here are
+    /// advisory only — `transcribe` retries the load and reports the real
+    /// error at the point it matters.
+    async fn prewarm(&self) -> AppResult<()> {
+        let whisper_path = self.whisper_model_path.clone();
+        let whisper_cache = Arc::clone(&self.whisper_cache);
+        tokio::task::spawn_blocking(move || {
+            WhisperTranscriber::new(whisper_path, whisper_cache)
+                .prewarm()
+                .map(|_| ())
+        })
+        .await
+        .map_err(|e| AppError::stt_provider(format!("Whisper prewarm task panicked: {e}")))?
+    }
 }
 
 #[cfg(test)]
@@ -255,5 +300,78 @@ mod tests {
             msg.to_lowercase().contains("cancel"),
             "expected error to mention cancel, got: {msg}"
         );
+    }
+
+    /// `prewarm` surfaces the missing-model error (advisory — callers log
+    /// it), and a second prewarm retries rather than replaying a cached
+    /// failure.
+    #[tokio::test]
+    async fn prewarm_errors_on_missing_model_and_retries() {
+        let provider = local_provider_for_test();
+        assert!(provider.prewarm().await.is_err());
+        assert!(provider.prewarm().await.is_err());
+    }
+
+    /// Providers sharing a cache must share the loaded model: prewarm
+    /// through one is observable... but without a real ggml file the cache
+    /// stays empty, so pin the cheaper contract — two providers built on
+    /// the same cache construct and prewarm independently (still errors on
+    /// the missing model, never panics).
+    #[tokio::test]
+    async fn shared_cache_providers_prewarm_independently() {
+        let cache = Arc::new(crate::whisper::WhisperContextCache::new());
+        let a = LocalSttProvider::with_cache(
+            PathBuf::from("/nonexistent/whisper-a.bin"),
+            PathBuf::from("/nonexistent/segmentation.onnx"),
+            PathBuf::from("/nonexistent/embedding.onnx"),
+            Arc::clone(&cache),
+        );
+        let b = LocalSttProvider::with_cache(
+            PathBuf::from("/nonexistent/whisper-b.bin"),
+            PathBuf::from("/nonexistent/segmentation.onnx"),
+            PathBuf::from("/nonexistent/embedding.onnx"),
+            cache,
+        );
+        assert!(a.prewarm().await.is_err());
+        assert!(b.prewarm().await.is_err());
+    }
+
+    /// The default trait prewarm is a no-op that succeeds — pins the
+    /// contract callers rely on (a prewarm error is advisory, never fatal).
+    #[tokio::test]
+    async fn default_prewarm_is_a_successful_no_op() {
+        #[derive(Default)]
+        struct Noop;
+        #[async_trait]
+        impl SttProvider for Noop {
+            fn name(&self) -> &str {
+                "noop"
+            }
+            fn supports_streaming(&self) -> bool {
+                false
+            }
+            fn supports_diarization(&self) -> bool {
+                false
+            }
+            async fn transcribe(
+                &self,
+                _audio: AudioData,
+                _config: SttConfig,
+                _cancel: CancellationToken,
+            ) -> AppResult<Transcript> {
+                Err(AppError::stt_provider("unused".to_owned()))
+            }
+
+            async fn transcribe_stream(
+                &self,
+                _stream: AudioStream,
+                _config: SttConfig,
+            ) -> AppResult<Box<dyn Stream<Item = AppResult<TranscriptChunk>> + Send + Unpin>>
+            {
+                Err(AppError::stt_provider("unused".to_owned()))
+            }
+        }
+        // `Noop` does not override prewarm — this exercises the default.
+        assert!(Noop.prewarm().await.is_ok());
     }
 }

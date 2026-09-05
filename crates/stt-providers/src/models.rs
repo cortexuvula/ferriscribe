@@ -12,8 +12,15 @@
 //!
 //! # Model Catalog
 //!
-//! - **Whisper**: `base` (~148 MB), `small` (~488 MB), `medium` (~1.5 GB), `large-v3-turbo` (~1.6 GB)
+//! - **Whisper**: `base` (~148 MB), `base-q5_1` (~60 MB), `small` (~488 MB),
+//!   `small-q5_1` (~190 MB), `medium` (~1.5 GB), `large-v3-turbo` (~1.6 GB),
+//!   `large-v3-turbo-q5_0` (~574 MB)
 //! - **Pyannote**: `segmentation-3.0.onnx` (~6 MB), `wespeaker_en_voxceleb_CAM++.onnx` (~28 MB)
+//!
+//! The `q5` variants are the same models with 5-bit quantization: a third
+//! to an eighth of the download and much faster to load, at a small
+//! accuracy cost — the turbo q5_0 in particular keeps large-v3-turbo
+//! accuracy at ~⅓ the size.
 
 use crate::SttError;
 use serde::{Deserialize, Serialize};
@@ -30,12 +37,19 @@ use std::path::{Path, PathBuf};
 pub enum WhisperModelId {
     /// Whisper Base — fastest, lowest accuracy (~148 MB).
     Base,
+    /// Whisper Base Q5_1 — quantized base (~60 MB).
+    BaseQ5_1,
     /// Whisper Small — balanced speed and accuracy (~488 MB).
     Small,
+    /// Whisper Small Q5_1 — quantized small (~190 MB).
+    SmallQ5_1,
     /// Whisper Medium — high accuracy (~1.5 GB).
     Medium,
     /// Whisper Large-v3-Turbo — best accuracy (~1.6 GB).
     LargeV3Turbo,
+    /// Whisper Large-v3-Turbo Q5_0 — quantized turbo, the size/speed
+    /// sweet spot (~574 MB).
+    LargeV3TurboQ5_0,
 }
 
 impl WhisperModelId {
@@ -43,9 +57,12 @@ impl WhisperModelId {
     pub fn as_str(&self) -> &'static str {
         match self {
             WhisperModelId::Base => "base",
+            WhisperModelId::BaseQ5_1 => "base-q5_1",
             WhisperModelId::Small => "small",
+            WhisperModelId::SmallQ5_1 => "small-q5_1",
             WhisperModelId::Medium => "medium",
             WhisperModelId::LargeV3Turbo => "large-v3-turbo",
+            WhisperModelId::LargeV3TurboQ5_0 => "large-v3-turbo-q5_0",
         }
     }
 
@@ -58,9 +75,12 @@ impl WhisperModelId {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "base" => Some(WhisperModelId::Base),
+            "base-q5_1" => Some(WhisperModelId::BaseQ5_1),
             "small" => Some(WhisperModelId::Small),
+            "small-q5_1" => Some(WhisperModelId::SmallQ5_1),
             "medium" => Some(WhisperModelId::Medium),
             "large-v3-turbo" => Some(WhisperModelId::LargeV3Turbo),
+            "large-v3-turbo-q5_0" => Some(WhisperModelId::LargeV3TurboQ5_0),
             _ => None,
         }
     }
@@ -127,15 +147,21 @@ pub fn pyannote_model_path(app_data_dir: &Path, filename: &str) -> PathBuf {
 /// | ID | Filename |
 /// |---|---|
 /// | `"base"` | `ggml-base.bin` |
+/// | `"base-q5_1"` | `ggml-base-q5_1.bin` |
 /// | `"small"` | `ggml-small.bin` |
+/// | `"small-q5_1"` | `ggml-small-q5_1.bin` |
 /// | `"medium"` | `ggml-medium.bin` |
 /// | `"large-v3-turbo"` | `ggml-large-v3-turbo.bin` |
+/// | `"large-v3-turbo-q5_0"` | `ggml-large-v3-turbo-q5_0.bin` |
 pub fn whisper_model_filename(model_id: &str) -> Option<&'static str> {
     match model_id {
         "base" => Some("ggml-base.bin"),
+        "base-q5_1" => Some("ggml-base-q5_1.bin"),
         "small" => Some("ggml-small.bin"),
+        "small-q5_1" => Some("ggml-small-q5_1.bin"),
         "medium" => Some("ggml-medium.bin"),
         "large-v3-turbo" => Some("ggml-large-v3-turbo.bin"),
+        "large-v3-turbo-q5_0" => Some("ggml-large-v3-turbo-q5_0.bin"),
         _ => None,
     }
 }
@@ -158,11 +184,25 @@ pub fn available_whisper_models(app_data_dir: &Path) -> Vec<ModelInfo> {
             "Whisper Base (~148 MB) — fast, lower accuracy",
         ),
         (
+            "base-q5_1",
+            "ggml-base-q5_1.bin",
+            59_707_625u64,
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin",
+            "Whisper Base Q5_1 (~60 MB) — fastest, quantized",
+        ),
+        (
             "small",
             "ggml-small.bin",
             487_601_905u64,
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
             "Whisper Small (~488 MB) — balanced speed and accuracy",
+        ),
+        (
+            "small-q5_1",
+            "ggml-small-q5_1.bin",
+            190_085_487u64,
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
+            "Whisper Small Q5_1 (~190 MB) — balanced, quantized",
         ),
         (
             "medium",
@@ -177,6 +217,13 @@ pub fn available_whisper_models(app_data_dir: &Path) -> Vec<ModelInfo> {
             1_622_081_537u64,
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
             "Whisper Large-v3-Turbo (~1.6 GB) — best accuracy",
+        ),
+        (
+            "large-v3-turbo-q5_0",
+            "ggml-large-v3-turbo-q5_0.bin",
+            574_041_195u64,
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+            "Whisper Large-v3-Turbo Q5_0 (~574 MB) — best accuracy, quantized",
         ),
     ];
 
@@ -345,11 +392,23 @@ mod tests {
     #[test]
     fn whisper_model_filenames() {
         assert_eq!(whisper_model_filename("base"), Some("ggml-base.bin"));
+        assert_eq!(
+            whisper_model_filename("base-q5_1"),
+            Some("ggml-base-q5_1.bin")
+        );
         assert_eq!(whisper_model_filename("small"), Some("ggml-small.bin"));
+        assert_eq!(
+            whisper_model_filename("small-q5_1"),
+            Some("ggml-small-q5_1.bin")
+        );
         assert_eq!(whisper_model_filename("medium"), Some("ggml-medium.bin"));
         assert_eq!(
             whisper_model_filename("large-v3-turbo"),
             Some("ggml-large-v3-turbo.bin")
+        );
+        assert_eq!(
+            whisper_model_filename("large-v3-turbo-q5_0"),
+            Some("ggml-large-v3-turbo-q5_0.bin")
         );
         assert_eq!(whisper_model_filename("unknown"), None);
     }
@@ -378,8 +437,17 @@ mod tests {
         // Use a path that definitely does not exist so downloaded = false for all
         let base = Path::new("/tmp/__nonexistent_ferriscribe_test_dir__");
         let models = available_whisper_models(base);
-        assert_eq!(models.len(), 4);
+        assert_eq!(models.len(), 7);
         assert!(models.iter().all(|m| !m.downloaded));
+        // Every catalog id must resolve to a filename — a missing match arm
+        // silently falls back to large-v3-turbo at provider build time.
+        for m in &models {
+            assert!(
+                whisper_model_filename(&m.id).is_some(),
+                "catalog id {} has no filename mapping",
+                m.id
+            );
+        }
     }
 
     #[test]
@@ -394,9 +462,12 @@ mod tests {
     fn whisper_model_id_roundtrip() {
         let ids = [
             WhisperModelId::Base,
+            WhisperModelId::BaseQ5_1,
             WhisperModelId::Small,
+            WhisperModelId::SmallQ5_1,
             WhisperModelId::Medium,
             WhisperModelId::LargeV3Turbo,
+            WhisperModelId::LargeV3TurboQ5_0,
         ];
         for id in &ids {
             let s = id.as_str();

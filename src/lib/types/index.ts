@@ -116,6 +116,12 @@ export interface AppConfig {
    *  Mirrors `ocr_model: Option<String>` in crates/core/src/types/settings.rs.
    *  When null, the generation model (`ai_model`) is used. */
   ocr_model: string | null;
+  /** Optional model for the Translate tab's live translation. Mirrors
+   *  `translation_model: Option<String>` in crates/core/src/types/settings.rs.
+   *  When null (or empty), the generation model (`ai_model`) is used —
+   *  pointing this at a small (1-4 B) model makes utterance turnaround
+   *  much faster. */
+  translation_model: string | null;
   whisper_model: string;
   tts_provider: string;
   tts_voice: string;
