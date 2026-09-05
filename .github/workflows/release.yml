@@ -15,7 +15,48 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Create the DRAFT release up front so every platform job uploads to the
+  # SAME release by ID. tauri-action's release lookup cannot reliably see
+  # drafts (GitHub's by-tag endpoint excludes them), so letting each job
+  # create/find the draft raced: the v0.74.2 run split assets across a
+  # public Linux-only release and a private macOS+Windows draft, and the
+  # manifest job (correctly) refused to publish a partial updater manifest.
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - name: Create draft release
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Reruns (or a leftover from a failed attempt) must reuse the
+          # existing release for this tag, not create a duplicate.
+          EXISTING=$(gh api "repos/$GH_REPO/releases" --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1)
+          if [ -n "$EXISTING" ]; then
+            echo "release_id=$EXISTING" >> "$GITHUB_OUTPUT"
+            echo "Reusing existing release for $TAG (id $EXISTING)"
+            exit 0
+          fi
+          if [[ "$TAG" == *-* ]]; then PRERELEASE=true; else PRERELEASE=false; fi
+          RESPONSE=$(gh api "repos/$GH_REPO/releases" \
+            -f tag_name="$TAG" \
+            -f name="FerriScribe $TAG" \
+            -f body="See the assets below to download and install this version." \
+            -F draft=true \
+            -F prerelease=$PRERELEASE)
+          ID=$(echo "$RESPONSE" | jq '.id')
+          echo "release_id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Draft release created for $TAG (id $ID)"
+
   release:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -109,14 +150,20 @@ jobs:
           APPLE_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
         with:
+          # Upload to the SHARED draft release created by the `prepare` job.
+          # Uploading by ID skips tauri-action's by-tag release lookup —
+          # which cannot see drafts and previously raced the three platform
+          # jobs into split releases. tagName/releaseName/releaseBody below
+          # are fallbacks for a world where releaseId is empty.
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           tagName: ${{ github.ref_name }}
           releaseName: 'FerriScribe ${{ github.ref_name }}'
           releaseBody: 'See the assets below to download and install this version.'
-          # Created as a DRAFT: the boot smoke test (next step) must pass
-          # before the release is flipped to published. A build that crashes
-          # at launch (the v0.74.1 class) must never reach users; if the
-          # smoke fails, the cleanup step deletes the draft and the tag-pushed
-          # release simply doesn't exist.
+          # The release is a DRAFT (created by `prepare`): it goes public
+          # only when the `publish` job runs — after EVERY platform job has
+          # built, uploaded, and passed its boot smoke test. A build that
+          # crashes at launch (the v0.74.1 class) must never reach users;
+          # if anything fails, the cleanup job deletes the draft.
           releaseDraft: true
           # Tags with a semver pre-release suffix (e.g. v0.10.85-beta.1) ship
           # as GitHub prereleases; plain vX.Y.Z tags ship as stable. Promote
@@ -168,29 +215,56 @@ jobs:
           fi
           echo "Boot smoke passed: app started, got through init, no panic."
 
-      # Smoke passed — make the draft release public.
-      - name: Publish release
-        if: success()
+  # Runs once, after EVERY platform job has built, uploaded, and passed its
+  # boot smoke. Verifies the draft holds all three platforms' assets, then
+  # makes the release public. Publishing here (never inside the matrix) is
+  # what makes the draft gate sound: a partial or crashing build stays a
+  # private draft.
+  publish:
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Verify all platform assets, then publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release edit "${{ github.ref_name }}" --draft=false
+          TAG: ${{ github.ref_name }}
+        run: |
+          ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          echo "──── assets on the draft ────"
+          echo "$ASSETS"
+          MISSING=0
+          echo "$ASSETS" | grep -q "aarch64.app" || { echo "::error::missing macOS (aarch64) assets"; MISSING=1; }
+          echo "$ASSETS" | grep -qE -- "-setup\.exe|\.msi$" || { echo "::error::missing Windows assets"; MISSING=1; }
+          echo "$ASSETS" | grep -q "\.AppImage" || { echo "::error::missing Linux (AppImage) asset"; MISSING=1; }
+          if [ "$MISSING" != "0" ]; then exit 1; fi
+          gh release edit "$TAG" --draft=false
+          echo "Release published."
 
-      # Smoke (or anything after the build) failed — remove the draft so no
-      # broken artifacts linger hidden on the tag. The tag itself stays.
+  # Anything failed after the draft was created — remove it so no broken or
+  # partial artifacts linger hidden on the tag. The tag itself stays.
+  cleanup:
+    needs: [release, publish]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
       - name: Delete draft release on failure
-        if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release delete "${{ github.ref_name }}" --yes || true
+          TAG: ${{ github.ref_name }}
+        run: gh release delete "$TAG" --yes || true
 
   # Prune old releases after a successful build, keeping only the 5 newest
   # (by semver). Deletes both the release assets and the git tag. Only
   # matches FerriScribe version tags (vX.Y.Z); leaves whisper-server-* and
   # other non-version tags untouched. Runs once after all platform builds.
   prune:
-    needs: [release, manifest]
+    needs: [publish, manifest]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -203,13 +277,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/prune-old-releases.mjs
 
-  # Generate a consolidated latest.json AFTER all platform builds complete.
-  # Each platform job auto-generates its own partial latest.json via
-  # tauri-action; this job overwrites it with a manifest that includes ALL
-  # platforms, eliminating the updater race condition where clients see a
-  # new version before their platform binary is uploaded.
+  # Generate a consolidated latest.json AFTER the publish job has made the
+  # (complete) release public. Each platform job auto-generates its own
+  # partial latest.json via tauri-action; this job overwrites it with a
+  # manifest that includes ALL platforms, eliminating the updater race
+  # condition where clients see a new version before their platform binary
+  # is uploaded.
   manifest:
-    needs: release
+    needs: publish
     runs-on: ubuntu-24.04
     permissions:
       contents: write
