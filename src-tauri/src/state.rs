@@ -28,6 +28,15 @@ use medical_stt_providers::models as stt_models;
 
 use medical_core::traits::SttProvider;
 
+/// How often the whisper idle sweeper (spawned in [`AppState::initialize`])
+/// checks the local STT provider's context cache.
+pub const WHISPER_IDLE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// Whisper contexts unused for this long are evicted, freeing the resident
+/// model weights (up to ~1.6 GB for large-v3-turbo). Sized to ride through
+/// normal clinical gaps — back-to-back translate sessions and consecutive
+/// dictations stay warm — while not pinning memory all day after one use.
+pub const WHISPER_IDLE_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 /// Errors that can be returned from `AppState::initialize()` to signal
 /// special boot conditions to the caller.
 #[derive(Debug)]
@@ -232,6 +241,10 @@ pub struct TranslationState {
     /// silently drops the completed entry, and a restart pushes it into the
     /// new session with the wrong language pair.
     pub in_flight: usize,
+    /// When the translation model was last used (keep-alive ping or a real
+    /// translation). Debounces the capture-time ping: rapid tap cycles
+    /// don't re-page an already-warm model. Timestamp only — never content.
+    pub last_llm_activity: Option<Instant>,
 }
 
 impl TranslationState {
@@ -352,6 +365,12 @@ pub struct AppState {
     /// Concrete RemoteSttProvider reference; `None` when STT mode is Local.
     pub remote_stt_provider:
         RwLock<Option<Arc<medical_stt_providers::remote_provider::RemoteSttProvider>>>,
+    /// Concrete LocalSttProvider reference; `None` when STT mode is Remote.
+    /// Exists so the idle-eviction sweeper spawned in [`Self::initialize`]
+    /// can reach the whisper context cache without downcasting the trait
+    /// object — `Arc`-wrapped so the sweeper task shares this exact slot.
+    pub local_stt_provider:
+        Arc<RwLock<Option<Arc<medical_stt_providers::local_provider::LocalSttProvider>>>>,
     /// Shared HTTP client for connection-test and pairing commands.
     /// Pooled per-host; reuse this instead of constructing a fresh
     /// `reqwest::Client` per call.
@@ -587,11 +606,15 @@ pub fn init_ai_providers(
 }
 
 /// The return type of `init_stt_providers_with_config`, bundling the trait
-/// object with a typed Arc handle for runtime endpoint updates.
+/// object with typed Arc handles for runtime updates.
 pub struct SttProviderHandles {
     pub provider: Option<Arc<dyn SttProvider + Send + Sync>>,
     /// Non-`None` only when `stt_mode` is `Remote`; enables `set_endpoint`.
     pub remote: Option<Arc<medical_stt_providers::remote_provider::RemoteSttProvider>>,
+    /// Non-`None` only when `stt_mode` is `Local`; enables the idle-eviction
+    /// sweeper (see [`AppState::initialize`]) to reach the whisper context
+    /// cache without downcasting the trait object.
+    pub local: Option<Arc<medical_stt_providers::local_provider::LocalSttProvider>>,
 }
 
 /// Create the STT provider based on the user's chosen mode.
@@ -617,15 +640,17 @@ pub fn init_stt_providers_with_config(
                 embedding = %emb_path.display(),
                 "Initializing local STT provider"
             );
+            let local = Arc::new(
+                medical_stt_providers::local_provider::LocalSttProvider::new(
+                    whisper_path,
+                    seg_path,
+                    emb_path,
+                ),
+            );
             SttProviderHandles {
-                provider: Some(Arc::new(
-                    medical_stt_providers::local_provider::LocalSttProvider::new(
-                        whisper_path,
-                        seg_path,
-                        emb_path,
-                    ),
-                )),
+                provider: Some(Arc::clone(&local) as Arc<dyn SttProvider + Send + Sync>),
                 remote: None,
+                local: Some(local),
             }
         }
         medical_core::types::settings::SttMode::Remote => {
@@ -673,6 +698,7 @@ pub fn init_stt_providers_with_config(
                     SttProviderHandles {
                         provider: Some(Arc::clone(&arc) as Arc<dyn SttProvider + Send + Sync>),
                         remote: Some(arc),
+                        local: None,
                     }
                 }
                 Err(e) => {
@@ -680,6 +706,7 @@ pub fn init_stt_providers_with_config(
                     SttProviderHandles {
                         provider: None,
                         remote: None,
+                        local: None,
                     }
                 }
             }
@@ -895,6 +922,30 @@ impl AppState {
         let lmstudio_provider = RwLock::new(ai_handles.lmstudio.take());
         let omlx_provider = RwLock::new(ai_handles.omlx.take());
         let remote_stt_provider = RwLock::new(stt_handles.remote.clone());
+        let local_stt_provider = Arc::new(RwLock::new(stt_handles.local.clone()));
+
+        // Idle-eviction sweeper: the cached whisper context keeps the model
+        // weights resident (up to ~1.6 GB for large-v3-turbo) for fast
+        // consecutive transcriptions; this task drops them after a stretch
+        // of disuse so memory isn't pinned all day after one translate
+        // session. Reads the handle slot each tick, so provider rebuilds
+        // (reinit / model download / pairing) are picked up without
+        // restarting the loop. Spawned ONCE — here, at boot.
+        let sweeper_slot = Arc::clone(&local_stt_provider);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(WHISPER_IDLE_SWEEP_INTERVAL);
+            loop {
+                interval.tick().await;
+                if let Some(local) = sweeper_slot.read().await.clone()
+                    && local.evict_if_idle(WHISPER_IDLE_AFTER)
+                {
+                    tracing::info!(
+                        idle_secs = WHISPER_IDLE_AFTER.as_secs(),
+                        "Evicted idle whisper context (freed model memory)"
+                    );
+                }
+            }
+        });
 
         // Initialize the agent orchestrator. RAG tools (RagSearchTool) are
         // instantiated lazily by chat.rs when the user invokes a RAG-dependent
@@ -924,6 +975,7 @@ impl AppState {
             lmstudio_provider,
             omlx_provider,
             remote_stt_provider,
+            local_stt_provider,
             http_client,
             content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             chat_stream_cancel: Arc::new(tokio::sync::Mutex::new(None)),

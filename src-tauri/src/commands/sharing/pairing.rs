@@ -375,6 +375,7 @@ async fn switch_stt_to_remote(
         *guard = stt_handles.provider;
     }
     *state.remote_stt_provider.write().await = stt_handles.remote;
+    *state.local_stt_provider.write().await = stt_handles.local;
     Ok(())
 }
 

@@ -219,46 +219,6 @@ pub fn available_pyannote_models(app_data_dir: &Path) -> Vec<ModelInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Check required models
-// ---------------------------------------------------------------------------
-
-/// Check which models are missing and return human-readable descriptions of each.
-///
-/// Checks the requested Whisper model plus both pyannote models (segmentation
-/// and embedding). Used by the Settings UI to show a "missing models" warning.
-pub fn check_required_models(app_data_dir: &Path, whisper_model_id: &str) -> Vec<String> {
-    let mut missing = Vec::new();
-
-    // Check requested whisper model
-    if let Some(filename) = whisper_model_filename(whisper_model_id) {
-        let path = whisper_model_path(app_data_dir, filename);
-        if !path.exists() {
-            missing.push(format!(
-                "Whisper model '{}' ({})",
-                whisper_model_id, filename
-            ));
-        }
-    }
-
-    // Pyannote stub models (diarization — currently not available but reserved)
-    let pyannote_stubs = [
-        ("segmentation-3.0.onnx", "Pyannote segmentation model"),
-        (
-            "wespeaker_en_voxceleb_CAM++.onnx",
-            "Pyannote speaker embedding model",
-        ),
-    ];
-    for (filename, description) in &pyannote_stubs {
-        let path = pyannote_model_path(app_data_dir, filename);
-        if !path.exists() {
-            missing.push(description.to_string());
-        }
-    }
-
-    missing
-}
-
-// ---------------------------------------------------------------------------
 // Download / delete
 // ---------------------------------------------------------------------------
 
@@ -388,13 +348,5 @@ mod tests {
                 m.id
             );
         }
-    }
-
-    #[test]
-    fn check_missing_models() {
-        let base = Path::new("/tmp/__nonexistent_ferriscribe_test_dir__");
-        let missing = check_required_models(base, "base");
-        // whisper base + 2 pyannote stubs = 3 missing
-        assert_eq!(missing.len(), 3);
     }
 }

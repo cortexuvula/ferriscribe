@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tracing::{info, instrument};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -26,43 +27,65 @@ pub struct WhisperSegment {
     pub end: f64,
 }
 
-/// Process-wide cache of the loaded `WhisperContext`, keyed by model path.
+/// How a cache loads a context — injectable so tests can pin the cache's
+/// contracts (reuse, eviction, failure-not-cached) without a real ggml file.
+pub type ContextLoader<C> = Arc<dyn Fn(&Path) -> AppResult<Arc<C>> + Send + Sync>;
+
+/// The cache's clock — injectable so idle eviction is deterministically
+/// testable (production uses [`Instant::now`]).
+pub type CacheClock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// Cache of one loaded context, keyed by model path.
 ///
-/// Building a context means reading the whole ggml file off disk and
-/// initializing the compute graph (~1-2 s for base, ~5 s for
-/// large-v3-turbo) — a per-utterance cost the translate tab pays on every
-/// tap. The cache keeps one loaded context alive across `transcribe` calls;
-/// each call creates its own `WhisperState` from the shared context (the
-/// whisper.cpp-endorsed way to run concurrent decodes).
+/// Building a whisper context means reading the whole ggml file off disk
+/// and initializing the compute graph (~1-2 s for base, ~5 s for
+/// large-v3-turbo) — a per-utterance cost the translate tab paid on every
+/// tap before this existed. The cache keeps one loaded context alive
+/// across `transcribe` calls; each call creates its own `WhisperState`
+/// from the shared context (the whisper.cpp-endorsed way to run
+/// concurrent decodes).
 ///
-/// A different `model_path` evicts and reloads — insurance against the model
-/// file being switched under a live provider. The cache lives as long as the
-/// owning provider: `reinit_providers`, model downloads, and pairing all
-/// rebuild the provider and drop its cache.
-pub struct WhisperContextCache {
-    inner: std::sync::Mutex<Option<CachedContext>>,
+/// A different `model_path` evicts and reloads — insurance against the
+/// model file being switched under a live provider — and
+/// [`evict_if_idle`](WhisperContextCache::evict_if_idle) drops the context
+/// after a configurable span of disuse so the resident weights (up to
+/// ~1.6 GB for large-v3-turbo) don't pin memory forever. The cache lives
+/// as long as the owning provider: `reinit_providers`, model downloads,
+/// and pairing all rebuild the provider and drop its cache.
+///
+/// Generic over the context type purely as a test seam — production is
+/// `WhisperContextCache<WhisperContext>`.
+pub struct WhisperContextCache<C> {
+    loader: ContextLoader<C>,
+    clock: CacheClock,
+    inner: std::sync::Mutex<Option<CachedContext<C>>>,
 }
 
-struct CachedContext {
+struct CachedContext<C> {
     model_path: PathBuf,
-    context: Arc<WhisperContext>,
+    context: Arc<C>,
+    last_used: Instant,
 }
 
-impl Default for WhisperContextCache {
-    fn default() -> Self {
-        Self::new()
+impl<C> WhisperContextCache<C> {
+    /// Create an empty cache loading contexts with `loader` and measuring
+    /// idleness against the wall clock. No model is loaded until the first
+    /// [`get`](WhisperContextCache::get).
+    pub fn new(loader: ContextLoader<C>) -> Self {
+        Self::with_clock(loader, Arc::new(Instant::now))
     }
-}
 
-impl WhisperContextCache {
-    /// Create an empty cache — no model is loaded until the first `get`.
-    pub fn new() -> Self {
+    /// Test seam: [`new`](WhisperContextCache::new) with an injectable clock.
+    pub fn with_clock(loader: ContextLoader<C>, clock: CacheClock) -> Self {
         Self {
+            loader,
+            clock,
             inner: std::sync::Mutex::new(None),
         }
     }
 
-    /// Return the loaded context for `model_path`, loading it on first use.
+    /// Return the loaded context for `model_path`, loading it on first use
+    /// and refreshing the idle timestamp on every call.
     ///
     /// The lock is held only for the get-or-init; the returned `Arc` keeps
     /// the context alive after the lock is dropped, and a failed load is
@@ -73,28 +96,56 @@ impl WhisperContextCache {
     /// state is always a fully-constructed `Option` (single assignment), and
     /// bricking every future transcription off one panicking load would be
     /// far worse than re-using whatever was cached.
-    pub fn get(&self, model_path: &Path) -> AppResult<Arc<WhisperContext>> {
+    pub fn get(&self, model_path: &Path) -> AppResult<Arc<C>> {
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(cached) = guard.as_ref()
+        if let Some(cached) = guard.as_mut()
             && cached.model_path == model_path
         {
+            cached.last_used = (self.clock)();
             return Ok(Arc::clone(&cached.context));
         }
-        let context = Arc::new(
-            WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
-                .map_err(|e| {
-                    AppError::stt_provider(format!("Failed to load Whisper model: {e}"))
-                })?,
-        );
+        let context = (self.loader)(model_path)?;
         *guard = Some(CachedContext {
             model_path: model_path.to_owned(),
+            last_used: (self.clock)(),
             context: Arc::clone(&context),
         });
         Ok(context)
     }
+
+    /// Drop the cached context when it has gone `max_idle` without a
+    /// [`get`](WhisperContextCache::get) — frees the resident weights (the
+    /// next transcription pays one model load). Returns whether a context
+    /// was evicted; an empty cache is a no-op.
+    ///
+    /// Safe against in-flight users: a transcription that raced this call
+    /// holds its own `Arc`, so the weights are freed only after the last
+    /// decode using them finishes.
+    pub fn evict_if_idle(&self, max_idle: Duration) -> bool {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Idleness is measured through the injected clock so both timestamps
+        // come from the same source (the production clock IS Instant::now,
+        // making this equivalent to last_used.elapsed()).
+        match guard.as_ref() {
+            Some(cached) if (self.clock)().duration_since(cached.last_used) < max_idle => false,
+            _ => guard.take().is_some(),
+        }
+    }
+}
+
+/// Production context loader: read the ggml file and build the
+/// (GPU-enabled per build features) whisper context.
+pub fn load_whisper_context(model_path: &Path) -> AppResult<Arc<WhisperContext>> {
+    Ok(Arc::new(
+        WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
+            .map_err(|e| AppError::stt_provider(format!("Failed to load Whisper model: {e}")))?,
+    ))
 }
 
 /// Wrapper around whisper-rs for local transcription.
@@ -105,20 +156,20 @@ impl WhisperContextCache {
 /// loaded weights are not.
 pub struct WhisperTranscriber {
     model_path: PathBuf,
-    cache: Arc<WhisperContextCache>,
+    cache: Arc<WhisperContextCache<WhisperContext>>,
 }
 
 impl WhisperTranscriber {
     /// Create a transcriber that loads the model at `model_path` through
     /// `cache` on first use and reuses it afterwards.
-    pub fn new(model_path: PathBuf, cache: Arc<WhisperContextCache>) -> Self {
+    pub fn new(model_path: PathBuf, cache: Arc<WhisperContextCache<WhisperContext>>) -> Self {
         Self { model_path, cache }
     }
 
     /// Load (or reuse) the model context — the work `prewarm` performs
     /// ahead of the first transcription.
-    pub fn prewarm(&self) -> AppResult<Arc<WhisperContext>> {
-        self.cache.get(&self.model_path)
+    pub fn prewarm(&self) -> AppResult<()> {
+        self.cache.get(&self.model_path).map(|_| ())
     }
 
     /// Transcribe 16 kHz mono f32 audio.
@@ -136,7 +187,7 @@ impl WhisperTranscriber {
         audio_16k_mono: &[f32],
         language: Option<&str>,
     ) -> AppResult<Vec<WhisperSegment>> {
-        let ctx = self.prewarm()?;
+        let ctx = self.cache.get(&self.model_path)?;
         let mut state = ctx
             .create_state()
             .map_err(|e| AppError::stt_provider(format!("Failed to create Whisper state: {e}")))?;
@@ -233,31 +284,166 @@ impl WhisperTranscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    fn missing_model_path() -> PathBuf {
-        PathBuf::from("/nonexistent/__ferriscribe_whisper_test__.bin")
+    /// Test double for `WhisperContext` — identity is all the cache needs.
+    #[derive(Debug)]
+    struct DummyCtx(u32);
+
+    /// Loader harness: counts invocations; a raised `fail` flag makes loads
+    /// error until cleared.
+    #[derive(Default)]
+    struct FakeLoader {
+        calls: AtomicUsize,
+        fail: AtomicBool,
+    }
+
+    impl FakeLoader {
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    fn fake_loader(
+        harness: Arc<FakeLoader>,
+    ) -> impl Fn(&Path) -> AppResult<Arc<DummyCtx>> + Send + Sync {
+        move |_path| {
+            let n = harness.calls.fetch_add(1, Ordering::SeqCst);
+            if harness.fail.load(Ordering::SeqCst) {
+                Err(AppError::stt_provider("model not found".to_string()))
+            } else {
+                Ok(Arc::new(DummyCtx(n as u32)))
+            }
+        }
+    }
+
+    fn fake_cache(loader: &Arc<FakeLoader>) -> WhisperContextCache<DummyCtx> {
+        WhisperContextCache::new(Arc::new(fake_loader(Arc::clone(loader))))
+    }
+
+    /// Clock harness: a mutable timestamp the test advances manually.
+    fn fake_clock() -> (Arc<std::sync::Mutex<Instant>>, CacheClock) {
+        let now = Arc::new(std::sync::Mutex::new(Instant::now()));
+        let clock = {
+            let now = Arc::clone(&now);
+            Arc::new(move || *now.lock().unwrap()) as CacheClock
+        };
+        (now, clock)
+    }
+
+    fn advance(now: &Arc<std::sync::Mutex<Instant>>, by: Duration) {
+        *now.lock().unwrap() += by;
     }
 
     #[test]
-    fn missing_model_errors_and_failure_is_not_cached() {
-        let cache = WhisperContextCache::new();
-        let path = missing_model_path();
+    fn same_path_reuses_one_load() {
+        let loader = Arc::new(FakeLoader::default());
+        let cache = fake_cache(&loader);
+        let path = Path::new("/models/ggml-base.bin");
 
-        let first = cache.get(&path);
-        assert!(first.is_err(), "missing model must error");
+        let first = cache.get(path).expect("first load");
+        let second = cache.get(path).expect("second get");
+        assert_eq!(loader.calls(), 1, "the second get must be a cache hit");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "same path must return the SAME context"
+        );
+    }
 
-        // The failure must not be cached — after the model appears (e.g. the
-        // user downloads it), the next call must retry the load, not replay
-        // the stale error. We can't make the file appear here, but a second
-        // error at a DIFFERENT path proves get() re-attempts loads instead of
-        // returning the first failure for everything.
-        let second = cache.get(&PathBuf::from("/nonexistent/other-model.bin"));
-        assert!(second.is_err());
+    #[test]
+    fn different_path_evicts_and_reloads() {
+        let loader = Arc::new(FakeLoader::default());
+        let cache = fake_cache(&loader);
+        let a = cache.get(Path::new("/models/ggml-base.bin")).expect("a");
+        let b = cache.get(Path::new("/models/ggml-small.bin")).expect("b");
+        assert_eq!(loader.calls(), 2);
+        assert!(!Arc::ptr_eq(&a, &b), "a model switch must reload");
+    }
+
+    #[test]
+    fn failed_load_is_not_cached() {
+        let loader = Arc::new(FakeLoader::default());
+        loader.fail.store(true, Ordering::SeqCst);
+        let cache = fake_cache(&loader);
+        let path = Path::new("/models/ggml-base.bin");
+
+        assert!(cache.get(path).is_err(), "failing load must error");
+
+        // The model "appears" — the failure must not have been cached.
+        loader.fail.store(false, Ordering::SeqCst);
+        cache.get(path).expect("retry after the model appears");
+        assert_eq!(loader.calls(), 2, "the failed get re-attempted the load");
+    }
+
+    #[test]
+    fn evict_if_idle_drops_only_stale_contexts() {
+        let loader = Arc::new(FakeLoader::default());
+        let (now, clock) = fake_clock();
+        let cache = WhisperContextCache::<DummyCtx>::with_clock(
+            Arc::new(fake_loader(Arc::clone(&loader))),
+            clock,
+        );
+
+        // Empty cache: no-op, reports no eviction.
+        assert!(!cache.evict_if_idle(Duration::from_secs(60)));
+
+        cache.get(Path::new("/models/ggml-base.bin")).expect("load");
+        // Freshly used — kept.
+        assert!(!cache.evict_if_idle(Duration::from_secs(60)));
+        // Advance past the idle window — evicted, and the next get reloads.
+        advance(&now, Duration::from_secs(61));
+        assert!(cache.evict_if_idle(Duration::from_secs(60)));
+        cache
+            .get(Path::new("/models/ggml-base.bin"))
+            .expect("reload");
+        assert_eq!(loader.calls(), 2, "post-eviction get reloads");
+
+        // Eviction is idempotent (already empty).
+        assert!(!cache.evict_if_idle(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn idle_timer_refreshes_on_every_get() {
+        let loader = Arc::new(FakeLoader::default());
+        let (now, clock) = fake_clock();
+        let cache = WhisperContextCache::<DummyCtx>::with_clock(
+            Arc::new(fake_loader(Arc::clone(&loader))),
+            clock,
+        );
+        let path = Path::new("/models/ggml-base.bin");
+        cache.get(path).expect("load");
+
+        // 50s idle then a get — the idle window restarts, so a later check
+        // 50s after THAT still keeps the context.
+        advance(&now, Duration::from_secs(50));
+        cache.get(path).expect("refreshing get");
+        advance(&now, Duration::from_secs(50));
+        assert!(
+            !cache.evict_if_idle(Duration::from_secs(60)),
+            "the get must refresh the idle timestamp"
+        );
+    }
+
+    #[test]
+    fn evicted_context_stays_alive_for_its_holder() {
+        let loader = Arc::new(FakeLoader::default());
+        let (now, clock) = fake_clock();
+        let cache = WhisperContextCache::<DummyCtx>::with_clock(
+            Arc::new(fake_loader(Arc::clone(&loader))),
+            clock,
+        );
+        let held = cache.get(Path::new("/models/ggml-base.bin")).expect("load");
+        advance(&now, Duration::from_secs(120));
+        assert!(cache.evict_if_idle(Duration::from_secs(60)));
+        // The Arc holder keeps the (dummy) context usable — eviction only
+        // drops the CACHE's reference.
+        assert_eq!(held.0, 0);
     }
 
     #[test]
     fn poisoned_cache_lock_is_recovered_from_not_fatal() {
-        let cache = Arc::new(WhisperContextCache::new());
+        let loader = Arc::new(FakeLoader::default());
+        let cache = Arc::new(fake_cache(&loader));
         // Poison the lock via a panic inside the critical section.
         let poisoning = Arc::clone(&cache);
         let handle = std::thread::spawn(move || {
@@ -266,24 +452,25 @@ mod tests {
         });
         assert!(handle.join().is_err());
         // A poisoned lock must neither hang, panic the caller, nor brick the
-        // cache: `get` recovers and still attempts the load (here: the
-        // missing-model error, same as an unpoisoned cache).
-        let result = cache.get(&missing_model_path());
-        assert!(result.is_err());
+        // cache: `get` recovers and still loads.
+        cache
+            .get(Path::new("/models/ggml-base.bin"))
+            .expect("poison is recovered from");
+        assert_eq!(loader.calls(), 1);
     }
 
-    /// Pins the core cache contract against a REAL model file: two `get`
-    /// calls with the same path return the SAME context (no reload), and a
-    /// different path reloads. Gated behind `FERRISCRIBE_STT_MODEL=<path>`
-    /// because it needs an actual ggml file (~148 MB for base); skipped
-    /// otherwise so `cargo test --workspace --lib` stays runnable everywhere.
+    /// End-to-end sanity against a REAL model file through the production
+    /// loader: two `get` calls return the same context. Gated behind
+    /// `FERRISCRIBE_STT_MODEL=<path>` because it needs an actual ggml file
+    /// (~148 MB for base); skipped otherwise so
+    /// `cargo test --workspace --lib` stays runnable everywhere.
     #[test]
     fn real_model_context_is_reused_across_gets() {
         let Ok(model_path) = std::env::var("FERRISCRIBE_STT_MODEL") else {
             eprintln!("skipping: FERRISCRIBE_STT_MODEL not set");
             return;
         };
-        let cache = WhisperContextCache::new();
+        let cache = WhisperContextCache::new(Arc::new(load_whisper_context));
         let first = cache.get(Path::new(&model_path)).expect("first load");
         let second = cache.get(Path::new(&model_path)).expect("second get");
         assert!(

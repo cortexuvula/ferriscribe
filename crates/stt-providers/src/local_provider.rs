@@ -27,7 +27,7 @@ use medical_core::types::{
 use crate::audio_prep;
 use crate::diarization::SpeakerDiarizer;
 use crate::merge;
-use crate::whisper::{WhisperContextCache, WhisperTranscriber};
+use crate::whisper::{WhisperContextCache, WhisperTranscriber, load_whisper_context};
 
 /// Local speech-to-text provider using whisper-rs + pyannote diarization.
 ///
@@ -52,7 +52,7 @@ pub struct LocalSttProvider {
     whisper_model_path: PathBuf,
     segmentation_model_path: PathBuf,
     embedding_model_path: PathBuf,
-    whisper_cache: Arc<WhisperContextCache>,
+    whisper_cache: Arc<WhisperContextCache<whisper_rs::WhisperContext>>,
 }
 
 impl LocalSttProvider {
@@ -67,28 +67,21 @@ impl LocalSttProvider {
         segmentation_model_path: PathBuf,
         embedding_model_path: PathBuf,
     ) -> Self {
-        Self::with_cache(
-            whisper_model_path,
-            segmentation_model_path,
-            embedding_model_path,
-            Arc::new(WhisperContextCache::new()),
-        )
-    }
-
-    /// Create a provider that shares `whisper_cache`, so a loaded model
-    /// context can outlive any one provider rebuild.
-    pub fn with_cache(
-        whisper_model_path: PathBuf,
-        segmentation_model_path: PathBuf,
-        embedding_model_path: PathBuf,
-        whisper_cache: Arc<WhisperContextCache>,
-    ) -> Self {
         Self {
             whisper_model_path,
             segmentation_model_path,
             embedding_model_path,
-            whisper_cache,
+            whisper_cache: Arc::new(WhisperContextCache::new(Arc::new(load_whisper_context))),
         }
+    }
+
+    /// Drop the cached whisper context when it has gone `max_idle` without
+    /// use — frees the resident model weights (up to ~1.6 GB for
+    /// large-v3-turbo) after a translation/recording session ends. The next
+    /// transcription pays one model load. See
+    /// [`WhisperContextCache::evict_if_idle`].
+    pub fn evict_if_idle(&self, max_idle: std::time::Duration) -> bool {
+        self.whisper_cache.evict_if_idle(max_idle)
     }
 }
 
@@ -245,9 +238,7 @@ impl SttProvider for LocalSttProvider {
         let whisper_path = self.whisper_model_path.clone();
         let whisper_cache = Arc::clone(&self.whisper_cache);
         tokio::task::spawn_blocking(move || {
-            WhisperTranscriber::new(whisper_path, whisper_cache)
-                .prewarm()
-                .map(|_| ())
+            WhisperTranscriber::new(whisper_path, whisper_cache).prewarm()
         })
         .await
         .map_err(|e| AppError::stt_provider(format!("Whisper prewarm task panicked: {e}")))?
@@ -312,28 +303,12 @@ mod tests {
         assert!(provider.prewarm().await.is_err());
     }
 
-    /// Providers sharing a cache must share the loaded model: prewarm
-    /// through one is observable... but without a real ggml file the cache
-    /// stays empty, so pin the cheaper contract — two providers built on
-    /// the same cache construct and prewarm independently (still errors on
-    /// the missing model, never panics).
+    /// `evict_if_idle` on an empty cache is a no-op reporting no eviction —
+    /// the sweeper's steady state between sessions.
     #[tokio::test]
-    async fn shared_cache_providers_prewarm_independently() {
-        let cache = Arc::new(crate::whisper::WhisperContextCache::new());
-        let a = LocalSttProvider::with_cache(
-            PathBuf::from("/nonexistent/whisper-a.bin"),
-            PathBuf::from("/nonexistent/segmentation.onnx"),
-            PathBuf::from("/nonexistent/embedding.onnx"),
-            Arc::clone(&cache),
-        );
-        let b = LocalSttProvider::with_cache(
-            PathBuf::from("/nonexistent/whisper-b.bin"),
-            PathBuf::from("/nonexistent/segmentation.onnx"),
-            PathBuf::from("/nonexistent/embedding.onnx"),
-            cache,
-        );
-        assert!(a.prewarm().await.is_err());
-        assert!(b.prewarm().await.is_err());
+    async fn evict_if_idle_on_an_empty_cache_is_a_no_op() {
+        let provider = local_provider_for_test();
+        assert!(!provider.evict_if_idle(std::time::Duration::from_secs(60)));
     }
 
     /// The default trait prewarm is a no-op that succeeds — pins the

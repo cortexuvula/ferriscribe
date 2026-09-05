@@ -945,6 +945,7 @@ mod preflight_tests {
             lmstudio_provider: RwLock::new(None),
             omlx_provider: RwLock::new(None),
             remote_stt_provider: RwLock::new(None),
+            local_stt_provider: std::sync::Arc::new(RwLock::new(None)),
             http_client,
             content_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             chat_stream_cancel: Arc::new(tokio::sync::Mutex::new(None)),

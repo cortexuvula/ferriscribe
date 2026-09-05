@@ -210,6 +210,18 @@ async fn llm_keepalive_ping(provider: Arc<dyn AiProvider>, model: String) -> App
     provider.complete(request).await.map(|_| ())
 }
 
+/// How recently the translation model must have been used (ping or real
+/// translation) for `capture_start` to SKIP the keep-alive ping. Sized
+/// under Ollama's default 5-min model keep-alive, so a skipped ping means
+/// the model is genuinely still resident.
+const PING_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(3 * 60);
+
+/// Whether a capture-time keep-alive ping is worth firing given the last
+/// LLM activity. Pure so the debounce window is unit-testable.
+fn should_ping_llm(last_activity: Option<Instant>, now: Instant) -> bool {
+    last_activity.is_none_or(|t| now.duration_since(t) >= PING_DEBOUNCE)
+}
+
 /// Fire-and-forget prewarm while the user speaks: load the whisper model
 /// into the provider's context cache and page the translation model into
 /// the AI server. Both run concurrently with the capture and neither may
@@ -221,13 +233,20 @@ fn spawn_translation_prewarm(
     stt: Arc<dyn medical_core::traits::SttProvider + Send + Sync>,
     ai: Arc<dyn AiProvider>,
     translation_model: String,
+    ping_llm: bool,
 ) {
     tokio::spawn(async move {
         // Concurrent, not sequential: the two warm different resources, and
         // a multi-second whisper load must not delay the LLM page-in past
-        // the user's stop-tap.
-        let (stt_res, ping_res) =
-            tokio::join!(stt.prewarm(), llm_keepalive_ping(ai, translation_model));
+        // the user's stop-tap. The ping itself is optional — the capture
+        // debounces it when the model was used moments ago.
+        let ping_fut = async {
+            if !ping_llm {
+                return Ok(());
+            }
+            llm_keepalive_ping(ai, translation_model).await
+        };
+        let (stt_res, ping_res) = tokio::join!(stt.prewarm(), ping_fut);
         if let Err(e) = stt_res {
             tracing::debug!(error = %e, "Translation STT prewarm failed (advisory)");
         }
@@ -337,6 +356,9 @@ async fn translate_utterance(
             "The AI provider returned an empty translation".to_string(),
         ));
     }
+    // A real translation leaves the model resident — record it so the next
+    // capture's keep-alive ping is debounced.
+    state.translation.lock().await.last_llm_activity = Some(Instant::now());
     Ok(translated)
 }
 
@@ -516,13 +538,21 @@ pub async fn translation_capture_start(
     // the detached task; a failed prewarm never blocks the capture. The
     // provider Arc is cloned out of the lock BEFORE any await (the
     // `chat.rs` discipline) so reinits/downloads aren't blocked on the
-    // config read.
+    // config read. The LLM ping is debounced: a translation (or ping) in
+    // the last few minutes already left the model resident.
     let stt = state.stt_providers.lock().await.clone();
+    let ping_due = should_ping_llm(
+        state.translation.lock().await.last_llm_activity,
+        Instant::now(),
+    );
     if let Some(stt) = stt
         && let Ok(config) = load_app_config(&state.db, "translation").await
         && let Ok(ai) = active_ai_provider(&state).await
     {
-        spawn_translation_prewarm(stt, ai, translation_model_from_config(&config));
+        if ping_due {
+            state.translation.lock().await.last_llm_activity = Some(Instant::now());
+        }
+        spawn_translation_prewarm(stt, ai, translation_model_from_config(&config), ping_due);
     }
 
     Ok(())
@@ -1209,6 +1239,38 @@ mod tests {
 
     /// The per-feature `translation_model` override wins when set (non-empty)
     /// and the global `ai_model` is used otherwise — the OCR fallback pattern.
+    /// The keep-alive ping fires only when the model has been idle past the
+    /// debounce window — never right after a translation or a recent ping.
+    #[test]
+    fn should_ping_llm_debounce_window() {
+        let now = Instant::now();
+        // Never used → ping.
+        assert!(should_ping_llm(None, now));
+        // Used moments ago → skip (model is still resident server-side).
+        let recent = now - std::time::Duration::from_secs(30);
+        assert!(!should_ping_llm(Some(recent), now));
+        // Just inside the window → skip.
+        let just_inside = now - (PING_DEBOUNCE - std::time::Duration::from_secs(1));
+        assert!(!should_ping_llm(Some(just_inside), now));
+        // Past the window → ping again.
+        let stale = now - (PING_DEBOUNCE + std::time::Duration::from_secs(1));
+        assert!(should_ping_llm(Some(stale), now));
+    }
+
+    /// A successful translation must refresh the debounce timestamp — a
+    /// capture started right after must NOT fire another keep-alive ping.
+    #[tokio::test]
+    async fn translation_refreshes_the_ping_debounce_timestamp() {
+        let state = state_with_session("Hola").await;
+        assert_eq!(state.translation.lock().await.last_llm_activity, None);
+        translate_and_record(&state, Speaker::Provider, "Hello")
+            .await
+            .expect("translate");
+        let stamped = state.translation.lock().await.last_llm_activity;
+        assert!(stamped.is_some(), "a real translation debounces the ping");
+        assert!(!should_ping_llm(stamped, Instant::now()));
+    }
+
     #[test]
     fn translation_model_resolution_prefers_override_and_falls_back() {
         let mut config = AppConfig {
