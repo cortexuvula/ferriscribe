@@ -78,7 +78,7 @@ Release tags: `vX.Y.Z` (stable) or `vX.Y.Z-beta.N` (any tag with `-` is a prerel
 
 - Edition 2024, `rust-version = "1.85"`. Use Rust 1.85+.
 - `whisper-rs` / `whisper.cpp` requires CMake + Clang at build time.
-- Windows CI is excluded from the test matrix because `cpal` device-enumeration crashes on headless runners (no audio hardware). Linux CI needs `libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev pkg-config`.
+- Windows CI is excluded from the test matrix because `cpal` device-enumeration crashes on headless runners (no audio hardware). Linux CI needs `libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev pkg-config libdbus-1-dev` (libdbus for xcap 0.4's portal dep — see the src-tauri xcap pin).
 
 ## Domain notes
 

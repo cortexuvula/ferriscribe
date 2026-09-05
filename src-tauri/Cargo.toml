@@ -1,6 +1,6 @@
 [package]
 name = "rust-medical-assistant"
-version = "0.75.0"
+version = "0.75.1"
 description = "FerriScribe"
 authors = []
 edition = "2024"
@@ -72,8 +72,15 @@ tauri-plugin-single-instance = "2"
 medical-tts-providers = { path = "../crates/tts-providers", features = ["local-tts"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
-xcap = "0.9"
+# Pinned to 0.4: xcap 0.5+ pulls `pipewire` on Linux (libspa C headers,
+# libpipewire-0.3-dev) which breaks every Linux build without that system
+# package — same failure mode as the tts/speech-dispatcher note above. The
+# Linux arms here are X11-only (Wayland goes slurp+grim), so 0.4's
+# xcb+libwayshot stack is all we need. Its dbus dep links libdbus
+# (libdbus-1-dev on CI/build boxes). image pinned to 0.24 to match xcap
+# 0.4's types (capture_image returns an image-0.24 RgbaImage).
+image = { version = "0.24", default-features = false, features = ["png"] }
+xcap = "=0.4.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
