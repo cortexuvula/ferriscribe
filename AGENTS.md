@@ -52,6 +52,8 @@ npm run tauri dev
 
 `npm run tauri dev` chains `npm run build:sidecar` (stages the `ferriscribe-backup` Tauri sidecar under `src-tauri/binaries/`, gitignored). The first run pays one `medical-backup` release build; afterwards cargo's cache makes it seconds. Local release builds (`npm run tauri build`) must run `npm run build:sidecar` first — CI's `release.yml` does this explicitly per target. Never commit anything under `src-tauri/binaries/`.
 
+**Boot smoke gate (release.yml):** tauri-action creates the release as a DRAFT; a smoke step then launches the freshly built release binary for 30 s and fails the job unless the log carries the "FerriScribe starting" banner and no `PANIC`/`panicked at` lines (Linux under xvfb); only then is the draft flipped to published (a failure-path step deletes the draft). Added after v0.74.1 shipped a boot crash on all platforms — the test suites passed but nothing ever booted the app. Any change to the boot path (`AppState::initialize`, `lib.rs::run`) should be verified with an actual `npm run tauri dev` boot before pushing, not just `cargo test`.
+
 CI (`ci.yml`, lint job) enforces `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` on every push to master and every PR. Run both locally before pushing — there is no separate "lint" npm script; invoke the cargo commands directly as shown. Frontend linting uses `npm run lint` (eslint), also gated in CI.
 
 `npm run check` runs `svelte-check` — an earlier version invoked `svelte-kit sync`; that prefix was removed because **this is not a SvelteKit project**. The README's mention of "SvelteKit" is stale; treat Svelte 5 + Vite as the truth.

@@ -56,7 +56,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # Linux: install system deps required by Tauri and cpal (ALSA)
+      # Linux: install system deps required by Tauri and cpal (ALSA).
+      # xvfb: the boot smoke test launches the app headless.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -72,7 +73,8 @@ jobs:
             libjavascriptcoregtk-4.1-dev \
             clang \
             cmake \
-            libfuse2t64
+            libfuse2t64 \
+            xvfb
           # libfuse2t64 (= libfuse2 on 24.04's t64 naming): linuxdeploy needs
           # FUSE on the build host to assemble the AppImage.
 
@@ -110,12 +112,78 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'FerriScribe ${{ github.ref_name }}'
           releaseBody: 'See the assets below to download and install this version.'
-          releaseDraft: false
+          # Created as a DRAFT: the boot smoke test (next step) must pass
+          # before the release is flipped to published. A build that crashes
+          # at launch (the v0.74.1 class) must never reach users; if the
+          # smoke fails, the cleanup step deletes the draft and the tag-pushed
+          # release simply doesn't exist.
+          releaseDraft: true
           # Tags with a semver pre-release suffix (e.g. v0.10.85-beta.1) ship
           # as GitHub prereleases; plain vX.Y.Z tags ship as stable. Promote
           # a beta to stable by tagging the same commit vX.Y.Z.
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: --target ${{ matrix.target }}
+
+      # ── Boot smoke test ──────────────────────────────────────────────────
+      #
+      # Launch the freshly built release binary and assert it survives
+      # AppState::initialize without panicking — the v0.74.1 release crashed
+      # ~1.4 s after launch on every platform (a tokio::spawn outside any
+      # runtime, aborted hard by panic = "abort") because nothing between
+      # the test suites and the published release ever BOOTED the app. This
+      # step is that boot. Runs against the real release-profile binary, so
+      # profile-dependent behavior (panic = abort, LTO) is exercised.
+      - name: Boot smoke test
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/rust-medical-assistant"
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
+          RUNNER=""
+          # Linux runners are headless — the webview needs a display server.
+          if [ "$RUNNER_OS" = "Linux" ]; then RUNNER="xvfb-run -a"; fi
+
+          set +e
+          $RUNNER "$BIN" > boot_smoke.log 2>&1 &
+          APP_PID=$!
+          # Long enough for a cold first-run init (keychain, DB creation).
+          sleep 30
+          kill "$APP_PID" 2>/dev/null || true
+          # Git Bash can't always signal native exes — force-kill by image name.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            taskkill //F //IM rust-medical-assistant.exe >/dev/null 2>&1 || true
+          fi
+          sleep 2
+          set -e
+
+          echo "──── boot log (tail) ────"
+          tail -40 boot_smoke.log || true
+
+          if ! grep -q "FerriScribe starting" boot_smoke.log; then
+            echo "::error::Boot smoke FAILED — the app never logged its startup banner"
+            exit 1
+          fi
+          if grep -E -q "PANIC|panicked at" boot_smoke.log; then
+            echo "::error::Boot smoke FAILED — the app panicked during boot (see log above)"
+            exit 1
+          fi
+          echo "Boot smoke passed: app started, got through init, no panic."
+
+      # Smoke passed — make the draft release public.
+      - name: Publish release
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false
+
+      # Smoke (or anything after the build) failed — remove the draft so no
+      # broken artifacts linger hidden on the tag. The tag itself stays.
+      - name: Delete draft release on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release delete "${{ github.ref_name }}" --yes || true
 
   # Prune old releases after a successful build, keeping only the 5 newest
   # (by semver). Deletes both the release assets and the git tag. Only
