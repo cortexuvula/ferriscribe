@@ -498,11 +498,19 @@ async fn capture_overlay_x11_windows(
 
     tokio::time::sleep(OVERLAY_HIDE_GRACE).await;
 
-    // Map CSS px (window-relative) → physical screen px.
-    let scale = window.scale_factor().max(0.01);
+    // Map CSS px (window-relative) → physical screen px. `scale_factor` and
+    // `inner_position` are fallible window queries; on failure the overlay is
+    // already hidden, so destroy it and bail out.
+    let scale = window
+        .scale_factor()
+        .map_err(|e| {
+            let _ = window.destroy();
+            RegionCaptureError::Failed(format!("overlay geometry query failed: {e}"))
+        })?
+        .max(0.01);
     let origin = window.inner_position().map_err(|e| {
         let _ = window.destroy();
-        RegionCaptureError::Failed(format!("overlay position: {e}"))
+        RegionCaptureError::Failed(format!("overlay geometry query failed: {e}"))
     })?;
     let phys_rect = CaptureRect {
         x: origin.x + (css_rect.x * scale).round() as i32,
@@ -513,10 +521,11 @@ async fn capture_overlay_x11_windows(
 
     let png = tokio::task::spawn_blocking(move || capture_screen_region_png(phys_rect))
         .await
-        .map_err(|e| RegionCaptureError::Failed(format!("capture task failed: {e}")));
+        .map_err(|e| RegionCaptureError::Failed(format!("capture task failed: {e}")))
+        .and_then(|inner| inner);
     let _ = window.destroy();
     tracing::debug!(
-        bytes = png.as_ref().map_or(0, Vec::len),
+        bytes = png.as_ref().map_or(0, |v| v.len()),
         "region captured (xcap)"
     );
     png
@@ -557,6 +566,8 @@ fn monitor_union() -> Result<CaptureRect, String> {
 /// PNG — all in memory.
 #[cfg(not(target_os = "macos"))]
 fn capture_screen_region_png(rect: CaptureRect) -> Result<Vec<u8>, RegionCaptureError> {
+    use image::GenericImageView;
+
     let cx = rect.x.saturating_add((rect.width / 2) as i32);
     let cy = rect.y.saturating_add((rect.height / 2) as i32);
     let monitor = xcap::Monitor::from_point(cx, cy)
@@ -581,9 +592,12 @@ fn capture_screen_region_png(rect: CaptureRect) -> Result<Vec<u8>, RegionCapture
     let local = clamp_rect(local, image.width() as i32, image.height() as i32)
         .ok_or_else(|| RegionCaptureError::Cancelled)?;
 
+    // Inherent `view`/`to_image` (not the GenericImageView-trait `crop_imm`)
+    // so this compiles against both image 0.24 (xcap 0.4) and 0.25 types
+    // without trait imports.
     let mut cropped = image
-        .crop_imm(local.x as u32, local.y as u32, local.width, local.height)
-        .to_owned();
+        .view(local.x as u32, local.y as u32, local.width, local.height)
+        .to_image();
     for pixel in cropped.pixels_mut() {
         pixel.0[3] = 255;
     }
