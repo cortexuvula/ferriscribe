@@ -457,12 +457,17 @@ async fn capture_overlay_x11_windows(
     .resizable(false)
     .shadow(false)
     .focused(true)
+    // Built hidden so it never flashes at the default position/size; shown
+    // only once it's been placed over the monitor union below.
+    .visible(false)
     .build()
     .map_err(|e| RegionCaptureError::Failed(format!("open selection overlay: {e}")))?;
 
     // Frameless window covering the whole virtual desktop.
     let _ = window.set_position(tauri::PhysicalPosition::new(union.x, union.y));
     let _ = window.set_size(tauri::PhysicalSize::new(union.width, union.height));
+    let _ = window.show();
+    let _ = window.set_focus();
 
     // Esc via the overlay page lands in `screen_region_submit(None)`; a
     // force-close of the window itself resolves the channel here too.

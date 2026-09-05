@@ -88,6 +88,12 @@ pub fn trigger_capture(app: &tauri::AppHandle) {
                 );
             }
             Err(e) => {
+                // A second trigger while a capture is running (double hotkey
+                // press, hotkey + CLI) is a no-op — don't toast it.
+                if e.to_string().contains("already in progress") {
+                    tracing::debug!("screenshot OCR trigger ignored: capture already running");
+                    return;
+                }
                 tracing::warn!(error = %e, "screenshot OCR failed");
                 emit_event(
                     &app,

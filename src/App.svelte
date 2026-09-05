@@ -154,7 +154,9 @@
   let onGlobalKeydown: ((e: KeyboardEvent) => void) | null = null;
 
   /** In-app screenshot-OCR trigger. Toasts the outcome; expected
-   *  cancellations and empty extractions are notices, not errors. */
+   *  cancellations and empty extractions are notices, not errors. A capture
+   *  already running (e.g. the global hotkey won the same keypress on a
+   *  platform where it doesn't consume the event) is a quiet no-op. */
   async function triggerScreenshotOcr() {
     try {
       const outcome = await captureRegionOcr();
@@ -165,6 +167,7 @@
         toasts.add({ message, type: 'success', autoDismiss: true });
       }
     } catch (err) {
+      if (String(err).includes('already in progress')) return;
       toasts.error(`Screenshot OCR failed: ${err}`);
     }
   }
@@ -257,18 +260,16 @@
 
     onGlobalKeydown = (e: KeyboardEvent) => {
       const cmdOrCtrl = e.metaKey || e.ctrlKey;
-      // Screenshot-OCR in-app shortcut (Cmd/Ctrl+Alt+O). Only handled here
-      // when the OS-level global hotkey is NOT registered — with it enabled,
-      // the backend global-shortcut handler fires on this same keypress and
-      // the in-app listener would double-trigger (the backend's in-flight
-      // guard rejects the second call, but the error toast is noise). The
-      // in-app path keeps the feature usable on Wayland and with the global
-      // hotkey disabled.
-      if (cmdOrCtrl && e.altKey && (e.key === 'o' || e.key === 'O')) {
-        if (!settings.state.screenshot_ocr_hotkey_enabled) {
-          e.preventDefault();
-          void triggerScreenshotOcr();
-        }
+      // Screenshot-OCR in-app shortcut (Cmd/Ctrl+Alt+O). Keyed on e.code —
+      // Option remaps e.key on macOS ("ø" on US layouts), so e.key never
+      // matches. ALWAYS handled here: where the OS-level global hotkey
+      // registered successfully it consumes the keypress and this never
+      // fires; where it didn't (Wayland — X11-only registration — or a
+      // conflicting binding) this is the only path that works. A double
+      // trigger loses quietly to the backend's in-flight guard.
+      if (cmdOrCtrl && e.altKey && e.code === 'KeyO') {
+        e.preventDefault();
+        void triggerScreenshotOcr();
         return;
       }
       if (!(cmdOrCtrl && e.shiftKey && (e.key === 'r' || e.key === 'R'))) return;

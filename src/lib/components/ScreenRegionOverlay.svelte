@@ -89,6 +89,17 @@
 </div>
 
 <style>
+  /* The overlay webview loads WITHOUT app.css (see main.ts), so the UA
+     default (and any inherited) canvas background must be explicitly
+     transparent or the "transparent" window renders as an opaque sheet
+     hiding the screen being selected. */
+  :global(html),
+  :global(body) {
+    background: transparent !important;
+    margin: 0;
+    overflow: hidden;
+  }
+
   .region-overlay {
     position: fixed;
     inset: 0;

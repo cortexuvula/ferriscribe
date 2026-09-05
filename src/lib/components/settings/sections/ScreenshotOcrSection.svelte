@@ -53,7 +53,11 @@
         toasts.success(message);
       }
     } catch (err) {
-      toasts.error(`Screenshot OCR failed: ${err}`);
+      // A capture started elsewhere (hotkey) holding the in-flight guard is
+      // a quiet no-op here, not an error.
+      if (!String(err).includes('already in progress')) {
+        toasts.error(`Screenshot OCR failed: ${err}`);
+      }
     } finally {
       capturing = false;
     }

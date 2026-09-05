@@ -21,6 +21,12 @@ no exceptions. Update this file only after running the script (and its
 
 ## Notes
 
+- **Mixed-DPI multi-monitor (known limitation, X11/Windows overlay path):** the
+  overlay spans the whole virtual desktop with ONE `scale_factor` (the
+  window's), so a drag rectangle on a monitor whose DPI differs from the
+  window's reported scale maps to the wrong physical pixels. Single-DPI setups
+  (the common case) are correct. Fixing per-monitor DPI needs monitor-aware
+  coordinate mapping in `screen_region_submit` — deferred until it bites.
 - **macOS Screen Recording permission (TCC):** the first interactive capture
   triggers macOS's Screen Recording permission prompt for FerriScribe; without
   it, `screencapture -i` yields wallpaper-only/empty frames which surface as
