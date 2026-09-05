@@ -55,4 +55,17 @@ pub trait SttProvider: Send + Sync {
         stream: AudioStream,
         config: SttConfig,
     ) -> AppResult<Box<dyn Stream<Item = AppResult<TranscriptChunk>> + Send + Unpin>>;
+
+    /// Best-effort hint to warm provider resources (e.g. load the whisper
+    /// model) ahead of the next [`transcribe`](SttProvider::transcribe) call.
+    ///
+    /// Callers fire this when they know a transcription is coming but the
+    /// audio isn't ready yet (the translate tab starts a capture seconds
+    /// before the user stops talking) and must treat errors as advisory —
+    /// a failed prewarm never blocks or fails the later transcription.
+    /// The default is a no-op for providers with nothing to warm (the
+    /// remote server holds its own model).
+    async fn prewarm(&self) -> AppResult<()> {
+        Ok(())
+    }
 }

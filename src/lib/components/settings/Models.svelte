@@ -101,6 +101,14 @@
     if (settings.state.ocr_model && !models.some((m) => m.id === settings.state.ocr_model)) {
       await settings.updateField('ocr_model', null);
     }
+    // …and the translation model (same silent-404 class on the next
+    // Translate-tab utterance).
+    if (
+      settings.state.translation_model &&
+      !models.some((m) => m.id === settings.state.translation_model)
+    ) {
+      await settings.updateField('translation_model', null);
+    }
   }
 
   async function handleAiModelChange(e: Event) {
@@ -194,6 +202,30 @@
     <p class="form-hint">
       Vision model for extracting text from dropped documents (e.g. glm-ocr).
       If not set, the generation model is used.
+    </p>
+  </div>
+
+  <div class="form-group">
+    <label for="translation-model" class="form-label">Translation Model</label>
+    <div class="model-select-row">
+      <select
+        id="translation-model"
+        value={settings.state.translation_model ?? ''}
+        onchange={async (e) => {
+          const val = (e.currentTarget as HTMLSelectElement).value;
+          await settings.updateField('translation_model', val || null);
+        }}
+      >
+        <option value="">(use generation model)</option>
+        {#each availableModels as m (m.id)}
+          <option value={m.id}>{m.name}</option>
+        {/each}
+      </select>
+    </div>
+    <p class="form-hint">
+      Model used by the Translate tab. Conversational translation needs far
+      less model than note generation — a small (1-4 B) model here makes live
+      utterance turnaround much faster. If not set, the generation model is used.
     </p>
   </div>
 

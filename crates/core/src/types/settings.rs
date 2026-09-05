@@ -373,6 +373,12 @@ pub struct AppConfig {
     /// If None, falls back to `ai_model` for OCR.
     #[serde(default)]
     pub ocr_model: Option<String>,
+    /// Model used by the Translate tab's live translation. If None or
+    /// empty, falls back to `ai_model` — conversational translation needs
+    /// far less model than note generation, so pointing this at a small
+    /// (1-4 B) model makes utterance turnaround much faster.
+    #[serde(default)]
+    pub translation_model: Option<String>,
     #[serde(default = "default_whisper_model")]
     pub whisper_model: String,
     #[serde(default = "default_tts_provider")]
@@ -932,6 +938,19 @@ mod tests {
             config.ocr_model.is_none(),
             "ocr_model should default to None"
         );
+    }
+
+    #[test]
+    fn translation_model_defaults_to_none_in_older_configs() {
+        let json = r#"{"theme":"dark","language":"en"}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap_or_default();
+        assert!(
+            config.translation_model.is_none(),
+            "translation_model is additive — older configs must parse to None"
+        );
+
+        let config: AppConfig = AppConfig::default();
+        assert!(config.translation_model.is_none());
     }
 
     #[test]

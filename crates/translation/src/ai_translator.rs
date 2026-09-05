@@ -55,6 +55,14 @@ impl AiTranslationProvider {
     }
 }
 
+/// Output cap for translation requests. A cap, not a target — servers stop
+/// at EOS long before this — but it bounds the damage if a thinking model
+/// ignores its opt-out and starts reasoning before the translation. Sized
+/// so even a max-length utterance's translation (the frontend auto-stops
+/// capture at 120 s ≈ 300+ spoken words) cannot be silently truncated —
+/// truncation of a clinical translation is worse than a slower bound.
+const MAX_TRANSLATION_TOKENS: u32 = 1024;
+
 #[async_trait]
 impl TranslationProvider for AiTranslationProvider {
     fn name(&self) -> &str {
@@ -84,12 +92,16 @@ impl TranslationProvider for AiTranslationProvider {
                 tool_calls: vec![],
             }],
             temperature: Some(0.1),
-            max_tokens: Some(4096),
+            max_tokens: Some(MAX_TRANSLATION_TOKENS),
             system_prompt: Some(
                 "You are a medical translator. Translate accurately, preserving clinical terminology."
                     .into(),
             ),
-            reasoning_effort: None,
+            // A one-line translation has nothing to reason about — opting
+            // out skips the CoT preamble thinking models would otherwise
+            // generate (seconds per utterance on local hardware). See
+            // `LocalOpenAiProvider::apply_thinking_control`.
+            reasoning_effort: Some("none".into()),
         };
 
         let response = self.provider.complete(request).await?;
@@ -110,7 +122,7 @@ impl TranslationProvider for AiTranslationProvider {
             temperature: Some(0.0),
             max_tokens: Some(10),
             system_prompt: None,
-            reasoning_effort: None,
+            reasoning_effort: Some("none".into()),
         };
 
         let response = self.provider.complete(request).await?;
@@ -209,7 +221,7 @@ mod tests {
 
         let req = &requests[0];
         assert_eq!(req.temperature, Some(0.1));
-        assert_eq!(req.max_tokens, Some(4096));
+        assert_eq!(req.max_tokens, Some(MAX_TRANSLATION_TOKENS));
         assert!(req.system_prompt.is_some());
         assert!(
             req.system_prompt
@@ -217,6 +229,9 @@ mod tests {
                 .unwrap()
                 .contains("medical translator")
         );
+        // Translation opts out of reasoning — thinking models would burn a
+        // CoT preamble before every one-line translation.
+        assert_eq!(req.reasoning_effort.as_deref(), Some("none"));
 
         // Verify the user message contains the expected elements.
         if let MessageContent::Text(ref text) = req.messages[0].content {

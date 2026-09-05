@@ -110,6 +110,14 @@
 
   async function handleWhisperModelChange(modelId: string) {
     await settings.updateField('whisper_model', modelId);
+    // The provider resolves the whisper model at build time — rebuild it so
+    // the new selection (and its context cache) takes effect immediately
+    // instead of at the next reinit/restart.
+    try {
+      await reinitProviders();
+    } catch (err) {
+      console.error('Failed to reinit providers after whisper model change:', err);
+    }
   }
 
   // Race guard: settings panes mount/unmount on every dialog open. If the

@@ -176,6 +176,71 @@ async fn active_ai_provider(state: &AppState) -> AppResult<Arc<dyn AiProvider>> 
         })
 }
 
+/// The model translation requests are sent to: the per-feature
+/// `translation_model` override when set (non-empty), else the global
+/// `ai_model` — the OCR fallback pattern.
+fn translation_model_from_config(config: &medical_core::types::settings::AppConfig) -> String {
+    config
+        .translation_model
+        .clone()
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| config.ai_model.clone())
+}
+
+/// Content of the keep-alive ping fired while the user is still speaking.
+/// A FIXED LITERAL — never patient or clinician content (PHI discipline).
+const KEEPALIVE_PROMPT: &str = "ping";
+
+/// One-token completion sent during `translation_capture_start` so the
+/// local server (Ollama et al.) pages the translation model into memory
+/// while the user is still talking. The result is discarded; failures are
+/// the caller's to log and ignore.
+///
+/// Thinking is opted out (`reasoning_effort: "none"`) so reasoning models
+/// don't burn a CoT preamble on the ping itself.
+async fn llm_keepalive_ping(provider: Arc<dyn AiProvider>, model: String) -> AppResult<()> {
+    let request = medical_core::types::CompletionRequest {
+        model,
+        messages: vec![medical_core::types::Message {
+            role: medical_core::types::Role::User,
+            content: medical_core::types::MessageContent::Text(KEEPALIVE_PROMPT.to_string()),
+            tool_calls: vec![],
+        }],
+        temperature: Some(0.0),
+        max_tokens: Some(1),
+        system_prompt: None,
+        reasoning_effort: Some("none".to_string()),
+    };
+    provider.complete(request).await.map(|_| ())
+}
+
+/// Fire-and-forget prewarm while the user speaks: load the whisper model
+/// into the provider's context cache and page the translation model into
+/// the AI server. Both run concurrently with the capture and neither may
+/// affect it — errors are logged and dropped.
+///
+/// Takes the already-resolved `Arc`s (not `&AppState`) so it can be spawned
+/// onto a detached task without borrowing command state.
+fn spawn_translation_prewarm(
+    stt: Arc<dyn medical_core::traits::SttProvider + Send + Sync>,
+    ai: Arc<dyn AiProvider>,
+    translation_model: String,
+) {
+    tokio::spawn(async move {
+        // Concurrent, not sequential: the two warm different resources, and
+        // a multi-second whisper load must not delay the LLM page-in past
+        // the user's stop-tap.
+        let (stt_res, ping_res) =
+            tokio::join!(stt.prewarm(), llm_keepalive_ping(ai, translation_model));
+        if let Err(e) = stt_res {
+            tracing::debug!(error = %e, "Translation STT prewarm failed (advisory)");
+        }
+        if let Err(e) = ping_res {
+            tracing::debug!(error = %e, "Translation LLM keep-alive failed (advisory)");
+        }
+    });
+}
+
 /// Translate `original` in the direction implied by `speaker` and append the
 /// entry to the session. Testable core shared by both utterance paths.
 ///
@@ -263,7 +328,7 @@ async fn translate_utterance(
     // model like every other AI command (the `chat.rs` convention).
     let model = {
         let config = load_app_config(&state.db, "translation").await?;
-        config.ai_model
+        translation_model_from_config(&config)
     };
     let translator = AiTranslationProvider::with_model(provider, model);
     let translated = translator
@@ -448,6 +513,21 @@ pub async fn translation_capture_start(
             let _ = app.emit("waveform-data", &data);
         }
     });
+
+    // Prewarm while the user speaks: load the whisper context and page the
+    // translation model into the AI server. Best-effort on every axis —
+    // missing providers/models and failures are logged and dropped inside
+    // the detached task; a failed prewarm never blocks the capture. The
+    // provider Arc is cloned out of the lock BEFORE any await (the
+    // `chat.rs` discipline) so reinits/downloads aren't blocked on the
+    // config read.
+    let stt = state.stt_providers.lock().await.clone();
+    if let Some(stt) = stt
+        && let Ok(config) = load_app_config(&state.db, "translation").await
+        && let Ok(ai) = active_ai_provider(&state).await
+    {
+        spawn_translation_prewarm(stt, ai, translation_model_from_config(&config));
+    }
 
     Ok(())
 }
@@ -754,19 +834,19 @@ mod tests {
     }
 
     /// An AI provider whose `complete()` blocks until the test releases it,
-    /// recording the model name of every request. Lets tests observe the
-    /// in-flight window of `translate_and_record` and assert the configured
-    /// model reached the wire.
+    /// recording every request. Lets tests observe the in-flight window of
+    /// `translate_and_record` and assert the configured model (and other
+    /// request fields) reached the wire.
     struct GatedProvider {
         release: Arc<tokio::sync::Notify>,
-        requested_models: std::sync::Mutex<Vec<String>>,
+        requested: std::sync::Mutex<Vec<medical_core::types::CompletionRequest>>,
     }
 
     impl GatedProvider {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 release: Arc::new(tokio::sync::Notify::new()),
-                requested_models: std::sync::Mutex::new(Vec::new()),
+                requested: std::sync::Mutex::new(Vec::new()),
             })
         }
 
@@ -777,7 +857,12 @@ mod tests {
 
         /// Model names recorded from every `complete()` request so far.
         fn requested_models(&self) -> Vec<String> {
-            self.requested_models.lock().expect("models lock").clone()
+            self.requests().iter().map(|r| r.model.clone()).collect()
+        }
+
+        /// Every `complete()` request seen so far, in order.
+        fn requests(&self) -> Vec<medical_core::types::CompletionRequest> {
+            self.requested.lock().expect("requests lock").clone()
         }
     }
 
@@ -795,14 +880,11 @@ mod tests {
             &self,
             request: medical_core::types::CompletionRequest,
         ) -> CoreResult<medical_core::types::CompletionResponse> {
-            self.requested_models
-                .lock()
-                .expect("models lock")
-                .push(request.model.clone());
+            self.requested.lock().expect("requests lock").push(request);
             self.release.notified().await;
             Ok(medical_core::types::CompletionResponse {
                 content: "Translated".into(),
-                model: request.model,
+                model: String::new(),
                 usage: medical_core::types::UsageInfo {
                     prompt_tokens: 1,
                     completion_tokens: 1,
@@ -1116,5 +1198,99 @@ mod tests {
         utterance.await.expect("task join").expect("translate");
         let models = provider.requested_models();
         assert_eq!(models, vec!["qwen3:8b".to_string()]);
+
+        // The translation request itself opts out of thinking and is
+        // token-capped (the ai_translator contract, observed end-to-end
+        // through the command layer).
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].reasoning_effort.as_deref(), Some("none"));
+        assert!(requests[0].max_tokens.is_some_and(|t| t <= 1024));
+    }
+
+    /// The per-feature `translation_model` override wins when set (non-empty)
+    /// and the global `ai_model` is used otherwise — the OCR fallback pattern.
+    #[test]
+    fn translation_model_resolution_prefers_override_and_falls_back() {
+        let mut config = AppConfig {
+            ai_model: "qwen3:8b".into(),
+            ..Default::default()
+        };
+        // Unset → global model.
+        assert_eq!(translation_model_from_config(&config), "qwen3:8b");
+        // Empty string is treated as unset (the sentinel the frontend saves).
+        config.translation_model = Some(String::new());
+        assert_eq!(translation_model_from_config(&config), "qwen3:8b");
+        // Set → override wins.
+        config.translation_model = Some("qwen3:1.7b".into());
+        assert_eq!(translation_model_from_config(&config), "qwen3:1.7b");
+    }
+
+    #[tokio::test]
+    async fn text_utterance_sends_the_translation_model_override() {
+        let config = AppConfig {
+            ai_provider: "gated".into(),
+            ai_model: "qwen3:8b".into(),
+            translation_model: Some("qwen3:1.7b".into()),
+            ..Default::default()
+        };
+        let provider = GatedProvider::new();
+        let (state, _) = build_test_state_with_provider(config, "", provider.clone()).await;
+        let state = Arc::new(state);
+        translation_start_session_inner(&state, "es", "en")
+            .await
+            .expect("start session");
+
+        let task_state = Arc::clone(&state);
+        let utterance = tokio::spawn(async move {
+            translate_and_record(&task_state, Speaker::Provider, "Hello").await
+        });
+        for _ in 0..500 {
+            if state.translation.lock().await.in_flight == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        provider.notify_complete();
+        utterance.await.expect("task join").expect("translate");
+        assert_eq!(provider.requested_models(), vec!["qwen3:1.7b".to_string()]);
+    }
+
+    /// The capture-time keep-alive ping must be content-free (fixed literal),
+    /// one token, and thinking-free — it pages the model in, nothing else.
+    /// PHI: this is the pinned contract that no utterance content ever
+    /// reaches the ping.
+    #[tokio::test]
+    async fn keepalive_ping_is_a_content_free_one_token_no_thinking_request() {
+        let provider = GatedProvider::new();
+        let ping = tokio::spawn(llm_keepalive_ping(
+            Arc::clone(&provider) as Arc<dyn AiProvider>,
+            "qwen3:1.7b".to_string(),
+        ));
+        for _ in 0..500 {
+            if !provider.requests().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        provider.notify_complete();
+        ping.await.expect("task join").expect("ping succeeds");
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        let req = &requests[0];
+        assert_eq!(req.model, "qwen3:1.7b");
+        assert_eq!(req.max_tokens, Some(1));
+        assert_eq!(req.reasoning_effort.as_deref(), Some("none"));
+        assert!(req.system_prompt.is_none());
+        match &req.messages[..] {
+            [msg] => match &msg.content {
+                medical_core::types::MessageContent::Text(text) => {
+                    assert_eq!(text, KEEPALIVE_PROMPT);
+                }
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected exactly one message"),
+        }
     }
 }

@@ -5,7 +5,8 @@
 //! (suppress_blank, suppress_nst, no_context) to minimize repetition loops.
 //! Must run inside `spawn_blocking` — the C++ inference is CPU/GPU-bound.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tracing::{info, instrument};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -25,35 +26,105 @@ pub struct WhisperSegment {
     pub end: f64,
 }
 
+/// Process-wide cache of the loaded `WhisperContext`, keyed by model path.
+///
+/// Building a context means reading the whole ggml file off disk and
+/// initializing the compute graph (~1-2 s for base, ~5 s for
+/// large-v3-turbo) — a per-utterance cost the translate tab pays on every
+/// tap. The cache keeps one loaded context alive across `transcribe` calls;
+/// each call creates its own `WhisperState` from the shared context (the
+/// whisper.cpp-endorsed way to run concurrent decodes).
+///
+/// A different `model_path` evicts and reloads — insurance against the model
+/// file being switched under a live provider. The cache lives as long as the
+/// owning provider: `reinit_providers`, model downloads, and pairing all
+/// rebuild the provider and drop its cache.
+pub struct WhisperContextCache {
+    inner: std::sync::Mutex<Option<CachedContext>>,
+}
+
+struct CachedContext {
+    model_path: PathBuf,
+    context: Arc<WhisperContext>,
+}
+
+impl Default for WhisperContextCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WhisperContextCache {
+    /// Create an empty cache — no model is loaded until the first `get`.
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Return the loaded context for `model_path`, loading it on first use.
+    ///
+    /// The lock is held only for the get-or-init; the returned `Arc` keeps
+    /// the context alive after the lock is dropped, and a failed load is
+    /// never cached (the next call retries — the missing-model error a user
+    /// sees stays live rather than going stale after they download it).
+    ///
+    /// A poisoned lock is recovered from rather than propagated: the guarded
+    /// state is always a fully-constructed `Option` (single assignment), and
+    /// bricking every future transcription off one panicking load would be
+    /// far worse than re-using whatever was cached.
+    pub fn get(&self, model_path: &Path) -> AppResult<Arc<WhisperContext>> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = guard.as_ref()
+            && cached.model_path == model_path
+        {
+            return Ok(Arc::clone(&cached.context));
+        }
+        let context = Arc::new(
+            WhisperContext::new_with_params(model_path, WhisperContextParameters::default())
+                .map_err(|e| {
+                    AppError::stt_provider(format!("Failed to load Whisper model: {e}"))
+                })?,
+        );
+        *guard = Some(CachedContext {
+            model_path: model_path.to_owned(),
+            context: Arc::clone(&context),
+        });
+        Ok(context)
+    }
+}
+
 /// Wrapper around whisper-rs for local transcription.
 ///
-/// Loads a ggml-format Whisper model and runs full-sequence inference.
-/// The model is loaded fresh on each `transcribe()` call — there is no
-/// persistent state between calls, which keeps memory usage predictable
-/// at the cost of model-load overhead (~1-2s for base, ~5s for large-v3-turbo).
+/// Resolves its model through a shared [`WhisperContextCache`] so
+/// consecutive transcriptions skip the model-load cost. Each `transcribe()`
+/// still creates a fresh `WhisperState` — decoder state is per-call, the
+/// loaded weights are not.
 pub struct WhisperTranscriber {
     model_path: PathBuf,
+    cache: Arc<WhisperContextCache>,
 }
 
 impl WhisperTranscriber {
-    /// Create a transcriber that will load the model at `model_path`.
-    ///
-    /// The path must point to a ggml-format `.bin` file (e.g. `ggml-base.bin`).
-    /// No model loading happens at construction time.
-    pub fn new(model_path: PathBuf) -> Self {
-        Self { model_path }
+    /// Create a transcriber that loads the model at `model_path` through
+    /// `cache` on first use and reuses it afterwards.
+    pub fn new(model_path: PathBuf, cache: Arc<WhisperContextCache>) -> Self {
+        Self { model_path, cache }
+    }
+
+    /// Load (or reuse) the model context — the work `prewarm` performs
+    /// ahead of the first transcription.
+    pub fn prewarm(&self) -> AppResult<Arc<WhisperContext>> {
+        self.cache.get(&self.model_path)
     }
 
     /// Transcribe 16 kHz mono f32 audio.
     ///
     /// Must be called inside `tokio::task::spawn_blocking` — the underlying
     /// whisper.cpp inference is CPU/GPU-bound and would block the async runtime.
-    ///
-    /// # Decoding Strategy
-    ///
-    /// Uses `BeamSearch { beam_size: 5 }` with `patience: -1.0`. This avoids
-    /// whisper.cpp's hallucination-skip that triggers under Greedy decoding on
-    /// medical terminology, silently dropping content.
     ///
     /// # Parameters
     ///
@@ -65,14 +136,7 @@ impl WhisperTranscriber {
         audio_16k_mono: &[f32],
         language: Option<&str>,
     ) -> AppResult<Vec<WhisperSegment>> {
-        let ctx = WhisperContext::new_with_params(
-            self.model_path
-                .to_str()
-                .ok_or_else(|| AppError::stt_provider("Model path is not valid UTF-8"))?,
-            WhisperContextParameters::default(),
-        )
-        .map_err(|e| AppError::stt_provider(format!("Failed to load Whisper model: {e}")))?;
-
+        let ctx = self.prewarm()?;
         let mut state = ctx
             .create_state()
             .map_err(|e| AppError::stt_provider(format!("Failed to create Whisper state: {e}")))?;
@@ -163,5 +227,68 @@ impl WhisperTranscriber {
 
         info!(segments = segments.len(), "Whisper transcription complete");
         Ok(segments)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn missing_model_path() -> PathBuf {
+        PathBuf::from("/nonexistent/__ferriscribe_whisper_test__.bin")
+    }
+
+    #[test]
+    fn missing_model_errors_and_failure_is_not_cached() {
+        let cache = WhisperContextCache::new();
+        let path = missing_model_path();
+
+        let first = cache.get(&path);
+        assert!(first.is_err(), "missing model must error");
+
+        // The failure must not be cached — after the model appears (e.g. the
+        // user downloads it), the next call must retry the load, not replay
+        // the stale error. We can't make the file appear here, but a second
+        // error at a DIFFERENT path proves get() re-attempts loads instead of
+        // returning the first failure for everything.
+        let second = cache.get(&PathBuf::from("/nonexistent/other-model.bin"));
+        assert!(second.is_err());
+    }
+
+    #[test]
+    fn poisoned_cache_lock_is_recovered_from_not_fatal() {
+        let cache = Arc::new(WhisperContextCache::new());
+        // Poison the lock via a panic inside the critical section.
+        let poisoning = Arc::clone(&cache);
+        let handle = std::thread::spawn(move || {
+            let _guard = poisoning.inner.lock().unwrap();
+            panic!("intentional poison");
+        });
+        assert!(handle.join().is_err());
+        // A poisoned lock must neither hang, panic the caller, nor brick the
+        // cache: `get` recovers and still attempts the load (here: the
+        // missing-model error, same as an unpoisoned cache).
+        let result = cache.get(&missing_model_path());
+        assert!(result.is_err());
+    }
+
+    /// Pins the core cache contract against a REAL model file: two `get`
+    /// calls with the same path return the SAME context (no reload), and a
+    /// different path reloads. Gated behind `FERRISCRIBE_STT_MODEL=<path>`
+    /// because it needs an actual ggml file (~148 MB for base); skipped
+    /// otherwise so `cargo test --workspace --lib` stays runnable everywhere.
+    #[test]
+    fn real_model_context_is_reused_across_gets() {
+        let Ok(model_path) = std::env::var("FERRISCRIBE_STT_MODEL") else {
+            eprintln!("skipping: FERRISCRIBE_STT_MODEL not set");
+            return;
+        };
+        let cache = WhisperContextCache::new();
+        let first = cache.get(Path::new(&model_path)).expect("first load");
+        let second = cache.get(Path::new(&model_path)).expect("second get");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "same path must return the cached context"
+        );
     }
 }

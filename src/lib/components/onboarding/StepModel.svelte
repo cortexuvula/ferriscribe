@@ -3,6 +3,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { settings } from '../../stores/settings.svelte';
   import { listWhisperModels, downloadModel } from '../../api/models';
+  import { reinitProviders } from '../../api/chat';
   import type { DownloadableModel } from '../../api/models';
 
   interface Props { onNext: () => void; onSkip: () => void; }
@@ -69,6 +70,14 @@
 
   async function saveAndNext() {
     await settings.updateField('whisper_model', selected);
+    // The provider resolves the whisper model at build time — a download
+    // mid-onboarding rebuilt it with the OLD selection, so rebuild again
+    // now that the choice is persisted.
+    try {
+      await reinitProviders();
+    } catch (err) {
+      console.error('Failed to reinit providers after whisper model choice:', err);
+    }
     onNext();
   }
 </script>

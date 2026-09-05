@@ -9,6 +9,7 @@ const defaults: AppConfig = {
   ai_provider: 'lmstudio',
   ai_model: '',
   ocr_model: null,
+  translation_model: null,
   whisper_model: 'large-v3-turbo',
   tts_provider: 'local',
   tts_voice: 'default',

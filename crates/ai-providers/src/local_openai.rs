@@ -204,16 +204,28 @@ impl LocalOpenAiProvider {
     /// Called from `init_ai_providers` with the user's
     /// `{provider}_disable_thinking` setting; the frontend must call
     /// `reinit_providers` after changing that setting for it to take effect.
+    /// Independent of this toggle, any request carrying
+    /// `reasoning_effort: "none"` opts itself out (see
+    /// [`apply_thinking_control`](LocalOpenAiProvider::apply_thinking_control)).
     pub fn set_thinking_disabled(&self, disabled: bool) {
         self.thinking_disabled.store(disabled, Ordering::Relaxed);
     }
 
     /// Apply [`ProviderMeta::thinking`] to an outgoing request when the user
-    /// has disabled thinking. The prefill variant appends the control as the
-    /// LAST message so the model continues from it directly into the answer
-    /// instead of opening a new thinking block.
+    /// has disabled thinking, or when the REQUEST itself opts out by carrying
+    /// `reasoning_effort: "none"` (e.g. the translate tab's one-line
+    /// translations, which have nothing to reason about). The prefill
+    /// variant appends the control as the LAST message so the model
+    /// continues from it directly into the answer instead of opening a new
+    /// thinking block.
+    ///
+    /// The request-level opt-out exists because `reasoning_effort` alone
+    /// only reaches servers that honor the parameter (Ollama); LM Studio /
+    /// oMLX silently drop it and need the prefill instead.
     fn apply_thinking_control(&self, request: &mut CompletionRequest) {
-        if !self.thinking_disabled.load(Ordering::Relaxed) {
+        let request_opts_out =
+            request.reasoning_effort.as_deref() == Some(REASONING_EFFORT_DISABLE);
+        if !self.thinking_disabled.load(Ordering::Relaxed) && !request_opts_out {
             return;
         }
         match self.meta.thinking {
@@ -722,6 +734,58 @@ mod tests {
         }
     }
 
+    /// Regression (request-level opt-out): a request carrying
+    /// `reasoning_effort: "none"` must fire the prefill strategy even with
+    /// the provider toggle OFF — LM Studio/oMLX drop the parameter itself,
+    /// so without the prefill the opt-out is a no-op on those servers and
+    /// thinking models burn a CoT preamble on trivial calls (translate).
+    #[test]
+    fn request_level_opt_out_fires_prefill_without_provider_toggle() {
+        let p =
+            LocalOpenAiProvider::new(&lmstudio::META, None, false, None, RetryConfig::default())
+                .expect("build");
+        let mut req = offline_tests::minimal_request("qwen3.8-27b");
+        req.reasoning_effort = Some(REASONING_EFFORT_DISABLE.into());
+        p.apply_thinking_control(&mut req);
+        assert_eq!(
+            req.messages.len(),
+            2,
+            "the request's own opt-out must append the prefill"
+        );
+        let prefill = req.messages.last().expect("prefill present");
+        assert!(matches!(prefill.role, Role::Assistant));
+        assert_eq!(req.reasoning_effort.as_deref(), Some("none"));
+    }
+
+    /// Regression (request-level opt-out): the same opt-out on the
+    /// effort-strategy provider keeps the effort value (idempotent) and
+    /// adds no messages.
+    #[test]
+    fn request_level_opt_out_keeps_effort_value_on_effort_strategy() {
+        let p = LocalOpenAiProvider::new(&ollama::META, None, false, None, RetryConfig::default())
+            .expect("build");
+        let mut req = offline_tests::minimal_request("qwen3.8:27b");
+        req.reasoning_effort = Some(REASONING_EFFORT_DISABLE.into());
+        p.apply_thinking_control(&mut req);
+        assert_eq!(req.reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(req.messages.len(), 1, "effort strategy adds no messages");
+    }
+
+    /// Only the exact disable value opts a request out — a caller asking
+    /// for a REAL effort level ("low") must not get the prefill appended.
+    #[test]
+    fn non_disable_effort_values_do_not_trigger_thinking_control() {
+        for m in all_metas() {
+            let p = LocalOpenAiProvider::new(m, None, false, None, RetryConfig::default())
+                .expect("build");
+            let mut req = offline_tests::minimal_request("test-model");
+            req.reasoning_effort = Some("low".into());
+            p.apply_thinking_control(&mut req);
+            assert_eq!(req.messages.len(), 1, "no prefill for non-disable effort");
+            assert_eq!(req.reasoning_effort.as_deref(), Some("low"));
+        }
+    }
+
     /// End-to-end over HTTP: with thinking disabled, the effort-strategy
     /// provider's POST body must carry the disable effort value.
     #[tokio::test]
@@ -843,6 +907,49 @@ mod tests {
 
         let resp = p
             .complete(offline_tests::minimal_request("qwen3.8-27b"))
+            .await
+            .expect("complete should succeed against mock");
+        assert_eq!(resp.content, "ok");
+        server.verify().await;
+    }
+
+    /// End-to-end over HTTP: the request-level opt-out (no provider toggle)
+    /// must land the prefill on the wire for prefill-strategy servers —
+    /// `reasoning_effort: "none"` alone is silently dropped by them.
+    #[tokio::test]
+    async fn complete_wire_body_carries_prefill_on_request_level_opt_out() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(body_partial_json(serde_json::json!({
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "<think>\n\n</think>\n\n"}
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "model": "qwen3.8-27b",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let policy = RetryConfig {
+            max_retries: 0,
+            ..RetryConfig::default()
+        };
+        let p = LocalOpenAiProvider::new(&lmstudio::META, Some(&server.uri()), false, None, policy)
+            .expect("build");
+        // NOTE: no set_thinking_disabled — the opt-out comes from the request.
+        let mut req = offline_tests::minimal_request("qwen3.8-27b");
+        req.reasoning_effort = Some(REASONING_EFFORT_DISABLE.into());
+
+        let resp = p
+            .complete(req)
             .await
             .expect("complete should succeed against mock");
         assert_eq!(resp.content, "ok");
