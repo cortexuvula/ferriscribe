@@ -27,66 +27,6 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// WhisperModelId
-// ---------------------------------------------------------------------------
-
-/// Identifies a Whisper model variant by name.
-///
-/// Maps to ggml filenames: `Base` → `ggml-base.bin`, etc.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WhisperModelId {
-    /// Whisper Base — fastest, lowest accuracy (~148 MB).
-    Base,
-    /// Whisper Base Q5_1 — quantized base (~60 MB).
-    BaseQ5_1,
-    /// Whisper Small — balanced speed and accuracy (~488 MB).
-    Small,
-    /// Whisper Small Q5_1 — quantized small (~190 MB).
-    SmallQ5_1,
-    /// Whisper Medium — high accuracy (~1.5 GB).
-    Medium,
-    /// Whisper Large-v3-Turbo — best accuracy (~1.6 GB).
-    LargeV3Turbo,
-    /// Whisper Large-v3-Turbo Q5_0 — quantized turbo, the size/speed
-    /// sweet spot (~574 MB).
-    LargeV3TurboQ5_0,
-}
-
-impl WhisperModelId {
-    /// Return the string identifier for this model (e.g. `"base"`, `"large-v3-turbo"`).
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            WhisperModelId::Base => "base",
-            WhisperModelId::BaseQ5_1 => "base-q5_1",
-            WhisperModelId::Small => "small",
-            WhisperModelId::SmallQ5_1 => "small-q5_1",
-            WhisperModelId::Medium => "medium",
-            WhisperModelId::LargeV3Turbo => "large-v3-turbo",
-            WhisperModelId::LargeV3TurboQ5_0 => "large-v3-turbo-q5_0",
-        }
-    }
-
-    /// Parse a string identifier into a `WhisperModelId`. Returns `None` for
-    /// unrecognized strings.
-    ///
-    /// Not implemented as `std::str::FromStr` because this returns `Option`,
-    /// not `Result`. Named `from_str` for call-site readability.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "base" => Some(WhisperModelId::Base),
-            "base-q5_1" => Some(WhisperModelId::BaseQ5_1),
-            "small" => Some(WhisperModelId::Small),
-            "small-q5_1" => Some(WhisperModelId::SmallQ5_1),
-            "medium" => Some(WhisperModelId::Medium),
-            "large-v3-turbo" => Some(WhisperModelId::LargeV3Turbo),
-            "large-v3-turbo-q5_0" => Some(WhisperModelId::LargeV3TurboQ5_0),
-            _ => None,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // ModelInfo
 // ---------------------------------------------------------------------------
 
@@ -279,46 +219,6 @@ pub fn available_pyannote_models(app_data_dir: &Path) -> Vec<ModelInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Check required models
-// ---------------------------------------------------------------------------
-
-/// Check which models are missing and return human-readable descriptions of each.
-///
-/// Checks the requested Whisper model plus both pyannote models (segmentation
-/// and embedding). Used by the Settings UI to show a "missing models" warning.
-pub fn check_required_models(app_data_dir: &Path, whisper_model_id: &str) -> Vec<String> {
-    let mut missing = Vec::new();
-
-    // Check requested whisper model
-    if let Some(filename) = whisper_model_filename(whisper_model_id) {
-        let path = whisper_model_path(app_data_dir, filename);
-        if !path.exists() {
-            missing.push(format!(
-                "Whisper model '{}' ({})",
-                whisper_model_id, filename
-            ));
-        }
-    }
-
-    // Pyannote stub models (diarization — currently not available but reserved)
-    let pyannote_stubs = [
-        ("segmentation-3.0.onnx", "Pyannote segmentation model"),
-        (
-            "wespeaker_en_voxceleb_CAM++.onnx",
-            "Pyannote speaker embedding model",
-        ),
-    ];
-    for (filename, description) in &pyannote_stubs {
-        let path = pyannote_model_path(app_data_dir, filename);
-        if !path.exists() {
-            missing.push(description.to_string());
-        }
-    }
-
-    missing
-}
-
-// ---------------------------------------------------------------------------
 // Download / delete
 // ---------------------------------------------------------------------------
 
@@ -448,32 +348,5 @@ mod tests {
                 m.id
             );
         }
-    }
-
-    #[test]
-    fn check_missing_models() {
-        let base = Path::new("/tmp/__nonexistent_ferriscribe_test_dir__");
-        let missing = check_required_models(base, "base");
-        // whisper base + 2 pyannote stubs = 3 missing
-        assert_eq!(missing.len(), 3);
-    }
-
-    #[test]
-    fn whisper_model_id_roundtrip() {
-        let ids = [
-            WhisperModelId::Base,
-            WhisperModelId::BaseQ5_1,
-            WhisperModelId::Small,
-            WhisperModelId::SmallQ5_1,
-            WhisperModelId::Medium,
-            WhisperModelId::LargeV3Turbo,
-            WhisperModelId::LargeV3TurboQ5_0,
-        ];
-        for id in &ids {
-            let s = id.as_str();
-            let roundtripped = WhisperModelId::from_str(s).expect("from_str failed");
-            assert_eq!(*id, roundtripped);
-        }
-        assert!(WhisperModelId::from_str("nonexistent").is_none());
     }
 }

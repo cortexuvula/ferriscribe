@@ -172,6 +172,7 @@ pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Ve
     let state::SttProviderHandles {
         provider: new_stt_provider,
         remote: new_remote_stt,
+        local: new_local_stt,
     } = stt_handles;
     {
         let mut guard = state.stt_providers.lock().await;
@@ -181,11 +182,13 @@ pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Ve
     // Replace the typed handles with the freshly built Arcs so the handles
     // and the registry point at the SAME Arc instances.  Any subsequent
     // set_endpoint call (e.g. from start_sharing / pair_with_server) now
-    // mutates the provider that is actually in the request path.
+    // mutates the provider that is actually in the request path. The local
+    // handle swap also hands the idle sweeper the new (empty) context cache.
     *state.ollama_provider.write().await = new_ollama;
     *state.lmstudio_provider.write().await = new_lmstudio;
     *state.omlx_provider.write().await = new_omlx;
     *state.remote_stt_provider.write().await = new_remote_stt;
+    *state.local_stt_provider.write().await = new_local_stt;
 
     info!(providers = ?available, "Providers reinitialized");
 

@@ -1,8 +1,9 @@
 <script lang="ts">
   import { settings } from '../../stores/settings.svelte';
   import { testLmStudioConnection, testOllamaConnection, testOmlxConnection } from '../../api/settings';
-  import { reinitProviders } from '../../api/chat';
+  import { listModels, reinitProviders } from '../../api/chat';
   import { useTestConnection } from '../../composables/useTestConnection.svelte';
+  import { staleFeatureModelFields } from '../../utils/modelOverrides';
 
   interface Props { onNext: () => void; onSkip: () => void; }
   const { onNext, onSkip }: Props = $props();
@@ -38,6 +39,19 @@
     await settings.updateField('ollama_port', ollamaPort);
     await settings.updateField('omlx_host', omlxHost);
     await settings.updateField('omlx_port', omlxPort);
+    // Per-feature model overrides (OCR, translation) saved against the OLD
+    // provider would silently 404 on the new one — clear what the new
+    // provider doesn't offer. Best-effort: if the model list can't be
+    // fetched the overrides stand (Settings → Models re-clears on its next
+    // provider switch).
+    try {
+      const models = await listModels(provider);
+      for (const field of staleFeatureModelFields(models, settings.state)) {
+        await settings.updateField(field, null);
+      }
+    } catch (e) {
+      console.error('Could not check per-feature models for staleness:', e);
+    }
     try { await reinitProviders(); } catch (e) { console.error('reinit failed', e); }
     onNext();
   }

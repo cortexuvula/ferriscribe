@@ -140,6 +140,18 @@ pub async fn load_app_config(
     .map_err(join_err)?
 }
 
+/// Resolve a per-feature model override (`ocr_model`, `translation_model`)
+/// to the model a request should carry: the override when set (non-empty),
+/// else the global `ai_model`. Empty overrides mean "inherit" — the
+/// frontend saves the sentinel as null, but hand-edited/synced configs can
+/// carry `Some("")`.
+pub fn feature_model_or_global(override_model: Option<&str>, global: &str) -> String {
+    override_model
+        .filter(|m| !m.is_empty())
+        .unwrap_or(global)
+        .to_string()
+}
+
 /// Cancel the SSE subscriber task tracked by `slot` and install `new_token`
 /// in its place (or clear the slot when `None` — used when the sync gates
 /// fail, e.g. the user unpaired, so a previous subscriber doesn't keep
@@ -244,6 +256,19 @@ pub(super) fn unwrap_app_error_message_ref(err: &AppError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feature_model_prefers_override_and_treats_empty_as_inherit() {
+        // Set override wins; unset and empty-string both inherit the global.
+        assert_eq!(
+            feature_model_or_global(Some("qwen3:1.7b"), "qwen3:8b"),
+            "qwen3:1.7b"
+        );
+        assert_eq!(feature_model_or_global(None, "qwen3:8b"), "qwen3:8b");
+        assert_eq!(feature_model_or_global(Some(""), "qwen3:8b"), "qwen3:8b");
+        // Both unset — empty on the wire (Ollama rejects with a clear error).
+        assert_eq!(feature_model_or_global(None, ""), "");
+    }
 
     #[test]
     fn unwrap_app_error_message_strips_all_category_prefixes() {

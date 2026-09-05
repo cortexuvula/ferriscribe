@@ -105,6 +105,7 @@ pub async fn download_model(
     let crate::state::SttProviderHandles {
         provider: new_stt_provider,
         remote: new_remote_stt,
+        local: new_local_stt,
     } = crate::state::init_stt_providers_with_config(&state.data_dir, &config, whisper_ep);
     {
         let mut guard = state.stt_providers.lock().await;
@@ -113,6 +114,7 @@ pub async fn download_model(
     // Replace the typed handle with the freshly built Arc so the handle and the
     // stt_providers slot point at the SAME instance.
     *state.remote_stt_provider.write().await = new_remote_stt;
+    *state.local_stt_provider.write().await = new_local_stt;
 
     Ok(())
 }
