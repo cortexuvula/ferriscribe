@@ -18,6 +18,19 @@ pub struct ModelInfo {
     pub provider: String,
 }
 
+/// The `reasoning_effort` value that disables the reasoning/"thinking"
+/// phase on servers that honor the parameter (Ollama's OpenAI-compatible
+/// endpoint accepts `"none"`; allowlist `minimal|low|…|none`).
+///
+/// This is a shared WIRE CONTRACT, not a local convention: request
+/// builders opt out of thinking by setting exactly this value, and
+/// `LocalOpenAiProvider::apply_thinking_control` matches on it to fire
+/// the per-request thinking control (the prefill variants need that
+/// match — their servers drop the parameter itself). The value is
+/// server-mandated; changing it is a provider-compat change, not a
+/// rename.
+pub const REASONING_EFFORT_DISABLE: &str = "none";
+
 /// A request to generate a chat completion.
 ///
 /// Passed to [`AiProvider::complete`](crate::traits::AiProvider::complete)
@@ -36,11 +49,11 @@ pub struct CompletionRequest {
     /// System prompt prepended to the conversation.
     pub system_prompt: Option<String>,
     /// Reasoning/"thinking" effort hint for providers that support it
-    /// (e.g. `"none"`, `"low"`, `"medium"`, `"high"` on Ollama's
-    /// OpenAI-compatible endpoint, where `"none"` disables the thinking
-    /// phase). `None` leaves the model's default behavior unchanged.
-    /// Providers that ignore the parameter (LM Studio as of 0.4.16+)
-    /// silently drop it.
+    /// (e.g. [`REASONING_EFFORT_DISABLE`], `"low"`, `"medium"`, `"high"`
+    /// on Ollama's OpenAI-compatible endpoint, where `"none"` disables
+    /// the thinking phase). `None` leaves the model's default behavior
+    /// unchanged. Providers that ignore the parameter (LM Studio as of
+    /// 0.4.16+) silently drop it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 }

@@ -178,13 +178,9 @@ async fn active_ai_provider(state: &AppState) -> AppResult<Arc<dyn AiProvider>> 
 
 /// The model translation requests are sent to: the per-feature
 /// `translation_model` override when set (non-empty), else the global
-/// `ai_model` — the OCR fallback pattern.
+/// `ai_model` — see [`crate::commands::feature_model_or_global`].
 fn translation_model_from_config(config: &medical_core::types::settings::AppConfig) -> String {
-    config
-        .translation_model
-        .clone()
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| config.ai_model.clone())
+    crate::commands::feature_model_or_global(config.translation_model.as_deref(), &config.ai_model)
 }
 
 /// Content of the keep-alive ping fired while the user is still speaking.
@@ -196,7 +192,7 @@ const KEEPALIVE_PROMPT: &str = "ping";
 /// while the user is still talking. The result is discarded; failures are
 /// the caller's to log and ignore.
 ///
-/// Thinking is opted out (`reasoning_effort: "none"`) so reasoning models
+/// Thinking is opted out ([`REASONING_EFFORT_DISABLE`]) so reasoning models
 /// don't burn a CoT preamble on the ping itself.
 async fn llm_keepalive_ping(provider: Arc<dyn AiProvider>, model: String) -> AppResult<()> {
     let request = medical_core::types::CompletionRequest {
@@ -209,7 +205,7 @@ async fn llm_keepalive_ping(provider: Arc<dyn AiProvider>, model: String) -> App
         temperature: Some(0.0),
         max_tokens: Some(1),
         system_prompt: None,
-        reasoning_effort: Some("none".to_string()),
+        reasoning_effort: Some(medical_core::types::REASONING_EFFORT_DISABLE.to_string()),
     };
     provider.complete(request).await.map(|_| ())
 }
@@ -1204,7 +1200,10 @@ mod tests {
         // through the command layer).
         let requests = provider.requests();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(
+            requests[0].reasoning_effort.as_deref(),
+            Some(medical_core::types::REASONING_EFFORT_DISABLE)
+        );
         assert!(requests[0].max_tokens.is_some_and(|t| t <= 1024));
     }
 
@@ -1281,7 +1280,10 @@ mod tests {
         let req = &requests[0];
         assert_eq!(req.model, "qwen3:1.7b");
         assert_eq!(req.max_tokens, Some(1));
-        assert_eq!(req.reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(
+            req.reasoning_effort.as_deref(),
+            Some(medical_core::types::REASONING_EFFORT_DISABLE)
+        );
         assert!(req.system_prompt.is_none());
         match &req.messages[..] {
             [msg] => match &msg.content {

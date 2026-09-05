@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use medical_core::error::AppResult;
 use medical_core::traits::translation::Language;
 use medical_core::traits::{AiProvider, TranslationProvider};
-use medical_core::types::{CompletionRequest, Message, MessageContent, Role};
+use medical_core::types::{
+    CompletionRequest, Message, MessageContent, REASONING_EFFORT_DISABLE, Role,
+};
 
 /// A [`TranslationProvider`] that delegates to an [`AiProvider`].
 ///
@@ -101,7 +103,7 @@ impl TranslationProvider for AiTranslationProvider {
             // out skips the CoT preamble thinking models would otherwise
             // generate (seconds per utterance on local hardware). See
             // `LocalOpenAiProvider::apply_thinking_control`.
-            reasoning_effort: Some("none".into()),
+            reasoning_effort: Some(REASONING_EFFORT_DISABLE.into()),
         };
 
         let response = self.provider.complete(request).await?;
@@ -122,7 +124,7 @@ impl TranslationProvider for AiTranslationProvider {
             temperature: Some(0.0),
             max_tokens: Some(10),
             system_prompt: None,
-            reasoning_effort: Some("none".into()),
+            reasoning_effort: Some(REASONING_EFFORT_DISABLE.into()),
         };
 
         let response = self.provider.complete(request).await?;
@@ -231,7 +233,10 @@ mod tests {
         );
         // Translation opts out of reasoning — thinking models would burn a
         // CoT preamble before every one-line translation.
-        assert_eq!(req.reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(
+            req.reasoning_effort.as_deref(),
+            Some(REASONING_EFFORT_DISABLE)
+        );
 
         // Verify the user message contains the expected elements.
         if let MessageContent::Text(ref text) = req.messages[0].content {

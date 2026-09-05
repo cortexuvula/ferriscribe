@@ -38,8 +38,9 @@ use medical_core::{
     traits::AiProvider,
     types::endpoint::http_url,
     types::{
-        CompletionRequest, CompletionResponse, Message, MessageContent, ModelInfo, RemoteEndpoint,
-        Role, StreamChunk, ToolCompletionResponse, ToolDef,
+        CompletionRequest, CompletionResponse, Message, MessageContent, ModelInfo,
+        REASONING_EFFORT_DISABLE, RemoteEndpoint, Role, StreamChunk, ToolCompletionResponse,
+        ToolDef,
     },
 };
 
@@ -82,10 +83,6 @@ pub enum ThinkingControl {
     /// client.
     AssistantPrefill,
 }
-
-/// The `reasoning_effort` value that disables thinking for
-/// [`ThinkingControl::ReasoningEffortNone`] providers.
-const REASONING_EFFORT_DISABLE: &str = "none";
 
 /// The assistant-prefill payload used to suppress the reasoning/"thinking"
 /// phase for [`ThinkingControl::AssistantPrefill`] providers: an

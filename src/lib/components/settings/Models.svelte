@@ -7,7 +7,9 @@
   import { officeServedHint, providerStartHint } from '../../utils/providerHints';
   import { formatError } from '../../types/errors';
   import ProviderServerSection from './ProviderServerSection.svelte';
+  import ModelOverrideSelect from './ModelOverrideSelect.svelte';
   import Callout from './Callout.svelte';
+  import { staleFeatureModelFields } from '../../utils/modelOverrides';
 
   let availableModels = $state<ModelInfo[]>([]);
   let modelsLoading = $state(false);
@@ -95,19 +97,10 @@
       // tells the user why the dropdown is empty.
       await settings.updateField('ai_model', '');
     }
-    // Same staleness class for the OCR model: an id from the old
-    // provider's list isn't offered by the new one and would silently 404
-    // at generation time.
-    if (settings.state.ocr_model && !models.some((m) => m.id === settings.state.ocr_model)) {
-      await settings.updateField('ocr_model', null);
-    }
-    // …and the translation model (same silent-404 class on the next
-    // Translate-tab utterance).
-    if (
-      settings.state.translation_model &&
-      !models.some((m) => m.id === settings.state.translation_model)
-    ) {
-      await settings.updateField('translation_model', null);
+    // Per-feature overrides (OCR, translation) from the old provider's list
+    // aren't offered by the new one and would silently 404 at request time.
+    for (const field of staleFeatureModelFields(models, settings.state)) {
+      await settings.updateField(field, null);
     }
   }
 
@@ -182,52 +175,24 @@
     {/if}
   </div>
 
-  <div class="form-group">
-    <label for="ocr-model" class="form-label">OCR / Vision Model</label>
-    <div class="model-select-row">
-      <select
-        id="ocr-model"
-        value={settings.state.ocr_model ?? ''}
-        onchange={async (e) => {
-          const val = (e.currentTarget as HTMLSelectElement).value;
-          await settings.updateField('ocr_model', val || null);
-        }}
-      >
-        <option value="">(use generation model)</option>
-        {#each availableModels as m (m.id)}
-          <option value={m.id}>{m.name}</option>
-        {/each}
-      </select>
-    </div>
-    <p class="form-hint">
-      Vision model for extracting text from dropped documents (e.g. glm-ocr).
-      If not set, the generation model is used.
-    </p>
-  </div>
+  <ModelOverrideSelect
+    id="ocr-model"
+    label="OCR / Vision Model"
+    field="ocr_model"
+    hint="Vision model for extracting text from dropped documents (e.g. glm-ocr).
+      If not set, the generation model is used."
+    models={availableModels}
+  />
 
-  <div class="form-group">
-    <label for="translation-model" class="form-label">Translation Model</label>
-    <div class="model-select-row">
-      <select
-        id="translation-model"
-        value={settings.state.translation_model ?? ''}
-        onchange={async (e) => {
-          const val = (e.currentTarget as HTMLSelectElement).value;
-          await settings.updateField('translation_model', val || null);
-        }}
-      >
-        <option value="">(use generation model)</option>
-        {#each availableModels as m (m.id)}
-          <option value={m.id}>{m.name}</option>
-        {/each}
-      </select>
-    </div>
-    <p class="form-hint">
-      Model used by the Translate tab. Conversational translation needs far
+  <ModelOverrideSelect
+    id="translation-model"
+    label="Translation Model"
+    field="translation_model"
+    hint="Model used by the Translate tab. Conversational translation needs far
       less model than note generation — a small (1-4 B) model here makes live
-      utterance turnaround much faster. If not set, the generation model is used.
-    </p>
-  </div>
+      utterance turnaround much faster. If not set, the generation model is used."
+    models={availableModels}
+  />
 
   <div class="form-group">
     <label for="temperature" class="form-label">
@@ -428,12 +393,5 @@
   .model-list-error-hint {
     margin: 4px 0 0;
     font-weight: 600;
-  }
-
-  .form-hint {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin: 4px 0 0;
-    line-height: 1.5;
   }
 </style>

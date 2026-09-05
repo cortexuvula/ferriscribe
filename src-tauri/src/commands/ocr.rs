@@ -39,12 +39,8 @@ pub async fn ocr_documents(
 
     // Load config to get the OCR model name.
     let config = crate::commands::load_app_config(&state.db, "OCR").await?;
-    let ocr_model = config
-        .ocr_model
-        .clone()
-        .filter(|m| !m.is_empty())
-        .or_else(|| Some(config.ai_model.clone()))
-        .unwrap_or_default();
+    let ocr_model =
+        crate::commands::feature_model_or_global(config.ocr_model.as_deref(), &config.ai_model);
     let provider_name = config.ai_provider.clone();
 
     let provider = generation::resolve_provider(&state, &provider_name).await?;
