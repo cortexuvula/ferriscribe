@@ -67,6 +67,8 @@ const defaults: AppConfig = {
   sync_condition_chips: false,
   sync_content: false,
   retention_days: null,
+  screenshot_ocr_hotkey_enabled: true,
+  screenshot_ocr_hotkey: null,
 };
 
 class SettingsStore {

@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Capability for the main window","local":true,"windows":["main"],"permissions":["core:default","opener:default","dialog:default","clipboard-manager:allow-write-text","updater:default","process:default"]}}
+{"default":{"identifier":"default","description":"Capability for the main window and the screen-region selection overlay","local":true,"windows":["main","screen-region-overlay"],"permissions":["core:default","opener:default","dialog:default","clipboard-manager:allow-write-text","updater:default","process:default"]}}

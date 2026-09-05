@@ -17,6 +17,7 @@ pub mod providers;
 pub mod recordings;
 pub mod recordings_edit;
 pub mod recovery;
+pub mod screenshot_ocr;
 pub mod settings;
 pub mod sharing;
 pub mod support;

@@ -110,19 +110,30 @@ pub(super) fn validate_prompt_overrides(config: &AppConfig) -> AppResult<()> {
 /// Validates that configured AI/STT hosts are local (private/LAN addresses)
 /// unless `allow_public_endpoint` is explicitly enabled. Rejects public hosts
 /// like `api.openai.com` to enforce the local-only PHI constraint.
+///
+/// After a successful save, the screenshot-OCR global hotkey is re-registered
+/// to match the new configuration (enable/disable or rebinding take effect
+/// immediately, no restart).
 #[tauri::command]
-pub async fn save_settings(state: tauri::State<'_, AppState>, config: AppConfig) -> AppResult<()> {
+pub async fn save_settings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    config: AppConfig,
+) -> AppResult<()> {
     validate_prompt_overrides(&config)?;
+    super::screenshot_ocr::validate_hotkey(&config)?;
     let db = state.db.clone();
     // Host validation may resolve DNS — blocking — so it rides along in the
-    // same spawn_blocking as the save.
+    // same spawn_blocking as the save. The closure takes its own clone so
+    // `config` stays available for the post-save hotkey re-registration.
+    let config_to_save = config.clone();
     tokio::task::spawn_blocking(move || -> AppResult<()> {
         // Reject public/unknown hosts unless the user has explicitly opted in.
         for (field, host) in [
-            ("ollama_host", config.ollama_host.as_str()),
-            ("lmstudio_host", config.lmstudio_host.as_str()),
-            ("omlx_host", config.omlx_host.as_str()),
-            ("stt_remote_host", config.stt_remote_host.as_str()),
+            ("ollama_host", config_to_save.ollama_host.as_str()),
+            ("lmstudio_host", config_to_save.lmstudio_host.as_str()),
+            ("omlx_host", config_to_save.omlx_host.as_str()),
+            ("stt_remote_host", config_to_save.stt_remote_host.as_str()),
         ] {
             // Empty host means "use default" — defer enforcement until the user
             // actually fills it in.
@@ -131,16 +142,19 @@ pub async fn save_settings(state: tauri::State<'_, AppState>, config: AppConfig)
             }
             medical_core::endpoint_policy::validate_local_endpoint(
                 host,
-                config.allow_public_endpoint,
+                config_to_save.allow_public_endpoint,
             )
             .map_err(|e| AppError::invalid_endpoint_for(e, field))?;
         }
 
         let conn = db.conn()?;
-        SettingsRepo::save_config(&conn, &config).map_err(AppError::from)
+        SettingsRepo::save_config(&conn, &config_to_save).map_err(AppError::from)
     })
     .await
-    .map_err(super::join_err)?
+    .map_err(super::join_err)??;
+
+    super::screenshot_ocr::sync_hotkey_registration(&app, &config);
+    Ok(())
 }
 
 #[cfg(test)]

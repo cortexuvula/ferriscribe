@@ -34,6 +34,7 @@
   import { rsvp } from './lib/stores/rsvp.svelte';
   import { getSpellchecker } from './lib/components/rich_editor/spellcheck/spellchecker';
   import { requestSpellcheckRescan } from './lib/components/rich_editor/spellcheck/spellcheck_extension';
+  import { captureRegionOcr, captureOutcomeMessage } from './lib/api/screenshotOcr';
 
   // Pages
   import RecordTab from './lib/pages/RecordTab.svelte';
@@ -148,8 +149,28 @@
   let recordingUpdatedUnlisten: UnlistenFn | null = null;
   let syncCompleteUnlisten: UnlistenFn | null = null;
   let userDictChangedUnlisten: UnlistenFn | null = null;
+  let screenshotOcrUnlisten: UnlistenFn | null = null;
   // Theme sync is handled reactively via $effect below.
   let onGlobalKeydown: ((e: KeyboardEvent) => void) | null = null;
+
+  /** In-app screenshot-OCR trigger. Toasts the outcome; expected
+   *  cancellations and empty extractions are notices, not errors. A capture
+   *  already running (e.g. the global hotkey won the same keypress on a
+   *  platform where it doesn't consume the event) is a quiet no-op. */
+  async function triggerScreenshotOcr() {
+    try {
+      const outcome = await captureRegionOcr();
+      const message = captureOutcomeMessage(outcome);
+      if (outcome.status === 'copied') {
+        toasts.success(message);
+      } else {
+        toasts.add({ message, type: 'success', autoDismiss: true });
+      }
+    } catch (err) {
+      if (String(err).includes('already in progress')) return;
+      toasts.error(`Screenshot OCR failed: ${err}`);
+    }
+  }
 
   async function navigateToSoap(tab: string, recordingId: string) {
     await selectRecording(recordingId);
@@ -239,6 +260,18 @@
 
     onGlobalKeydown = (e: KeyboardEvent) => {
       const cmdOrCtrl = e.metaKey || e.ctrlKey;
+      // Screenshot-OCR in-app shortcut (Cmd/Ctrl+Alt+O). Keyed on e.code —
+      // Option remaps e.key on macOS ("ø" on US layouts), so e.key never
+      // matches. ALWAYS handled here: where the OS-level global hotkey
+      // registered successfully it consumes the keypress and this never
+      // fires; where it didn't (Wayland — X11-only registration — or a
+      // conflicting binding) this is the only path that works. A double
+      // trigger loses quietly to the backend's in-flight guard.
+      if (cmdOrCtrl && e.altKey && e.code === 'KeyO') {
+        e.preventDefault();
+        void triggerScreenshotOcr();
+        return;
+      }
       if (!(cmdOrCtrl && e.shiftKey && (e.key === 'r' || e.key === 'R'))) return;
       e.preventDefault();
       // Already open — don't stack another reader/picker on top.
@@ -346,6 +379,30 @@
     } catch (err) {
       console.error('Failed to start user dictionary sync subscription:', err);
     }
+
+    // Screenshot-OCR results from HEADLESS triggers (global hotkey, CLI
+    // delegation) arrive as events — there is no command caller to return
+    // to. Payload carries status/counts/error only, never content.
+    screenshotOcrUnlisten = await listen<{
+      status: string;
+      chars: number;
+      error?: string;
+    }>('screenshot-ocr', (event) => {
+      const { status, chars, error } = event.payload;
+      if (status === 'copied') {
+        toasts.success(`OCR text copied to clipboard (${chars} characters)`);
+      } else if (status === 'cancelled') {
+        toasts.add({ message: 'Region selection cancelled', type: 'success', autoDismiss: true });
+      } else if (status === 'empty') {
+        toasts.add({
+          message: 'No text found in the selected region',
+          type: 'success',
+          autoDismiss: true,
+        });
+      } else {
+        toasts.error(`Screenshot OCR failed: ${error ?? 'unknown error'}`);
+      }
+    });
   });
 
   onDestroy(() => {
@@ -358,6 +415,7 @@
     recordingUpdatedUnlisten?.();
     syncCompleteUnlisten?.();
     userDictChangedUnlisten?.();
+    screenshotOcrUnlisten?.();
     updater.stopAutoCheck();
     audio.destroy();
   });
