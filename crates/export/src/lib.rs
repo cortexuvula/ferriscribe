@@ -23,7 +23,22 @@ pub mod docx;
 pub mod fhir;
 pub mod pdf;
 
+use medical_core::types::recording::Recording;
 use thiserror::Error;
+
+/// Extract the stored synopsis from a recording's metadata.
+///
+/// The synopsis is generated from the SOAP note and persisted as a plain
+/// string under `metadata.synopsis` (there is no dedicated column — see
+/// `generate_synopsis`). Shared by the PDF and DOCX exporters so both read
+/// the same source of truth.
+pub(crate) fn synopsis_text(recording: &Recording) -> Option<&str> {
+    recording
+        .metadata
+        .get("synopsis")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
 
 /// Errors that can occur during document export.
 ///

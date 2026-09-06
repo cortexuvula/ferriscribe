@@ -58,6 +58,7 @@ pub(super) mod audio;
 pub(super) mod condition_chips;
 pub(super) mod content_sync;
 pub(super) mod context_templates;
+pub(super) mod mobile;
 pub(super) mod user_dictionary;
 pub(super) mod vocabulary;
 
@@ -100,6 +101,10 @@ pub(super) struct ApiState<R: tauri::Runtime> {
     /// are never throttled. The transport itself stays plain HTTP (tracked
     /// item) — this at least closes the unthrottled guessing surface.
     pub(super) fail_limiter: Arc<std::sync::Mutex<medical_security::rate_limiter::RateLimiter>>,
+    /// In-memory processing-job registry for the mobile API's
+    /// `/v1/jobs/*` routes. Fed by the pipeline/generation Tauri events
+    /// (see `mobile::attach_event_forwarders`); snapshots are ephemeral.
+    pub(super) jobs: Arc<mobile::JobRegistry>,
 }
 
 // Manual Clone: the derive would add a spurious `R: Clone` bound (Runtime
@@ -116,6 +121,7 @@ impl<R: tauri::Runtime> Clone for ApiState<R> {
             app_handle: self.app_handle.clone(),
             merge_lock: Arc::clone(&self.merge_lock),
             fail_limiter: Arc::clone(&self.fail_limiter),
+            jobs: Arc::clone(&self.jobs),
         }
     }
 }
@@ -135,6 +141,11 @@ pub async fn spawn(
     let (chips_changed_tx, _) = tokio::sync::broadcast::channel::<()>(16);
     let (dict_changed_tx, _) = tokio::sync::broadcast::channel::<()>(16);
     let (content_changed_tx, _) = tokio::sync::broadcast::channel::<String>(32);
+    let jobs = Arc::new(mobile::JobRegistry::new());
+    // Bridge the desktop's pipeline/generation progress events into the
+    // job registry so /v1/jobs reflects BOTH desktop- and HTTP-triggered
+    // work under one vocabulary.
+    mobile::attach_event_forwarders(&app_handle, &jobs);
     let state = ApiState {
         db,
         tokens,
@@ -147,8 +158,13 @@ pub async fn spawn(
         fail_limiter: Arc::new(std::sync::Mutex::new(
             medical_security::rate_limiter::RateLimiter::new(5),
         )),
+        jobs,
     };
-    let app = build_router(state);
+    // The generate route dispatches into generation commands that are typed
+    // AppHandle<Wry>; merge it on the concrete runtime. `spawn`'s own
+    // `app_handle: AppHandle` IS AppHandle<Wry> (default-runtime alias), so
+    // `state` is already the Wry flavor — clone for the sub-router.
+    let app = build_router(state.clone()).merge(mobile::generate_route(state));
 
     let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
         .parse()
@@ -244,6 +260,24 @@ pub(super) fn build_router<R: tauri::Runtime>(state: ApiState<R>) -> Router {
         .route(
             "/v1/content/audio/{recording_id}",
             get(audio::content_audio_get_handler).put(audio::content_audio_put_handler),
+        )
+        // Mobile-client surface (see mobile.rs). The generate route is
+        // merged separately on the concrete Wry runtime — the generation
+        // commands are AppHandle<Wry>-typed.
+        .route("/v1/recordings", post(mobile::create_recording_handler))
+        .route("/v1/jobs/{recording_id}", get(mobile::job_status_handler))
+        .route(
+            "/v1/jobs/{recording_id}/events",
+            get(mobile::job_events_handler),
+        )
+        .route(
+            "/v1/recordings/{id}/documents/{doc_type}",
+            get(mobile::document_get_handler).put(mobile::document_put_handler),
+        )
+        .route("/v1/recordings/{id}/export", get(mobile::export_handler))
+        .route(
+            "/v1/devices/self",
+            post(mobile::devices_self_revoke_handler),
         )
         // Allow large bodies (up to 1 GiB) for audio upload/download. The
         // previous 256 MiB cap rejected multi-hour recordings with

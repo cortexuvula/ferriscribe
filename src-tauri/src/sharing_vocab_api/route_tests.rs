@@ -27,6 +27,9 @@ struct TestApp {
     router: Router,
     token: String,
     tokens: Arc<TokenStore>,
+    /// In-memory database (also inside the router's state) for direct
+    /// seeding/inspection in tests.
+    db: Arc<Database>,
     /// Keeps the mock app (event loop owner) and the temp token-store dir
     /// alive for the lifetime of the test.
     _app: tauri::App<tauri::test::MockRuntime>,
@@ -35,12 +38,17 @@ struct TestApp {
 
 async fn test_app() -> TestApp {
     let db = Arc::new(Database::open_in_memory().expect("in-memory db"));
+    let db_for_app = Arc::clone(&db);
     let tmp = tempfile::tempdir().expect("tempdir");
     let tokens =
         Arc::new(TokenStore::open(tmp.path().join("tokens.db"), &[7u8; 32]).expect("token store"));
     let issued = tokens.issue("route-tests").expect("issue token");
     let tokens_for_state = Arc::clone(&tokens);
     let app = tauri::test::mock_app();
+    let jobs = Arc::new(super::mobile::JobRegistry::new());
+    // Same bridge the real spawn() installs — lets tests drive the registry
+    // by emitting pipeline/generation events the way the commands do.
+    super::mobile::attach_event_forwarders(app.handle(), &jobs);
     let state = ApiState {
         db,
         tokens: tokens_for_state,
@@ -53,11 +61,13 @@ async fn test_app() -> TestApp {
         fail_limiter: Arc::new(std::sync::Mutex::new(
             medical_security::rate_limiter::RateLimiter::new(5),
         )),
+        jobs,
     };
     TestApp {
         router: build_router(state),
         token: issued.token,
         tokens,
+        db: db_for_app,
         _app: app,
         _tmp: tmp,
     }
@@ -404,4 +414,351 @@ async fn condition_chips_sync_merges_and_returns_full_list() {
         stored["deleted_at"].is_string(),
         "tombstoned chip must carry deleted_at: {stored}"
     );
+}
+
+// ── Mobile API ───────────────────────────────────────────────────────────────
+
+mod mobile_api_tests {
+    use super::*;
+    use tauri::Emitter as _;
+
+    /// Insert a recording row directly for document/export tests.
+    fn seed_recording(app: &TestApp, transcript: Option<&str>) -> String {
+        let conn = app.db.conn().expect("conn");
+        let mut rec = medical_core::types::recording::Recording::new(
+            "consult.wav",
+            std::path::PathBuf::from("/tmp/consult.wav"),
+        );
+        rec.transcript = transcript.map(|s| s.to_string());
+        medical_db::recordings::RecordingsRepo::insert(&conn, &rec).expect("seed insert");
+        rec.id.to_string()
+    }
+
+    /// One-shot raw-bytes request (export responses are not JSON).
+    async fn req_bytes(app: &TestApp, uri: &str, bearer: Option<&str>) -> (StatusCode, Vec<u8>) {
+        let mut builder = Request::builder().method("GET").uri(uri).header(
+            "authorization",
+            format!("Bearer {}", bearer.expect("bearer")),
+        );
+        builder = builder.header("content-type", "application/json");
+        let response = app
+            .router
+            .clone()
+            .oneshot(builder.body(Body::empty()).expect("request"))
+            .await
+            .expect("router responds");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .expect("body");
+        (status, bytes.to_vec())
+    }
+
+    #[tokio::test]
+    async fn create_recording_roundtrip() {
+        let app = test_app().await;
+        let (status, body) = req(
+            &app,
+            "POST",
+            "/v1/recordings",
+            authed(&app),
+            Some(json!({"filename": "consult-2026-09-06.wav", "duration_seconds": 91.5})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "create: {body}");
+        let id = body["id"].as_str().expect("id").to_string();
+        assert!(uuid::Uuid::parse_str(&id).is_ok(), "server-minted uuid");
+
+        // Duplicate id → 409.
+        let (status, _) = req(
+            &app,
+            "POST",
+            "/v1/recordings",
+            authed(&app),
+            Some(json!({"id": id, "filename": "again.wav"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // Validation: empty filename → 400.
+        let (status, _) = req(
+            &app,
+            "POST",
+            "/v1/recordings",
+            authed(&app),
+            Some(json!({"filename": "   "})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn job_status_requires_known_job() {
+        let app = test_app().await;
+        let rid = uuid::Uuid::new_v4().to_string();
+        let (status, _) = req(&app, "GET", &format!("/v1/jobs/{rid}"), authed(&app), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn pipeline_events_drive_job_registry() {
+        let app = test_app().await;
+        let rid = uuid::Uuid::new_v4().to_string();
+
+        // The commands emit these exact payload shapes — mirror them.
+        app._app
+            .emit(
+                "pipeline-progress",
+                serde_json::json!({"recording_id": rid, "stage": "transcribing", "error": null}),
+            )
+            .unwrap();
+        // Events dispatch synchronously on the mock runtime's listeners?
+        // Give the (same-thread) dispatch a tick to land.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let (status, body) = req(&app, "GET", &format!("/v1/jobs/{rid}"), authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "status: {body}");
+        assert_eq!(body["stage"], "transcribing");
+
+        // Terminal state, then SSE payload must NOT carry error text.
+        app._app
+            .emit(
+                "pipeline-progress",
+                serde_json::json!({"recording_id": rid, "stage": "failed", "error": "PHI-ADJACENT diagnostic"}),
+            )
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let (status, body) = req(&app, "GET", &format!("/v1/jobs/{rid}"), authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["stage"], "failed");
+        // GET (authenticated) carries the error; the registry stores it.
+        assert_eq!(body["error"], "PHI-ADJACENT diagnostic");
+    }
+
+    #[tokio::test]
+    async fn generation_event_maps_started_to_generating_doc() {
+        let app = test_app().await;
+        let rid = uuid::Uuid::new_v4().to_string();
+        app._app
+            .emit(
+                "generation-progress",
+                serde_json::json!({
+                    "type": "synopsis",
+                    "status": "started",
+                    "recording_id": rid,
+                    "progress": null
+                }),
+            )
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let (status, body) = req(&app, "GET", &format!("/v1/jobs/{rid}"), authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "status: {body}");
+        assert_eq!(body["stage"], "generating_synopsis");
+    }
+
+    #[tokio::test]
+    async fn document_get_put_roundtrip_and_revision() {
+        let app = test_app().await;
+        let rid = seed_recording(&app, Some("Patient reports headache."));
+        let uri = format!("/v1/recordings/{rid}/documents/soap_note_field_alias");
+        let _ = uri; // placeholder to keep assertions explicit below
+        let uri = format!("/v1/recordings/{rid}/documents/soap");
+        let (status, body) = req(&app, "GET", &uri, authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "get: {body}");
+        assert_eq!(body["doc_type"], "soap");
+        assert_eq!(
+            body["content"],
+            serde_json::Value::Null,
+            "not generated yet"
+        );
+
+        let (status, _) = req(
+            &app,
+            "PUT",
+            &uri,
+            authed(&app),
+            Some(json!({"content": "S: edited on phone"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Read back + per-field sync revision present.
+        let (status, body) = req(&app, "GET", &uri, authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["content"], "S: edited on phone");
+        assert!(
+            body["updated_at"].is_string(),
+            "field revision or row stamp must be set: {body}"
+        );
+
+        // Invalid doc type → 400; unknown recording → 404.
+        let (status, _) = req(
+            &app,
+            "GET",
+            &format!("/v1/recordings/{rid}/documents/nonsense"),
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let ghost = uuid::Uuid::new_v4().to_string();
+        let (status, _) = req(
+            &app,
+            "GET",
+            &format!("/v1/recordings/{ghost}/documents/soap"),
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn synopsis_document_roundtrip_via_metadata() {
+        let app = test_app().await;
+        let rid = seed_recording(&app, Some("Patient reports headache."));
+
+        let uri = format!("/v1/recordings/{rid}/documents/synopsis");
+        let (status, _) = req(
+            &app,
+            "PUT",
+            &uri,
+            authed(&app),
+            Some(json!({"content": "Brief: tension headache, follow up 2 weeks."})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, body) = req(&app, "GET", &uri, authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "get: {body}");
+        assert_eq!(
+            body["content"],
+            "Brief: tension headache, follow up 2 weeks."
+        );
+    }
+
+    #[tokio::test]
+    async fn export_returns_pdf_and_docx_bytes() {
+        let app = test_app().await;
+        let rid = seed_recording(&app, Some("Patient reports headache."));
+        // Seed a SOAP note for export.
+        {
+            let uuid = uuid::Uuid::parse_str(&rid).unwrap();
+            let conn = app.db.conn().expect("conn");
+            let mut rec =
+                medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid).expect("recording");
+            rec.soap_note = Some("S: Headache\nA: Tension\nP: Follow up".to_string());
+            medical_db::recordings::RecordingsRepo::update(&conn, &rec).expect("update");
+        }
+
+        let pdf = req_bytes(
+            &app,
+            &format!("/v1/recordings/{rid}/export?format=pdf&doc_type=soap"),
+            authed(&app),
+        )
+        .await;
+        assert_eq!(pdf.0, StatusCode::OK);
+        assert!(pdf.1.starts_with(b"%PDF-"), "PDF magic");
+        assert!(pdf.1.len() > 500, "non-trivial PDF");
+
+        let docx = req_bytes(
+            &app,
+            &format!("/v1/recordings/{rid}/export?format=docx&doc_type=soap"),
+            authed(&app),
+        )
+        .await;
+        assert_eq!(docx.0, StatusCode::OK);
+        assert!(docx.1.starts_with(&[0x50, 0x4B]), "DOCX/ZIP magic");
+
+        // Synopsis export via metadata.
+        {
+            let uuid = uuid::Uuid::parse_str(&rid).unwrap();
+            let conn = app.db.conn().expect("conn");
+            let mut rec =
+                medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid).expect("recording");
+            rec.metadata = serde_json::json!({"synopsis": "Brief synopsis text."});
+            medical_db::recordings::RecordingsRepo::update(&conn, &rec).expect("update");
+        }
+        let syn = req_bytes(
+            &app,
+            &format!("/v1/recordings/{rid}/export?format=pdf&doc_type=synopsis"),
+            authed(&app),
+        )
+        .await;
+        assert_eq!(syn.0, StatusCode::OK, "synopsis export: status");
+        assert!(syn.1.starts_with(b"%PDF-"));
+
+        // Missing content → 404, missing recording → 404, bad format → 400.
+        let peer = req_bytes(
+            &app,
+            &format!("/v1/recordings/{rid}/export?format=pdf&doc_type=peer_discussion"),
+            authed(&app),
+        )
+        .await;
+        assert_eq!(peer.0, StatusCode::NOT_FOUND);
+        let ghost = uuid::Uuid::new_v4().to_string();
+        let (status, _) = req(
+            &app,
+            "GET",
+            &format!("/v1/recordings/{ghost}/export?format=pdf&doc_type=soap"),
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = req(
+            &app,
+            "GET",
+            &format!("/v1/recordings/{rid}/export?format=rtf&doc_type=soap"),
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn devices_self_revoke_invalidates_bearer() {
+        let app = test_app().await;
+        // Sanity: token works.
+        let (status, _) = req(&app, "GET", "/v1/vocabulary", authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, _) = req(&app, "POST", "/v1/devices/self", authed(&app), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The same token now 401s everywhere (revocation is the boundary).
+        let (status, _) = req(&app, "GET", "/v1/vocabulary", authed(&app), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn mobile_routes_require_auth() {
+        // (method, uri) pairs — POST-only routes must be probed with POST;
+        // axum answers 405 (not 401) for a wrong method before any handler.
+        for (method, uri, body) in [
+            ("POST", "/v1/recordings", Some(json!({"filename": "x.wav"}))),
+            ("GET", "/v1/jobs/00000000-0000-0000-0000-000000000000", None),
+            (
+                "GET",
+                "/v1/jobs/00000000-0000-0000-0000-000000000000/events",
+                None,
+            ),
+            (
+                "GET",
+                "/v1/recordings/00000000-0000-0000-0000-000000000000/documents/soap",
+                None,
+            ),
+            (
+                "GET",
+                "/v1/recordings/00000000-0000-0000-0000-000000000000/export?format=pdf&doc_type=soap",
+                None,
+            ),
+            ("POST", "/v1/devices/self", None),
+        ] {
+            let app = test_app().await;
+            let (status, _) = req(&app, method, uri, None, body).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "no bearer on {uri}");
+        }
+    }
 }
