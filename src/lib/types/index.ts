@@ -164,6 +164,12 @@ export interface AppConfig {
   medical_dict_enabled: boolean;
   max_speakers: number | null;
   custom_context_templates: ContextTemplate[];
+  /** Selected specialty prompt-pack id; null = built-in family-medicine
+   *  defaults. The pack's per-doc-type prompt artifacts override the
+   *  built-ins (assembled with a compiled-in safety block) but LOSE to the
+   *  per-doc-type custom_*_prompt overrides below. Mirrors
+   *  `specialty: Option<String>` in crates/core/src/types/settings.rs. */
+  specialty: string | null;
   custom_soap_prompt: string | null;
   custom_referral_prompt: string | null;
   custom_letter_prompt: string | null;

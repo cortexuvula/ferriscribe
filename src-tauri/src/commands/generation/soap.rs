@@ -10,12 +10,15 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+use super::super::specialty::resolve_specialty_prompt;
 use super::helpers::{
     acquire_generation_lock, build_completion_request, ensure_nonempty_output,
     ensure_prompt_within_cap, load_recording_and_settings, patient_context_is_empty,
     require_transcript, resolve_provider, resolve_soap_template, run_generation_command,
     stream_with_events, validate_patient_context,
 };
+
+use medical_processing::specialty::DocType as PackDocType;
 
 /// Generate a SOAP note from a recording's transcript.
 ///
@@ -127,6 +130,7 @@ async fn generate_soap_inner(
         template: soap_template,
         icd_version: settings.icd_version,
         custom_prompt: settings.custom_soap_prompt,
+        specialty_prompt: resolve_specialty_prompt(state, &config, PackDocType::Soap).await?,
         icd9_candidates,
     };
 

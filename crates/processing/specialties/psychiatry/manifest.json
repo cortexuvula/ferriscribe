@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "psychiatry",
+  "name": "Psychiatry",
+  "version": "1.0.0",
+  "description": "Psychiatric-interview SOAP notes: psychiatric history, Mental Status Examination, and risk assessment as transcript-supported sections. Referral, letter, synopsis, and peer-discussion documents keep the built-in prompts.",
+  "prompts": {
+    "soap": "soap_prompt.md"
+  }
+}

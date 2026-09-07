@@ -123,6 +123,7 @@ pub async fn save_settings(
     validate_prompt_overrides(&config)?;
     super::screenshot_ocr::validate_hotkey(&config)?;
     let db = state.db.clone();
+    let data_dir = state.data_dir.clone();
     // Host validation may resolve DNS — blocking — so it rides along in the
     // same spawn_blocking as the save. The closure takes its own clone so
     // `config` stays available for the post-save hotkey re-registration.
@@ -147,7 +148,17 @@ pub async fn save_settings(
             .map_err(|e| AppError::invalid_endpoint_for(e, field))?;
         }
 
+        // Specialty selection: only a CHANGED id must resolve — a pack that
+        // vanished after being chosen must never block unrelated saves
+        // (generation falls back to built-ins; the Prompts pane warns).
         let conn = db.conn()?;
+        let previous = SettingsRepo::load_config(&conn)?;
+        super::specialty::validate_specialty_selection(
+            previous.specialty.as_deref(),
+            &config_to_save,
+            &data_dir,
+        )?;
+
         SettingsRepo::save_config(&conn, &config_to_save).map_err(AppError::from)
     })
     .await

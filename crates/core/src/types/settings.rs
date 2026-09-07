@@ -490,6 +490,13 @@ pub struct AppConfig {
     // Templates
     #[serde(default = "default_soap_template")]
     pub soap_template: SoapTemplate,
+    /// Selected specialty prompt pack (`medical_processing::specialty` pack
+    /// `id`). `None`/empty = the built-in family-medicine defaults. The
+    /// selected pack's per-doc-type prompt artifacts override the built-in
+    /// prompts (assembled with the compiled-in safety block) but LOSE to the
+    /// per-doc-type `custom_*_prompt` free-text overrides below.
+    #[serde(default)]
+    pub specialty: Option<String>,
     #[serde(default)]
     pub custom_soap_prompt: Option<String>,
     #[serde(default)]

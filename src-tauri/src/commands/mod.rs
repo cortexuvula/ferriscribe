@@ -20,6 +20,7 @@ pub mod recovery;
 pub mod screenshot_ocr;
 pub mod settings;
 pub mod sharing;
+pub mod specialty;
 pub mod support;
 pub mod training_corpus;
 pub mod training_corpus_export;

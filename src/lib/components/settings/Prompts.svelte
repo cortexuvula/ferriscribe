@@ -2,6 +2,14 @@
   import { onDestroy, untrack } from 'svelte';
   import { settings } from '../../stores/settings.svelte';
   import { getDefaultPrompt, type DocType } from '../../api/prompts';
+  import { listSpecialtyPacks, type SpecialtyPackInfo } from '../../api/specialty';
+  import {
+    activePack,
+    activeSource,
+    conflictingDocTypes,
+    packProvides,
+    sourceLabel,
+  } from '../../utils/specialtyPacks';
   import { toasts } from '../../stores/toasts.svelte';
   import { confirmDialog } from '../../stores/confirm.svelte';
   import { formatError } from '../../types/errors';
@@ -22,6 +30,7 @@
         { token: '{icd_label}', description: 'ICD code header line (from ICD version setting)' },
         { token: '{icd_instruction}', description: 'Inline ICD reference phrase' },
         { token: '{template_guidance}', description: 'SOAP template hint (FollowUp, NewPatient, etc.)' },
+        { token: '{icd_candidates}', description: 'BC MSP candidate-code list (ICD-9/both modes)' },
       ],
     },
     {
@@ -68,6 +77,84 @@
   // Handle for the "saved → idle" status timer; tracked so it can be cleared
   // on unmount and on rapid re-saves instead of firing on a stale closure.
   let promptStatusTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // ---- Specialty packs ----
+  let packs = $state<SpecialtyPackInfo[]>([]);
+  let packsLoadError = $state<string | null>(null);
+
+  async function loadPacks() {
+    try {
+      packs = await listSpecialtyPacks();
+      packsLoadError = null;
+    } catch (e) {
+      console.error('Failed to list specialty packs:', e);
+      packsLoadError = formatError(e);
+    }
+  }
+
+  /** The pack serving the currently selected specialty (user packs already
+   *  override bundled same-id packs on the backend). */
+  const selectedPack = $derived(activePack(packs, settings.state?.specialty));
+
+  /** True when the stored specialty id no longer resolves to a usable pack
+   *  (uninstalled or broken since it was saved). */
+  const specialtyMissing = $derived.by(() => {
+    const id = settings.state?.specialty?.trim();
+    if (!id) return false;
+    return !packs.some((p) => p.id === id && !p.error);
+  });
+
+  /** Value bound to the specialty <select>. The bundled family-medicine
+   *  pack is not listed separately — it IS the "Default" option — so an
+   *  explicit family-medicine selection displays as Default (a user pack
+   *  overriding that id still lists and selects normally). */
+  const specialtySelectValue = $derived.by(() => {
+    const id = settings.state?.specialty;
+    if (!id) return '';
+    if (
+      id === 'family-medicine' &&
+      !packs.some((p) => p.id === 'family-medicine' && p.source === 'user')
+    ) {
+      return '';
+    }
+    return id;
+  });
+
+  const specialtyConflicts = $derived(
+    selectedPack
+      ? conflictingDocTypes(
+          {
+            soap: settings.state?.custom_soap_prompt,
+            referral: settings.state?.custom_referral_prompt,
+            letter: settings.state?.custom_letter_prompt,
+            synopsis: settings.state?.custom_synopsis_prompt,
+            peer_discussion: settings.state?.custom_peer_discussion_prompt,
+          },
+          selectedPack,
+        )
+      : [],
+  );
+
+  async function handleSpecialtyChange(event: Event) {
+    const value = (event.currentTarget as HTMLSelectElement).value;
+    try {
+      await settings.updateField('specialty', value === '' ? null : value);
+    } catch (e) {
+      console.error('Failed to save specialty:', e);
+      toasts.error(`Could not save the specialty: ${formatError(e)}`);
+    }
+  }
+
+  function packDocLabels(packInfo: SpecialtyPackInfo): string {
+    const labels: Record<DocType, string> = {
+      soap: 'SOAP',
+      referral: 'Referral',
+      letter: 'Letter',
+      synopsis: 'Synopsis',
+      peer_discussion: 'Peer Discussion',
+    };
+    return packInfo.provided_prompts.map((d) => labels[d]).join(', ');
+  }
 
   onDestroy(() => {
     if (promptStatusTimer) clearTimeout(promptStatusTimer);
@@ -192,6 +279,10 @@
   }
 
   $effect(() => {
+    loadPacks();
+  });
+
+  $effect(() => {
     loadPromptEditor(activePromptKey);
   });
 </script>
@@ -202,6 +293,67 @@
     View and customize the system prompts sent to the AI for each document type.
     Placeholder tokens are substituted at generation time.
   </p>
+
+  <div class="specialty-section">
+    <h3>Specialty</h3>
+    <p class="section-description">
+      Select a specialty prompt pack to tailor every generated document. A
+      locked anti-fabrication safety block is always appended to pack prompts
+      and cannot be altered. Packs are read from the app's local
+      <code>specialties</code> folder only — nothing is downloaded.
+    </p>
+
+    <select
+      class="specialty-select"
+      value={specialtySelectValue}
+      onchange={handleSpecialtyChange}
+    >
+      <option value="">Default — Family Medicine (built-in)</option>
+      {#each packs.filter((p) => !p.error && !(p.id === 'family-medicine' && p.source === 'bundled')) as packInfo (packInfo.id)}
+        <option value={packInfo.id}>
+          {packInfo.name} — v{packInfo.version} ({packInfo.source})
+        </option>
+      {/each}
+      {#if settings.state?.specialty && specialtyMissing}
+        <option value={settings.state.specialty}>
+          {settings.state.specialty} (missing)
+        </option>
+      {/if}
+    </select>
+
+    {#if packsLoadError}
+      <p class="specialty-warning">
+        Could not load specialty packs: {packsLoadError}
+      </p>
+    {:else if specialtyMissing}
+      <p class="specialty-warning">
+        The selected specialty pack is missing or broken — the built-in
+        prompts are used until it is restored or the selection is changed.
+      </p>
+    {:else if selectedPack}
+      <div class="specialty-details">
+        <p class="specialty-description">{selectedPack.description}</p>
+        <p class="specialty-meta">
+          Provides prompts for: {packDocLabels(selectedPack)}.
+          Document types without a pack prompt use the built-in default.
+        </p>
+      </div>
+      {#if specialtyConflicts.length > 0}
+        <p class="specialty-warning">
+          Custom prompts are set for
+          {specialtyConflicts.map((doc) => PROMPT_TYPES.find((pt) => pt.key === doc)?.label).join(', ')}
+          — they override the {selectedPack.name} pack for those documents.
+          Reset them below to use the pack.
+        </p>
+      {/if}
+    {/if}
+
+    {#each packs.filter((pk) => pk.error) as broken (broken.name)}
+      <p class="specialty-warning">
+        Pack folder “{broken.name}” could not be loaded: {broken.error}
+      </p>
+    {/each}
+  </div>
 
   <div class="prompts-layout">
     <aside class="prompts-sidebar">
@@ -245,10 +397,25 @@
           </details>
         {/if}
 
+        {@const currentCustom = settings.state?.[info?.configField ?? 'custom_soap_prompt']}
+        {@const currentSource = activeSource(activePromptKey, currentCustom, selectedPack)}
         <div class="prompts-status">
-          Using: <strong>{promptIsCustom ? 'custom' : 'default'}</strong>
+          Using: <strong>{sourceLabel(currentSource, selectedPack)}</strong>
           {#if promptDirty}<span class="dirty-indicator"> (unsaved changes)</span>{/if}
         </div>
+        {#if currentSource === 'custom' && packProvides(selectedPack, activePromptKey)}
+          <p class="specialty-warning">
+            This custom prompt overrides the {selectedPack?.name} pack for this
+            document type. Reset to the default to use the pack.
+          </p>
+        {:else if currentSource === 'pack'}
+          <p class="specialty-note">
+            The {selectedPack?.name} pack prompt is active for this document
+            type — the text above is the built-in default, not the pack.
+            Editing and saving it creates a custom prompt that overrides the
+            pack.
+          </p>
+        {/if}
 
         <div class="prompts-actions">
           <button
@@ -272,6 +439,60 @@
 </section>
 
 <style>
+  .specialty-section {
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .specialty-section h3 {
+    margin: 0;
+  }
+
+  .specialty-select {
+    max-width: 380px;
+    padding: 0.4rem 0.5rem;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.9rem;
+  }
+
+  .specialty-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .specialty-description {
+    margin: 0;
+    color: var(--text-primary);
+  }
+
+  .specialty-meta {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+  }
+
+  .specialty-note {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+  }
+
+  .specialty-warning {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--warning);
+  }
+
   .prompts-layout {
     display: grid;
     grid-template-columns: 160px 1fr;

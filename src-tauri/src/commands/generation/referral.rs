@@ -5,10 +5,13 @@ use medical_processing::document_generator;
 
 use crate::state::AppState;
 
+use super::super::specialty::resolve_specialty_prompt;
 use super::helpers::{
     acquire_generation_lock, ensure_prompt_within_cap, fresh_stats_patch, generate_from_soap,
     load_recording_and_settings, persist_producer_patch, run_generation_command,
 };
+
+use medical_processing::specialty::DocType as PackDocType;
 
 /// Generate a referral letter from a recording's SOAP note.
 ///
@@ -36,6 +39,8 @@ pub async fn generate_referral(
         // Same generation-time cap every custom prompt gets — covers configs
         // that arrived via sync.
         ensure_prompt_within_cap(settings.custom_referral_prompt.as_deref(), "referral")?;
+        let specialty_body =
+            resolve_specialty_prompt(&state, &config, PackDocType::Referral).await?;
 
         let recipient = recipient.clone();
         let urg = urg.clone();
@@ -55,6 +60,7 @@ pub async fn generate_referral(
                     &recipient,
                     &urg,
                     settings.custom_referral_prompt.as_deref(),
+                    specialty_body.as_deref(),
                     ctx2.as_deref(),
                 )
             },
@@ -124,6 +130,7 @@ mod preflight_tests {
                     "routine",
                     settings.custom_referral_prompt.as_deref(),
                     None,
+                    None,
                 )
             },
             |rec, text| {
@@ -191,6 +198,7 @@ mod stats_tests {
                     "Specialist",
                     "routine",
                     settings.custom_referral_prompt.as_deref(),
+                    None,
                     None,
                 )
             },

@@ -40,6 +40,7 @@ const defaults: AppConfig = {
   medical_dict_enabled: true,
   max_speakers: 3,
   custom_context_templates: [],
+  specialty: null,
   custom_soap_prompt: null,
   custom_referral_prompt: null,
   custom_letter_prompt: null,

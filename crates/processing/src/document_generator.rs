@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use chrono::Local;
 
 use crate::prompt_resolver::resolve_prompt;
+use crate::specialty::assemble_pack_prompt;
 
 // ---------------------------------------------------------------------------
 // Letter audience context
@@ -88,6 +89,33 @@ pub(crate) fn inject_context(user_prompt: &str, context: Option<&str>) -> String
 // ---------------------------------------------------------------------------
 // Default templates
 // ---------------------------------------------------------------------------
+
+/// Resolve a system prompt with the specialty-pack precedence:
+///
+/// 1. `custom_template` (the user's stored free-text override) — wins
+///    outright, verbatim (no safety block appended; unchanged historical
+///    behaviour for custom prompts).
+/// 2. `specialty_body` (the selected pack's artifact for this doc type) —
+///    assembled as `[pack prompt] + --- + SAFETY_BLOCK`.
+/// 3. `default_template` — the Rust default, verbatim (unchanged; packs are
+///    opt-in per doc type, so no pack means today's prompt exactly).
+///
+/// Placeholders resolve identically in every tier.
+fn resolve_system_with_specialty(
+    custom_template: Option<&str>,
+    specialty_body: Option<&str>,
+    default_template: &str,
+    placeholders: &HashMap<&str, String>,
+) -> String {
+    if let Some(custom) = custom_template.filter(|s| !s.is_empty()) {
+        return resolve_prompt(custom, placeholders);
+    }
+    let template = match specialty_body.filter(|s| !s.is_empty()) {
+        Some(body) => assemble_pack_prompt(body),
+        None => default_template.to_string(),
+    };
+    resolve_prompt(&template, placeholders)
+}
 
 /// Returns the built-in default referral letter system prompt template.
 ///
@@ -161,27 +189,31 @@ pub fn default_letter_from_document_prompt() -> &'static str {
 ///
 /// # Template Resolution
 ///
-/// If `custom_template` is provided and non-empty, it is used in place of
+/// Precedence: `custom_template` (user free-text, verbatim) >
+/// `specialty_body` (pack prompt + safety block) >
 /// [`default_referral_prompt`]. The `{recipient_type}` and `{urgency}`
-/// placeholders are resolved via [`resolve_prompt`].
+/// placeholders are resolved via [`resolve_prompt`] in every tier.
 ///
 /// The user prompt includes the current date/time and the full SOAP note.
+#[allow(clippy::too_many_arguments)]
 pub fn build_referral_prompt(
     soap_note: &str,
     recipient_type: &str,
     urgency: &str,
     custom_template: Option<&str>,
+    specialty_body: Option<&str>,
     context: Option<&str>,
 ) -> (String, String) {
-    let template = custom_template
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default_referral_prompt());
-
     let mut placeholders = HashMap::new();
     placeholders.insert("recipient_type", recipient_type.to_string());
     placeholders.insert("urgency", urgency.to_string());
 
-    let system = resolve_prompt(template, &placeholders);
+    let system = resolve_system_with_specialty(
+        custom_template,
+        specialty_body,
+        default_referral_prompt(),
+        &placeholders,
+    );
 
     let time_date = format_now_for_prompt();
     let user = format!(
@@ -209,16 +241,20 @@ pub fn build_referral_prompt(
 ///    `{time_date}` placeholders resolved).
 /// 2. If `audience` is provided but has no `user_template`, use the audience's
 ///    `system_prompt` and the default user template with the audience name.
-/// 3. If `audience` is `None`, fall back to legacy behaviour: use
-///    `custom_template` if provided, otherwise the default letter prompt.
+/// 3. If `audience` is `None`, fall back to legacy behaviour with the
+///    specialty-pack precedence (`custom_template` user free-text verbatim,
+///    then `specialty_body` pack prompt + safety block, then
+///    [`default_letter_prompt`]).
 ///
-/// **Note:** when an audience is provided, `custom_template` is ignored —
-/// audience-specific prompts take precedence.
+/// **Note:** when an audience is provided, `custom_template` AND
+/// `specialty_body` are both ignored — the explicitly chosen audience
+/// prompt takes precedence over stored settings.
 pub fn build_letter_prompt(
     soap_note: &str,
     letter_type: &str,
     audience: Option<&LetterAudienceContext>,
     custom_template: Option<&str>,
+    specialty_body: Option<&str>,
     context: Option<&str>,
 ) -> (String, String) {
     let time_date = format_now_for_prompt();
@@ -249,12 +285,13 @@ pub fn build_letter_prompt(
         return (system, inject_context(&user, context));
     }
 
-    // Case 3: no audience — legacy behaviour
-    let template = custom_template
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default_letter_prompt());
-
-    let system = resolve_prompt(template, &placeholders);
+    // Case 3: no audience — legacy behaviour with specialty precedence
+    let system = resolve_system_with_specialty(
+        custom_template,
+        specialty_body,
+        default_letter_prompt(),
+        &placeholders,
+    );
 
     let user = format!(
         "Please write a {letter_type} letter for the patient based on the following SOAP \
@@ -378,22 +415,26 @@ pub fn strip_markdown(text: &str) -> String {
 
 /// Build `(system_prompt, user_prompt)` for generating a brief SOAP synopsis.
 ///
-/// If `custom_template` is provided and non-empty, it replaces
-/// [`default_synopsis_prompt`]. The synopsis template has no placeholders.
+/// Precedence: `custom_template` (user free-text, verbatim) >
+/// `specialty_body` (pack prompt + safety block) >
+/// [`default_synopsis_prompt`]. The synopsis default has no placeholders;
+/// unknown `{tokens}` in custom or pack bodies remain visible.
 ///
 /// The user prompt includes the current date/time and the full SOAP note,
 /// with an instruction to summarise in under 200 words.
 pub fn build_synopsis_prompt(
     soap_note: &str,
     custom_template: Option<&str>,
+    specialty_body: Option<&str>,
     context: Option<&str>,
 ) -> (String, String) {
-    let template = custom_template
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default_synopsis_prompt());
-
     // Synopsis template has no placeholders; pass empty map.
-    let system = resolve_prompt(template, &HashMap::new());
+    let system = resolve_system_with_specialty(
+        custom_template,
+        specialty_body,
+        default_synopsis_prompt(),
+        &HashMap::new(),
+    );
 
     let time_date = format_now_for_prompt();
     let user = format!(
@@ -513,7 +554,8 @@ mod tests {
     #[test]
     fn referral_default_contains_recipient_and_urgency() {
         let soap = "S: Chest pain\nO: BP 140/90\nA: Hypertension\nP: Refer to Cardiology";
-        let (system, user) = build_referral_prompt(soap, "Cardiologist", "urgent", None, None);
+        let (system, user) =
+            build_referral_prompt(soap, "Cardiologist", "urgent", None, None, None);
 
         assert!(system.contains("Cardiologist"));
         assert!(system.contains("urgent"));
@@ -528,7 +570,7 @@ mod tests {
         let soap = "S: foo";
         let custom = "CUSTOM: Refer to {recipient_type} ({urgency})";
         let (system, _user) =
-            build_referral_prompt(soap, "Neurology", "routine", Some(custom), None);
+            build_referral_prompt(soap, "Neurology", "routine", Some(custom), None, None);
 
         assert!(system.starts_with("CUSTOM: Refer to Neurology (routine)"));
     }
@@ -536,14 +578,14 @@ mod tests {
     #[test]
     fn referral_empty_custom_falls_back_to_default() {
         let soap = "S: foo";
-        let (system, _user) = build_referral_prompt(soap, "Derm", "routine", Some(""), None);
+        let (system, _user) = build_referral_prompt(soap, "Derm", "routine", Some(""), None, None);
         assert!(system.contains("professional referral letters"));
     }
 
     #[test]
     fn letter_default_contains_type() {
         let soap = "S: Anxiety\nO: HR 90\nA: GAD\nP: CBT referral";
-        let (system, user) = build_letter_prompt(soap, "results", None, None, None);
+        let (system, user) = build_letter_prompt(soap, "results", None, None, None, None);
 
         assert!(system.contains("results"));
         assert!(!system.contains("{letter_type}"));
@@ -555,7 +597,8 @@ mod tests {
     fn letter_custom_template_overrides() {
         let soap = "S: foo";
         let custom = "CUSTOM: {letter_type} letter";
-        let (system, _user) = build_letter_prompt(soap, "follow-up", None, Some(custom), None);
+        let (system, _user) =
+            build_letter_prompt(soap, "follow-up", None, Some(custom), None, None);
         assert!(system.starts_with("CUSTOM: follow-up letter"));
     }
 
@@ -573,7 +616,7 @@ mod tests {
             ),
         };
         let (system, user) =
-            build_letter_prompt(soap, "medical report", Some(&audience), None, None);
+            build_letter_prompt(soap, "medical report", Some(&audience), None, None, None);
 
         assert!(system.contains("insurance company"));
         assert!(system.contains("factual and concise"));
@@ -592,7 +635,8 @@ mod tests {
                 .into(),
             user_template: None,
         };
-        let (system, user) = build_letter_prompt(soap, "fitness", Some(&audience), None, None);
+        let (system, user) =
+            build_letter_prompt(soap, "fitness", Some(&audience), None, None, None);
 
         assert!(system.contains("fitness for work"));
         // Default user template should include audience name
@@ -605,14 +649,15 @@ mod tests {
     fn letter_without_audience_uses_legacy_behavior() {
         let soap = "S: Back pain\nO: Limited flexion\nA: Lumbar strain\nP: Physio";
         // audience=None, custom_template=None -> default
-        let (system, user) = build_letter_prompt(soap, "results", None, None, None);
+        let (system, user) = build_letter_prompt(soap, "results", None, None, None, None);
         assert!(system.contains("patient-friendly"));
         assert!(user.contains("for the patient"));
         assert!(user.contains("results"));
 
         // audience=None, custom_template=Some -> custom
         let custom = "LEGACY CUSTOM: {letter_type}";
-        let (system2, _user2) = build_letter_prompt(soap, "summary", None, Some(custom), None);
+        let (system2, _user2) =
+            build_letter_prompt(soap, "summary", None, Some(custom), None, None);
         assert!(system2.starts_with("LEGACY CUSTOM: summary"));
     }
 
@@ -628,7 +673,7 @@ mod tests {
 
         // Even though custom_template is provided, audience takes precedence
         let (system, user) =
-            build_letter_prompt(soap, "referral", Some(&audience), Some(custom), None);
+            build_letter_prompt(soap, "referral", Some(&audience), Some(custom), None, None);
 
         assert!(system.contains("specialist colleague"));
         assert!(!system.contains("THIS CUSTOM TEMPLATE"));
@@ -640,7 +685,7 @@ mod tests {
     #[test]
     fn synopsis_default_mentions_word_limit() {
         let soap = "S: Patient reports fatigue\nO: Haemoglobin 9.0\nA: Iron deficiency anaemia";
-        let (system, user) = build_synopsis_prompt(soap, None, None);
+        let (system, user) = build_synopsis_prompt(soap, None, None, None);
         assert!(system.contains("200 words") || system.contains("200-word"));
         assert!(user.contains("Iron deficiency anaemia"));
         assert!(user.contains("Time") && user.contains("Date"));
@@ -649,7 +694,7 @@ mod tests {
     #[test]
     fn synopsis_custom_template_overrides() {
         let soap = "S: foo";
-        let (system, _user) = build_synopsis_prompt(soap, Some("CUSTOM SYNOPSIS"), None);
+        let (system, _user) = build_synopsis_prompt(soap, Some("CUSTOM SYNOPSIS"), None, None);
         assert!(system.starts_with("CUSTOM SYNOPSIS"));
     }
 
@@ -724,6 +769,7 @@ mod tests {
             "follow-up",
             None,
             None,
+            None,
             Some("Lab: HbA1c 7.2%"),
         );
         let _ = system;
@@ -743,7 +789,7 @@ mod tests {
 
     #[test]
     fn build_letter_prompt_without_context_omits_section() {
-        let (_system, user) = build_letter_prompt("SOAP", "follow-up", None, None, None);
+        let (_system, user) = build_letter_prompt("SOAP", "follow-up", None, None, None, None);
         assert!(
             !user.contains("Supporting Documents"),
             "no context should not add Supporting Documents section"
@@ -757,6 +803,7 @@ mod tests {
             "Specialist",
             "routine",
             None,
+            None,
             Some("Prior MRI report attached"),
         );
         assert!(user.contains("## Supporting Documents"));
@@ -765,14 +812,15 @@ mod tests {
 
     #[test]
     fn build_referral_prompt_without_context_omits_section() {
-        let (_system, user) = build_referral_prompt("SOAP", "Specialist", "routine", None, None);
+        let (_system, user) =
+            build_referral_prompt("SOAP", "Specialist", "routine", None, None, None);
         assert!(!user.contains("Supporting Documents"));
     }
 
     #[test]
     fn build_synopsis_prompt_with_context_prepends_supporting_documents() {
         let (_system, user) =
-            build_synopsis_prompt("SOAP content", None, Some("ECG: sinus rhythm"));
+            build_synopsis_prompt("SOAP content", None, None, Some("ECG: sinus rhythm"));
         assert!(user.contains("## Supporting Documents"));
         assert!(user.contains("ECG: sinus rhythm"));
         assert!(user.contains("SOAP content"));
@@ -780,7 +828,7 @@ mod tests {
 
     #[test]
     fn build_synopsis_prompt_without_context_omits_section() {
-        let (_system, user) = build_synopsis_prompt("SOAP", None, None);
+        let (_system, user) = build_synopsis_prompt("SOAP", None, None, None);
         assert!(!user.contains("Supporting Documents"));
     }
 

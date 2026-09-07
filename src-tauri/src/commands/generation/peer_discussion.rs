@@ -8,12 +8,15 @@ use tracing::{debug, info};
 
 use crate::state::AppState;
 
+use super::super::specialty::resolve_specialty_prompt;
 use super::helpers::{
     acquire_generation_lock, build_completion_request, ensure_nonempty_output,
     ensure_prompt_within_cap, fresh_stats_patch, load_recording_and_settings,
     persist_producer_patch, require_transcript, resolve_provider, run_generation_command,
     stream_with_events,
 };
+
+use medical_processing::specialty::DocType as PackDocType;
 
 /// Generate a peer discussion note from a recording's transcript.
 ///
@@ -105,6 +108,8 @@ async fn generate_peer_discussion_inner(
         specialty: specialty.to_string(),
         reason: reason.to_string(),
         custom_prompt: settings.custom_peer_discussion_prompt.clone(),
+        specialty_prompt: resolve_specialty_prompt(state, &config, PackDocType::PeerDiscussion)
+            .await?,
     };
 
     let system_prompt = peer_discussion::build_peer_discussion_prompt(&prompt_config);

@@ -31,4 +31,9 @@ pub struct PeerDiscussionPromptConfig {
     /// prompt-editor settings surface should set it; it is NOT
     /// sanitized because it IS the prompt.
     pub custom_prompt: Option<String>,
+    /// The selected specialty pack's peer-discussion prompt body, when a
+    /// specialty is selected and its pack provides one. Assembled with the
+    /// compiled-in safety block; loses to `custom_prompt`, wins over the
+    /// built-in default. `None` falls back to the default.
+    pub specialty_prompt: Option<String>,
 }

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "family-medicine",
+  "name": "Family Medicine",
+  "version": "1.0.0",
+  "description": "The built-in FerriScribe general-practice prompts. The SOAP prompt is the original hardened extraction instrument, carried over byte-for-byte from before specialty packs existed; the other document types use the built-in general-practice defaults.",
+  "prompts": {
+    "soap": "soap_prompt.md"
+  }
+}
