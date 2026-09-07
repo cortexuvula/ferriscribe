@@ -106,6 +106,20 @@ impl UserDictionaryRepo {
     ///
     /// Returns the active word list (`Vec<String>`) after merging.
     pub fn merge_incoming(conn: &Connection, remote: &[UserDictEntry]) -> DbResult<Vec<String>> {
+        Self::merge_incoming_detailed(conn, remote).map(|(words, _)| words)
+    }
+
+    /// [`Self::merge_incoming`] with a change report: the second element is
+    /// `true` when the merge actually wrote something (a new entry, a newer
+    /// remote entry, or a tie-break tombstone). The server sync handlers
+    /// use it to suppress the SSE `dict_changed` broadcast for no-op
+    /// merges — every client list pushes a full sync, so an unconditional
+    /// broadcast fed the feedback storm (each broadcast makes OTHER
+    /// clients re-list, which pushes again…).
+    pub fn merge_incoming_detailed(
+        conn: &Connection,
+        remote: &[UserDictEntry],
+    ) -> DbResult<(Vec<String>, bool)> {
         // Load all local entries once and index by sync_id for O(1) lookup.
         // The load runs INSIDE the transaction: two concurrent sync rounds
         // reading the same snapshot outside it could apply the older entry
@@ -115,16 +129,19 @@ impl UserDictionaryRepo {
         let local_map: std::collections::HashMap<&str, &UserDictEntry> =
             local_all.iter().map(|e| (e.id.as_str(), e)).collect();
 
+        let mut changed = false;
         for remote_entry in remote {
             match local_map.get(remote_entry.id.as_str()) {
                 None => {
                     // New entry — insert as-is (addition or tombstone).
                     Self::upsert(&tx, remote_entry)?;
+                    changed = true;
                 }
                 Some(local) => match remote_entry.updated_at.cmp(&local.updated_at) {
                     std::cmp::Ordering::Greater => {
                         // Remote is newer — remote wins.
                         Self::upsert(&tx, remote_entry)?;
+                        changed = true;
                     }
                     std::cmp::Ordering::Less => {
                         // Local is newer — local wins, do nothing.
@@ -133,6 +150,7 @@ impl UserDictionaryRepo {
                         // Tie — tombstone wins to avoid ghost reappearance.
                         if remote_entry.deleted_at.is_some() {
                             Self::upsert(&tx, remote_entry)?;
+                            changed = true;
                         }
                     }
                 },
@@ -140,7 +158,7 @@ impl UserDictionaryRepo {
         }
         tx.commit()?;
 
-        Self::list_active(conn)
+        Ok((Self::list_active(conn)?, changed))
     }
 
     /// Permanently delete tombstones whose `deleted_at` is older than
@@ -419,6 +437,49 @@ mod tests {
             "merging the same list twice must yield the same result"
         );
         assert_eq!(second.len(), 2);
+    }
+
+    /// The change report the server sync handlers use to suppress no-op
+    /// broadcasts: a no-op merge (nothing newer, nothing new) reports
+    /// `false`; a new entry, a newer remote entry, and a tie-break
+    /// tombstone each report `true`.
+    #[test]
+    fn merge_incoming_detailed_reports_changed_accurately() {
+        let conn = fresh();
+        let remote = vec![entry("Atenolol", 100, false)];
+
+        // New entry → changed.
+        let (_, changed) =
+            UserDictionaryRepo::merge_incoming_detailed(&conn, &remote).expect("first merge");
+        assert!(changed, "a new remote entry is a change");
+
+        // Same list again (stale/equal, not deleted) → no-op.
+        let (_, changed) =
+            UserDictionaryRepo::merge_incoming_detailed(&conn, &remote).expect("second merge");
+        assert!(!changed, "an identical re-sync must report no change");
+
+        // Older remote entry → local wins, no-op.
+        let older = vec![entry("Atenolol", 50, false)];
+        let (_, changed) =
+            UserDictionaryRepo::merge_incoming_detailed(&conn, &older).expect("older merge");
+        assert!(!changed, "a stale remote entry must not report a change");
+
+        // Newer remote entry → changed.
+        let newer = vec![entry("Atenolol", 300, false)];
+        let (_, changed) =
+            UserDictionaryRepo::merge_incoming_detailed(&conn, &newer).expect("newer merge");
+        assert!(changed, "a newer remote entry is a change");
+
+        // Tie-break tombstone → changed.
+        let tie_tomb = vec![entry("Atenolol", 300, true)];
+        let (_, changed) =
+            UserDictionaryRepo::merge_incoming_detailed(&conn, &tie_tomb).expect("tie merge");
+        assert!(changed, "a tie-breaking tombstone is a change");
+
+        // Empty remote list → no-op.
+        let (_, changed) =
+            UserDictionaryRepo::merge_incoming_detailed(&conn, &[]).expect("empty merge");
+        assert!(!changed, "an empty push must not report a change");
     }
 
     #[test]

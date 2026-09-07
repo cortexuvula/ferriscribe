@@ -149,12 +149,13 @@ pub(super) async fn dict_sync_handler<R: tauri::Runtime>(
     let cutoff = chrono::Utc::now() - chrono::Duration::days(365);
     let cutoff_iso = cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
-    let merged = tokio::task::spawn_blocking(
-        move || -> Result<Vec<String>, medical_core::error::AppError> {
+    let (merged, changed) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<String>, bool), medical_core::error::AppError> {
             let conn = db.conn()?;
-            let result =
-                medical_db::user_dictionary::UserDictionaryRepo::merge_incoming(&conn, &incoming)
-                    .map_err(medical_core::error::AppError::from)?;
+            let result = medical_db::user_dictionary::UserDictionaryRepo::merge_incoming_detailed(
+                &conn, &incoming,
+            )
+            .map_err(medical_core::error::AppError::from)?;
             // Best-effort prune — don't fail the sync if pruning errors.
             let _ = medical_db::user_dictionary::UserDictionaryRepo::prune_tombstones(
                 &conn,
@@ -174,14 +175,19 @@ pub(super) async fn dict_sync_handler<R: tauri::Runtime>(
     // never blocks the next concurrent dictionary merge.
     drop(merge_guard);
 
-    // Notify SSE subscribers that the dictionary changed. Best-effort: no
-    // receivers is not an error (send returns Err only when there are no
-    // active receivers, which is the normal idle case).
-    let _ = state.dict_changed_tx.send(());
+    // Notify SSE subscribers that the dictionary changed — but ONLY when
+    // the merge actually wrote something. Every client list pushes a full
+    // sync, so broadcasting on a no-op merge fed the feedback storm (each
+    // broadcast makes other clients re-list, which pushes again…).
+    // Best-effort: no receivers is not an error.
+    if changed {
+        let _ = state.dict_changed_tx.send(());
+    }
 
     info!(
         incoming_count,
         result_count = merged.len(),
+        changed,
         "dict_api: sync"
     );
     Ok(Json(merged))
@@ -224,21 +230,24 @@ pub(super) async fn dict_sync_full_handler<R: tauri::Runtime>(
     let cutoff = chrono::Utc::now() - chrono::Duration::days(365);
     let cutoff_iso = cutoff.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
-    let merged = tokio::task::spawn_blocking(
-        move || -> Result<Vec<medical_core::types::user_dict_entry::UserDictEntry>, medical_core::error::AppError> {
+    let (merged, changed) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<medical_core::types::user_dict_entry::UserDictEntry>, bool), medical_core::error::AppError> {
             let conn = db.conn()?;
             // Merge the client's list in (LWW; ties break toward the
-            // tombstone). The merge's return value is the ACTIVE list —
-            // discard it and serve the FULL list so tombstones travel.
-            medical_db::user_dictionary::UserDictionaryRepo::merge_incoming(&conn, &incoming)
+            // tombstone). The merge's ACTIVE-list return value is discarded
+            // — the FULL list is served so tombstones travel.
+            let (_, changed) = medical_db::user_dictionary::UserDictionaryRepo::merge_incoming_detailed(&conn, &incoming)
                 .map_err(medical_core::error::AppError::from)?;
             // Best-effort prune — don't fail the sync if pruning errors.
             let _ = medical_db::user_dictionary::UserDictionaryRepo::prune_tombstones(
                 &conn,
                 &cutoff_iso,
             );
-            medical_db::user_dictionary::UserDictionaryRepo::list_all(&conn)
-                .map_err(medical_core::error::AppError::from)
+            Ok((
+                medical_db::user_dictionary::UserDictionaryRepo::list_all(&conn)
+                    .map_err(medical_core::error::AppError::from)?,
+                changed,
+            ))
         },
     )
     .await
@@ -251,10 +260,13 @@ pub(super) async fn dict_sync_full_handler<R: tauri::Runtime>(
     // Release the merge lock before the SSE fan-out.
     drop(merge_guard);
 
-    // Notify SSE subscribers that the dictionary changed. Best-effort: no
-    // receivers is not an error (send returns Err only when there are no
-    // active receivers, which is the normal idle case).
-    let _ = state.dict_changed_tx.send(());
+    // Notify SSE subscribers that the dictionary changed — but ONLY when
+    // the merge actually wrote something (no-op merges must not broadcast;
+    // see the `/sync` handler for the feedback-storm rationale).
+    // Best-effort: no receivers is not an error.
+    if changed {
+        let _ = state.dict_changed_tx.send(());
+    }
 
     info!(
         incoming_count,
