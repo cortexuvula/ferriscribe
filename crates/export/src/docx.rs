@@ -70,6 +70,34 @@ impl DocxExporter {
         let date = recording.created_at.format("%Y-%m-%d").to_string();
         render_document("Letter", letter, &date)
     }
+
+    /// Exports the synopsis from a recording's metadata as a DOCX document.
+    ///
+    /// The synopsis has no dedicated column; it is stored under
+    /// `metadata.synopsis` by `generate_synopsis`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Docx`] if the metadata carries no synopsis.
+    pub fn export_synopsis(recording: &Recording) -> ExportResult<Vec<u8>> {
+        let synopsis = crate::synopsis_text(recording)
+            .ok_or_else(|| ExportError::Docx("Recording has no synopsis".to_string()))?;
+        let date = recording.created_at.format("%Y-%m-%d").to_string();
+        render_document("Synopsis", synopsis, &date)
+    }
+
+    /// Exports the peer-to-peer discussion note as a DOCX document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Docx`] if `recording.peer_discussion` is `None`.
+    pub fn export_peer_discussion(recording: &Recording) -> ExportResult<Vec<u8>> {
+        let discussion = recording.peer_discussion.as_deref().ok_or_else(|| {
+            ExportError::Docx("Recording has no peer discussion note".to_string())
+        })?;
+        let date = recording.created_at.format("%Y-%m-%d").to_string();
+        render_document("Peer Discussion", discussion, &date)
+    }
 }
 
 // ── Renderer ─────────────────────────────────────────────────────────────────
@@ -180,5 +208,51 @@ mod tests {
         let recording = Recording::new("empty.wav", PathBuf::from("/tmp/empty.wav"));
         let result = DocxExporter::export_letter(&recording);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn export_synopsis_produces_docx() {
+        // The synopsis lives in metadata (no dedicated column) — mirror what
+        // generate_synopsis persists.
+        let mut rec = Recording::new("visit.wav", PathBuf::from("/tmp/visit.wav"));
+        rec.metadata = serde_json::json!({ "synopsis": "Brief synopsis: tension headache." });
+        let bytes = DocxExporter::export_synopsis(&rec).expect("export OK");
+        assert!(bytes.starts_with(&[0x50, 0x4B]), "not a valid DOCX/ZIP");
+    }
+
+    #[test]
+    fn export_synopsis_without_synopsis_errors() {
+        let recording = Recording::new("empty.wav", PathBuf::from("/tmp/empty.wav"));
+        let result = DocxExporter::export_synopsis(&recording);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("synopsis"));
+    }
+
+    #[test]
+    fn export_synopsis_ignores_empty_string() {
+        // An empty-string synopsis must be treated as absent, not exported
+        // as a blank document.
+        let mut rec = Recording::new("empty.wav", PathBuf::from("/tmp/empty.wav"));
+        rec.metadata = serde_json::json!({ "synopsis": "" });
+        let result = DocxExporter::export_synopsis(&rec);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn export_peer_discussion_produces_docx() {
+        let mut rec = Recording::new("visit.wav", PathBuf::from("/tmp/visit.wav"));
+        rec.peer_discussion = Some("Discussion: recommend MRI to rule out pathology.".to_string());
+        let bytes = DocxExporter::export_peer_discussion(&rec).expect("export OK");
+        assert!(bytes.starts_with(&[0x50, 0x4B]), "not a valid DOCX/ZIP");
+    }
+
+    #[test]
+    fn export_peer_discussion_without_note_errors() {
+        let recording = Recording::new("empty.wav", PathBuf::from("/tmp/empty.wav"));
+        let result = DocxExporter::export_peer_discussion(&recording);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("peer discussion"));
     }
 }

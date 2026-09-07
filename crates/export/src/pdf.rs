@@ -66,6 +66,35 @@ impl PdfExporter {
         let date = recording.created_at.format("%Y-%m-%d").to_string();
         render_document("Letter", letter, &date)
     }
+
+    /// Exports the synopsis from a recording's metadata as a PDF document.
+    ///
+    /// The synopsis has no dedicated column; it is stored under
+    /// `metadata.synopsis` by `generate_synopsis`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Pdf`] if the metadata carries no synopsis.
+    pub fn export_synopsis(recording: &Recording) -> ExportResult<Vec<u8>> {
+        let synopsis = crate::synopsis_text(recording)
+            .ok_or_else(|| ExportError::Pdf("Recording has no synopsis".to_string()))?;
+        let date = recording.created_at.format("%Y-%m-%d").to_string();
+        render_document("Synopsis", synopsis, &date)
+    }
+
+    /// Exports the peer-to-peer discussion note as a PDF document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::Pdf`] if `recording.peer_discussion` is `None`.
+    pub fn export_peer_discussion(recording: &Recording) -> ExportResult<Vec<u8>> {
+        let discussion = recording
+            .peer_discussion
+            .as_deref()
+            .ok_or_else(|| ExportError::Pdf("Recording has no peer discussion note".to_string()))?;
+        let date = recording.created_at.format("%Y-%m-%d").to_string();
+        render_document("Peer Discussion", discussion, &date)
+    }
 }
 
 // ── Renderer ─────────────────────────────────────────────────────────────────
@@ -204,5 +233,47 @@ mod tests {
         let bytes = PdfExporter::export_soap(&rec).unwrap();
         assert!(bytes.len() > 100);
         assert_eq!(&bytes[0..5], b"%PDF-");
+    }
+
+    #[test]
+    fn export_synopsis_produces_pdf() {
+        let mut rec = Recording::new("visit.wav", PathBuf::from("/tmp/visit.wav"));
+        rec.metadata = serde_json::json!({ "synopsis": "Brief synopsis: tension headache." });
+        let bytes = PdfExporter::export_synopsis(&rec).expect("export OK");
+        assert!(bytes.starts_with(b"%PDF-"), "not a valid PDF");
+    }
+
+    #[test]
+    fn export_synopsis_without_synopsis_errors() {
+        let recording = Recording::new("empty.wav", PathBuf::from("/tmp/empty.wav"));
+        let result = PdfExporter::export_synopsis(&recording);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("synopsis"));
+    }
+
+    #[test]
+    fn export_synopsis_ignores_empty_string() {
+        let mut rec = Recording::new("empty.wav", PathBuf::from("/tmp/empty.wav"));
+        rec.metadata = serde_json::json!({ "synopsis": "" });
+        let result = PdfExporter::export_synopsis(&rec);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn export_peer_discussion_produces_pdf() {
+        let mut rec = Recording::new("visit.wav", PathBuf::from("/tmp/visit.wav"));
+        rec.peer_discussion = Some("Discussion: recommend MRI to rule out pathology.".to_string());
+        let bytes = PdfExporter::export_peer_discussion(&rec).expect("export OK");
+        assert!(bytes.starts_with(b"%PDF-"), "not a valid PDF");
+    }
+
+    #[test]
+    fn export_peer_discussion_without_note_errors() {
+        let recording = Recording::new("empty.wav", PathBuf::from("/tmp/empty.wav"));
+        let result = PdfExporter::export_peer_discussion(&recording);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("peer discussion"));
     }
 }
