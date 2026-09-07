@@ -18,9 +18,19 @@ no exceptions. Update this file only after running the script (and its
 | 8 | Cold start (no instance): exit 2 + desktop notification, no stale socket | ✅ (2026-09-05) | ⬜ | ⬜ | ⬜ |
 | 9 | Compositor binding (`o.bind` / `bind =`) triggers capture | n/a | n/a | ⬜ | n/a |
 | 10 | Rebinding + disable hotkey in Settings applies immediately | ⬜ | ⬜ | ⬜ (disable leg only) | ⬜ |
+| 11 | Progress pill visible with readable label during OCR | ⬜ (v0.76.1 fix — see run log) | ⬜ | ⬜ | ⬜ |
 
 ## Notes
 
+- **Progress pill background (row 11) is page-painted, not window-painted:**
+  wry applies `background_color` to the WEBVIEW only with its `transparent`
+  feature, which Tauri enables via `macOSPrivateApi` — deliberately off in
+  this project. On macOS the WKWebView therefore keeps its default opaque
+  white page background, and because the pill's label/spinner are white,
+  v0.75.5–v0.76.0 showed a blank light box (v0.76.1 moved the dark
+  background into `OcrProgressIndicator.svelte`'s page CSS so every
+  platform is identical). Row 11 must be eyeballed per platform: dark pill,
+  white "Recognizing text…" label + spinner visible for the OCR duration.
 - **Mixed-DPI multi-monitor (known limitation, X11/Windows overlay path):** the
   overlay spans the whole virtual desktop with ONE `scale_factor` (the
   window's), so a drag rectangle on a monitor whose DPI differs from the
