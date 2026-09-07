@@ -5,6 +5,7 @@
   "scripts": {
     "build": "vite build",
     "build:sidecar": "node scripts/build-sidecar.mjs",
+    "sign:dev": "bash scripts/sign-dev-macos.sh",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "dev": "vite",
     "format": "prettier --write \"src/**/*.{ts,svelte,js}\" \"*.{ts,js,json}\"",
