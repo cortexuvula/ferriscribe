@@ -298,6 +298,75 @@ async fn templates_upsert_rename_delete() {
 
 // ── User dictionary ─────────────────────────────────────────────────────────
 
+/// The feedback-storm fix (tracked item 7): every client list pushes a full
+/// sync, so the server must broadcast `dict_changed` ONLY when a merge
+/// actually wrote something — otherwise each broadcast makes other clients
+/// re-list, which pushes again, amplifying forever.
+#[tokio::test]
+async fn dictionary_sync_suppresses_broadcast_on_noop_merges() {
+    let app = test_app().await;
+    // Subscribe to the SSE-side broadcast channel before syncing.
+    let mut events = app.state.dict_changed_tx.subscribe();
+
+    // An empty push merges nothing — no broadcast.
+    let (status, body) = req(
+        &app,
+        "POST",
+        "/v1/user-dictionary/sync",
+        authed(&app),
+        Some(json!([])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "empty sync: {body}");
+    assert!(
+        matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "a no-op merge must not broadcast"
+    );
+
+    // A push carrying a new word DOES broadcast.
+    let (status, body) = req(
+        &app,
+        "POST",
+        "/v1/user-dictionary/sync",
+        authed(&app),
+        Some(json!([{
+            "id": "11111111-1111-1111-1111-111111111111",
+            "word": "metformin",
+            "updated_at": "2026-09-07T00:00:00.000Z",
+            "deleted_at": null
+        }])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "word sync: {body}");
+    assert!(events.try_recv().is_ok(), "a real change must broadcast");
+
+    // Re-pushing the same (now stale) word is a no-op again.
+    let (status, _) = req(
+        &app,
+        "POST",
+        "/v1/user-dictionary/sync",
+        authed(&app),
+        Some(json!([{
+            "id": "11111111-1111-1111-1111-111111111111",
+            "word": "metformin",
+            "updated_at": "2026-09-07T00:00:00.000Z",
+            "deleted_at": null
+        }])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "a stale re-push must not broadcast"
+    );
+}
+
 #[tokio::test]
 async fn dictionary_add_list_remove_roundtrip() {
     let app = test_app().await;

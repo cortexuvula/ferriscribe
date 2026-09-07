@@ -485,6 +485,31 @@ impl RecordingsRepo {
         Ok(())
     }
 
+    /// Whether the recording's row currently has an entry in the
+    /// external-content FTS index.
+    ///
+    /// Plain SELECTs against `recordings_fts` (by rowid or column filter)
+    /// read the CONTENT table and never observe de-indexing, and `id` is
+    /// declared `UNINDEXED`, so no MATCH query can probe by id either. The
+    /// `_docsize` shadow table is the membership oracle: FTS5 maintains
+    /// exactly one row per indexed document (keyed by rowid), including
+    /// documents whose indexed columns are all empty — no tokenization
+    /// caveats. (The shadow table exists because the FTS5 table was not
+    /// created with `columnsize=0`.)
+    ///
+    /// This is the membership probe the restore paths use to avoid
+    /// double-indexing a tombstoned row that `set_encryption_done` already
+    /// re-indexed (its insert is unconditional by design).
+    pub(crate) fn fts_row_indexed(conn: &Connection, id: &str) -> DbResult<bool> {
+        let indexed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recordings_fts_docsize
+             WHERE rowid = (SELECT rowid FROM recordings WHERE id = ?1))",
+            [id],
+            |r| r.get(0),
+        )?;
+        Ok(indexed)
+    }
+
     /// Restore a soft-deleted recording (undo).
     ///
     /// Clears `deleted_at` so the recording reappears in queries. Also
@@ -543,17 +568,33 @@ impl RecordingsRepo {
         // that 'delete' must match the indexed state or the index corrupts
         // (SQLITE_CORRUPT).
         //
+        // Membership probe: a tombstoned row can ALREADY be indexed —
+        // `set_encryption_done` re-indexes trashed rows unconditionally
+        // (trigger-corruption workaround), so an unconditional insert here
+        // would DOUBLE-index it (duplicate search results, index drift).
+        // A probe error falls back to inserting: that is the historical
+        // behavior, and skipping on a failed probe could leave a restored
+        // row unfindable.
+        //
         // The error is propagated (`?`), not swallowed: warn-and-continue
         // would let the UPDATE below fire its trigger 'delete' against
         // absent index state — corrupting the index and wedging every
         // later FTS operation. Failing the restore leaves the row
         // consistently trashed + de-indexed, ready for a retry.
-        tx.execute(
-            "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
-             SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
-             FROM recordings WHERE id = ?1",
-            [id.to_string()],
-        )?;
+        match Self::fts_row_indexed(&tx, &id.to_string()) {
+            Ok(true) => {}
+            probe => {
+                if let Err(e) = probe {
+                    tracing::warn!(error = %e, "restore: FTS membership probe failed; re-indexing anyway");
+                }
+                tx.execute(
+                    "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                     SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                     FROM recordings WHERE id = ?1",
+                    [id.to_string()],
+                )?;
+            }
+        }
         let rows = tx.execute(
             "UPDATE recordings SET deleted_at = NULL, updated_at = ?1, metadata = ?2 WHERE id = ?3 AND deleted_at IS NOT NULL",
             rusqlite::params![now, metadata_json, id.to_string()],
@@ -1014,6 +1055,47 @@ mod tests {
 
     fn new_rec() -> Recording {
         Recording::new("test.wav", PathBuf::from("/audio/test.wav"))
+    }
+
+    /// MATCH-count by filename stem — duplicate FTS index entries for one
+    /// row surface as COUNT > 1 (`id` is UNINDEXED, so it cannot probe).
+    fn fts_match_count_by_stem(conn: &Connection, stem: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM recordings_fts WHERE recordings_fts MATCH ?1",
+            [format!("filename:{stem}")],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The tracked double-index bug (2026-08-17 review item 9), desktop
+    /// undo path: `set_encryption_done` re-indexes a tombstoned row, so a
+    /// later `restore` must probe membership instead of inserting again.
+    #[test]
+    fn restore_after_set_encryption_done_does_not_double_index() {
+        let conn = migrated_conn();
+        let rec = new_rec();
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+        RecordingsRepo::soft_delete(&conn, &rec.id).unwrap();
+        // The workaround path: encryption finishes after the trash.
+        RecordingsRepo::set_encryption_done(&conn, &rec.id).unwrap();
+        assert!(RecordingsRepo::fts_row_indexed(&conn, &rec.id.to_string()).unwrap());
+        RecordingsRepo::restore(&conn, &rec.id).unwrap();
+        // Membership-guard invariants: exactly one searchable entry, and a
+        // LATER soft-delete must fully de-index the row (a leaked duplicate
+        // index entry would keep a tombstoned row findable). NB: on the
+        // bundled SQLite an identical FTS5 re-insert coalesces, so these
+        // assertions pin correct END-state rather than catching a
+        // duplicated doclist — the docsize probe itself is what prevents
+        // index drift.
+        assert_eq!(fts_match_count_by_stem(&conn, "test"), 1);
+        RecordingsRepo::soft_delete(&conn, &rec.id).unwrap();
+        assert_eq!(
+            fts_match_count_by_stem(&conn, "test"),
+            0,
+            "a later soft-delete must fully de-index the restored row"
+        );
+        assert!(!RecordingsRepo::fts_row_indexed(&conn, &rec.id.to_string()).unwrap());
     }
 
     #[test]

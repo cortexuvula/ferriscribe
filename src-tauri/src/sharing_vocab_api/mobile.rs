@@ -205,8 +205,11 @@ fn get_active_recording(
     what: &str,
 ) -> Result<Recording, StatusCode> {
     require_active_recording(conn, uuid, what)?;
-    RecordingsRepo::get_by_id(conn, uuid).map_err(|e| match AppError::from(e) {
-        AppError::Database { .. } => StatusCode::NOT_FOUND,
+    RecordingsRepo::get_by_id(conn, uuid).map_err(|e| match e {
+        // A missing row is a 404; any other DB failure is a 500 (the row
+        // was just verified active one statement earlier, so a query error
+        // here is a genuine database problem, not "not found").
+        medical_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     })
 }
@@ -720,9 +723,16 @@ pub(super) async fn document_put_handler<R: tauri::Runtime>(
         let result = if doc == DocType::Synopsis {
             persist_synopsis(&db, &conn, &rid, &value)
         } else {
-            let capture = medical_db::settings::SettingsRepo::load_config(&conn)
-                .unwrap_or_default()
-                .capture_for_training;
+            let capture = match medical_db::settings::SettingsRepo::load_config(&conn) {
+                Ok(cfg) => cfg.capture_for_training,
+                Err(e) => {
+                    // Fail CLOSED (no training capture) — the safe default —
+                    // but visibly: a transient load failure silently flipping
+                    // the preference was invisible before (2026-09-07 item f).
+                    tracing::warn!(error = %e, "mobile document put: config load failed; training capture disabled for this edit");
+                    false
+                }
+            };
             crate::commands::recordings_edit::save_recording_field_inner(
                 db, &conn, &rid, &field, &value, capture,
             )
@@ -768,7 +778,14 @@ fn persist_synopsis(
     )
     .map_err(AppError::from)?;
     let now = Utc::now().to_rfc3339();
-    let _ = medical_db::ContentSyncRepo::upsert_revision(conn, &uuid, "metadata", &now, None);
+    // Best-effort like the desktop editor's stamp, but visible: a dropped
+    // revision here costs this edit its LWW sync priority with no other
+    // signal (tracked 2026-09-07 review item f). Ids/field only — no PHI.
+    if let Err(e) =
+        medical_db::ContentSyncRepo::upsert_revision(conn, &uuid, "metadata", &now, None)
+    {
+        tracing::warn!(error = %e, "mobile synopsis edit saved without a metadata revision stamp");
+    }
     let _ = db; // reserved for symmetry with save_recording_field_inner
     Ok(())
 }

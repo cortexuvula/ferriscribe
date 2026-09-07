@@ -1102,12 +1102,27 @@ impl ContentSyncRepo {
         if !tombstoned {
             return Ok(());
         }
-        conn.execute(
-            "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
-             SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
-             FROM recordings WHERE id = ?1",
-            [id],
-        )?;
+        // Membership probe before the re-index: a tombstoned row can
+        // ALREADY be indexed (`set_encryption_done` re-indexes trashed
+        // rows unconditionally), and an unconditional insert here would
+        // double-index it — duplicate search results and index drift. A
+        // probe error falls back to inserting (the historical behavior;
+        // skipping on a failed probe could leave a restored row
+        // unfindable). See `RecordingsRepo::fts_row_indexed`.
+        match crate::recordings::RecordingsRepo::fts_row_indexed(conn, id) {
+            Ok(true) => {}
+            probe => {
+                if let Err(e) = probe {
+                    tracing::warn!(error = %e, "sync_restore: FTS membership probe failed; re-indexing anyway");
+                }
+                conn.execute(
+                    "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                     SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                     FROM recordings WHERE id = ?1",
+                    [id],
+                )?;
+            }
+        }
         let changed = conn.execute(
             "UPDATE recordings SET deleted_at = NULL, updated_at = ?1
              WHERE id = ?2 AND deleted_at IS NOT NULL",
@@ -1354,6 +1369,18 @@ mod sync_tombstone_tests {
     /// content table, so `WHERE id = ?` always "finds" the row and never
     /// observes de-indexing. Index membership must be probed with a MATCH
     /// on a token unique to the fixture — its filename stem.
+    /// MATCH-count by a filename stem unique to the fixture — duplicate
+    /// index entries for one rowid surface as COUNT > 1 (the double-index
+    /// symptom; `id` is UNINDEXED so it cannot serve as the probe key).
+    fn fts_match_count_by_stem(conn: &Connection, filename_stem: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM recordings_fts WHERE recordings_fts MATCH ?1",
+            [format!("filename:{filename_stem}")],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
     fn fts_row_present(conn: &Connection, filename_stem: &str) -> bool {
         conn.query_row(
             "SELECT COUNT(*) FROM recordings_fts WHERE recordings_fts MATCH ?1",
@@ -1392,6 +1419,38 @@ mod sync_tombstone_tests {
             !fts_row_present(&conn, "tqz"),
             "tombstoned row must leave the FTS index"
         );
+        assert_fts_healthy(&conn);
+    }
+
+    /// The tracked double-index bug (2026-08-17 review item 9):
+    /// `set_encryption_done` re-indexes a tombstoned row (by design, the
+    /// trigger-corruption workaround), so a later `sync_restore` on that
+    /// row must PROBE index membership instead of inserting unconditionally
+    /// — the unconditional insert produced a duplicate index entry
+    /// (duplicate search results, index drift).
+    #[test]
+    fn sync_restore_after_set_encryption_done_does_not_double_index() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let rec = seed(&conn, "dbidx.wav");
+        RecordingsRepo::soft_delete(&conn, &rec.id).unwrap();
+        assert!(!fts_row_present(&conn, "dbidx"));
+        // The workaround path: encryption finishes after the row was
+        // trashed — the row is deliberately re-indexed while tombstoned.
+        RecordingsRepo::set_encryption_done(&conn, &rec.id).unwrap();
+        assert!(
+            fts_row_present(&conn, "dbidx"),
+            "workaround re-indexes the trashed row"
+        );
+        assert_eq!(fts_match_count_by_stem(&conn, "dbidx"), 1);
+        // The restore must probe: exactly ONE entry after revival.
+        ContentSyncRepo::sync_restore(&conn, &rec.id.to_string(), "2026-06-02T00:00:00Z").unwrap();
+        assert_eq!(
+            fts_match_count_by_stem(&conn, "dbidx"),
+            1,
+            "restore must not double-index an already-indexed tombstoned row"
+        );
+        assert!(fts_row_present(&conn, "dbidx"), "row still searchable once");
         assert_fts_healthy(&conn);
     }
 

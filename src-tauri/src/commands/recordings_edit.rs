@@ -205,13 +205,17 @@ pub fn save_recording_field_inner(
         "UPDATE recordings SET updated_at = ?1 WHERE id = ?2",
         rusqlite::params![now, recording.id.to_string()],
     );
-    let _ = medical_db::ContentSyncRepo::upsert_revision(
+    // Best-effort, but visible: a dropped revision stamp costs this edit
+    // its LWW sync priority with no other signal. Field name only — no PHI.
+    if let Err(e) = medical_db::ContentSyncRepo::upsert_revision(
         conn,
         &recording.id,
         field,
         &now,
         None, // origin_device — could add machine_id later
-    );
+    ) {
+        tracing::warn!(error = %e, field, "edit saved without a field revision stamp");
+    }
 
     // Training-corpus finalize hook. Only applies to soap_note (v1 captures
     // only SOAP). Best-effort — failures are logged but never returned to
