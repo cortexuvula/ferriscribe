@@ -622,6 +622,56 @@ mod mobile_api_tests {
         assert_eq!(body["stage"], "completed");
     }
 
+    /// The PUT cap is per-doc-type and 500_000 across the board. Synopsis
+    /// specifically: it persists via the metadata patch path, so it must
+    /// NOT be routed through the desktop column-cap fallback (50_000) — a
+    /// 2026-09-07 regression did exactly that and would have rejected any
+    /// legitimately long synopsis re-save from a mobile device.
+    #[tokio::test]
+    async fn document_put_caps_per_doc_type() {
+        let app = test_app().await;
+        let rid = seed_recording(&app, Some("Patient reports headache."));
+
+        // 60_000-char synopsis — over the 50_000 fallback, under the cap.
+        let long_synopsis = "x".repeat(60_000);
+        let (status, body) = req(
+            &app,
+            "PUT",
+            &format!("/v1/recordings/{rid}/documents/synopsis"),
+            authed(&app),
+            Some(json!({ "content": long_synopsis })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "synopsis 60k: {body}");
+
+        // 500_001-char soap — one over the cap, 413.
+        let over = "y".repeat(500_001);
+        let (status, body) = req(
+            &app,
+            "PUT",
+            &format!("/v1/recordings/{rid}/documents/soap"),
+            authed(&app),
+            Some(json!({ "content": over.clone() })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "soap 500001: {body}");
+
+        // 500_001-char synopsis — also capped at the blanket document cap.
+        let (status, body) = req(
+            &app,
+            "PUT",
+            &format!("/v1/recordings/{rid}/documents/synopsis"),
+            authed(&app),
+            Some(json!({ "content": over })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "synopsis 500001: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn document_get_put_roundtrip_and_revision() {
         let app = test_app().await;

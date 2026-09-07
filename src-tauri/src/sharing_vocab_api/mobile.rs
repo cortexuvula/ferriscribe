@@ -110,11 +110,18 @@ pub(super) fn parse_doc_type(s: &str) -> Option<DocType> {
 }
 
 /// Character cap for document PUT bodies — the desktop editor's own
-/// per-field cap function (`commands::recordings_edit::max_chars_for_field`),
-/// so a future desktop cap change cannot silently diverge from the mobile
-/// PUT limit.
+/// per-field cap function (`commands::recordings_edit::max_chars_for_field`)
+/// for the column-backed doc types, so a future desktop cap change cannot
+/// silently diverge from the mobile PUT limit. Synopsis rides the metadata
+/// patch path, not a desktop editable column, and keeps the historical
+/// blanket document cap (routing it through `field_name()` would land on
+/// the forward-compat `"metadata"` fallback — 50_000 — and reject
+/// legitimately long synopses; pinned by `document_put_caps_per_doc_type`).
 fn max_doc_chars(doc: DocType) -> usize {
-    crate::commands::recordings_edit::max_chars_for_field(doc.field_name())
+    match doc {
+        DocType::Synopsis => 500_000,
+        other => crate::commands::recordings_edit::max_chars_for_field(other.field_name()),
+    }
 }
 /// Character cap for a recording filename on create.
 const MAX_FILENAME_CHARS: usize = 255;

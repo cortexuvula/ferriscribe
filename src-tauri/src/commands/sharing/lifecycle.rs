@@ -230,8 +230,15 @@ pub async fn stop_sharing_inner(state: &AppState) -> AppResult<()> {
     // unrelated startup race (e.g. user stops sharing immediately on launch
     // before the resume hook fires).
     delete_server_config();
-    if let Some(s) = state.sharing.write().await.take() {
-        s.stop().await.map_err(|e| AppError::Other(e.to_string()))?;
+    // Stop the sharing service, but keep its error for the return: the
+    // vocab API teardown below must run regardless — early-returning on a
+    // service-stop failure would leave the HTTP API (and its event
+    // forwarders) alive after sharing is down.
+    let mut service_stop_err = None;
+    if let Some(s) = state.sharing.write().await.take()
+        && let Err(e) = s.stop().await
+    {
+        service_stop_err = Some(AppError::Other(e.to_string()));
     }
     if let Some(v) = state.vocab_api.write().await.take() {
         // Unlisten the mobile job forwarders BEFORE aborting the serve
@@ -240,6 +247,9 @@ pub async fn stop_sharing_inner(state: &AppState) -> AppResult<()> {
         // the app exits — accumulating two per stop→start cycle.
         (v.detach)();
         v.server.abort();
+    }
+    if let Some(e) = service_stop_err {
+        return Err(e);
     }
 
     // Restore provider endpoints to pre-sharing configuration.

@@ -156,14 +156,6 @@ pub async fn spawn(
     let (dict_changed_tx, _) = tokio::sync::broadcast::channel::<()>(16);
     let (content_changed_tx, _) = tokio::sync::broadcast::channel::<String>(32);
     let jobs = Arc::new(mobile::JobRegistry::new());
-    // Bridge the desktop's pipeline/generation progress events into the
-    // job registry so /v1/jobs reflects BOTH desktop- and HTTP-triggered
-    // work under one vocabulary. The ids ride in the returned handle so
-    // the stop path can unlisten them.
-    let forwarders = mobile::attach_event_forwarders(&app_handle, &jobs);
-    let detach_handle = app_handle.clone();
-    let detach: Box<dyn FnOnce() + Send + Sync> =
-        Box::new(move || mobile::detach_event_forwarders(&detach_handle, forwarders));
     let state = ApiState {
         db,
         tokens,
@@ -171,12 +163,12 @@ pub async fn spawn(
         dict_changed_tx,
         content_changed_tx,
         data_dir,
-        app_handle,
+        app_handle: app_handle.clone(),
         merge_lock: Arc::new(tokio::sync::Mutex::new(())),
         fail_limiter: Arc::new(std::sync::Mutex::new(
             medical_security::rate_limiter::RateLimiter::new(5),
         )),
-        jobs,
+        jobs: Arc::clone(&jobs),
     };
     // The generate route dispatches into generation commands that are typed
     // AppHandle<Wry>; merge it on the concrete runtime. `spawn`'s own
@@ -190,6 +182,16 @@ pub async fn spawn(
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("vocab_api bind {addr}: {e}"))?;
+    // Bridge the desktop's pipeline/generation progress events into the
+    // job registry so /v1/jobs reflects BOTH desktop- and HTTP-triggered
+    // work under one vocabulary. Attached only AFTER the port is secured:
+    // a failed bind returns Err with nothing holding the listener ids, so
+    // attaching earlier would leak the forwarders on exactly that path.
+    // The ids ride in the returned handle so the stop path can unlisten
+    // them.
+    let forwarders = mobile::attach_event_forwarders(&app_handle, &jobs);
+    let detach: Box<dyn FnOnce() + Send + Sync> =
+        Box::new(move || mobile::detach_event_forwarders(&app_handle, forwarders));
     info!(port, "vocab API listening");
     Ok(VocabApiHandle {
         server: tokio::spawn(async move {
