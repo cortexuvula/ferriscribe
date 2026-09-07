@@ -820,36 +820,37 @@ pub(super) async fn devices_self_revoke_handler<R: tauri::Runtime>(
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize, Default)]
-struct GenerateRequest {
+pub(super) struct GenerateRequest {
     #[serde(default)]
-    context: Option<String>,
+    pub(super) context: Option<String>,
     #[serde(default)]
-    template: Option<String>,
+    pub(super) template: Option<String>,
     #[serde(default)]
-    patient_context: Option<PatientContext>,
+    pub(super) patient_context: Option<PatientContext>,
     #[serde(default)]
-    recipient_type: Option<String>,
+    pub(super) recipient_type: Option<String>,
     #[serde(default)]
-    urgency: Option<String>,
+    pub(super) urgency: Option<String>,
     #[serde(default)]
-    letter_type: Option<String>,
+    pub(super) letter_type: Option<String>,
     #[serde(default)]
-    audience_id: Option<Uuid>,
+    pub(super) audience_id: Option<Uuid>,
     #[serde(default)]
-    physician_name: Option<String>,
+    pub(super) physician_name: Option<String>,
     #[serde(default)]
-    specialty: Option<String>,
+    pub(super) specialty: Option<String>,
     #[serde(default)]
-    reason: Option<String>,
+    pub(super) reason: Option<String>,
 }
 
 /// Runtime-independent validation for a generate request: doc-type parse,
 /// peer-discussion required fields, recording existence/visibility, and
 /// (for soap) audio presence. Returns the parsed doc type.
 ///
-/// Factored out of the Wry-typed handler so the checks are route-testable
-/// on MockRuntime.
-async fn validate_generate_request<R: tauri::Runtime>(
+/// Factored out of the Wry-typed handler so the checks are testable on
+/// MockRuntime (the route itself is Wry-only; see `generate_validation_tests`
+/// in route_tests.rs).
+pub(super) async fn validate_generate_request<R: tauri::Runtime>(
     state: &ApiState<R>,
     recording_id: &str,
     doc_type: &str,
@@ -900,8 +901,10 @@ async fn validate_generate_request<R: tauri::Runtime>(
 /// The generation commands (`process_recording`, `generate_*`) are typed
 /// `AppHandle<Wry>`, so only this handler needs the concrete runtime — it
 /// is merged into the router in `spawn()` and excluded from the
-/// MockRuntime route tests (its validation core is
-/// [`validate_generate_request`], which IS route-tested).
+/// MockRuntime route tests. Its validation core
+/// ([`validate_generate_request`]) is what those tests exercise directly;
+/// the queue/dispatch half below stays covered by the JobRegistry tests
+/// plus the generation commands' own tests.
 pub(super) fn generate_route(state: ApiState<tauri::Wry>) -> axum::Router {
     axum::Router::new()
         .route(
