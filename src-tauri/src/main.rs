@@ -2,6 +2,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // Hidden pill diagnostic (smoke-matrix row 11): open the OCR progress
+    // pill through the production path, log its real webview URL, exit.
+    if std::env::args().any(|a| a == "--pill-selftest") {
+        rust_medical_assistant_lib::pill_selftest();
+    }
     // Headless screenshot-OCR trigger (Omarchy-style compositor/global
     // binding): delegate to the ALREADY-RUNNING instance via the
     // single-instance plugin instead of booting a second app shell.

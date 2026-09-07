@@ -18,7 +18,7 @@ no exceptions. Update this file only after running the script (and its
 | 8 | Cold start (no instance): exit 2 + desktop notification, no stale socket | ✅ (2026-09-05) | ⬜ | ⬜ | ⬜ |
 | 9 | Compositor binding (`o.bind` / `bind =`) triggers capture | n/a | n/a | ⬜ | n/a |
 | 10 | Rebinding + disable hotkey in Settings applies immediately | ⬜ | ⬜ | ⬜ (disable leg only) | ⬜ |
-| 11 | Progress pill visible with readable label during OCR | ⬜ (v0.76.1 fix — see run log) | ⬜ | ⬜ | ⬜ |
+| 11 | Progress pill visible with readable label during OCR | ✅ (2026-09-07, v0.76.4 — `--pill-selftest` probe + screenshot; see run log) | ⬜ | ⬜ | ⬜ |
 
 ## Notes
 
@@ -29,8 +29,19 @@ no exceptions. Update this file only after running the script (and its
   white page background, and because the pill's label/spinner are white,
   v0.75.5–v0.76.0 showed a blank light box (v0.76.1 moved the dark
   background into `OcrProgressIndicator.svelte`'s page CSS so every
-  platform is identical). Row 11 must be eyeballed per platform: dark pill,
-  white "Recognizing text…" label + spinner visible for the OCR duration.
+  platform is identical). v0.76.1–v0.76.3 were STILL blank on macOS: the
+  pill page co-imported `ScreenRegionOverlay.svelte` (one shared hash-route
+  branch in `src/main.ts`), whose page-global
+  `background: transparent !important` beat the pill's dark rule and left
+  the white webview showing. v0.76.4 splits the routes so each page imports
+  only its own component (pinned by `src/main.test.ts`). Row 11 can be
+  checked WITHOUT a running OCR backend: `rust-medical-assistant
+  --pill-selftest` boots a minimal shell, shows the pill (plus a control
+  window), logs the committed URL + an in-page probe
+  (`mounted:true,htmlBg:rgb(20, 20, 24)` = pass), and exits after ~12 s —
+  screenshot mid-run to eyeball the label. Row 11 must still be eyeballed
+  per platform: dark pill, white "Recognizing text…" label + spinner
+  visible for the OCR duration.
 - **Mixed-DPI multi-monitor (known limitation, X11/Windows overlay path):** the
   overlay spans the whole virtual desktop with ONE `scale_factor` (the
   window's), so a drag rectangle on a monitor whose DPI differs from the
@@ -61,3 +72,13 @@ no exceptions. Update this file only after running the script (and its
   with a configured OCR model plus a human dragging the selection — not
   executed in this run, intentionally left unverified. Rows 2–10 on Linux and
   Windows entirely unexecuted (different platforms).
+- 2026-09-07, macOS arm64, branch `fix/ocr-pill-blank` (v0.76.4): row 11
+  executed via `--pill-selftest` — pill built from a worker thread (the
+  production creation context), committed URL
+  `tauri://localhost/index.html#ocr-progress`, in-page probe reported
+  `mounted:true, htmlBg:rgb(20, 20, 24)` at +1.5/+4/+8 s, and a mid-run
+  screenshot shows the dark pill with spinner + "Recognizing text…" label.
+  The pre-fix binary reproduced the user's blank white pill under the same
+  harness (probe: `htmlBg:rgba(0, 0, 0, 0)` + the overlay's
+  `background: transparent !important` sheet present). Full-OCR interactive
+  legs (rows 2–7, 10) still pending a human pass.
