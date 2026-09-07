@@ -521,6 +521,133 @@ fn app_context() -> tauri::Context {
 /// a desktop notification telling the user to start FerriScribe first —
 /// stdout is invisible under `windows_subsystem = "windows"`, so a
 /// notification is the only viable surface.
+/// Hidden `--pill-selftest`: open the OCR progress pill through the exact
+/// production window path, log the webview's ACTUAL URL once loaded (the
+/// datum the 2026-09-07 blank-pill investigation needed — `window.url()`
+/// from the Rust side shows whether the `#ocr-progress` fragment survived
+/// the packaged `tauri://` navigation), keep the pill on screen for
+/// eyeballing/screenshots, then exit 0. Smoke-matrix row 11's tool.
+pub fn pill_selftest() -> ! {
+    // Minimal tracing to the SAME rolling log file the app uses, so the
+    // selftest's URL lines land next to the investigation logs.
+    let file_appender = tracing_appender::rolling::daily(log_dir(), "ferri-scribe.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(
+            "info,rust_medical_assistant_lib=debug",
+        ))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true),
+        )
+        .init();
+
+    let mut context = app_context();
+    context.config_mut().app.windows.clear();
+    let _ = tauri::Builder::default()
+        .setup(|app| {
+            // No single-instance plugin here on purpose: the real app may be
+            // running (the plugin would exit(0) this process before setup),
+            // and a second process owning only a pill window is harmless.
+
+            // CONTROL window: identical flags, NO url fragment. If the
+            // control loads while the pill stays empty, the fragment is the
+            // culprit; if both stay empty, runtime-created windows fail to
+            // navigate in this context at all.
+            let _control = tauri::WebviewWindowBuilder::new(
+                app,
+                "selftest-control",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("FerriScribe OCR selftest control")
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .shadow(false)
+            .focused(false)
+            .inner_size(220.0, 44.0)
+            .position(200.0, 200.0)
+            .build();
+            match &_control {
+                Ok(_) => tracing::info!("selftest: control window built"),
+                Err(e) => tracing::warn!(error = %e, "selftest: control build failed"),
+            }
+
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                use tauri::Manager;
+                let log_url = |label: &str, tag: &str| {
+                    let pill = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        handle
+                            .get_webview_window(label)
+                            .map(|w| w.url().map(|u| u.to_string()))
+                    }));
+                    match pill {
+                        Ok(Some(Ok(u))) => tracing::info!("{tag}: {label} url={u}"),
+                        Ok(Some(Err(e))) => tracing::warn!("{tag}: {label} url err: {e}"),
+                        Ok(None) => tracing::warn!("{tag}: {label} window not found"),
+                        Err(_) => tracing::warn!(
+                            "{tag}: {label} url() PANICKED (nil URL — no navigation committed)"
+                        ),
+                    }
+                };
+                // Interrogate the pill's page from inside the webview: the
+                // ONLY observability into a release webview (no devtools).
+                // Asserts the two things the blank-pill bug broke: the
+                // component mounted, and the page actually PAINTS the dark
+                // background (a transparent page = white pill on macOS).
+                let probe_pill = |tag: &'static str| {
+                    let Some(w) = handle.get_webview_window("ocr-progress") else {
+                        return;
+                    };
+                    let js = r#"(function(){
+                        var el = document.getElementById('app');
+                        return JSON.stringify({
+                            mounted: !!(el && el.querySelector('.ocr-progress')),
+                            htmlBg: getComputedStyle(document.documentElement).backgroundColor
+                        });
+                    })()"#;
+                    if let Err(e) = w.eval_with_callback(js, move |result| {
+                        tracing::info!("{tag}: pill probe: {result}");
+                    }) {
+                        tracing::warn!("{tag}: probe eval failed: {e}");
+                    }
+                };
+                for (delay, tag) in [
+                    (1500u64, "selftest +1.5s"),
+                    (2500, "selftest +4s"),
+                    (4000, "selftest +8s"),
+                ] {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    log_url("ocr-progress", tag);
+                    log_url("selftest-control", tag);
+                    probe_pill(tag);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(4));
+                tracing::info!("pill selftest done — exiting");
+                std::process::exit(0);
+            });
+            // Reproduce the PRODUCTION creation context: the real pill is
+            // built from the OCR async worker thread, not the main thread
+            // (WKWebView is main-thread-only in wry's bindings — if
+            // off-main creation is the blank-pill cause, this reproduces
+            // it).
+            let handle_for_pill = app.handle().clone();
+            std::thread::spawn(move || {
+                crate::commands::screenshot_ocr::ProgressIndicator::selftest_show(&handle_for_pill);
+                tracing::info!("selftest: pill built from worker thread");
+            });
+            Ok(())
+        })
+        .run(context);
+    std::process::exit(3);
+}
+
 pub fn delegate_capture_ocr() -> ! {
     let mut context = app_context();
     // Never create the main window in the delegate shell — without this, the

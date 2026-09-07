@@ -56,12 +56,19 @@ fn indicator_position(mon_x: i32, mon_y: i32, mon_width: u32, scale: f64) -> (f6
 /// show it degrades to today's behavior (completion toasts only), never to a
 /// capture failure. Tauri window builders are thread-safe: creation from the
 /// async worker is dispatched to the main-thread event loop internally.
-struct ProgressIndicator {
+pub(crate) struct ProgressIndicator {
     app: tauri::AppHandle,
     shown: bool,
 }
-
 impl ProgressIndicator {
+    /// Smoke-test hook behind `--pill-selftest`: create the pill through
+    /// the EXACT production path and leak the RAII handle so the window
+    /// stays on screen until the selftest process exits on its own timer.
+    /// Row 11 of the smoke matrix (pill readable during OCR) — its tool.
+    pub fn selftest_show(app: &tauri::AppHandle) {
+        std::mem::forget(Self::show(app));
+    }
+
     fn show(app: &tauri::AppHandle) -> Self {
         let mut indicator = Self {
             app: app.clone(),
