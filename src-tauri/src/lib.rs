@@ -371,6 +371,7 @@ pub fn run() {
             commands::settings::get_api_key,
             commands::settings::set_api_key,
             commands::settings::get_default_prompt,
+            commands::specialty::list_specialty_packs,
             commands::export::export_pdf,
             commands::export::export_docx,
             commands::export::export_fhir,

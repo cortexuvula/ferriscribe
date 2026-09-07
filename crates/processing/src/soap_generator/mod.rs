@@ -61,6 +61,11 @@ pub struct SoapPromptConfig {
     /// User-supplied override for the entire system prompt. Empty string is
     /// treated as absent and falls back to the default template.
     pub custom_prompt: Option<String>,
+    /// The selected specialty pack's SOAP prompt body (`soap_prompt.md`),
+    /// when a specialty is selected and its pack provides one. Assembled
+    /// with the compiled-in safety block; loses to `custom_prompt`, wins
+    /// over the built-in default. `None` falls back to the default.
+    pub specialty_prompt: Option<String>,
     /// Clinically relevant BC MSP ICD-9 candidates selected from the
     /// visit's source text. Injected into the prompt as a constrained
     /// vocabulary so the model selects from accepted codes rather than
@@ -74,6 +79,7 @@ impl Default for SoapPromptConfig {
             template: SoapTemplate::FollowUp,
             icd_version: IcdVersion::Icd10,
             custom_prompt: None,
+            specialty_prompt: None,
             icd9_candidates: vec![],
         }
     }

@@ -6,12 +6,15 @@ use tracing::debug;
 
 use crate::state::AppState;
 
+use super::super::specialty::resolve_specialty_prompt;
 use super::helpers::{
     acquire_generation_lock, build_completion_request, ensure_nonempty_output,
     ensure_prompt_within_cap, fresh_stats_patch, load_recording_and_settings,
     persist_producer_patch, require_soap_note, resolve_provider, run_generation_command,
     stream_with_events,
 };
+
+use medical_processing::specialty::DocType as PackDocType;
 
 /// Generate a brief synopsis from a recording's SOAP note.
 ///
@@ -67,6 +70,9 @@ async fn generate_synopsis_inner(
     let (system_prompt, user_prompt) = document_generator::build_synopsis_prompt(
         soap_note,
         settings.custom_synopsis_prompt.as_deref(),
+        resolve_specialty_prompt(state, &config, PackDocType::Synopsis)
+            .await?
+            .as_deref(),
         None,
     );
 

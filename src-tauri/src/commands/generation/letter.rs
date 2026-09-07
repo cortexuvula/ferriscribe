@@ -7,10 +7,13 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+use super::super::specialty::resolve_specialty_prompt;
 use super::helpers::{
     acquire_generation_lock, ensure_prompt_within_cap, fresh_stats_patch, generate_from_soap,
     load_recording_and_settings, persist_producer_patch, run_generation_command,
 };
+
+use medical_processing::specialty::DocType as PackDocType;
 
 /// Generate a patient letter from a recording's SOAP note.
 ///
@@ -40,6 +43,7 @@ pub async fn generate_letter(
         // Same generation-time cap every custom prompt gets — covers configs
         // that arrived via sync.
         ensure_prompt_within_cap(settings.custom_letter_prompt.as_deref(), "letter")?;
+        let specialty_body = resolve_specialty_prompt(&state, &config, PackDocType::Letter).await?;
 
         // Audience lookup on a blocking worker — rusqlite never runs on the
         // async runtime (the invariant every other generation DB access
@@ -80,6 +84,7 @@ pub async fn generate_letter(
                     &lt,
                     aud.as_ref(),
                     settings.custom_letter_prompt.as_deref(),
+                    specialty_body.as_deref(),
                     ctx2.as_deref(),
                 )
             },
@@ -148,6 +153,7 @@ mod preflight_tests {
                     "follow-up",
                     None,
                     settings.custom_letter_prompt.as_deref(),
+                    None,
                     None,
                 )
             },
