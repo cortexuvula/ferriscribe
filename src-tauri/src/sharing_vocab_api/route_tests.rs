@@ -561,6 +561,67 @@ mod mobile_api_tests {
         assert_eq!(body["stage"], "generating_synopsis");
     }
 
+    /// The registry consumes the EMITTERS' own structs (shared since the
+    /// scaffold-dedup branch) — this pins that serializing what the
+    /// pipeline/generation commands actually emit still deserializes and
+    /// drives the registry. The hand-written-JSON tests above pin the raw
+    /// wire shape for frontend compat; this one pins Rust-side compat, so
+    /// an emitter field rename fails HERE instead of silently breaking
+    /// mobile job staging in production.
+    #[tokio::test]
+    async fn emitter_struct_serializations_drive_the_registry() {
+        let app = test_app().await;
+        let rid = uuid::Uuid::new_v4().to_string();
+
+        // Emit the structs themselves — exactly what the emitters do
+        // (Tauri serializes the payload; payload() on the listener side is
+        // the object JSON).
+        app._app
+            .emit(
+                "pipeline-progress",
+                &crate::commands::pipeline::PipelineProgress {
+                    recording_id: rid.clone(),
+                    stage: crate::job_stages::GENERATING_SOAP.to_string(),
+                    error: None,
+                },
+            )
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let (status, body) = req(&app, "GET", &format!("/v1/jobs/{rid}"), authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "status: {body}");
+        assert_eq!(body["stage"], "generating_soap");
+
+        // progress: None is OMITTED from the JSON (skip_serializing_if) —
+        // the mobile consumer must tolerate its absence (serde default).
+        let generation_payload =
+            serde_json::to_string(&crate::commands::generation::GenerationProgress {
+                doc_type: "peer_discussion".into(),
+                status: crate::job_stages::COMPLETED.into(),
+                recording_id: rid.clone(),
+                progress: None,
+            })
+            .expect("serialize generation progress");
+        assert!(
+            !generation_payload.contains("progress"),
+            "None stats must be omitted: {generation_payload}"
+        );
+        app._app
+            .emit(
+                "generation-progress",
+                &crate::commands::generation::GenerationProgress {
+                    doc_type: "peer_discussion".into(),
+                    status: crate::job_stages::COMPLETED.into(),
+                    recording_id: rid.clone(),
+                    progress: None,
+                },
+            )
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let (status, body) = req(&app, "GET", &format!("/v1/jobs/{rid}"), authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["stage"], "completed");
+    }
+
     #[tokio::test]
     async fn document_get_put_roundtrip_and_revision() {
         let app = test_app().await;

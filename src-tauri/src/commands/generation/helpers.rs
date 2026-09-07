@@ -178,7 +178,7 @@ pub(super) async fn run_generation_command(
         "generation-progress",
         GenerationProgress {
             doc_type: doc_type.into(),
-            status: "started".into(),
+            status: crate::job_stages::STATUS_STARTED.into(),
             recording_id: recording_id.to_string(),
             progress: None,
         },
@@ -192,7 +192,7 @@ pub(super) async fn run_generation_command(
                 "generation-progress",
                 GenerationProgress {
                     doc_type: doc_type.into(),
-                    status: "completed".into(),
+                    status: crate::job_stages::COMPLETED.into(),
                     recording_id: recording_id.to_string(),
                     progress: None,
                 },

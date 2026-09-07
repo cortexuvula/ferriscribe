@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
@@ -12,13 +12,18 @@ use medical_core::error::{AppError, AppResult};
 use medical_core::types::PatientContext;
 use medical_db::recordings::RecordingsRepo;
 
+use crate::job_stages;
 use crate::state::AppState;
 
-#[derive(Debug, Clone, Serialize)]
-struct PipelineProgress {
-    recording_id: String,
-    stage: String,
-    error: Option<String>,
+/// `pipeline-progress` event payload. Serialized to the desktop frontend
+/// AND deserialized by the mobile API's job registry (the event forwarders
+/// in `sharing_vocab_api::mobile`) — one struct so the emitter and the
+/// consumer cannot drift apart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PipelineProgress {
+    pub(crate) recording_id: String,
+    pub(crate) stage: String,
+    pub(crate) error: Option<String>,
 }
 
 /// Run the full transcribe → SOAP pipeline for a recording.
@@ -92,7 +97,7 @@ pub async fn process_recording(
     // falling back to FollowUp the way the old lookup here did.
 
     // --- Stage 1: Transcribe ---
-    emit_progress(&app, &rid, "transcribing", None);
+    emit_progress(&app, &rid, job_stages::TRANSCRIBING, None);
 
     // Forward the pipeline cancel flag through to the transcription inner
     // helper so the user's cancel click can interrupt transcription at the
@@ -111,7 +116,7 @@ pub async fn process_recording(
     if let Err(e) = transcript_result {
         let msg = e.to_string();
         error!(error = %msg, "Pipeline failed at transcription stage");
-        emit_progress(&app, &rid, "failed", Some(msg));
+        emit_progress(&app, &rid, job_stages::FAILED, Some(msg));
         // Return the original typed error so the frontend receives a
         // structured {kind, message} payload instead of a plain string.
         return Err(e);
@@ -122,12 +127,12 @@ pub async fn process_recording(
     if cancel.is_cancelled() {
         let msg = "Pipeline cancelled by user after transcription".to_string();
         warn!("{msg}");
-        emit_progress(&app, &rid, "failed", Some(msg.clone()));
+        emit_progress(&app, &rid, job_stages::FAILED, Some(msg.clone()));
         return Err(AppError::Cancelled);
     }
 
     // --- Stage 2: Generate SOAP ---
-    emit_progress(&app, &rid, "generating_soap", None);
+    emit_progress(&app, &rid, job_stages::GENERATING_SOAP, None);
 
     // generate_soap doesn't take a CancellationToken — race it against the
     // cancel signal so a click during SOAP generation drops the in-flight
@@ -140,7 +145,7 @@ pub async fn process_recording(
         _ = cancel.cancelled() => {
             let msg = "Pipeline cancelled by user during SOAP generation".to_string();
             warn!("{msg}");
-            emit_progress(&app, &rid, "failed", Some(msg));
+            emit_progress(&app, &rid, job_stages::FAILED, Some(msg));
             return Err(AppError::Cancelled);
         }
         res = super::generation::soap::generate_soap(
@@ -157,7 +162,7 @@ pub async fn process_recording(
         Ok(soap_text) => {
             // Fetch the recording name for the notification
             let display_name = get_recording_display_name(&state, &recording_id).await;
-            emit_progress(&app, &rid, "completed", None);
+            emit_progress(&app, &rid, job_stages::COMPLETED, None);
 
             info!(
                 soap_len = soap_text.len(),
@@ -178,7 +183,7 @@ pub async fn process_recording(
         Err(e) => {
             let msg = e.to_string();
             error!(error = %msg, "Pipeline failed at SOAP generation stage");
-            emit_progress(&app, &rid, "failed", Some(msg));
+            emit_progress(&app, &rid, job_stages::FAILED, Some(msg));
             Err(e)
         }
     }
