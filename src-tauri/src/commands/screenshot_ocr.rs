@@ -133,7 +133,10 @@ impl Drop for ProgressIndicator {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CaptureOcrOutcome {
     /// `"copied"` — text is on the clipboard; `"cancelled"` — user dismissed
-    /// the selection; `"empty"` — the model found no text.
+    /// the selection; `"empty"` — the model found no text; `"in_progress"` —
+    /// the single-flight guard rejected a concurrent trigger (a typed
+    /// no-op, not an error, so UIs branch on the discriminator instead of
+    /// prose-matching an error message).
     pub status: &'static str,
     /// Extracted character count (0 unless `copied`).
     pub chars: usize,
@@ -175,6 +178,11 @@ pub fn trigger_capture(app: &tauri::AppHandle) {
         };
         match run_capture_ocr(&app, &state).await {
             Ok(outcome) => {
+                // A second trigger while a capture is running (double hotkey
+                // press, hotkey + CLI) is a typed no-op — no event, no toast.
+                if outcome.status == "in_progress" {
+                    return;
+                }
                 emit_event(
                     &app,
                     &ScreenshotOcrEvent {
@@ -185,12 +193,6 @@ pub fn trigger_capture(app: &tauri::AppHandle) {
                 );
             }
             Err(e) => {
-                // A second trigger while a capture is running (double hotkey
-                // press, hotkey + CLI) is a no-op — don't toast it.
-                if e.to_string().contains("already in progress") {
-                    tracing::debug!("screenshot OCR trigger ignored: capture already running");
-                    return;
-                }
                 tracing::warn!(error = %e, "screenshot OCR failed");
                 emit_event(
                     &app,
@@ -342,6 +344,11 @@ pub async fn capture_region_ocr(
 /// The shared flow behind every trigger (command invoke, global hotkey,
 /// CLI delegation — the latter two wrap it in [`trigger_capture`], which
 /// emits the outcome as an event because they have no caller to return to).
+///
+/// A trigger while a capture is already running is a TYPED no-op outcome
+/// (`status: "in_progress"`), never an error — the Rust hotkey path and
+/// every frontend consumer branch on the status instead of matching the
+/// error prose.
 pub async fn run_capture_ocr(
     app: &tauri::AppHandle,
     state: &AppState,
@@ -350,9 +357,11 @@ pub async fn run_capture_ocr(
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        return Err(AppError::InvalidInput(
-            "A screenshot OCR capture is already in progress.".into(),
-        ));
+        tracing::debug!("screenshot OCR trigger ignored: capture already running");
+        return Ok(CaptureOcrOutcome {
+            status: "in_progress",
+            chars: 0,
+        });
     }
     let result = capture_ocr_inner(app, state).await;
     IN_FLIGHT.store(false, Ordering::SeqCst);

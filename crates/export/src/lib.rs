@@ -32,7 +32,7 @@ use thiserror::Error;
 /// string under `metadata.synopsis` (there is no dedicated column — see
 /// `generate_synopsis`). Shared by the PDF and DOCX exporters so both read
 /// the same source of truth.
-pub(crate) fn synopsis_text(recording: &Recording) -> Option<&str> {
+pub fn synopsis_text(recording: &Recording) -> Option<&str> {
     recording
         .metadata
         .get("synopsis")

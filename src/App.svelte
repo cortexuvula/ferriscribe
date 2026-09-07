@@ -34,8 +34,12 @@
   import { rsvp } from './lib/stores/rsvp.svelte';
   import { getSpellchecker } from './lib/components/rich_editor/spellcheck/spellchecker';
   import { requestSpellcheckRescan } from './lib/components/rich_editor/spellcheck/spellcheck_extension';
-  import { captureRegionOcr, captureOutcomeMessage } from './lib/api/screenshotOcr';
-  import { formatError } from './lib/types/errors';
+  import {
+    captureRegionOcr,
+    toastOcrFailure,
+    toastOcrOutcome,
+    type CaptureOcrOutcome,
+  } from './lib/api/screenshotOcr';
 
   // Pages
   import RecordTab from './lib/pages/RecordTab.svelte';
@@ -161,18 +165,11 @@
   async function triggerScreenshotOcr() {
     try {
       const outcome = await captureRegionOcr();
-      const message = captureOutcomeMessage(outcome);
-      if (outcome.status === 'copied') {
-        toasts.success(message);
-      } else {
-        toasts.add({ message, type: 'success', autoDismiss: true });
-      }
+      toastOcrOutcome(outcome);
     } catch (err) {
-      // invoke rejections carry the serialized AppError struct — formatError
-      // pulls out the human message.
-      const msg = formatError(err);
-      if (msg.includes('already in progress')) return;
-      toasts.error(`Screenshot OCR failed: ${msg}`);
+      // invoke rejections carry the serialized AppError struct;
+      // toastOcrFailure's formatError pulls out the human message.
+      toastOcrFailure(err);
     }
   }
 
@@ -393,19 +390,11 @@
       error?: string;
     }>('screenshot-ocr', (event) => {
       const { status, chars, error } = event.payload;
-      if (status === 'copied') {
-        toasts.success(`OCR text copied to clipboard (${chars} characters)`);
-      } else if (status === 'cancelled') {
-        toasts.add({ message: 'Region selection cancelled', type: 'success', autoDismiss: true });
-      } else if (status === 'empty') {
-        toasts.add({
-          message: 'No text found in the selected region',
-          type: 'success',
-          autoDismiss: true,
-        });
-      } else {
+      if (status === 'failed') {
         toasts.error(`Screenshot OCR failed: ${error ?? 'unknown error'}`);
+        return;
       }
+      toastOcrOutcome({ status: status as CaptureOcrOutcome['status'], chars });
     });
   });
 
