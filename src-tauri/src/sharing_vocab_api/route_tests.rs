@@ -30,6 +30,9 @@ struct TestApp {
     /// In-memory database (also inside the router's state) for direct
     /// seeding/inspection in tests.
     db: Arc<Database>,
+    /// The router's own state, retained for direct handler-core tests
+    /// (e.g. the generate-validation module below).
+    state: ApiState<tauri::test::MockRuntime>,
     /// Keeps the mock app (event loop owner) and the temp token-store dir
     /// alive for the lifetime of the test.
     _app: tauri::App<tauri::test::MockRuntime>,
@@ -64,10 +67,11 @@ async fn test_app() -> TestApp {
         jobs,
     };
     TestApp {
-        router: build_router(state),
+        router: build_router(state.clone()),
         token: issued.token,
         tokens,
         db: db_for_app,
+        state,
         _app: app,
         _tmp: tmp,
     }
@@ -820,5 +824,153 @@ mod mobile_api_tests {
             let (status, _) = req(&app, method, uri, None, body).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "no bearer on {uri}");
         }
+    }
+}
+
+/// Direct tests for `validate_generate_request` — the runtime-generic
+/// validation core of the Wry-only generate route. The HTTP route itself is
+/// merged only on Wry (the generation commands are `AppHandle<Wry>`-typed),
+/// so these exercise the core against the same `ApiState` the router uses:
+/// doc-type parse, peer-discussion required fields, recording visibility
+/// (tombstones are 404), and soap's audio-presence 409.
+mod generate_validation_tests {
+    use super::super::mobile::{DocType, GenerateRequest, validate_generate_request};
+    use super::*;
+    use medical_core::types::recording::Recording;
+    use medical_db::recordings::RecordingsRepo;
+    use uuid::Uuid;
+
+    async fn validate(
+        app: &TestApp,
+        id: &str,
+        doc_type: &str,
+        req: &GenerateRequest,
+    ) -> Result<DocType, StatusCode> {
+        validate_generate_request(&app.state, id, doc_type, req).await
+    }
+
+    /// Seed a recording whose `audio_path` is `audio` (None = a path that
+    /// does not exist on disk — the no-audio case).
+    fn seed_with_audio(app: &TestApp, audio: Option<std::path::PathBuf>) -> String {
+        let conn = app.db.conn().expect("conn");
+        let path = audio.unwrap_or_else(|| app._tmp.path().join("no-such-audio.wav"));
+        let rec = Recording::new("consult.wav", path);
+        RecordingsRepo::insert(&conn, &rec).expect("seed insert");
+        rec.id.to_string()
+    }
+
+    fn peer_req() -> GenerateRequest {
+        GenerateRequest {
+            physician_name: Some("Dr. Smith".into()),
+            specialty: Some("Cardiology".into()),
+            reason: Some("chest pain review".into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_doc_type_and_malformed_uuid_are_400() {
+        let app = test_app().await;
+        let id = seed_with_audio(&app, None);
+        let err = validate(&app, &id, "nonsense", &GenerateRequest::default())
+            .await
+            .expect_err("unknown doc type");
+        assert_eq!(err, StatusCode::BAD_REQUEST);
+
+        let err = validate(&app, "not-a-uuid", "soap", &GenerateRequest::default())
+            .await
+            .expect_err("malformed uuid");
+        assert_eq!(err, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn peer_discussion_requires_all_three_fields_nonblank() {
+        let app = test_app().await;
+        let id = seed_with_audio(&app, None);
+
+        // Sanity: the complete request passes.
+        let doc = validate(&app, &id, "peer_discussion", &peer_req())
+            .await
+            .expect("complete peer request is valid");
+        assert_eq!(doc, DocType::PeerDiscussion);
+
+        for blank in [None, Some("   ")] {
+            for field in ["physician_name", "specialty", "reason"] {
+                let mut req = peer_req();
+                match field {
+                    "physician_name" => req.physician_name = blank.map(String::from),
+                    "specialty" => req.specialty = blank.map(String::from),
+                    _ => req.reason = blank.map(String::from),
+                }
+                let err = validate(&app, &id, "peer_discussion", &req)
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    err,
+                    StatusCode::BAD_REQUEST,
+                    "{field} = {blank:?} must reject"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_and_tombstoned_recordings_are_404() {
+        let app = test_app().await;
+        // Well-formed uuid that was never created.
+        let missing = Uuid::new_v4().to_string();
+        let err = validate(&app, &missing, "synopsis", &GenerateRequest::default())
+            .await
+            .expect_err("unknown recording");
+        assert_eq!(err, StatusCode::NOT_FOUND);
+
+        // Tombstoned rows are invisible (same visibility rule as the
+        // document/export handlers). Scoped so the pooled connection is
+        // released before `validate` asks the pool for its own.
+        let id = seed_with_audio(&app, None);
+        {
+            let conn = app.db.conn().expect("conn");
+            let uuid = Uuid::parse_str(&id).expect("uuid");
+            RecordingsRepo::soft_delete(&conn, &uuid).expect("tombstone");
+        }
+        let err = validate(&app, &id, "synopsis", &GenerateRequest::default())
+            .await
+            .expect_err("tombstoned recording");
+        assert_eq!(err, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn soap_without_an_audio_file_on_disk_is_409() {
+        let app = test_app().await;
+        let id = seed_with_audio(&app, None);
+        let err = validate(&app, &id, "soap", &GenerateRequest::default())
+            .await
+            .expect_err("no audio");
+        // 409, not 404: the recording exists and is visible — the request
+        // is unprocessable because process_recording can only fail without
+        // audio.
+        assert_eq!(err, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn soap_with_audio_passes_and_other_docs_skip_the_audio_check() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let audio = tmp.path().join("consult.wav");
+        std::fs::write(&audio, b"RIFF").expect("write audio");
+
+        let app = test_app().await;
+        let with_audio = seed_with_audio(&app, Some(audio));
+        let doc = validate(&app, &with_audio, "soap", &GenerateRequest::default())
+            .await
+            .expect("audio present");
+        assert_eq!(doc, DocType::Soap);
+
+        // Only soap runs the transcribe pipeline — the doc generators work
+        // from an existing SOAP note, so they must NOT demand audio.
+        let no_audio = seed_with_audio(&app, None);
+        let doc = validate(&app, &no_audio, "synopsis", &GenerateRequest::default())
+            .await
+            .expect("synopsis has no audio requirement");
+        assert_eq!(doc, DocType::Synopsis);
     }
 }
