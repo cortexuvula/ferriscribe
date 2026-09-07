@@ -38,6 +38,7 @@ mod commands;
 mod conditions_remote;
 mod content_remote;
 pub mod corpus_export;
+mod job_stages;
 mod screen_capture;
 mod sharing_vocab_api;
 mod state;

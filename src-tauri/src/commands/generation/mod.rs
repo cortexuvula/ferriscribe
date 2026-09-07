@@ -4,7 +4,7 @@
 //! [`helpers`]. Tauri command names and the public path
 //! `commands::generation::*` are unchanged from the pre-split layout.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use medical_core::error::AppError;
 
@@ -64,20 +64,22 @@ pub(super) const MAX_DOCUMENT_CHARS: usize = 500_000;
 // Progress event payload
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GenerationProgress {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GenerationProgress {
     #[serde(rename = "type")]
     pub doc_type: String,
     pub status: String,
     pub recording_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Omitted from the JSON when absent; defaults back to `None` on
+    /// deserialize (the mobile registry ignores it either way).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub progress: Option<GenerationProgressStats>,
 }
 
 /// Live throughput stats for an in-flight streaming generation.
 /// Counts and durations only — never content (AGENTS.md PHI rule).
-#[derive(Debug, Clone, Copy, Serialize)]
-pub(super) struct GenerationProgressStats {
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct GenerationProgressStats {
     /// Approximate tokens streamed so far (one SSE delta ≈ one token;
     /// the persisted generation stat remains exact via the usage chunk).
     pub tokens: u64,
@@ -94,8 +96,12 @@ pub(super) fn format_progress_error(err: &AppError) -> String {
     let msg = crate::commands::unwrap_app_error_message_ref(err);
     let trimmed = msg.trim();
     if trimmed.is_empty() {
-        format!("failed: unknown error ({})", err.kind_str())
+        format!(
+            "{}: unknown error ({})",
+            crate::job_stages::FAILED,
+            err.kind_str()
+        )
     } else {
-        format!("failed: {}", trimmed)
+        format!("{}: {}", crate::job_stages::FAILED, trimmed)
     }
 }

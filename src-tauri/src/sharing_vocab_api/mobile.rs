@@ -145,6 +145,77 @@ fn recording_is_active(conn: &medical_db::Connection, uuid: &Uuid) -> bool {
     .unwrap_or(false)
 }
 
+// ---------------------------------------------------------------------------
+// Shared handler scaffolding — the authorize→spawn_blocking→conn spine and
+// the recording-visibility/fan-out steps every mobile DB handler repeats.
+// ----------------------------------------------------------------------------
+
+/// Run a database closure on the blocking pool.
+///
+/// The spine of every mobile handler that touches the DB: clone the pool
+/// Arc, `spawn_blocking`, `db.conn()` (500 on pool failure), run the
+/// closure, 500 on join failure. The closure owns its error mapping.
+/// The closure also receives the `Arc<Database>` for paths that need to
+/// re-enter the repo layer with it (`save_recording_field_inner`).
+async fn with_conn<T, F, R>(state: &ApiState<R>, f: F) -> Result<T, StatusCode>
+where
+    R: tauri::Runtime,
+    T: Send + 'static,
+    F: FnOnce(Arc<medical_db::Database>, medical_db::PooledConnection) -> Result<T, StatusCode>
+        + Send
+        + 'static,
+{
+    let db = Arc::clone(&state.db);
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        f(db, conn)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+/// The tombstone gate: 404 unless the recording exists and is active.
+/// `what` names the rejecting handler for the log line (ids only, no PHI).
+fn require_active_recording(
+    conn: &medical_db::Connection,
+    uuid: &Uuid,
+    what: &str,
+) -> Result<(), StatusCode> {
+    if !recording_is_active(conn, uuid) {
+        warn!("{what} rejected, recording not active (404)");
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(())
+}
+
+/// Load an active recording for a content-touching handler: tombstone gate
+/// first, then the row. A `Database` error maps to 404 (the row was just
+/// verified active, so NotFound is the expected shape; anything else is
+/// surfaced as the same code the handlers have always used).
+fn get_active_recording(
+    conn: &medical_db::Connection,
+    uuid: &Uuid,
+    what: &str,
+) -> Result<Recording, StatusCode> {
+    require_active_recording(conn, uuid, what)?;
+    RecordingsRepo::get_by_id(conn, uuid).map_err(|e| match AppError::from(e) {
+        AppError::Database { .. } => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    })
+}
+
+/// Notify other clients (SSE `content_changed`) and this server's own
+/// Recordings/Editor views (`recording-updated` Tauri event) — the same
+/// fan-out the audio PUT and the sync push perform.
+fn fan_out_recording_changed<R: tauri::Runtime>(state: &ApiState<R>, recording_id: &str) {
+    let _ = state.content_changed_tx.send(recording_id.to_string());
+    use tauri::Emitter as _;
+    let _ = state.app_handle.emit(
+        "recording-updated",
+        serde_json::json!({ "id": recording_id }),
+    );
+}
+
 /// Extract the current content for a doc type from a recording row.
 fn document_content(rec: &Recording, doc: DocType) -> Option<&str> {
     match doc {
@@ -176,7 +247,7 @@ pub(super) struct JobSnapshot {
 /// (except by a NEW job for the same recording), so its registry entry is
 /// safe to evict once stale.
 fn stage_is_terminal(stage: &str) -> bool {
-    stage == "completed" || stage == "failed"
+    crate::job_stages::is_terminal(stage)
 }
 
 /// Evict terminal snapshots older than `max_age`. RFC 3339 stamps compare
@@ -196,24 +267,6 @@ fn prune_terminal(
 }
 
 /// Wire shape of a `pipeline-progress` event (see `commands::pipeline`).
-#[derive(Deserialize)]
-struct PipelineProgressWire {
-    recording_id: String,
-    stage: String,
-    error: Option<String>,
-}
-
-/// Wire shape of a `generation-progress` event (see
-/// `commands::generation::helpers::run_generation_command`). `progress`
-/// (live streaming stats) is deliberately ignored — stage labels only.
-#[derive(Deserialize)]
-struct GenerationProgressWire {
-    #[serde(rename = "type")]
-    doc_type: String,
-    status: String,
-    recording_id: String,
-}
-
 /// In-memory job registry keyed by recording ID.
 ///
 /// Updated from two sources:
@@ -328,14 +381,18 @@ impl JobRegistry {
 /// `generating_soap` vocabulary); `completed` passes through; `failed: …`
 /// (from `format_progress_error`) becomes stage `failed` with the message
 /// detached. Any other status (live streaming stats) is ignored.
-fn map_generation_event(wire: &GenerationProgressWire) -> Option<(String, Option<String>)> {
+fn map_generation_event(
+    wire: &crate::commands::generation::GenerationProgress,
+) -> Option<(String, Option<String>)> {
+    use crate::job_stages as stage;
     match wire.status.as_str() {
-        "started" => Some((format!("generating_{}", wire.doc_type), None)),
-        "completed" => Some(("completed".to_string(), None)),
-        s if s.starts_with("failed") => {
-            let msg = s.strip_prefix("failed:").unwrap_or(s).trim();
+        stage::STATUS_STARTED => Some((stage::generating(&wire.doc_type), None)),
+        stage::COMPLETED => Some((stage::COMPLETED.to_string(), None)),
+        s if s.starts_with(stage::FAILED) => {
+            let prefix = format!("{}:", stage::FAILED);
+            let msg = s.strip_prefix(&prefix).unwrap_or(s).trim();
             Some((
-                "failed".to_string(),
+                stage::FAILED.to_string(),
                 (!msg.is_empty()).then(|| msg.to_string()),
             ))
         }
@@ -368,7 +425,9 @@ pub(super) fn attach_event_forwarders<R: tauri::Runtime>(
 
     let j = Arc::clone(jobs);
     let pipeline = app_handle.listen_any("pipeline-progress", move |event| {
-        let Ok(wire) = serde_json::from_str::<PipelineProgressWire>(event.payload()) else {
+        let Ok(wire) =
+            serde_json::from_str::<crate::commands::pipeline::PipelineProgress>(event.payload())
+        else {
             return;
         };
         j.mark(&wire.recording_id, &wire.stage, wire.error);
@@ -376,7 +435,9 @@ pub(super) fn attach_event_forwarders<R: tauri::Runtime>(
 
     let j = Arc::clone(jobs);
     let generation = app_handle.listen_any("generation-progress", move |event| {
-        let Ok(wire) = serde_json::from_str::<GenerationProgressWire>(event.payload()) else {
+        let Ok(wire) = serde_json::from_str::<crate::commands::generation::GenerationProgress>(
+            event.payload(),
+        ) else {
             return;
         };
         if let Some((stage, error)) = map_generation_event(&wire) {
@@ -456,10 +517,10 @@ pub(super) async fn create_recording_handler<R: tauri::Runtime>(
             StatusCode::BAD_REQUEST
         })?,
     };
+    let duration_seconds = req.duration_seconds;
+    let patient_name = req.patient_name;
 
-    let db = Arc::clone(&state.db);
-    let rec = tokio::task::spawn_blocking(move || -> Result<Recording, StatusCode> {
-        let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let db_check = with_conn(&state, move |db, conn| -> Result<Recording, StatusCode> {
         let existing: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM recordings WHERE id = ?1",
@@ -472,29 +533,24 @@ pub(super) async fn create_recording_handler<R: tauri::Runtime>(
         }
         let mut rec = Recording::new(filename, std::path::PathBuf::new());
         rec.id = id;
-        rec.duration_seconds = req.duration_seconds;
-        rec.patient_name = req.patient_name;
+        rec.duration_seconds = duration_seconds;
+        rec.patient_name = patient_name;
         RecordingsRepo::insert(&conn, &rec).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let _ = db; // insert needs only the connection
         Ok(rec)
     })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    .await?;
 
     // Let other clients (SSE) and this server's own Recordings view know a
     // row landed — same fan-out the audio PUT performs.
-    let _ = state.content_changed_tx.send(rec.id.to_string());
-    use tauri::Emitter as _;
-    let _ = state.app_handle.emit(
-        "recording-updated",
-        serde_json::json!({ "id": rec.id.to_string() }),
-    );
+    fan_out_recording_changed(&state, &db_check.id.to_string());
 
-    info!(recording_id = %rec.id, "mobile: recording created");
+    info!(recording_id = %db_check.id, "mobile: recording created");
     Ok((
         StatusCode::CREATED,
         Json(CreateRecordingResponse {
-            id: rec.id.to_string(),
-            created_at: rec.created_at.to_rfc3339(),
+            id: db_check.id.to_string(),
+            created_at: db_check.created_at.to_rfc3339(),
         }),
     ))
 }
@@ -598,37 +654,30 @@ pub(super) async fn document_get_handler<R: tauri::Runtime>(
     let _ = authorize(&state, &headers)?;
     let doc = parse_doc_type(&doc_type).ok_or(StatusCode::BAD_REQUEST)?;
     let uuid = Uuid::parse_str(&recording_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let db = Arc::clone(&state.db);
 
-    let out = tokio::task::spawn_blocking(move || -> Result<DocumentResponse, StatusCode> {
-        let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if !recording_is_active(&conn, &uuid) {
-            warn!("mobile: document get rejected, recording not active (404)");
-            return Err(StatusCode::NOT_FOUND);
-        }
-        let rec = RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| match AppError::from(e) {
-            AppError::Database { .. } => StatusCode::NOT_FOUND,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        })?;
-        let content = document_content(&rec, doc).map(|s| s.to_string());
-        // Field revision when one exists (per-field LWW stamp), else the
-        // row stamp — same precedence the sync wire builder uses.
-        let updated_at = medical_db::ContentSyncRepo::revisions_for(&conn, &uuid)
-            .ok()
-            .and_then(|revs| {
-                revs.iter()
-                    .find(|r| r.field == doc.field_name())
-                    .map(|r| r.updated_at.clone())
+    let out = with_conn(
+        &state,
+        move |_, conn| -> Result<DocumentResponse, StatusCode> {
+            let rec = get_active_recording(&conn, &uuid, "mobile: document get")?;
+            let content = document_content(&rec, doc).map(|s| s.to_string());
+            // Field revision when one exists (per-field LWW stamp), else the
+            // row stamp — same precedence the sync wire builder uses.
+            let updated_at = medical_db::ContentSyncRepo::revisions_for(&conn, &uuid)
+                .ok()
+                .and_then(|revs| {
+                    revs.iter()
+                        .find(|r| r.field == doc.field_name())
+                        .map(|r| r.updated_at.clone())
+                })
+                .or_else(|| rec.updated_at.map(|dt| dt.to_rfc3339()));
+            Ok(DocumentResponse {
+                doc_type: doc.as_str().to_string(),
+                content,
+                updated_at,
             })
-            .or_else(|| rec.updated_at.map(|dt| dt.to_rfc3339()));
-        Ok(DocumentResponse {
-            doc_type: doc.as_str().to_string(),
-            content,
-            updated_at,
-        })
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+        },
+    )
+    .await?;
 
     info!(recording_id = %recording_id, doc_type = doc.as_str(), "mobile: document get");
     Ok(Json(out))
@@ -656,16 +705,11 @@ pub(super) async fn document_put_handler<R: tauri::Runtime>(
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    let db = Arc::clone(&state.db);
     let field = doc.field_name().to_string();
     let value = req.content;
     let rid = recording_id.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), StatusCode> {
-        let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if !recording_is_active(&conn, &uuid) {
-            warn!("mobile: document put rejected, recording not active (404)");
-            return Err(StatusCode::NOT_FOUND);
-        }
+    with_conn(&state, move |db, conn| -> Result<(), StatusCode> {
+        require_active_recording(&conn, &uuid, "mobile: document put")?;
         let result = if doc == DocType::Synopsis {
             persist_synopsis(&db, &conn, &rid, &value)
         } else {
@@ -673,12 +717,7 @@ pub(super) async fn document_put_handler<R: tauri::Runtime>(
                 .unwrap_or_default()
                 .capture_for_training;
             crate::commands::recordings_edit::save_recording_field_inner(
-                Arc::clone(&db),
-                &conn,
-                &rid,
-                &field,
-                &value,
-                capture,
+                db, &conn, &rid, &field, &value, capture,
             )
         };
         result.map_err(|e| match e {
@@ -686,17 +725,11 @@ pub(super) async fn document_put_handler<R: tauri::Runtime>(
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         })
     })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    .await?;
 
     // Same fan-out the sync push performs: other clients + this server's
     // own Recordings/Editor views.
-    let _ = state.content_changed_tx.send(recording_id.clone());
-    use tauri::Emitter as _;
-    let _ = state.app_handle.emit(
-        "recording-updated",
-        serde_json::json!({ "id": recording_id }),
-    );
+    fan_out_recording_changed(&state, &recording_id);
 
     info!(recording_id = %recording_id, doc_type = doc.as_str(), "mobile: document put");
     Ok(StatusCode::NO_CONTENT)
@@ -762,18 +795,9 @@ pub(super) async fn export_handler<R: tauri::Runtime>(
         _ => return Err(StatusCode::BAD_REQUEST),
     };
     let uuid = Uuid::parse_str(&recording_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let db = Arc::clone(&state.db);
 
-    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, StatusCode> {
-        let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if !recording_is_active(&conn, &uuid) {
-            warn!("mobile: export rejected, recording not active (404)");
-            return Err(StatusCode::NOT_FOUND);
-        }
-        let rec = RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| match AppError::from(e) {
-            AppError::Database { .. } => StatusCode::NOT_FOUND,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        })?;
+    let bytes = with_conn(&state, move |_, conn| -> Result<Vec<u8>, StatusCode> {
+        let rec = get_active_recording(&conn, &uuid, "mobile: export")?;
         if document_content(&rec, doc).is_none() {
             return Err(StatusCode::NOT_FOUND);
         }
@@ -798,8 +822,7 @@ pub(super) async fn export_handler<R: tauri::Runtime>(
             StatusCode::INTERNAL_SERVER_ERROR
         })
     })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+    .await?;
 
     let byte_count = bytes.len();
     let ext = if pdf { "pdf" } else { "docx" };
@@ -900,16 +923,7 @@ pub(super) async fn validate_generate_request<R: tauri::Runtime>(
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || -> Result<(), StatusCode> {
         let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let visible: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM recordings WHERE id = ?1 AND deleted_at IS NULL",
-                [&uuid.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if visible == 0 {
-            return Err(StatusCode::NOT_FOUND);
-        }
+        require_active_recording(&conn, &uuid, "mobile: generate validation")?;
         if doc == DocType::Soap {
             // process_recording transcribes first — without audio it can
             // only fail. Reject with 409 before queueing.
@@ -973,7 +987,9 @@ async fn generate_handler(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    let seq = state.jobs.mark(&recording_id, "queued", None);
+    let seq = state
+        .jobs
+        .mark(&recording_id, crate::job_stages::QUEUED, None);
     let app = state.app_handle.clone();
     let jobs = Arc::clone(&state.jobs);
     let rid = recording_id.clone();
@@ -1044,8 +1060,10 @@ async fn generate_handler(
         // when no event fired since queue time — e.g. the generation lock
         // was already held and the command bailed before its first emit.
         match result {
-            Ok(_) => jobs.mark_if_current(&rid, seq, "completed", None),
-            Err(e) => jobs.mark_if_current(&rid, seq, "failed", Some(e.to_string())),
+            Ok(_) => jobs.mark_if_current(&rid, seq, crate::job_stages::COMPLETED, None),
+            Err(e) => {
+                jobs.mark_if_current(&rid, seq, crate::job_stages::FAILED, Some(e.to_string()))
+            }
         }
     });
 
