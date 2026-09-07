@@ -74,6 +74,16 @@ jobs:
         run: node scripts/build-sidecar.mjs --debug
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
+      - name: Version files in sync (Cargo.lock is the 4th)
+        # AGENTS.md names three version-sync files; Cargo.lock's
+        # rust-medical-assistant entry drifts independently (it has once
+        # already) unless a `cargo update -p` follows the bump. Fail the
+        # gate when they disagree.
+        run: |
+          toml_v="$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version *= *"\(.*\)"/\1/')"
+          lock_v="$(grep -A1 '^name = "rust-medical-assistant"' Cargo.lock | grep -m1 '^version' | sed 's/version *= *"\(.*\)"/\1/')"
+          echo "Cargo.toml=$toml_v Cargo.lock=$lock_v"
+          test "$toml_v" = "$lock_v"
       - name: cargo clippy (-D warnings)
         # lib + tests only — the Tauri shell pulls in platform GUI deps that
         # aren't relevant to the workspace lint gate. `--all-targets` includes

@@ -42,7 +42,7 @@ const EDITABLE_FIELDS: &[&str] = &[
 /// The `_` arm is a fallback for forward-compat; the
 /// `every_editable_field_has_explicit_cap` test guards that adding a field
 /// to `EDITABLE_FIELDS` without an explicit cap here fails the test.
-fn max_chars_for_field(field: &str) -> usize {
+pub(crate) fn max_chars_for_field(field: &str) -> usize {
     match field {
         "transcript" => 500_000,
         "soap_note" | "referral" | "letter" | "peer_discussion" | "chat" => 500_000,

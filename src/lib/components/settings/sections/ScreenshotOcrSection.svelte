@@ -7,8 +7,11 @@
    */
   import { settings } from '../../../stores/settings.svelte';
   import { toasts } from '../../../stores/toasts.svelte';
-  import { captureRegionOcr, captureOutcomeMessage } from '../../../api/screenshotOcr';
-  import { formatError } from '../../../types/errors';
+  import {
+    captureRegionOcr,
+    toastOcrFailure,
+    toastOcrOutcome,
+  } from '../../../api/screenshotOcr';
 
   const DEFAULT_HOTKEY = 'CmdOrCtrl+Alt+O';
 
@@ -47,20 +50,9 @@
     capturing = true;
     try {
       const outcome = await captureRegionOcr();
-      const message = captureOutcomeMessage(outcome);
-      if (outcome.status === 'empty' || outcome.status === 'cancelled') {
-        toasts.add({ message, type: 'success', autoDismiss: true });
-      } else {
-        toasts.success(message);
-      }
+      toastOcrOutcome(outcome);
     } catch (err) {
-      // A capture started elsewhere (hotkey) holding the in-flight guard is
-      // a quiet no-op here, not an error. formatError extracts the human
-      // message from the serialized AppError struct.
-      const msg = formatError(err);
-      if (!msg.includes('already in progress')) {
-        toasts.error(`Screenshot OCR failed: ${msg}`);
-      }
+      toastOcrFailure(err);
     } finally {
       capturing = false;
     }

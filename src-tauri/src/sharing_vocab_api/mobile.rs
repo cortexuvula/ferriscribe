@@ -109,22 +109,22 @@ pub(super) fn parse_doc_type(s: &str) -> Option<DocType> {
     }
 }
 
-/// Character cap for document PUT bodies. Mirrors the desktop editor's
-/// per-field caps (`commands::recordings_edit::max_chars_for_field`).
-const MAX_DOC_CHARS: usize = 500_000;
+/// Character cap for document PUT bodies — the desktop editor's own
+/// per-field cap function (`commands::recordings_edit::max_chars_for_field`),
+/// so a future desktop cap change cannot silently diverge from the mobile
+/// PUT limit.
+fn max_doc_chars(doc: DocType) -> usize {
+    crate::commands::recordings_edit::max_chars_for_field(doc.field_name())
+}
 /// Character cap for a recording filename on create.
 const MAX_FILENAME_CHARS: usize = 255;
 
-/// Read the stored synopsis off a recording's metadata.
-///
-/// Mirrors the medical-export crate's reader: the synopsis has no dedicated
-/// column; `generate_synopsis` persists it as a plain string under
-/// `metadata.synopsis`. An empty string counts as absent.
+/// Read the stored synopsis off a recording's metadata — the
+/// medical-export crate's own reader (the synopsis has no dedicated column;
+/// `generate_synopsis` persists it as a plain string under
+/// `metadata.synopsis`, and an empty string counts as absent).
 fn synopsis_of(rec: &Recording) -> Option<&str> {
-    rec.metadata
-        .get("synopsis")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
+    medical_export::synopsis_text(rec)
 }
 
 /// Whether the recording row exists and is NOT soft-deleted.
@@ -700,7 +700,7 @@ pub(super) async fn document_put_handler<R: tauri::Runtime>(
     let _ = authorize(&state, &headers)?;
     let doc = parse_doc_type(&doc_type).ok_or(StatusCode::BAD_REQUEST)?;
     let uuid = Uuid::parse_str(&recording_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if !req.content.is_empty() && req.content.chars().count() > MAX_DOC_CHARS {
+    if !req.content.is_empty() && req.content.chars().count() > max_doc_chars(doc) {
         warn!("mobile: document put rejected, over cap");
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }

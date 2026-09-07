@@ -311,7 +311,7 @@
       <option value="">Default — Family Medicine (built-in)</option>
       {#each packs.filter((p) => !p.error && !(p.id === 'family-medicine' && p.source === 'bundled')) as packInfo (packInfo.id)}
         <option value={packInfo.id}>
-          {packInfo.name} — v{packInfo.version} ({packInfo.source})
+          {packInfo.icon ? `${packInfo.icon} ` : ''}{packInfo.name} — v{packInfo.version} ({packInfo.source})
         </option>
       {/each}
       {#if settings.state?.specialty && specialtyMissing}
