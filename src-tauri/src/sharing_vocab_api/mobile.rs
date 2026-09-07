@@ -127,6 +127,24 @@ fn synopsis_of(rec: &Recording) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Whether the recording row exists and is NOT soft-deleted.
+///
+/// `RecordingsRepo::get_by_id` projects no `deleted_at` column, so a
+/// tombstoned row reads as a normal one. Every mobile handler that touches
+/// recording content must gate on this — a soft-deleted recording's
+/// documents must not be readable, writable, or exportable from a paired
+/// device, and a PUT must not resurrect tombstoned fields (the create
+/// handler already refuses tombstoned ids with 409 for the same reason).
+fn recording_is_active(conn: &medical_db::Connection, uuid: &Uuid) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM recordings WHERE id = ?1 AND deleted_at IS NULL",
+        [uuid.to_string()],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
 /// Extract the current content for a doc type from a recording row.
 fn document_content(rec: &Recording, doc: DocType) -> Option<&str> {
     match doc {
@@ -152,6 +170,29 @@ pub(super) struct JobSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) error: Option<String>,
     pub(super) updated_at: String,
+}
+
+/// Terminal stages — a job in one of these states will never change again
+/// (except by a NEW job for the same recording), so its registry entry is
+/// safe to evict once stale.
+fn stage_is_terminal(stage: &str) -> bool {
+    stage == "completed" || stage == "failed"
+}
+
+/// Evict terminal snapshots older than `max_age`. RFC 3339 stamps compare
+/// correctly as strings for identical UTC formats (`to_rfc3339` always
+/// emits `+00:00` suffix here, and the stamps are only ever produced by
+/// `Utc::now().to_rfc3339()` in this module). Returns entries removed.
+fn prune_terminal(
+    jobs: &mut HashMap<String, (u64, JobSnapshot)>,
+    max_age: chrono::Duration,
+) -> usize {
+    let cutoff = (Utc::now() - max_age).to_rfc3339();
+    let before = jobs.len();
+    jobs.retain(|_, (_, snap)| {
+        !(stage_is_terminal(&snap.stage) && snap.updated_at.as_str() < cutoff.as_str())
+    });
+    before - jobs.len()
 }
 
 /// Wire shape of a `pipeline-progress` event (see `commands::pipeline`).
@@ -247,6 +288,12 @@ impl JobRegistry {
             }
         {
             return; // superseded by a newer mark
+        }
+        // Amortized prune: every 64th insert sweeps terminal snapshots
+        // older than 24h. Keeps the registry bounded over the server's
+        // lifetime without a dedicated sweeper task (review note).
+        if seq.is_multiple_of(64) {
+            let _ = prune_terminal(&mut guard, chrono::Duration::hours(24));
         }
         guard.insert(
             recording_id.to_string(),
@@ -524,6 +571,10 @@ pub(super) async fn document_get_handler<R: tauri::Runtime>(
 
     let out = tokio::task::spawn_blocking(move || -> Result<DocumentResponse, StatusCode> {
         let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if !recording_is_active(&conn, &uuid) {
+            warn!("mobile: document get rejected, recording not active (404)");
+            return Err(StatusCode::NOT_FOUND);
+        }
         let rec = RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| match AppError::from(e) {
             AppError::Database { .. } => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -568,7 +619,7 @@ pub(super) async fn document_put_handler<R: tauri::Runtime>(
 ) -> Result<StatusCode, StatusCode> {
     let _ = authorize(&state, &headers)?;
     let doc = parse_doc_type(&doc_type).ok_or(StatusCode::BAD_REQUEST)?;
-    Uuid::parse_str(&recording_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let uuid = Uuid::parse_str(&recording_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     if !req.content.is_empty() && req.content.chars().count() > MAX_DOC_CHARS {
         warn!("mobile: document put rejected, over cap");
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
@@ -580,6 +631,10 @@ pub(super) async fn document_put_handler<R: tauri::Runtime>(
     let rid = recording_id.clone();
     tokio::task::spawn_blocking(move || -> Result<(), StatusCode> {
         let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if !recording_is_active(&conn, &uuid) {
+            warn!("mobile: document put rejected, recording not active (404)");
+            return Err(StatusCode::NOT_FOUND);
+        }
         let result = if doc == DocType::Synopsis {
             persist_synopsis(&db, &conn, &rid, &value)
         } else {
@@ -680,6 +735,10 @@ pub(super) async fn export_handler<R: tauri::Runtime>(
 
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, StatusCode> {
         let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if !recording_is_active(&conn, &uuid) {
+            warn!("mobile: export rejected, recording not active (404)");
+            return Err(StatusCode::NOT_FOUND);
+        }
         let rec = RecordingsRepo::get_by_id(&conn, &uuid).map_err(|e| match AppError::from(e) {
             AppError::Database { .. } => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,

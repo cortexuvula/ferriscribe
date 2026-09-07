@@ -718,6 +718,66 @@ mod mobile_api_tests {
     }
 
     #[tokio::test]
+    async fn tombstoned_recordings_are_invisible_to_documents_and_export() {
+        // Soft-delete leaks PHI if get_by_id (no deleted_at projection) is
+        // used unchecked: documents readable, exports render, PUT silently
+        // resurrects the tombstoned row. All three must 404 instead.
+        let app = test_app().await;
+        let rid = seed_recording(&app, Some("Patient reports headache."));
+        let uuid = uuid::Uuid::parse_str(&rid).unwrap();
+
+        // Seed a SOAP note, then tombstone the row.
+        {
+            let conn = app.db.conn().expect("conn");
+            let mut rec =
+                medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid).expect("recording");
+            rec.soap_note = Some("S: Headache".to_string());
+            medical_db::recordings::RecordingsRepo::update(&conn, &rec).expect("update");
+            medical_db::recordings::RecordingsRepo::soft_delete(&conn, &uuid).expect("tombstone");
+        }
+
+        // GET document → 404 (not the seeded SOAP content).
+        let (status, body) = req(
+            &app,
+            "GET",
+            &format!("/v1/recordings/{rid}/documents/soap"),
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "get: {body}");
+
+        // PUT document → 404; the tombstoned row must gain nothing.
+        let (status, _) = req(
+            &app,
+            "PUT",
+            &format!("/v1/recordings/{rid}/documents/soap"),
+            authed(&app),
+            Some(json!({"content": "resurrection attempt"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        {
+            let conn = app.db.conn().expect("conn");
+            let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
+                .expect("row still exists (tombstoned)");
+            assert_ne!(rec.soap_note, Some("resurrection attempt".to_string()));
+        }
+
+        // Export → 404 (content exists on the tombstoned row but must not
+        // render for a paired device).
+        let (status, _) = req(
+            &app,
+            "GET",
+            &format!("/v1/recordings/{rid}/export?format=pdf&doc_type=soap"),
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn devices_self_revoke_invalidates_bearer() {
         let app = test_app().await;
         // Sanity: token works.
