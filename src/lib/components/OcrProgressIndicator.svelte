@@ -3,10 +3,16 @@
    * Floating "recognizing text…" status shown by the Rust side while the
    * vision model runs a screenshot-OCR capture. Mounted INSTEAD of the app
    * shell when the webview URL carries `#ocr-progress` (see src/main.ts).
-   * The window itself is the pill — frameless, opaque dark, always-on-top,
-   * click-through — so this component only centers a spinner and label.
-   * It must not import app.css or stores — same featherweight rules as the
-   * screen-region overlay.
+   * The window itself is the pill — frameless, always-on-top, click-through
+   * — so this component centers a spinner and label over an opaque dark
+   * page. The PAGE paints the dark background (not just the window):
+   * wry applies `background_color` to the webview only with its
+   * `transparent` feature, which Tauri enables via `macOSPrivateApi` —
+   * off in this project — so on macOS the WKWebView keeps its default
+   * opaque WHITE background and the white label would be invisible
+   * (v0.76.1). Linux/Windows honor the window color; painting here too
+   * keeps every platform identical. It must not import app.css or stores
+   * — same featherweight rules as the screen-region overlay.
    */
 </script>
 
@@ -14,7 +20,10 @@
   <style>
     html,
     body {
-      background: transparent;
+      /* Same dark as ProgressIndicator's window background_color
+         (20, 20, 24) — see the module comment for why the PAGE must
+         carry it. Opaque, so the window color behind never matters. */
+      background: rgb(20, 20, 24);
       margin: 0;
       overflow: hidden;
     }
