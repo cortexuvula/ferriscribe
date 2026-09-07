@@ -348,10 +348,12 @@ pub struct AppState {
     /// auto-resume marker). Holds are long (multi-second start) — status
     /// polling still reads the RwLock and never takes this.
     pub sharing_lifecycle: Arc<tokio::sync::Mutex<()>>,
-    /// JoinHandle for the vocab CRUD HTTP API task spawned alongside the
-    /// sharing service. Held here (rather than in SharingService) because
-    /// the API handlers need DB access that lives in the Tauri layer.
-    pub vocab_api: RwLock<Option<tokio::task::JoinHandle<()>>>,
+    /// Handle for the vocab CRUD HTTP API spawned alongside the sharing
+    /// service (serve task + mobile job-forwarder detach). Held here
+    /// (rather than in SharingService) because the API handlers need DB
+    /// access that lives in the Tauri layer. On stop BOTH the serve task
+    /// must be aborted AND `detach` called — see `VocabApiHandle`.
+    pub vocab_api: RwLock<Option<crate::sharing_vocab_api::VocabApiHandle>>,
     // ── Typed provider handles for runtime endpoint updates ──────────────────
     /// Concrete Ollama provider reference; allows `set_endpoint` after startup.
     /// Wrapped in `RwLock` so `reinit_providers` / `download_model` can replace

@@ -92,7 +92,6 @@ pub async fn start_sharing_inner(
             None
         }
     };
-
     // Spawn the ReadinessWatcher (10s probe loop) and a tiny forwarder that
     // turns watch-channel changes into a Tauri event the frontend listens to.
     // Layering: SharingService is a library crate with no tauri dep, so the
@@ -117,8 +116,11 @@ pub async fn start_sharing_inner(
     // start fail with "sharing already running" while an orphaned vocab API
     // keeps serving PHI over HTTP until restart.
     if let Err(e) = wire_upstream_endpoints(state).await {
-        if let Some(h) = vocab_handle {
-            h.abort();
+        if let Some(v) = vocab_handle {
+            // Detach before aborting: the forwarders outlive the serve
+            // task and would leak otherwise.
+            (v.detach)();
+            v.server.abort();
         }
         let _ = service.stop().await;
         return Err(e);
@@ -231,8 +233,13 @@ pub async fn stop_sharing_inner(state: &AppState) -> AppResult<()> {
     if let Some(s) = state.sharing.write().await.take() {
         s.stop().await.map_err(|e| AppError::Other(e.to_string()))?;
     }
-    if let Some(h) = state.vocab_api.write().await.take() {
-        h.abort();
+    if let Some(v) = state.vocab_api.write().await.take() {
+        // Unlisten the mobile job forwarders BEFORE aborting the serve
+        // task: the listeners are registered on the app handle, not the
+        // task, and would keep firing (holding the dead JobRegistry) until
+        // the app exits — accumulating two per stop→start cycle.
+        (v.detach)();
+        v.server.abort();
     }
 
     // Restore provider endpoints to pre-sharing configuration.

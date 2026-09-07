@@ -51,7 +51,6 @@ use medical_db::Database;
 use medical_sharing::token_store::TokenStore;
 use std::path::PathBuf;
 use tauri::AppHandle;
-use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 pub(super) mod audio;
@@ -126,26 +125,45 @@ impl<R: tauri::Runtime> Clone for ApiState<R> {
     }
 }
 
+/// A running vocab API server: the serve task plus the mobile
+/// job-registry event forwarders registered for it.
+///
+/// Aborting `server` alone is NOT enough — `detach` MUST also be called
+/// when sharing stops, or the forwarders leak (they hold the `JobRegistry`
+/// and fire on every progress event until the app exits; each stop→start
+/// cycle adds two more).
+pub(crate) struct VocabApiHandle {
+    pub(crate) server: tokio::task::JoinHandle<()>,
+    /// Unlistens the event forwarders; self-contained (captures the app
+    /// handle), so the stop path needs no `AppHandle` of its own.
+    pub(crate) detach: Box<dyn FnOnce() + Send + Sync>,
+}
+
 /// Spawn the vocab/templates/dictionary HTTP API server on `0.0.0.0:{port}`.
 ///
-/// Returns a `JoinHandle` for the server task. The server runs until the
-/// handle is dropped (which happens when sharing is stopped). Bearer tokens
-/// are validated against the same `TokenStore` the auth proxy uses.
+/// Returns the server task and its event-forwarder detach handle. The
+/// server runs until the task is aborted (which happens when sharing is
+/// stopped — along with `detach`). Bearer tokens are validated against the
+/// same `TokenStore` the auth proxy uses.
 pub async fn spawn(
     db: Arc<Database>,
     tokens: Arc<TokenStore>,
     port: u16,
     data_dir: PathBuf,
     app_handle: AppHandle,
-) -> Result<JoinHandle<()>, medical_core::error::AppError> {
+) -> Result<VocabApiHandle, medical_core::error::AppError> {
     let (chips_changed_tx, _) = tokio::sync::broadcast::channel::<()>(16);
     let (dict_changed_tx, _) = tokio::sync::broadcast::channel::<()>(16);
     let (content_changed_tx, _) = tokio::sync::broadcast::channel::<String>(32);
     let jobs = Arc::new(mobile::JobRegistry::new());
     // Bridge the desktop's pipeline/generation progress events into the
     // job registry so /v1/jobs reflects BOTH desktop- and HTTP-triggered
-    // work under one vocabulary.
-    mobile::attach_event_forwarders(&app_handle, &jobs);
+    // work under one vocabulary. The ids ride in the returned handle so
+    // the stop path can unlisten them.
+    let forwarders = mobile::attach_event_forwarders(&app_handle, &jobs);
+    let detach_handle = app_handle.clone();
+    let detach: Box<dyn FnOnce() + Send + Sync> =
+        Box::new(move || mobile::detach_event_forwarders(&detach_handle, forwarders));
     let state = ApiState {
         db,
         tokens,
@@ -173,11 +191,14 @@ pub async fn spawn(
         .await
         .map_err(|e| format!("vocab_api bind {addr}: {e}"))?;
     info!(port, "vocab API listening");
-    Ok(tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            warn!("vocab_api serve exited: {e}");
-        }
-    }))
+    Ok(VocabApiHandle {
+        server: tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                warn!("vocab_api serve exited: {e}");
+            }
+        }),
+        detach,
+    })
 }
 
 /// Assemble the full vocab/templates/dictionary/chips/content router.

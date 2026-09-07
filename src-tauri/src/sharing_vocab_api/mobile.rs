@@ -343,20 +343,31 @@ fn map_generation_event(wire: &GenerationProgressWire) -> Option<(String, Option
     }
 }
 
+/// Listener ids for the two event forwarders, returned by
+/// [`attach_event_forwarders`] and consumed by [`detach_event_forwarders`]
+/// when sharing stops.
+#[must_use = "keep these and call detach_event_forwarders on stop, or the listeners leak"]
+pub(super) struct EventForwarders {
+    pipeline: tauri::EventId,
+    generation: tauri::EventId,
+}
+
 /// Bridge the desktop's Tauri progress events into the job registry.
 ///
 /// Registered once per vocab-API lifetime (server start) and mirrored in
 /// route tests. Listening to the same events the desktop frontend consumes
 /// means HTTP-triggered and desktop-triggered work are indistinguishable to
-/// the registry — one job vocabulary, both entry points.
+/// the registry — one job vocabulary, both entry points. Returns the
+/// listener ids so the server owner can [`detach_event_forwarders`] them on
+/// stop.
 pub(super) fn attach_event_forwarders<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     jobs: &Arc<JobRegistry>,
-) {
+) -> EventForwarders {
     use tauri::Listener as _;
 
     let j = Arc::clone(jobs);
-    app_handle.listen_any("pipeline-progress", move |event| {
+    let pipeline = app_handle.listen_any("pipeline-progress", move |event| {
         let Ok(wire) = serde_json::from_str::<PipelineProgressWire>(event.payload()) else {
             return;
         };
@@ -364,7 +375,7 @@ pub(super) fn attach_event_forwarders<R: tauri::Runtime>(
     });
 
     let j = Arc::clone(jobs);
-    app_handle.listen_any("generation-progress", move |event| {
+    let generation = app_handle.listen_any("generation-progress", move |event| {
         let Ok(wire) = serde_json::from_str::<GenerationProgressWire>(event.payload()) else {
             return;
         };
@@ -372,6 +383,26 @@ pub(super) fn attach_event_forwarders<R: tauri::Runtime>(
             j.mark(&wire.recording_id, &stage, error);
         }
     });
+
+    EventForwarders {
+        pipeline,
+        generation,
+    }
+}
+
+/// Remove the forwarders registered by [`attach_event_forwarders`].
+///
+/// Without this, every sharing stop→start cycle within one app session
+/// permanently leaks two listeners holding an `Arc` to the dead registry —
+/// they keep firing (and deserializing) on every pipeline/generation event
+/// until the app exits, and the cycles accumulate.
+pub(super) fn detach_event_forwarders<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    ids: EventForwarders,
+) {
+    use tauri::Listener as _;
+    app_handle.unlisten(ids.pipeline);
+    app_handle.unlisten(ids.generation);
 }
 
 // ---------------------------------------------------------------------------
