@@ -51,7 +51,8 @@ async fn test_app() -> TestApp {
     let jobs = Arc::new(super::mobile::JobRegistry::new());
     // Same bridge the real spawn() installs — lets tests drive the registry
     // by emitting pipeline/generation events the way the commands do.
-    super::mobile::attach_event_forwarders(app.handle(), &jobs);
+    // (Never detached here: the mock app dies with the test.)
+    let _ = super::mobile::attach_event_forwarders(app.handle(), &jobs);
     let state = ApiState {
         db,
         tokens: tokens_for_state,
@@ -972,5 +973,49 @@ mod generate_validation_tests {
             .await
             .expect("synopsis has no audio requirement");
         assert_eq!(doc, DocType::Synopsis);
+    }
+}
+
+/// The sharing-stop contract for the mobile event forwarders: listeners
+/// registered by `attach_event_forwarders` must stop feeding the registry
+/// once `detach_event_forwarders` runs — otherwise every sharing
+/// stop→start cycle leaks two listeners that hold the dead registry and
+/// fire on every progress event until the app exits.
+mod forwarder_lifecycle_tests {
+    use super::*;
+    use tauri::Emitter as _;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn forwarders_stop_updating_the_registry_after_detach() {
+        let app = tauri::test::mock_app();
+        let jobs = Arc::new(super::super::mobile::JobRegistry::new());
+        let ids = super::super::mobile::attach_event_forwarders(app.handle(), &jobs);
+        let rid = Uuid::new_v4().to_string();
+
+        // Same wire shape the generation commands emit.
+        let _ = app.emit(
+            "generation-progress",
+            json!({"type": "soap", "status": "started", "recording_id": rid, "progress": null}),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(
+            jobs.get(&rid).expect("forwarder drove the registry").stage,
+            "generating_soap"
+        );
+
+        super::super::mobile::detach_event_forwarders(app.handle(), ids);
+
+        let _ = app.emit(
+            "generation-progress",
+            json!({"type": "soap", "status": "completed", "recording_id": rid, "progress": null}),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        // The snapshot stays stale — the detached listener must not fire.
+        assert_eq!(
+            jobs.get(&rid).expect("snapshot still cached").stage,
+            "generating_soap",
+            "a detached forwarder must not update the registry"
+        );
     }
 }
