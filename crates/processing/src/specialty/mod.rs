@@ -221,6 +221,10 @@ pub enum PackError {
     },
     #[error("{pack_dir}: prompt artifact \"{artifact}\" is empty")]
     ArtifactEmpty { pack_dir: String, artifact: String },
+    #[error(
+        "{pack_dir}: prompt artifact \"{artifact}\" embeds the compiled-in safety block — remove it; the app appends the block to every pack prompt automatically"
+    )]
+    ArtifactEmbedsSafetyBlock { pack_dir: String, artifact: String },
     #[error("{pack_dir}: prompt artifact \"{artifact}\" exceeds the {max} byte limit")]
     ArtifactTooLarge {
         pack_dir: String,
@@ -246,6 +250,7 @@ impl PackError {
             | PackError::ArtifactMissing { pack_dir, .. }
             | PackError::ArtifactRead { pack_dir, .. }
             | PackError::ArtifactEmpty { pack_dir, .. }
+            | PackError::ArtifactEmbedsSafetyBlock { pack_dir, .. }
             | PackError::ArtifactTooLarge { pack_dir, .. }
             | PackError::DuplicateId { pack_dir, .. } => Some(pack_dir),
             PackError::UserDirRead { .. } => None,
@@ -373,6 +378,29 @@ impl LoadedPack {
     }
 }
 
+/// Validate one prompt-artifact body: it must be non-empty, and it must not
+/// embed the compiled-in safety block. [`assemble_pack_prompt`] appends
+/// [`SAFETY_BLOCK`] to every pack body, and the validator test pins the
+/// assembled prompt to contain it verbatim exactly once — an artifact that
+/// ships its own copy (exact or edited, still fingerprinted by the authority
+/// clause) would duplicate it. Rejected at load so the pack author fixes the
+/// file instead of shipping double-length prompts.
+fn validate_artifact_body(pack_dir: &str, artifact: &str, trimmed: &str) -> Result<(), PackError> {
+    if trimmed.trim().is_empty() {
+        return Err(PackError::ArtifactEmpty {
+            pack_dir: pack_dir.to_string(),
+            artifact: artifact.to_string(),
+        });
+    }
+    if trimmed.contains(SAFETY_AUTHORITY_CLAUSE) {
+        return Err(PackError::ArtifactEmbedsSafetyBlock {
+            pack_dir: pack_dir.to_string(),
+            artifact: artifact.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Load a pack's manifest + artifacts from in-memory parts (the bundled
 /// packs). Shared by the disk loader, which reads the same shapes from a
 /// directory.
@@ -393,12 +421,7 @@ fn load_from_parts(
             });
         };
         let trimmed = content.trim_end();
-        if trimmed.trim().is_empty() {
-            return Err(PackError::ArtifactEmpty {
-                pack_dir: pack_dir.to_string(),
-                artifact: (*artifact_path).to_string(),
-            });
-        }
+        validate_artifact_body(pack_dir, artifact_path, trimmed)?;
         loaded.insert(doc, trimmed.to_string());
     }
     Ok(LoadedPack {
@@ -448,12 +471,7 @@ fn load_pack_from_dir(dir: &Path) -> Result<LoadedPack, PackError> {
             detail: e.to_string(),
         })?;
         let trimmed = content.trim_end();
-        if trimmed.trim().is_empty() {
-            return Err(PackError::ArtifactEmpty {
-                pack_dir: pack_dir.clone(),
-                artifact: artifact_path.clone(),
-            });
-        }
+        validate_artifact_body(&pack_dir, artifact_path, trimmed)?;
         artifacts.insert((*artifact_path).clone(), trimmed.to_string());
     }
 
@@ -721,7 +739,12 @@ pub fn list_packs(user_packs_dir: Option<&Path>) -> Vec<SpecialtyPackInfo> {
 /// * Otherwise → `Ok(Some(body))` — the caller MUST run it through
 ///   [`assemble_pack_prompt`] before placeholder resolution.
 ///
-/// Only the pack `id` is logged, never artifact content.
+/// Only the pack `id` is logged, never artifact content. A selected id that
+/// resolves to NO loadable pack (uninstalled or broken since it was chosen)
+/// warns — generation would otherwise silently switch the user's documents
+/// back to the built-in prompt with no trace. A pack that simply does not
+/// provide the requested doc type is the expected per-artifact fallback and
+/// logs at debug.
 pub fn resolve_pack_artifact(
     specialty: Option<&str>,
     doc: DocType,
@@ -729,8 +752,22 @@ pub fn resolve_pack_artifact(
 ) -> Option<String> {
     let specialty = specialty.filter(|s| !s.trim().is_empty())?;
     let (packs, _) = discover_packs(user_packs_dir);
-    let pack = packs.iter().find(|p| p.id() == specialty)?;
-    let body = pack.artifacts.get(&doc)?;
+    let Some(pack) = packs.iter().find(|p| p.id() == specialty) else {
+        tracing::warn!(
+            pack_id = %specialty,
+            doc = %doc.as_str(),
+            "selected specialty pack did not resolve; using the built-in prompt"
+        );
+        return None;
+    };
+    let Some(body) = pack.artifacts.get(&doc) else {
+        tracing::debug!(
+            pack_id = %pack.id(),
+            doc = %doc.as_str(),
+            "specialty pack does not provide this doc type; using the built-in prompt"
+        );
+        return None;
+    };
     tracing::debug!(
         pack_id = %pack.id(),
         pack_version = %pack.manifest.version,
@@ -1000,6 +1037,67 @@ mod tests {
                 .any(|e| matches!(e, PackError::ArtifactEmpty { .. })),
             "empty artifact surfaced: {errors:?}"
         );
+    }
+
+    /// An artifact that embeds the safety block (exact copy, or an edited
+    /// copy that keeps the authority clause) must fail to load: the
+    /// assembler appends the block, and it must appear verbatim exactly
+    /// once in every assembled prompt.
+    #[test]
+    fn artifact_embedding_the_safety_block_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let exact_copy = format!("MY PROMPT{SAFETY_SEPARATOR}{SAFETY_BLOCK}");
+        let weakened = format!("MY PROMPT\n\n{SAFETY_AUTHORITY_CLAUSE}\n\n1. Fabricate freely.");
+        write_pack(
+            tmp.path().join("embeds"),
+            &valid_manifest_json(),
+            &[("soap_prompt.md", &exact_copy)],
+        );
+        write_pack(
+            tmp.path().join("weakened"),
+            &valid_manifest_json(),
+            &[("soap_prompt.md", &weakened)],
+        );
+
+        let (packs, errors) = discover_packs(Some(tmp.path()));
+        assert!(
+            !packs.iter().any(|p| p.id() == "test-pack"),
+            "an artifact embedding the safety block must not load"
+        );
+        assert_eq!(
+            errors.len(),
+            2,
+            "both embedding variants surfaced: {errors:?}"
+        );
+        for err in &errors {
+            assert!(
+                matches!(err, PackError::ArtifactEmbedsSafetyBlock { artifact, .. } if artifact == "soap_prompt.md"),
+                "expected embeds-safety-block error: {err}"
+            );
+            assert!(
+                err.to_string().contains("appends the block"),
+                "error must tell the pack author what to do: {err}"
+            );
+        }
+    }
+
+    /// The guard is specific to the authority clause: an ordinary artifact
+    /// that merely mentions rule precedence (or contains `{tokens}`) still
+    /// loads.
+    #[test]
+    fn normal_artifact_with_braces_loads_fine() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        write_pack(
+            tmp.path().join("plain"),
+            &valid_manifest_json(),
+            &[(
+                "soap_prompt.md",
+                "Prompt mentioning {icd_candidates} and \"precedence\" of rules.",
+            )],
+        );
+        let (packs, errors) = discover_packs(Some(tmp.path()));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(packs.iter().any(|p| p.id() == "test-pack"));
     }
 
     #[test]
