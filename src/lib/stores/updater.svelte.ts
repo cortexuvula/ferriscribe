@@ -1,5 +1,5 @@
 import { check } from '@tauri-apps/plugin-updater';
-import { relaunch } from '@tauri-apps/plugin-process';
+import { invoke } from '@tauri-apps/api/core';
 import { settings } from './settings.svelte';
 
 /// How often to auto-check for updates while the app is running.
@@ -93,10 +93,16 @@ class UpdaterStore {
     }
   }
 
-  /// Relaunch the app after a successful install.
+  /// Relaunch the app after a successful install. Uses the backend's
+  /// `restart_app` — NOT the plugin-process `relaunch()`: the plugin path
+  /// ends in std::process::exit(0), whose C++ static-destructor run aborts
+  /// (ONNX Runtime / kaldi-native-fbank teardown with live worker
+  /// threads — a SIGABRT crash report on every update relaunch before the
+  /// fix; see src-tauri/src/commands/restart.rs). restart_app sets the
+  /// exit-guard flag first so the process terminates via _exit instead.
   async relaunch(): Promise<void> {
     try {
-      await relaunch();
+      await invoke('restart_app');
     } catch (e) {
       console.error('Failed to relaunch:', e);
     }

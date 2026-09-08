@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// Mock the Tauri updater + process plugins.
+// Mock the Tauri updater + process plugins, and the invoke bridge the
+// crash-safe relaunch rides.
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(async () => undefined),
+}));
 vi.mock('@tauri-apps/plugin-updater', () => ({
   check: vi.fn(async () => ({ available: false, version: '', downloadAndInstall: vi.fn() })),
 }));
@@ -10,8 +14,36 @@ vi.mock('@tauri-apps/plugin-process', () => ({
 }));
 
 // Import AFTER mocks are registered.
+const { invoke } = await import('@tauri-apps/api/core');
+const { relaunch: pluginRelaunch } = await import('@tauri-apps/plugin-process');
 const { updater } = await import('./updater.svelte');
 const { settings } = await import('./settings.svelte');
+
+describe('UpdaterStore — relaunch', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(invoke).mockResolvedValue(undefined);
+  });
+
+  it('relaunch() rides the backend restart_app command — never the plugin relaunch', async () => {
+    // The plugin's relaunch ends in std::process::exit(0), whose C++
+    // static-destructor run aborts on this app (ONNX Runtime /
+    // kaldi-native-fbank teardown — SIGABRT on every update relaunch before
+    // the fix; see src-tauri/src/commands/restart.rs).
+    await updater.relaunch();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('restart_app');
+    expect(vi.mocked(pluginRelaunch)).not.toHaveBeenCalled();
+  });
+
+  it('relaunch() swallows failures (logged, no throw)', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('failed to restart the app'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(updater.relaunch()).resolves.toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith('Failed to relaunch:', expect.any(Error));
+    errorSpy.mockRestore();
+  });
+});
 
 describe('UpdaterStore — dismiss', () => {
   beforeEach(() => {

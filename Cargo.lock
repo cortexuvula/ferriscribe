@@ -5660,6 +5660,7 @@ dependencies = [
  "hound",
  "image 0.25.10",
  "keyring",
+ "libc",
  "medical-agents",
  "medical-ai-providers",
  "medical-audio",

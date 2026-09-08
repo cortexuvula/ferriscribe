@@ -18,6 +18,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 fs2 = "0.4"
+# atexit/_exit for the crash-safe update relaunch (commands/restart.rs).
+libc = "0.2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-deep-link = "2"
