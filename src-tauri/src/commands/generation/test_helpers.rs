@@ -206,6 +206,10 @@ pub(crate) struct MockCompletionProvider {
     name: &'static str,
     content: String,
     usage: medical_core::types::UsageInfo,
+    /// The system prompt of the most recent request, for assertions that a
+    /// generation command sent the expected prompt (e.g. the selected
+    /// specialty pack). Prompt content stays inside the test binary.
+    last_system: std::sync::Mutex<Option<String>>,
 }
 
 impl MockCompletionProvider {
@@ -220,7 +224,18 @@ impl MockCompletionProvider {
                 total_tokens: 128 + completion_tokens,
                 decode_tokens_per_second: None,
             },
+            last_system: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The system prompt seen by the most recent `complete`/`complete_stream`
+    /// call, if any request has arrived yet.
+    pub(crate) fn last_system_prompt(&self) -> Option<String> {
+        self.last_system.lock().expect("last_system lock").clone()
+    }
+
+    fn record_system_prompt(&self, request: &medical_core::types::CompletionRequest) {
+        *self.last_system.lock().expect("last_system lock") = request.system_prompt.clone();
     }
 }
 
@@ -238,6 +253,7 @@ impl medical_core::traits::AiProvider for MockCompletionProvider {
         &self,
         request: medical_core::types::CompletionRequest,
     ) -> AppResult<medical_core::types::CompletionResponse> {
+        self.record_system_prompt(&request);
         Ok(medical_core::types::CompletionResponse {
             content: self.content.clone(),
             model: request.model.clone(),
@@ -248,7 +264,7 @@ impl medical_core::traits::AiProvider for MockCompletionProvider {
 
     async fn complete_stream(
         &self,
-        _request: medical_core::types::CompletionRequest,
+        request: medical_core::types::CompletionRequest,
     ) -> AppResult<
         Box<
             dyn futures_util::Stream<Item = AppResult<medical_core::types::StreamChunk>>
@@ -265,6 +281,7 @@ impl medical_core::traits::AiProvider for MockCompletionProvider {
         ];
         // `Box::pin` yields `Pin<Box<..>>`, but the trait wants a plain
         // `Box<dyn Stream + Send + Unpin>`; `Iter` is already `Unpin`.
+        self.record_system_prompt(&request);
         Ok(Box::new(tokio_stream::iter(chunks)))
     }
 
