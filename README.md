@@ -1,6 +1,6 @@
 # FerriScribe
 
-A privacy-first medical transcription desktop application built with Rust and Svelte. Record doctor-patient encounters, transcribe them locally with speaker diarization, generate SOAP notes and clinical documents, draft letters from scanned paper documents, OCR supporting documents, sync across machines, and export to PDF, DOCX, or FHIR.
+A privacy-first medical transcription desktop application built with Rust and Svelte. Record doctor-patient encounters, transcribe them locally with speaker diarization, generate SOAP notes and clinical documents, draft letters from scanned paper documents, OCR supporting documents or any region of your screen, hold live translated conversations with patients, sync across machines, and export to PDF, DOCX, or FHIR.
 
 ## Features
 
@@ -15,7 +15,8 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 ### Documents & Review
 - **SOAP Note Generation** — AI-powered Subjective / Objective / Assessment / Plan notes from transcripts.
 - **ICD-9 Billing Codes** — BC MSP-accepted ICD-9 codes (7,122 codes) with intelligent candidate selection. The selector scores codes against the transcript using a keyword-overlap inverted index enriched with medical synonyms, plus a specificity adjustment favoring precise codes over generic ones (e.g. cervicalgia over backache). Off-list codes are flagged with amber chips in the UI.
-- **Referral, Clinical Letter, and Synopsis Generation** — Templated AI generation with per-document custom prompts.
+- **Referral, Clinical Letter, Synopsis, and Peer-Discussion Generation** — Templated AI generation with per-document custom prompts.
+- **Specialty Prompt Packs** — Switch the tone and focus of every generated document to match your practice: **Settings → Prompts** picks a specialty pack (family medicine and psychiatry ship built in) whose prompts apply to all five document types. Add your own packs as plain-text prompt files in a folder under the app data directory — no downloads, no fetches. A hand-written custom prompt still takes precedence per document type, and a locked safety block (anti-fabrication and scope rules) is appended to every prompt regardless of pack or custom text.
 - **Letter Audiences** — Generate letters tailored to different recipients:
   - **Patient** — Plain language, empathetic
   - **Insurance Company** — Medical necessity language, ICD/CPT codes
@@ -38,6 +39,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
   - **Office** — `.docx` (text from Word XML), `.xlsx` (cell data from all sheets)
 - **Scanned-PDF Renderer** — Scanned-PDF OCR is powered by [pdfium](https://github.com/bblanchon/pdfium-binaries) (Chrome's PDF engine, BSD-licensed). The library is downloaded automatically into the app data directory the first time you OCR a scanned PDF — nothing to install, and it runs entirely locally (no network after the one-time fetch). The download is pinned to a known release and verified against a SHA-256 digest before the library is loaded.
 - **OCR Model Setting** — Configure a dedicated vision model for OCR separately from the text generation model in **Settings → Models**.
+- **Screenshot-Region OCR** — Grab text straight off the screen: press the global hotkey (default `Cmd/Ctrl+Alt+O`, rebindable in **Settings → General**; on Wayland, bind your compositor — snippet provided), drag a rectangle over anything — a lab portal, a PDF in another app, a webpage — and the extracted text lands on your clipboard while a small "Recognizing text…" pill shows progress. Only text ever reaches the clipboard, never the pixels (macOS and Windows sync clipboard history to the cloud), and on macOS the screenshot passes through a private app-owned file that is shredded before OCR. An in-app button/shortcut works too, and `rust-medical-assistant --capture-ocr` from a script or launcher delegates to the running app.
 - **Integration** — OCR'd text is combined with notes and structured patient context (medications, allergies, conditions) and threaded into all generation types (SOAP, referral, letter, peer discussion). Available in the Record, Generate, and Letter Writer tabs.
 
 ### Chat & Document Q&A
@@ -48,12 +50,18 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 - **Once-off by Design** — Conversations and their documents live in memory only. The **New chat** button (with a confirm when documents are attached — OCR time is lost) or closing the app wipes everything; nothing is persisted, synced, or logged.
 - **Embedding model** — Chart-review mode needs an embedding model available on your provider (default: `nomic-embed-text` — `ollama pull nomic-embed-text` or load it in LM Studio). If it's missing, the error tells you exactly what to pull.
 
+### Translate
+- **Live Conversation Translation** — A dedicated tab for bilingual visits: pick the language pair (e.g. English ⇄ Spanish), tap **Hold to talk** for whoever is speaking, and each utterance is transcribed locally, translated by your local AI model, and shown in both languages — the clinician side can also be read aloud through the OS's built-in speech synthesis (local voices only, no cloud TTS).
+- **Ephemeral by Design** — Translation sessions never touch the recordings database, sync, or logs: utterance audio is deleted as soon as it's transcribed, and the only export is copy-to-clipboard. Nothing persists when you clear the session or close the app.
+- **Tuned for the Room** — The STT engine stays warm between utterances, thinking phases are disabled on translation requests, and **Settings → Models** can point the tab at a smaller, faster model than the one writing your notes.
+
 ### Content Sync
 - **Bidirectional Sync** — Sync transcripts, SOAP notes, letters, referrals, peer discussions, and audio between machines over Tailscale. Per-field last-write-wins merge with separate push/pull cursors; each field carries its own timestamp and origin machine.
 - **Deletions & Restores Propagate** — Trashing a recording on one machine tombstones it everywhere; restoring it (newer write wins) revives it everywhere. The office server permanently purges trash after 30 days and keeps an id-only purge ledger, so a machine that was offline during the deletion can never resurrect purged content. Condition chips and the user dictionary sync with the same tombstone-aware merge, and a deleted chip stays deleted until explicitly re-added.
 - **Background Sync** — Automatic sync every 5 minutes when enabled, with a manual "Sync Now" button and last-synced timestamp.
 - **Cloud Badge** — Remote-synced recordings display a cloud badge for easy identification.
 - **Real-time Updates** — SSE-based change notifications refresh the recordings list instantly when new content arrives.
+- **Mobile Companion API** — The office server exposes a bearer-authenticated HTTP surface for companion clients (e.g. a phone app): upload a recording, follow its processing job (`queued → transcribing → generating_soap → completed`), trigger per-document generation, read and edit documents, and download server-rendered PDF/DOCX exports — all scoped to what sync makes visible, with per-device token revocation from the office server's **Connected clients** panel.
 
 ### AI providers
 - **Local and LAN-accessible only** — Ollama, LM Studio, and oMLX (MLX inference for Apple Silicon), each configurable with a remote host/port so you can run the heavy model on a separate machine over LAN or Tailscale.
@@ -68,6 +76,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 
 ### Platform
 - **Cross-Platform** — macOS (Apple Silicon; Metal-accelerated STT), Windows, and Linux. Note: Windows builds are produced by CI but excluded from the automated test matrix (cpal audio-device enumeration crashes on headless runners); macOS installers are Apple-Silicon-only.
+- **Update Checks (optional)** — The app can check GitHub Releases for newer versions and download them in-app — an anonymous fetch of the release manifest and binary, with no patient data, tokens, or identifying headers sent. Disable it in **Settings → About** or during onboarding.
 
 ## Tech Stack
 
@@ -77,8 +86,8 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 | Backend | Rust (edition 2024), Tauri v2 |
 | STT | whisper-rs (whisper.cpp), ort (ONNX Runtime), knf-rs, rubato |
 | Database | SQLite with SQLCipher (AES-256 encryption) |
-| AI | Ollama, LM Studio (OpenAI-compatible wire protocol) |
-| OCR | Vision models via Ollama/LM Studio, pdfium (scanned-PDF rendering), pdf-extract, calamine, quick-xml |
+| AI | Ollama, LM Studio, oMLX (OpenAI-compatible wire protocol) |
+| OCR | Vision models via Ollama/LM Studio/oMLX, pdfium (scanned-PDF rendering), pdf-extract, calamine, quick-xml |
 | Export | PDF (printpdf), DOCX (docx-rs), FHIR R4 |
 | Security | AES-256-GCM + PBKDF2 (aes-gcm + pbkdf2 crates), SQLCipher |
 
@@ -92,7 +101,7 @@ crates/
   db/             — SQLite database, settings, recordings, content sync
   security/       — AES-256-GCM file/key encryption
   audio/          — microphone capture (cpal)
-  ai-providers/   — Ollama + LM Studio (OpenAI-compat wire, vision support)
+  ai-providers/   — Ollama, LM Studio, oMLX (shared OpenAI-compat wire, vision support)
   stt-providers/  — whisper transcription + pyannote diarization
   tts-providers/  — text-to-speech
   agents/         — agentic orchestrator with tool registry
@@ -143,12 +152,17 @@ npx vitest run
 # Type-check (svelte-check)
 npm run check
 
+# Frontend lint (eslint)
+npm run lint
+
 # Rust formatting + lints — both gates enforced by CI
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Audio device tests are gated behind `FERRISCRIBE_AUDIO_TEST=1` (cpal enumeration can block on machines with virtual audio hardware); without the env var they skip.
+
+Local release builds (`npm run tauri build`) must stage the backup sidecar first — `npm run build:sidecar` — and on macOS need `MACOSX_DEPLOYMENT_TARGET=11.0` for whisper.cpp's C++ standard library. CI does both automatically.
 
 ### Model Setup
 
@@ -174,6 +188,8 @@ Models are downloaded from HuggingFace / GitHub and stored under the app's data 
 7. **Chat** — Ask a local model anything, with grounded anti-fabrication rules. Drop documents (or a whole chart) into the conversation and ask questions about them — see [Chat & Document Q&A](#chat--document-qa).
 
 **No recording needed?** Use the **Letter Writer** tab (Workflow section) to OCR a paper document — or paste text — and draft a letter directly from it. Or drop documents into **Chat** and interrogate them.
+
+**Language barrier?** Switch to the **Translate** tab for a live two-way translated conversation — nothing is saved, and both sides see every utterance in their own language.
 
 ## Running Across Machines (LAN / Tailscale)
 
