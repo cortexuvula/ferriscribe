@@ -408,7 +408,7 @@ impl RecordingsRepo {
         // Content change → row stamp moves (LWW rider dependency).
         let now_rfc3339 = Utc::now().to_rfc3339();
         sets.push(format!("updated_at = ?{next_idx}"));
-        params.push(Box::new(now_rfc3339));
+        params.push(Box::new(now_rfc3339.clone()));
         next_idx += 1;
 
         params.push(Box::new(id.to_string()));
@@ -421,10 +421,55 @@ impl RecordingsRepo {
             sql.as_str(),
             rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
         )?;
-        tx.commit()?;
+        // Rows == 0 → no such (active) recording: bail BEFORE stamping
+        // revisions (dropping the tx rolls everything back) so a stale
+        // producer persist can't leave orphan revision rows.
         if rows == 0 {
             return Err(DbError::NotFound(format!("recording {id}")));
         }
+
+        // Field-revision coverage (2026-08-17 review item 8): every
+        // syncable column this persist writes gets a precise per-field LWW
+        // stamp, inside the same transaction so a crash can never land the
+        // column write without its revision. Before this, producer paths
+        // relied on the wire builder's max(revision, row) rider — which
+        // works, but leaves the revision table stale and drops the origin
+        // device for conflict display. Only the columns ACTUALLY written
+        // are stamped, keeping the per-field clocks precise (an unrelated
+        // field's revision must not move).
+        let mut revision_fields: Vec<&str> = Vec::new();
+        if update.transcript.is_some() {
+            revision_fields.push("transcript");
+        }
+        if update.soap_note.is_some() {
+            revision_fields.push("soap_note");
+        }
+        if update.referral.is_some() {
+            revision_fields.push("referral");
+        }
+        if update.letter.is_some() {
+            revision_fields.push("letter");
+        }
+        if update.peer_discussion.is_some() {
+            revision_fields.push("peer_discussion");
+        }
+        if update.processing_status.is_some() {
+            revision_fields.push("processing_status");
+        }
+        if !update.metadata_patch.is_empty() {
+            revision_fields.push("metadata");
+        }
+        for field in revision_fields {
+            crate::content_sync::ContentSyncRepo::upsert_revision(
+                &tx,
+                id,
+                field,
+                &now_rfc3339,
+                None,
+            )?;
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -1232,6 +1277,79 @@ mod tests {
             after.referral.as_deref(),
             Some("edited referral"),
             "concurrent column edit must survive the producer persist"
+        );
+    }
+
+    /// Field-revision coverage (2026-08-17 review item 8): a producer
+    /// persist stamps a revision for exactly the columns it writes — the
+    /// per-field LWW clock no longer depends on the row-stamp rider, and
+    /// columns the persist did NOT touch keep their old revision.
+    #[test]
+    fn persist_producer_update_stamps_revisions_for_written_columns_only() {
+        use crate::content_sync::ContentSyncRepo;
+
+        let conn = migrated_conn();
+        let rec = new_rec();
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        // A pre-existing revision on a field this persist won't touch.
+        let old_stamp = "2020-01-01T00:00:00Z".to_string();
+        ContentSyncRepo::upsert_revision(&conn, &rec.id, "referral", &old_stamp, None).unwrap();
+
+        let before = chrono::Utc::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                transcript: Some("fresh transcript".into()),
+                soap_note: Some("S: new note".into()),
+                metadata_patch: vec![(
+                    "icd_codes".to_string(),
+                    serde_json::json!([{"code": "789.0"}]),
+                )],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let revisions = ContentSyncRepo::revisions_for(&conn, &rec.id).unwrap();
+        let stamp = |field: &str| {
+            revisions
+                .iter()
+                .find(|r| r.field == field)
+                .map(|r| r.updated_at.clone())
+        };
+
+        for field in ["transcript", "soap_note", "metadata"] {
+            let ts = stamp(field).unwrap_or_else(|| panic!("{field} revision stamped"));
+            assert!(
+                crate::content_sync::cmp_lww_timestamps(&ts, &before.to_rfc3339())
+                    != std::cmp::Ordering::Less,
+                "{field} stamp must be fresh, got {ts}"
+            );
+        }
+        // The untouched field keeps its old stamp — precision is the point.
+        assert_eq!(stamp("referral").as_deref(), Some(old_stamp.as_str()));
+
+        // A persist against a missing recording leaves no orphan revisions.
+        let ghost = uuid::Uuid::new_v4();
+        assert!(
+            RecordingsRepo::persist_producer_update(
+                &conn,
+                &ghost,
+                &ProducerPersist {
+                    transcript: Some("x".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            ContentSyncRepo::revisions_for(&conn, &ghost)
+                .unwrap()
+                .is_empty(),
+            "no revision rows for a recording that never existed"
         );
     }
 

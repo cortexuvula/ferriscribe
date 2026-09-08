@@ -387,6 +387,54 @@ impl ContentSyncRepo {
         Ok(())
     }
 
+    /// Recording IDs whose audio still needs uploading to the sync server.
+    ///
+    /// The push loop enqueues EVERY successfully pushed recording (the audio
+    /// upload itself is capped per cycle for latency), drains a slice per
+    /// cycle, and removes an id on upload success or when it can never
+    /// upload (row gone, no local audio) — transient failures keep their id
+    /// so the next cycle retries. Stored as a JSON array of id strings under
+    /// the `pending_audio_uploads` sync-state key, created on demand (the
+    /// old migration SEED for this key was dead and removed 2026-09-02;
+    /// databases migrated before then may carry a harmless NULL row, which
+    /// reads as an empty queue).
+    pub fn get_pending_audio_uploads(conn: &Connection) -> DbResult<Vec<String>> {
+        let value: Option<String> = match conn.query_row(
+            "SELECT value FROM sync_state WHERE key = 'pending_audio_uploads'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(DbError::from(e)),
+        };
+        let Some(json) = value else {
+            return Ok(Vec::new());
+        };
+        match serde_json::from_str(&json) {
+            Ok(ids) => Ok(ids),
+            Err(e) => {
+                // Reset rather than propagate: a corrupt queue must never
+                // block syncing (the push cursor still re-enqueues every
+                // newly pushed recording).
+                tracing::warn!(error = %e, "pending audio upload queue unreadable — resetting");
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Persist the pending-audio upload queue (see
+    /// [`get_pending_audio_uploads`]). Ids only — never audio or PHI.
+    pub fn set_pending_audio_uploads(conn: &Connection, ids: &[String]) -> DbResult<()> {
+        let json = serde_json::to_string(ids)
+            .map_err(|e| DbError::Migration(format!("serialize audio queue: {e}")))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('pending_audio_uploads', ?1)",
+            params![json],
+        )?;
+        Ok(())
+    }
+
     /// Delta query: return recording IDs modified since the given cursor.
     ///
     /// `since` is an RFC 3339 `updated_at` watermark; `None` returns
@@ -1180,6 +1228,60 @@ mod tests {
         let after = ContentSyncRepo::get_cursor(&conn).expect("get");
         assert_eq!(after.cursor.as_deref(), Some("2026-07-10T00:00:00Z"));
         assert!(after.last_pull.is_some(), "last_pull should be stamped");
+    }
+
+    #[test]
+    fn pending_audio_queue_round_trips_and_tolerates_bad_state() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+
+        // Fresh DB (no row at all) → empty.
+        assert!(
+            ContentSyncRepo::get_pending_audio_uploads(&conn)
+                .expect("get")
+                .is_empty()
+        );
+
+        // Round-trip.
+        let ids = vec!["a".to_string(), "b".to_string()];
+        ContentSyncRepo::set_pending_audio_uploads(&conn, &ids).expect("set");
+        assert_eq!(
+            ContentSyncRepo::get_pending_audio_uploads(&conn).expect("get"),
+            ids
+        );
+
+        // Clearing is just an empty array write.
+        ContentSyncRepo::set_pending_audio_uploads(&conn, &[]).expect("clear");
+        assert!(
+            ContentSyncRepo::get_pending_audio_uploads(&conn)
+                .expect("get")
+                .is_empty()
+        );
+
+        // The pre-2026-09 migration seeded this key with NULL — must read
+        // as empty, not error.
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('pending_audio_uploads', NULL)",
+            [],
+        )
+        .expect("seed null");
+        assert!(
+            ContentSyncRepo::get_pending_audio_uploads(&conn)
+                .expect("null reads empty")
+                .is_empty()
+        );
+
+        // Corrupt JSON resets to empty rather than blocking sync.
+        conn.execute(
+            "UPDATE sync_state SET value = '{not json' WHERE key = 'pending_audio_uploads'",
+            [],
+        )
+        .expect("corrupt");
+        assert!(
+            ContentSyncRepo::get_pending_audio_uploads(&conn)
+                .expect("corrupt reads empty")
+                .is_empty()
+        );
     }
 
     // Regression (2026-09-02 bug review): a legacy space-format
