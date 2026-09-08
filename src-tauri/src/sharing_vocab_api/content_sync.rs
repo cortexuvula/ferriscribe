@@ -96,7 +96,7 @@ fn build_sparse_fields(
 /// Convert a `Recording` row into a wire-format `SyncRecording`.
 ///
 /// `deleted_at` is read separately (it's not on the `Recording` struct).
-fn recording_to_sync(
+pub(super) fn recording_to_sync(
     rec: &Recording,
     deleted_at: Option<String>,
     revisions: Option<&Vec<FieldRevision>>,
@@ -125,7 +125,7 @@ fn recording_to_sync(
 /// `get_many` on the repo filters out deleted rows, so we run a custom
 /// query here that includes the `deleted_at` column. Returns at most the
 /// number of IDs supplied.
-fn load_sync_recordings(
+pub(super) fn load_sync_recordings(
     conn: &rusqlite::Connection,
     ids: &[String],
 ) -> Result<Vec<SyncRecording>, medical_core::error::AppError> {

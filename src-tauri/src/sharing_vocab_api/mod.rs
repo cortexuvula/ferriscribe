@@ -287,7 +287,10 @@ pub(super) fn build_router<R: tauri::Runtime>(state: ApiState<R>) -> Router {
         // Mobile-client surface (see mobile.rs). The generate route is
         // merged separately on the concrete Wry runtime — the generation
         // commands are AppHandle<Wry>-typed.
-        .route("/v1/recordings", post(mobile::create_recording_handler))
+        .route(
+            "/v1/recordings",
+            post(mobile::create_recording_handler).get(mobile::list_recordings_handler),
+        )
         .route("/v1/jobs/{recording_id}", get(mobile::job_status_handler))
         .route(
             "/v1/jobs/{recording_id}/events",

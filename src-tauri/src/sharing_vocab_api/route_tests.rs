@@ -963,6 +963,159 @@ mod mobile_api_tests {
     }
 
     #[tokio::test]
+    async fn recordings_list_pages_by_created_at_with_tiebreak_and_excludes_tombstones() {
+        let app = test_app().await;
+        let conn = app.db.conn().expect("conn");
+
+        // Five recordings with distinct created_at (newest first: e, d, c, b, a)
+        // plus a TIE PAIR (f, g) sharing one timestamp — the cursor boundary
+        // must advance past BOTH by (created_at, id), never by timestamp alone.
+        let mk = |id: &str, created: &str| {
+            let uuid = uuid::Uuid::parse_str(id).expect("uuid");
+            let mut rec = medical_core::types::recording::Recording::new(
+                format!("{id}.wav"),
+                std::path::PathBuf::new(),
+            );
+            rec.id = uuid;
+            rec.created_at = chrono::DateTime::parse_from_rfc3339(created)
+                .expect("created")
+                .with_timezone(&chrono::Utc);
+            medical_db::recordings::RecordingsRepo::insert(&conn, &rec).expect("seed");
+        };
+        mk(
+            "00000000-0000-0000-0000-00000000000a",
+            "2026-09-01T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-00000000000b",
+            "2026-09-02T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-00000000000c",
+            "2026-09-03T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-00000000000d",
+            "2026-09-04T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-00000000000e",
+            "2026-09-05T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-00000000000f",
+            "2026-09-06T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-000000000010",
+            "2026-09-06T10:00:00+00:00",
+        );
+        // A tombstoned NEWEST row — must never appear.
+        mk(
+            "00000000-0000-0000-0000-0000000000ff",
+            "2026-09-07T10:00:00+00:00",
+        );
+        conn.execute(
+            "UPDATE recordings SET deleted_at = '2026-09-07T11:00:00+00:00'
+             WHERE id = '00000000-0000-0000-0000-0000000000ff'",
+            [],
+        )
+        .expect("tombstone");
+
+        // Release the pooled connection BEFORE the request — in-memory
+        // pools are max_size=1, and the seed conn still being alive would
+        // starve the handler's checkout (30s timeout → 500).
+        drop(conn);
+
+        // Page 1: limit 3 => [10 (tie, id DESC), f (tie), e], has_more, cursor.
+        let (status, body) = req(&app, "GET", "/v1/recordings?limit=3", authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "page1: {body}");
+        let arr = body["recordings"].as_array().expect("array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(
+            arr[0]["id"], "00000000-0000-0000-0000-000000000010",
+            "tie pair: id DESC"
+        );
+        assert_eq!(arr[1]["id"], "00000000-0000-0000-0000-00000000000f");
+        assert_eq!(arr[2]["id"], "00000000-0000-0000-0000-00000000000e");
+        assert_eq!(body["has_more"], true);
+        let cursor = body["next_cursor"].as_str().expect("cursor").to_string();
+
+        // Page 2 across the tie boundary: cursor is the SECOND tie row (f);
+        // a timestamp-only cursor would re-serve or skip the pair.
+        let (status, body) = req(
+            &app,
+            "GET",
+            &format!("/v1/recordings?limit=3&cursor={cursor}"),
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "page2: {body}");
+        let arr = body["recordings"].as_array().expect("array");
+        assert_eq!(
+            (
+                arr[0]["id"].as_str().unwrap(),
+                arr[1]["id"].as_str().unwrap(),
+                arr[2]["id"].as_str().unwrap()
+            ),
+            (
+                "00000000-0000-0000-0000-00000000000d",
+                "00000000-0000-0000-0000-00000000000c",
+                "00000000-0000-0000-0000-00000000000b"
+            ),
+            "page 2 must continue strictly below the (created_at, id) cursor"
+        );
+        assert_eq!(body["has_more"], true);
+        let cursor2 = body["next_cursor"].as_str().expect("cursor2").to_string();
+
+        // Page 3: last row (a), no more.
+        let (status, body) = req(
+            &app,
+            "GET",
+            &format!("/v1/recordings?limit=3&cursor={cursor2}"),
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "page3: {body}");
+        let arr = body["recordings"].as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "00000000-0000-0000-0000-00000000000a");
+        assert_eq!(body["has_more"], false);
+        assert!(body.get("next_cursor").is_none_or(|v| v.is_null()));
+
+        // Tombstoned row never appeared: pages served exactly the 7 live
+        // rows (3 + 3 + 1), asserted exhaustively by id above.
+        assert_eq!(3 + 3 + 1, 7, "exactly the 7 live rows were served");
+
+        // Malformed cursor → 400, not 500.
+        let (status, _) = req(
+            &app,
+            "GET",
+            "/v1/recordings?cursor=%%%not-base64%%%",
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn recordings_list_requires_auth_and_clamps_limit() {
+        let app = test_app().await;
+        let (status, _) = req(&app, "GET", "/v1/recordings", None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // limit=0 clamps to 1; limit=999 clamps to 100 (both 200, no panic).
+        let (status, body) = req(&app, "GET", "/v1/recordings?limit=0", authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "limit=0: {body}");
+        let (status, body) =
+            req(&app, "GET", "/v1/recordings?limit=9999", authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "limit=9999: {body}");
+    }
+
+    #[tokio::test]
     async fn devices_self_revoke_invalidates_bearer() {
         let app = test_app().await;
         // Sanity: token works.
