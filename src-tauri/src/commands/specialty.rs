@@ -9,7 +9,7 @@
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::settings::AppConfig;
 use medical_processing::specialty::{
-    DocType, SpecialtyPackInfo, list_packs, resolve_pack_artifact,
+    DocType, SpecialtyPackInfo, assemble_pack_prompt, list_packs, resolve_pack_artifact,
 };
 
 use crate::state::AppState;
@@ -72,6 +72,38 @@ pub(crate) fn validate_specialty_selection(
     )))
 }
 
+/// Resolve a pack artifact body (raw, NOT assembled with the safety block)
+/// on the blocking pool, enforcing the same size cap every custom prompt
+/// gets. Shared by the generation path ([`resolve_specialty_prompt`]) and
+/// the Settings display command ([`get_specialty_pack_prompt`]).
+async fn resolve_capped_body(
+    state: &AppState,
+    id: &str,
+    doc: DocType,
+) -> AppResult<Option<String>> {
+    let data_dir = state.data_dir.clone();
+    let id = id.to_string();
+    // Kept out of the move closure so the size-cap error can name the pack.
+    let id_for_error = id.clone();
+    tokio::task::spawn_blocking(move || {
+        resolve_pack_artifact(Some(&id), doc, Some(&user_packs_dir(&data_dir)))
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("specialty pack resolution task failed: {e}")))?
+    .map(move |body| -> AppResult<String> {
+        if body.len() > MAX_CONTEXT_CHARS {
+            return Err(AppError::InvalidInput(format!(
+                "Specialty pack \"{id_for_error}\" {} prompt too large: {} chars, \
+                 limit is {MAX_CONTEXT_CHARS}.",
+                doc.as_str(),
+                body.len(),
+            )));
+        }
+        Ok(body)
+    })
+    .transpose()
+}
+
 /// Resolve the selected specialty pack's prompt body for one document type,
 /// ready to hand to the generation prompt builders (which assemble it with
 /// the compiled-in safety block).
@@ -96,29 +128,49 @@ pub(super) async fn resolve_specialty_prompt(
     else {
         return Ok(None);
     };
+    resolve_capped_body(state, id, doc).await
+}
 
-    let data_dir = state.data_dir.clone();
-    let id = id.to_string();
-    // Kept out of the move closure so the size-cap error can name the pack.
-    let id_for_error = id.clone();
-    tokio::task::spawn_blocking(move || {
-        let dir = user_packs_dir(&data_dir);
-        resolve_pack_artifact(Some(&id), doc, Some(&dir))
-    })
-    .await
-    .map_err(|e| AppError::Other(format!("specialty pack resolution task failed: {e}")))?
-    .map(move |body| -> AppResult<String> {
-        if body.len() > MAX_CONTEXT_CHARS {
-            return Err(AppError::InvalidInput(format!(
-                "Specialty pack \"{id_for_error}\" {} prompt too large: {} chars, \
-                 limit is {MAX_CONTEXT_CHARS}.",
-                doc.as_str(),
-                body.len(),
-            )));
-        }
-        Ok(body)
-    })
-    .transpose()
+/// The assembled prompt the SELECTED specialty pack serves for one document
+/// type — `[pack body]\n\n---\n\nSAFETY_BLOCK`, exactly what generation
+/// sends before placeholder substitution — so Settings → Prompts can show
+/// the prompt that is actually in effect instead of the built-in default.
+///
+/// `Ok(None)` = no specialty selected, the id resolves to nothing, or the
+/// pack does not provide this doc type; the caller shows the default.
+#[tauri::command]
+pub async fn get_specialty_pack_prompt(
+    state: tauri::State<'_, AppState>,
+    doc_type: String,
+) -> AppResult<Option<String>> {
+    get_specialty_pack_prompt_inner(&state, &doc_type).await
+}
+
+async fn get_specialty_pack_prompt_inner(
+    state: &AppState,
+    doc_type: &str,
+) -> AppResult<Option<String>> {
+    let doc = DocType::parse(doc_type).ok_or_else(|| {
+        AppError::InvalidInput(format!(
+            "Unknown doc_type \"{doc_type}\" (expected one of: {})",
+            DocType::ALL
+                .iter()
+                .map(|d| d.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    })?;
+    let config = super::load_app_config(&state.db, "specialty").await?;
+    let Some(id) = config
+        .specialty
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    let body = resolve_capped_body(state, id, doc).await?;
+    Ok(body.map(|b| assemble_pack_prompt(&b)))
 }
 
 #[cfg(test)]
@@ -199,5 +251,65 @@ mod tests {
         };
         validate_specialty_selection(Some("vanished-pack"), &config, tmp.path())
             .expect("unchanged selection must not block the save");
+    }
+
+    /// The display command: with psychiatry selected, it returns the
+    /// ASSEMBLED prompt (pack body + safety block) — the text generation
+    /// actually sends — read from the config persisted in the DB.
+    #[tokio::test]
+    async fn display_prompt_returns_assembled_selected_pack() {
+        use crate::commands::generation::test_helpers::build_test_state_with_recording;
+
+        let mut config = AppConfig::default();
+        config.specialty = Some("psychiatry".into());
+        let (state, _recording_id) = build_test_state_with_recording(config, "transcript").await;
+
+        let assembled = get_specialty_pack_prompt_inner(&state, "soap")
+            .await
+            .expect("psychiatry display prompt resolves");
+        let assembled = assembled.expect("psychiatry provides soap");
+        assert!(
+            assembled.starts_with("You are a psychiatrist"),
+            "must be the psychiatry pack body: {}…",
+            assembled.chars().take(60).collect::<String>()
+        );
+        assert!(
+            assembled.ends_with(medical_processing::specialty::SAFETY_BLOCK),
+            "the assembled safety block must be appended for display too"
+        );
+
+        // A doc type the pack does not provide → None (caller shows default).
+        assert!(
+            get_specialty_pack_prompt_inner(&state, "referral")
+                .await
+                .expect("resolution succeeds")
+                .is_none()
+        );
+    }
+
+    /// No selection → None; an unknown doc type → a typed InvalidInput
+    /// (never a silent default or a panic).
+    #[tokio::test]
+    async fn display_prompt_handles_unset_and_unknown_doc_type() {
+        use crate::commands::generation::test_helpers::build_test_state_with_recording;
+
+        let (state, _recording_id) =
+            build_test_state_with_recording(AppConfig::default(), "transcript").await;
+
+        assert!(
+            get_specialty_pack_prompt_inner(&state, "soap")
+                .await
+                .expect("no selection is not an error")
+                .is_none()
+        );
+
+        let err = get_specialty_pack_prompt_inner(&state, "nonsense")
+            .await
+            .expect_err("unknown doc type must be rejected");
+        assert!(
+            matches!(err, AppError::InvalidInput(_)),
+            "expected InvalidInput, got: {err}"
+        );
+        assert!(err.to_string().contains("nonsense"));
     }
 }

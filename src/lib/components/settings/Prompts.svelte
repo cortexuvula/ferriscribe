@@ -2,7 +2,11 @@
   import { onDestroy, untrack } from 'svelte';
   import { settings } from '../../stores/settings.svelte';
   import { getDefaultPrompt, type DocType } from '../../api/prompts';
-  import { listSpecialtyPacks, type SpecialtyPackInfo } from '../../api/specialty';
+  import {
+    getSpecialtyPackPrompt,
+    listSpecialtyPacks,
+    type SpecialtyPackInfo,
+  } from '../../api/specialty';
   import {
     activePack,
     activeSource,
@@ -172,10 +176,12 @@
     promptSaveStatus = 'idle';
     try {
       const info = PROMPT_TYPES.find((p) => p.key === docType)!;
-      // untrack: the reload effect must depend on activePromptKey ONLY.
-      // settings.updateField replaces settings.state wholesale, so a
-      // tracked read here re-ran the effect on EVERY settings save —
-      // discarding in-progress prompt edits from any other pane.
+      // untrack: the reload effect must depend on activePromptKey and
+      // editorReloadKey ONLY. settings.updateField replaces settings.state
+      // wholesale, so a tracked read here re-ran the effect on EVERY
+      // settings save — discarding in-progress prompt edits from any other
+      // pane. selectedPack likewise (its identity changes when the pack
+      // list reloads).
       const customValue = untrack(
         () => settings.state?.[info.configField],
       ) as string | null | undefined;
@@ -183,17 +189,34 @@
         if (gen !== promptLoadGen) return; // user switched while loading
         promptEditorText = customValue;
         promptIsCustom = true;
-      } else {
-        const defaultText = await getDefaultPrompt(docType);
-        if (gen !== promptLoadGen) return; // stale load — user moved on
-        promptEditorText = defaultText;
-        promptIsCustom = false;
+        return;
       }
+      promptIsCustom = false;
+      // The selected pack serves this doc type → show the assembled pack
+      // prompt (body + safety block), exactly what generation sends before
+      // placeholder substitution — not the built-in default.
+      if (untrack(() => packProvides(selectedPack, docType))) {
+        const assembled = await getSpecialtyPackPrompt(docType);
+        if (gen !== promptLoadGen) return; // stale load — user moved on
+        if (assembled != null) {
+          promptEditorText = assembled;
+          return;
+        }
+        // The pack vanished between listing and fetching (uninstalled or
+        // broke mid-session) → fall through to the built-in default.
+      }
+      const defaultText = await getDefaultPrompt(docType);
+      if (gen !== promptLoadGen) return; // stale load — user moved on
+      promptEditorText = defaultText;
     } catch (e) {
       if (gen !== promptLoadGen) return;
       console.error('Failed to load prompt editor:', e);
       promptEditorText = '';
       promptIsCustom = false;
+      // A pack can list fine yet fail to resolve for display (e.g. a user
+      // pack over the 50K prompt cap but under the 1 MiB list cap) — a
+      // silently blank editor would look like data loss.
+      toasts.error(`Could not load the prompt: ${formatError(e)}`);
     } finally {
       if (gen === promptLoadGen) promptLoading = false;
     }
@@ -256,7 +279,8 @@
       promptIsCustom &&
       !(await confirmDialog({
         title: 'Reset prompt?',
-        message: 'Clear the custom prompt and restore the default?',
+        message:
+          'Clear the custom prompt? The selected specialty pack (when it covers this document type) or the built-in default will be used.',
         confirmLabel: 'Reset',
         danger: true,
       }))
@@ -265,16 +289,20 @@
     }
     try {
       await settings.updateField(info.configField, null);
-      const defaultText = await getDefaultPrompt(info.key);
-      if (gen !== promptLoadGen) return; // user switched mid-reset
-      promptEditorText = defaultText;
-      promptIsCustom = false;
-      promptDirty = false;
-      promptSaveStatus = 'idle';
     } catch (e) {
-      console.error('Failed to reset prompt:', e);
+      console.error('Failed to reset custom prompt:', e);
       if (gen === promptLoadGen) promptSaveStatus = 'error';
       toasts.error(`Could not reset the prompt: ${formatError(e)}`);
+      return;
+    }
+    // Reload through the shared loader: after clearing the custom prompt
+    // the PACK prompt (when the selected specialty serves this doc type)
+    // must reappear — not just the built-in default. Only when the user
+    // did not switch prompts mid-reset (dialog/settings-save await): the
+    // captured gen detects a switch, and loading the OLD doc now would put
+    // its text under the NEW heading.
+    if (gen === promptLoadGen) {
+      await loadPromptEditor(info.key);
     }
   }
 
@@ -282,8 +310,38 @@
     loadPacks();
   });
 
+  /** Everything besides the selected doc type that decides which TEXT the
+   *  editor shows: whether the selected pack serves this doc type, and
+   *  which pack it is. A primitive string, so a wholesale settings.state
+   *  replacement with unchanged values (every settings.updateField) yields
+   *  an equal key and does NOT retrigger the reload effect below — only a
+   *  real change (specialty switched, pack list finished loading) does. */
+  const editorReloadKey = $derived.by(() => {
+    const pack = activePack(packs, settings.state?.specialty);
+    return `${packProvides(pack, activePromptKey) ? 'pack' : 'default'}:${pack?.id ?? ''}`;
+  });
+
+  // The doc the editor last loaded content for, and the source key it
+  // loaded under — plain bookkeeping (not reactive) so a source-only
+  // change can be told apart from a doc-type switch the user already
+  // confirmed in handlePromptSelect.
+  let loadedDoc: DocType | null = null;
+  let loadedSourceKey = '';
+
   $effect(() => {
-    loadPromptEditor(activePromptKey);
+    const doc = activePromptKey; // tracked
+    const sourceKey = editorReloadKey; // tracked
+    const docSwitched = doc !== loadedDoc;
+    const sourceSwitched = sourceKey !== loadedSourceKey;
+    if (!docSwitched && !sourceSwitched) return;
+    loadedDoc = doc;
+    loadedSourceKey = sourceKey;
+    // A doc-type switch is user-confirmed and must always load; a
+    // source-only change (specialty switched, packs arrived) must never
+    // clobber unsaved edits — the "Using:" line below the editor still
+    // updates either way.
+    if (!docSwitched && untrack(() => promptDirty)) return;
+    loadPromptEditor(doc);
   });
 </script>
 
@@ -406,14 +464,15 @@
         {#if currentSource === 'custom' && packProvides(selectedPack, activePromptKey)}
           <p class="specialty-warning">
             This custom prompt overrides the {selectedPack?.name} pack for this
-            document type. Reset to the default to use the pack.
+            document type. Reset below to use the pack.
           </p>
         {:else if currentSource === 'pack'}
           <p class="specialty-note">
-            The {selectedPack?.name} pack prompt is active for this document
-            type — the text above is the built-in default, not the pack.
-            Editing and saving it creates a custom prompt that overrides the
-            pack.
+            The {selectedPack?.name} pack prompt is shown above — it is what
+            generation sends for this document type (placeholder tokens
+            substitute at generation time, and the trailing safety rules are
+            locked and always appended). Edit and save to create a custom
+            prompt that overrides the pack.
           </p>
         {/if}
 

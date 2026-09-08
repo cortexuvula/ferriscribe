@@ -23,3 +23,12 @@ export interface SpecialtyPackInfo {
 export async function listSpecialtyPacks(): Promise<SpecialtyPackInfo[]> {
   return await invoke<SpecialtyPackInfo[]>('list_specialty_packs');
 }
+
+/** The assembled prompt (`[pack body]\n\n---\n\nSAFETY_BLOCK`) the selected
+ * specialty pack serves for one document type — exactly what generation
+ * sends, before placeholder substitution. `null` = no specialty selected,
+ * the id resolves to no pack, or the pack does not provide this doc type
+ * (show the built-in default). */
+export async function getSpecialtyPackPrompt(docType: DocType): Promise<string | null> {
+  return await invoke<string | null>('get_specialty_pack_prompt', { docType });
+}

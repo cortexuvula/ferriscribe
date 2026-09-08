@@ -858,3 +858,126 @@ mod postprocess_rejection_tests {
         assert!(rec.soap_note.is_none(), "no LLM output persisted");
     }
 }
+
+/// The selected specialty pack must actually reach the provider. These pin
+/// the full command-layer chain — DB config → `resolve_specialty_prompt` →
+/// `SoapPromptConfig` → the sent system prompt — so a regression anywhere
+/// in the threading silently reverts users to the family-medicine default.
+#[cfg(test)]
+mod specialty_flow_tests {
+    use super::super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
+    use super::*;
+    use medical_core::types::settings::AppConfig;
+    use medical_processing::specialty::SAFETY_BLOCK;
+    use std::sync::Arc;
+
+    fn base_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        // Loopback → preflight probe is skipped; the mock serves completions.
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+        config
+    }
+
+    #[tokio::test]
+    async fn generate_soap_sends_the_selected_specialty_pack_prompt() {
+        let mut config = base_config();
+        config.specialty = Some("psychiatry".into());
+
+        let provider = Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Subjective:\n- Chief complaint: low mood\n\nPlan:\n- Follow up in 4 weeks",
+            200,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            config,
+            "Patient reports low mood and poor sleep.",
+            provider.clone(),
+        )
+        .await;
+
+        generate_soap_inner(&state, None, &recording_id, None, None, None)
+            .await
+            .expect("generation with mock provider succeeds");
+
+        let system = provider
+            .last_system_prompt()
+            .expect("system prompt captured");
+        assert!(
+            system.starts_with("You are a psychiatrist"),
+            "the psychiatry pack prompt must be sent, got: {}…",
+            system.chars().take(80).collect::<String>()
+        );
+        assert!(
+            !system.contains("You are a physician creating a SOAP note"),
+            "the family-medicine default must NOT be sent when psychiatry is selected"
+        );
+        assert!(
+            system.ends_with(SAFETY_BLOCK),
+            "the locked safety block must be the last thing the model reads"
+        );
+        // Placeholders the pack body declares are substituted at build time.
+        assert!(!system.contains("{template_guidance}"));
+    }
+
+    #[tokio::test]
+    async fn generate_soap_without_specialty_sends_the_default_prompt() {
+        let provider = Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Subjective:\n- Chief complaint: back pain\n\nPlan:\n- Rest",
+            200,
+        ));
+        let (state, recording_id) = build_test_state_with_provider(
+            base_config(),
+            "Patient reports back pain after lifting boxes.",
+            provider.clone(),
+        )
+        .await;
+
+        generate_soap_inner(&state, None, &recording_id, None, None, None)
+            .await
+            .expect("generation with mock provider succeeds");
+
+        let system = provider
+            .last_system_prompt()
+            .expect("system prompt captured");
+        assert!(
+            system.starts_with("You are a physician creating a SOAP note"),
+            "no selection → the family-medicine default: {}…",
+            system.chars().take(80).collect::<String>()
+        );
+        assert!(system.ends_with(SAFETY_BLOCK));
+    }
+
+    /// Custom free-text still wins over the pack on the command path.
+    #[tokio::test]
+    async fn generate_soap_custom_prompt_beats_the_selected_pack() {
+        let mut config = base_config();
+        config.specialty = Some("psychiatry".into());
+        config.custom_soap_prompt = Some("CUSTOM WINS outright.".into());
+
+        let provider = Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Subjective:\n- Chief complaint: low mood\n\nPlan:\n- Follow up",
+            200,
+        ));
+        let (state, recording_id) =
+            build_test_state_with_provider(config, "Patient reports low mood.", provider.clone())
+                .await;
+
+        generate_soap_inner(&state, None, &recording_id, None, None, None)
+            .await
+            .expect("generation with mock provider succeeds");
+
+        let system = provider
+            .last_system_prompt()
+            .expect("system prompt captured");
+        assert!(
+            system.starts_with("CUSTOM WINS"),
+            "custom free-text must win outright: {}…",
+            system.chars().take(80).collect::<String>()
+        );
+        assert!(!system.contains("You are a psychiatrist"));
+    }
+}
