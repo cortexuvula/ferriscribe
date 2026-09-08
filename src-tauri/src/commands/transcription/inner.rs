@@ -79,6 +79,20 @@ pub async fn transcribe_recording_inner(
             started_at: Utc::now(),
         };
         RecordingsRepo::update(&conn, &recording)?;
+        // Field-revision stamp for the syncable status column (2026-08-17
+        // review item 8) — the whole-row update above leaves the revision
+        // table stale; the wire builder's max(revision,row) rider covers
+        // LWW, this records the precise per-field clock. Best-effort: a
+        // failed stamp must not fail the transcription over sync metadata.
+        if let Err(e) = medical_db::ContentSyncRepo::upsert_revision(
+            &conn,
+            &uuid,
+            "processing_status",
+            &Utc::now().to_rfc3339(),
+            None,
+        ) {
+            tracing::warn!(error = %e, "transcription: status revision stamp failed (non-fatal)");
+        }
         Ok::<_, AppError>(recording)
     })
     .await

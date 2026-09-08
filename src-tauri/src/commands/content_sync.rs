@@ -222,6 +222,92 @@ fn build_sparse_fields(
     crate::sync_sparse_fields::build_sparse_fields(rec, revisions)
 }
 
+/// Audio uploads attempted per push batch — bounds one cycle's upload time.
+const AUDIO_UPLOADS_PER_BATCH: usize = 10;
+
+/// Append newly pushed ids to the persistent audio queue, skipping ids
+/// already queued (a re-pushed recording must not duplicate its retry).
+fn merge_audio_queue(queue: &[String], pushed: &[String]) -> Vec<String> {
+    let mut out = queue.to_vec();
+    for id in pushed {
+        if !out.iter().any(|q| q == id) {
+            out.push(id.clone());
+        }
+    }
+    out
+}
+
+/// Persist the audio upload queue (ids only). Best-effort: a failed persist
+/// means the queue re-drains from its last saved state — safe, because
+/// uploads are idempotent (the server's first-write-wins 409 is treated as
+/// success by `upload_audio`).
+async fn persist_audio_queue(db: &Arc<Database>, ids: &[String]) {
+    let db = Arc::clone(db);
+    let ids = ids.to_vec();
+    let result = tokio::task::spawn_blocking(move || -> AppResult<()> {
+        let conn = db.conn()?;
+        ContentSyncRepo::set_pending_audio_uploads(&conn, &ids).map_err(AppError::from)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "sync: persist audio queue failed"),
+        Err(e) => tracing::warn!(error = %e, "sync: persist audio queue task failed"),
+    }
+}
+
+/// Outcome of reading one queued recording's local audio for upload.
+#[derive(Debug)]
+enum PendingAudioRead {
+    /// Decrypted (or legacy plaintext) audio bytes, ready to upload.
+    Bytes(Vec<u8>),
+    /// The recording is gone or tombstoned, or has no local audio file
+    /// (e.g. a pulled recording whose audio still lives on the partner) —
+    /// the id can never upload and must leave the queue.
+    Gone,
+    /// The audio exists but could not be read/decrypted — possibly
+    /// transient (keychain); keep the id for a later cycle.
+    Failed(AppError),
+}
+
+/// Read one recording's local audio for upload. Runs on the blocking pool.
+fn read_local_audio(db: &Arc<Database>, rec_id: &str) -> PendingAudioRead {
+    let conn = match db.conn() {
+        Ok(c) => c,
+        Err(e) => return PendingAudioRead::Failed(e.into()),
+    };
+    // A malformed id can never resolve — drop it rather than retry forever.
+    let Ok(uuid) = uuid::Uuid::parse_str(rec_id) else {
+        return PendingAudioRead::Gone;
+    };
+    // Active rows only: a tombstoned recording must not upload its audio
+    // (the tombstone push already told the partner it is deleted).
+    let rec = match RecordingsRepo::get_by_id_active(&conn, &uuid) {
+        Ok(rec) => rec,
+        Err(medical_db::DbError::NotFound(_)) => return PendingAudioRead::Gone,
+        Err(e) => return PendingAudioRead::Failed(e.into()),
+    };
+    let path = &rec.audio_path;
+    if path.as_os_str().is_empty() || !path.exists() {
+        return PendingAudioRead::Gone;
+    }
+    match medical_security::file_crypto::decrypt_file(path) {
+        Ok(bytes) => PendingAudioRead::Bytes(bytes),
+        Err(medical_security::file_crypto::FileCryptoError::NotEncrypted) => {
+            // Legacy plaintext WAV — auto-detected by the missing magic.
+            match std::fs::read(path) {
+                Ok(bytes) => PendingAudioRead::Bytes(bytes),
+                Err(e) => {
+                    PendingAudioRead::Failed(AppError::Other(format!("audio read failed: {e}")))
+                }
+            }
+        }
+        Err(e) => {
+            PendingAudioRead::Failed(AppError::security(format!("audio decrypt failed: {e}")))
+        }
+    }
+}
+
 /// Run one full bidirectional content sync against the office server.
 ///
 /// This is the core logic shared by the [`sync_content_now`] command and the
@@ -512,6 +598,27 @@ async fn run_sync(
     // cursor tracks what we've sent to the server. Without this separation,
     // the pull loop would advance the shared cursor past local recordings,
     // and they'd never be pushed.
+    //
+    // Audio uploads ride a PERSISTENT retry queue: every successfully
+    // pushed recording is enqueued (surviving restarts and multi-batch
+    // catch-ups), a bounded slice is attempted per batch, and only success
+    // or a permanently-unuploadable id leaves the queue. Before the queue,
+    // a take(10)-per-batch slice meant recordings past the tenth in a batch
+    // had their audio silently never uploaded once the cursor advanced —
+    // and failed uploads were never retried.
+    // A failed queue READ aborts the push phase (propagated): proceeding
+    // with an empty queue and a later successful persist would overwrite
+    // the saved retries — losing exactly the backlog this queue exists to
+    // protect. The next sync cycle retries.
+    let mut audio_queue: Vec<String> = {
+        let q_db = Arc::clone(&db);
+        tokio::task::spawn_blocking(move || -> AppResult<Vec<String>> {
+            let conn = q_db.conn()?;
+            ContentSyncRepo::get_pending_audio_uploads(&conn).map_err(AppError::from)
+        })
+        .await
+        .map_err(crate::commands::join_err)??
+    };
     loop {
         let push_db = Arc::clone(&db);
         let push_result = tokio::task::spawn_blocking(move || {
@@ -598,58 +705,84 @@ async fn run_sync(
                 .await
                 .map_err(crate::commands::join_err)??;
             }
-            // Best-effort audio upload for pushed recordings. Decrypts local
-            // audio and uploads to server so the partner can fetch it.
-            // Limit to 10 per cycle to bound latency. Errors are non-fatal.
-            for rec_id in pushed_ids.iter().take(10) {
+            // Enqueue EVERY pushed recording's audio — the cursor is about
+            // to advance past the whole batch, so this is the only moment
+            // these ids enter the queue. Persist immediately: a crash
+            // between here and the uploads must not lose them (the push
+            // cursor has already moved).
+            audio_queue = merge_audio_queue(&audio_queue, &pushed_ids);
+            persist_audio_queue(&db, &audio_queue).await;
+
+            // Drain a bounded slice (oldest first) so one sync cycle can't
+            // spend minutes uploading a catch-up backlog. Success or a
+            // permanently-gone id leaves the queue; transient failures keep
+            // their id for the next cycle.
+            let attempt: Vec<String> = audio_queue
+                .iter()
+                .take(AUDIO_UPLOADS_PER_BATCH)
+                .cloned()
+                .collect();
+            let mut remove_ids: Vec<String> = Vec::new();
+            for rec_id in &attempt {
                 let upload_db = Arc::clone(&db);
                 let rec_id_owned = rec_id.clone();
-                let plaintext_result =
-                    tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
-                        let conn = upload_db.conn()?;
-                        let uuid = uuid::Uuid::parse_str(&rec_id_owned)
-                            .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-                        let rec = medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid)
-                            .map_err(AppError::from)?;
-                        let path = &rec.audio_path;
-                        if path.as_os_str().is_empty() || !path.exists() {
-                            return Err(AppError::Other("no local audio".into()));
-                        }
-                        match medical_security::file_crypto::decrypt_file(path) {
-                            Ok(p) => Ok(p),
-                            Err(medical_security::file_crypto::FileCryptoError::NotEncrypted) => {
-                                std::fs::read(path)
-                                    .map_err(|e| AppError::Other(format!("audio read failed: {e}")))
-                            }
-                            Err(e) => Err(AppError::security(format!("audio decrypt failed: {e}"))),
-                        }
-                    })
-                    .await
-                    .map_err(crate::commands::join_err);
+                let plaintext_result = tokio::task::spawn_blocking(move || {
+                    read_local_audio(&upload_db, &rec_id_owned)
+                })
+                .await
+                .map_err(crate::commands::join_err);
                 match plaintext_result {
-                    Ok(Ok(plaintext)) => {
-                        if let Err(e) = remote.upload_audio(rec_id, plaintext).await {
-                            tracing::debug!(error = %e, "sync: audio upload failed");
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        // At-rest corruption or a keychain failure — the
-                        // audio silently never reaches the partner, so make
-                        // it diagnosable (ids/errors only, no PHI).
-                        tracing::warn!(
-                            error = %e,
-                            recording_id = %rec_id,
-                            "sync: audio upload skipped — local audio unreadable"
-                        );
-                    }
+                    // Join failure is transient (task panicked / runtime
+                    // shutdown) — keep the id.
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
                             recording_id = %rec_id,
-                            "sync: audio upload skipped — read task failed"
+                            "sync: audio read task failed — queued for retry"
                         );
                     }
+                    Ok(read) => match read {
+                        PendingAudioRead::Bytes(plaintext) => {
+                            match remote.upload_audio(rec_id, plaintext).await {
+                                Ok(()) => {
+                                    remove_ids.push(rec_id.clone());
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        error = %e,
+                                        recording_id = %rec_id,
+                                        "sync: audio upload failed — queued for retry"
+                                    );
+                                }
+                            }
+                        }
+                        PendingAudioRead::Gone => {
+                            // Row deleted, tombstoned, or no local audio
+                            // (e.g. a pulled recording whose audio still
+                            // lives on the partner) — this id can never
+                            // upload.
+                            tracing::debug!(
+                                recording_id = %rec_id,
+                                "sync: audio upload dropped — no uploadable local audio"
+                            );
+                            remove_ids.push(rec_id.clone());
+                        }
+                        PendingAudioRead::Failed(e) => {
+                            // At-rest corruption or a keychain failure —
+                            // retried next cycle (bounded: one attempt per
+                            // cycle) and diagnosable via the warn.
+                            tracing::warn!(
+                                error = %e,
+                                recording_id = %rec_id,
+                                "sync: audio upload deferred — local audio unreadable"
+                            );
+                        }
+                    },
                 }
+            }
+            if !remove_ids.is_empty() {
+                audio_queue.retain(|id| !remove_ids.contains(id));
+                persist_audio_queue(&db, &audio_queue).await;
             }
         } else if let Some(ts) = skip_cursor {
             // All recordings in this page were unreadable — advance the push
@@ -1133,6 +1266,93 @@ mod tests {
     use medical_core::types::recording::Recording;
     use medical_db::Database;
     use medical_db::recordings::RecordingsRepo;
+
+    #[test]
+    fn merge_audio_queue_appends_without_duplicates() {
+        let queue = vec!["old-a".to_string(), "old-b".to_string()];
+        let merged = merge_audio_queue(&queue, &["new-c".into(), "old-a".into(), "new-d".into()]);
+        assert_eq!(merged, vec!["old-a", "old-b", "new-c", "new-d"]);
+        // Empty inputs stay empty.
+        assert!(merge_audio_queue(&[], &[]).is_empty());
+    }
+
+    /// The retry queue's permanence classification: only live rows with a
+    /// readable local audio file produce uploadable bytes — everything a
+    /// cycle can never fix classifies `Gone` so it leaves the queue instead
+    /// of retrying forever.
+    #[test]
+    fn read_local_audio_classifies_gone_versus_bytes() {
+        let db = Arc::new(Database::open_in_memory().expect("db"));
+
+        // The in-memory pool is max_size(1): all row setup happens in a
+        // scoped connection that is dropped BEFORE any read_local_audio
+        // call (which checks the pool out itself).
+        let tmp = tempfile::tempdir().expect("tmp");
+        let plaintext_wav = tmp.path().join("tombstoned.wav");
+        std::fs::write(&plaintext_wav, b"RIFF....WAVEfmt ").expect("write wav");
+        let encrypted_wav = tmp.path().join("encrypted.wav");
+        medical_security::file_crypto::encrypt_file(&encrypted_wav, b"SECRET AUDIO")
+            .expect("encrypt");
+
+        // Malformed id → Gone (can never resolve).
+        assert!(matches!(
+            read_local_audio(&db, "not-a-uuid"),
+            PendingAudioRead::Gone
+        ));
+
+        // No row at all → Gone.
+        assert!(matches!(
+            read_local_audio(&db, &uuid::Uuid::new_v4().to_string()),
+            PendingAudioRead::Gone
+        ));
+
+        let (missing_id, tombstoned_id) = {
+            let conn = db.conn().expect("conn");
+            // Live row whose audio file is missing.
+            let missing = Recording::new(
+                "missing.wav",
+                std::path::PathBuf::from("/nonexistent/missing.wav"),
+            );
+            RecordingsRepo::insert(&conn, &missing).expect("insert");
+            // Tombstoned row with an EXISTING audio file.
+            let tombstoned =
+                Recording::new("tombstoned.wav", std::path::PathBuf::from(&plaintext_wav));
+            RecordingsRepo::insert(&conn, &tombstoned).expect("insert");
+            RecordingsRepo::soft_delete(&conn, &tombstoned.id).expect("soft delete");
+            (missing.id, tombstoned.id)
+        };
+
+        assert!(matches!(
+            read_local_audio(&db, &missing_id.to_string()),
+            PendingAudioRead::Gone
+        ));
+        assert!(matches!(
+            read_local_audio(&db, &tombstoned_id.to_string()),
+            PendingAudioRead::Gone
+        ));
+
+        // Restored live row with a legacy PLAINTEXT wav → Bytes.
+        {
+            let conn = db.conn().expect("conn");
+            RecordingsRepo::restore(&conn, &tombstoned_id).expect("restore");
+        }
+        match read_local_audio(&db, &tombstoned_id.to_string()) {
+            PendingAudioRead::Bytes(b) => assert_eq!(b, b"RIFF....WAVEfmt "),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+
+        // Encrypted audio (the normal at-rest format) → decrypted Bytes.
+        {
+            let conn = db.conn().expect("conn");
+            let mut rec = RecordingsRepo::get_by_id(&conn, &tombstoned_id).expect("row");
+            rec.audio_path = encrypted_wav;
+            RecordingsRepo::update(&conn, &rec).expect("update path");
+        }
+        match read_local_audio(&db, &tombstoned_id.to_string()) {
+            PendingAudioRead::Bytes(b) => assert_eq!(b, b"SECRET AUDIO"),
+            other => panic!("expected Bytes, got {other:?}"),
+        }
+    }
 
     #[test]
     fn advance_cursor_adds_exactly_one_microsecond() {
