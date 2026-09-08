@@ -535,12 +535,19 @@ fn decode_cursor(raw: &str) -> Option<ListCursor> {
 /// GET /v1/recordings — newest-first by consultation date (`created_at`
 /// DESC), tombstoned rows excluded, composite-cursor paging.
 ///
-/// Ordering uses `julianday`-parsed comparison on BOTH sides of the
-/// cursor — `created_at` mixes RFC 3339 (T-format) and legacy SQLite
-/// space-format stamps, and a plain string comparison permanently skips
-/// same-day space-format rows once the cursor passes their date (the
-/// exact bug `changed_since` fixed for `updated_at`; see its comment and
-/// the `changed_since_compares_mixed_format_stamps_parsed` pin).
+/// Ordering AND the cursor predicate both use `julianday`-parsed
+/// comparison — `created_at` mixes RFC 3339 (T-format) and legacy SQLite
+/// space-format stamps; a plain string ORDER BY disagrees with a parsed
+/// cursor predicate on mixed populations and skips/duplicates rows at
+/// page boundaries (the bug class `changed_since` fixed for `updated_at`).
+/// Unparseable stamps are EXCLUDED (`julianday(created_at) IS NOT
+/// NULL`): such rows cannot be hydrated anyway — row_to_recording's
+/// parse_db_timestamp fails and load_sync_recordings drops them (the
+/// sync pull path's established behavior for corrupt rows) — so serving
+/// their id would produce a phantom page slot. Exclusion keeps the list
+/// and the sync view consistent: corrupt-stamp rows are invisible to
+/// both, visible only in the error log. The cursor's boundary value is
+/// always a hydrated row's stamp, so it always parses.
 pub(super) async fn list_recordings_handler<R: tauri::Runtime>(
     AxumState(state): AxumState<ApiState<R>>,
     headers: HeaderMap,
@@ -577,8 +584,9 @@ pub(super) async fn list_recordings_handler<R: tauri::Runtime>(
                         .prepare(
                             "SELECT id FROM recordings
                              WHERE deleted_at IS NULL
+                               AND julianday(created_at) IS NOT NULL
                                AND (julianday(created_at), id) < (julianday(?1), ?2)
-                             ORDER BY created_at DESC, id DESC
+                             ORDER BY julianday(created_at) DESC, id DESC
                              LIMIT ?3",
                         )
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -594,7 +602,8 @@ pub(super) async fn list_recordings_handler<R: tauri::Runtime>(
                         .prepare(
                             "SELECT id FROM recordings
                              WHERE deleted_at IS NULL
-                             ORDER BY created_at DESC, id DESC
+                               AND julianday(created_at) IS NOT NULL
+                             ORDER BY julianday(created_at) DESC, id DESC
                              LIMIT ?1",
                         )
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
