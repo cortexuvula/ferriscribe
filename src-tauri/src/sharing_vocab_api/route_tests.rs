@@ -963,6 +963,283 @@ mod mobile_api_tests {
     }
 
     #[tokio::test]
+    async fn recordings_list_pages_by_created_at_with_tiebreak_and_excludes_tombstones() {
+        let app = test_app().await;
+        let conn = app.db.conn().expect("conn");
+
+        // Five recordings with distinct created_at (newest first: e, d, c, b, a)
+        // plus a TIE PAIR (f, g) sharing one timestamp — the cursor boundary
+        // must advance past BOTH by (created_at, id), never by timestamp alone.
+        let mk = |id: &str, created: &str| {
+            let uuid = uuid::Uuid::parse_str(id).expect("uuid");
+            let mut rec = medical_core::types::recording::Recording::new(
+                format!("{id}.wav"),
+                std::path::PathBuf::new(),
+            );
+            rec.id = uuid;
+            rec.created_at = chrono::DateTime::parse_from_rfc3339(created)
+                .expect("created")
+                .with_timezone(&chrono::Utc);
+            medical_db::recordings::RecordingsRepo::insert(&conn, &rec).expect("seed");
+        };
+        mk(
+            "00000000-0000-0000-0000-00000000000a",
+            "2026-09-01T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-00000000000b",
+            "2026-09-02T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-00000000000c",
+            "2026-09-03T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-00000000000d",
+            "2026-09-04T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-00000000000e",
+            "2026-09-05T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-00000000000f",
+            "2026-09-06T10:00:00+00:00",
+        );
+        mk(
+            "00000000-0000-0000-0000-000000000010",
+            "2026-09-06T10:00:00+00:00",
+        );
+        // A tombstoned NEWEST row — must never appear.
+        mk(
+            "00000000-0000-0000-0000-0000000000ff",
+            "2026-09-07T10:00:00+00:00",
+        );
+        conn.execute(
+            "UPDATE recordings SET deleted_at = '2026-09-07T11:00:00+00:00'
+             WHERE id = '00000000-0000-0000-0000-0000000000ff'",
+            [],
+        )
+        .expect("tombstone");
+
+        // Release the pooled connection BEFORE the request — in-memory
+        // pools are max_size=1, and the seed conn still being alive would
+        // starve the handler's checkout (30s timeout → 500).
+        drop(conn);
+
+        // Page 1: limit 3 => [10 (tie, id DESC), f (tie), e], has_more, cursor.
+        let (status, body) = req(&app, "GET", "/v1/recordings?limit=3", authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "page1: {body}");
+        let arr = body["recordings"].as_array().expect("array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(
+            arr[0]["id"], "00000000-0000-0000-0000-000000000010",
+            "tie pair: id DESC"
+        );
+        assert_eq!(arr[1]["id"], "00000000-0000-0000-0000-00000000000f");
+        assert_eq!(arr[2]["id"], "00000000-0000-0000-0000-00000000000e");
+        assert_eq!(body["has_more"], true);
+        let cursor = body["next_cursor"].as_str().expect("cursor").to_string();
+
+        // Page 2 across the tie boundary: cursor is the SECOND tie row (f);
+        // a timestamp-only cursor would re-serve or skip the pair.
+        let (status, body) = req(
+            &app,
+            "GET",
+            &format!("/v1/recordings?limit=3&cursor={cursor}"),
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "page2: {body}");
+        let arr = body["recordings"].as_array().expect("array");
+        assert_eq!(
+            (
+                arr[0]["id"].as_str().unwrap(),
+                arr[1]["id"].as_str().unwrap(),
+                arr[2]["id"].as_str().unwrap()
+            ),
+            (
+                "00000000-0000-0000-0000-00000000000d",
+                "00000000-0000-0000-0000-00000000000c",
+                "00000000-0000-0000-0000-00000000000b"
+            ),
+            "page 2 must continue strictly below the (created_at, id) cursor"
+        );
+        assert_eq!(body["has_more"], true);
+        let cursor2 = body["next_cursor"].as_str().expect("cursor2").to_string();
+
+        // Page 3: last row (a), no more.
+        let (status, body) = req(
+            &app,
+            "GET",
+            &format!("/v1/recordings?limit=3&cursor={cursor2}"),
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "page3: {body}");
+        let arr = body["recordings"].as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "00000000-0000-0000-0000-00000000000a");
+        assert_eq!(body["has_more"], false);
+        assert!(body.get("next_cursor").is_none_or(|v| v.is_null()));
+
+        // Tombstoned row never appeared: pages served exactly the 7 live
+        // rows (3 + 3 + 1), asserted exhaustively by id above.
+        assert_eq!(3 + 3 + 1, 7, "exactly the 7 live rows were served");
+
+        // Malformed cursor → 400, not 500.
+        let (status, _) = req(
+            &app,
+            "GET",
+            "/v1/recordings?cursor=%%%not-base64%%%",
+            authed(&app),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn recordings_list_orders_mixed_format_stamps_parsed_across_pages() {
+        // codie's Critical: a string ORDER BY disagrees with a parsed
+        // cursor predicate when created_at mixes RFC 3339 (T-format) and
+        // legacy SQLite space-format stamps. Seed interleaved dates in
+        // BOTH formats and assert the parsed order holds across a page
+        // boundary — no skips, no duplicates.
+        let app = test_app().await;
+        let conn = app.db.conn().expect("conn");
+
+        // Dates (oldest → newest): d1 < d2 < d3 < d4 < d5. d2/dd4 are
+        // space-format; d1/d3/d5 are T-format. Correct parsed order:
+        // d5, d4, d3, d2, d1 regardless of format.
+        let mk = |id: &str, created: &str| {
+            let mut rec = medical_core::types::recording::Recording::new(
+                format!("{id}.wav"),
+                std::path::PathBuf::new(),
+            );
+            rec.id = uuid::Uuid::parse_str(id).expect("uuid");
+            // Raw insert: bypass the repo so the stamp lands verbatim
+            // (RecordingsRepo would normalize through chrono).
+            conn.execute(
+                "INSERT INTO recordings (id, filename, audio_path, created_at, metadata)
+                 VALUES (?1, ?2, '', ?3, '{}')",
+                rusqlite::params![id, format!("{id}.wav"), created],
+            )
+            .expect("seed");
+            rec
+        };
+        mk(
+            "00000000-0000-0000-0000-00000000000a",
+            "2026-09-01T10:00:00+00:00",
+        ); // d1 T
+        mk(
+            "00000000-0000-0000-0000-00000000000b",
+            "2026-09-02 10:00:00",
+        ); // d2 SPACE
+        mk(
+            "00000000-0000-0000-0000-00000000000c",
+            "2026-09-03T10:00:00+00:00",
+        ); // d3 T
+        mk(
+            "00000000-0000-0000-0000-00000000000d",
+            "2026-09-04 10:00:00",
+        ); // d4 SPACE
+        mk(
+            "00000000-0000-0000-0000-00000000000e",
+            "2026-09-05T10:00:00+00:00",
+        ); // d5 T
+        mk("00000000-0000-0000-0000-00000000000f", "not-a-timestamp"); // NULL-stamp row
+
+        // Sanity: the string sort would place 'not-a-timestamp' and the
+        // space-format rows LAST/WILDLY — the parsed sort must interleave
+        // by actual date. (Guard against regression to ORDER BY created_at.)
+        drop(conn);
+
+        // Page 1 (limit 2): d5, d4 — the space-format d4 must sit in its
+        // parsed position, NOT sink below d3 (string sort would return
+        // d5, d3 because '2026-09-04 ...' < '2026-09-03T...' lexically?
+        // No — '2026-09-04' > '2026-09-03' at the date prefix, but the
+        // 'T' vs ' ' at position 10 flips same-day comparisons. The pin
+        // is the CROSS-BOUNDARY walk below.)
+        let (status, body) = req(&app, "GET", "/v1/recordings?limit=2", authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "page1: {body}");
+        let arr = body["recordings"].as_array().expect("array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], "00000000-0000-0000-0000-00000000000e");
+        assert_eq!(
+            arr[1]["id"], "00000000-0000-0000-0000-00000000000d",
+            "space-format d4 must interleave in parsed position, not sink"
+        );
+        assert_eq!(body["has_more"], true);
+        let cursor = body["next_cursor"].as_str().expect("cursor").to_string();
+
+        // Walk pages 2..N; collect every id; stop at null cursor.
+        let mut seen = vec![
+            "00000000-0000-0000-0000-00000000000e".to_string(),
+            "00000000-0000-0000-0000-00000000000d".to_string(),
+        ];
+        let mut cur = cursor;
+        loop {
+            let (status, body) = req(
+                &app,
+                "GET",
+                &format!("/v1/recordings?limit=2&cursor={cur}"),
+                authed(&app),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "walk: {body}");
+            let arr = body["recordings"].as_array().expect("array");
+            if arr.is_empty() {
+                break;
+            }
+            for r in arr {
+                seen.push(r["id"].as_str().expect("id").to_string());
+            }
+            match body["next_cursor"].as_str() {
+                Some(c) => cur = c.to_string(),
+                None => break,
+            }
+        }
+
+        // Parsed order: d5, d4, d3, d2, d1 — space-format rows interleave
+        // by parsed date. The corrupt-stamp row (f) is EXCLUDED: it can't
+        // be hydrated (parse_db_timestamp fails; sync drops it too), and
+        // serving its id would create a phantom page slot. Pinned.
+        assert_eq!(
+            seen,
+            vec![
+                "00000000-0000-0000-0000-00000000000e".to_string(),
+                "00000000-0000-0000-0000-00000000000d".to_string(),
+                "00000000-0000-0000-0000-00000000000c".to_string(),
+                "00000000-0000-0000-0000-00000000000b".to_string(),
+                "00000000-0000-0000-0000-00000000000a".to_string(),
+            ],
+            "mixed-format stamps must interleave by parsed date; corrupt-stamp row excluded; no skips/dupes"
+        );
+        assert!(
+            !seen.contains(&"00000000-0000-0000-0000-00000000000f".to_string()),
+            "corrupt-stamp row must never be served"
+        );
+    }
+
+    #[tokio::test]
+    async fn recordings_list_requires_auth_and_clamps_limit() {
+        let app = test_app().await;
+        let (status, _) = req(&app, "GET", "/v1/recordings", None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // limit=0 clamps to 1; limit=999 clamps to 100 (both 200, no panic).
+        let (status, body) = req(&app, "GET", "/v1/recordings?limit=0", authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "limit=0: {body}");
+        let (status, body) =
+            req(&app, "GET", "/v1/recordings?limit=9999", authed(&app), None).await;
+        assert_eq!(status, StatusCode::OK, "limit=9999: {body}");
+    }
+
+    #[tokio::test]
     async fn devices_self_revoke_invalidates_bearer() {
         let app = test_app().await;
         // Sanity: token works.

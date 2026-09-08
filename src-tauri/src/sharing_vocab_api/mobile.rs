@@ -477,6 +477,184 @@ pub(super) fn detach_event_forwarders<R: tauri::Runtime>(
 }
 
 // ---------------------------------------------------------------------------
+// GET /v1/recordings — newest-first paged list (cursor, by created_at)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub(super) struct ListRecordingsQuery {
+    /// Opaque cursor from a previous page's `next_cursor` (omit for page 1).
+    #[serde(default)]
+    cursor: Option<String>,
+    /// Page size, clamped to 1..=100 (default 20).
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct ListRecordingsResponse {
+    recordings: Vec<medical_db::content_sync::SyncRecording>,
+    /// Cursor for the next page; `null` when this is the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+    /// DEPRECATED-ish convenience: clients should rely on `next_cursor`,
+    /// but `has_more` saves a length check. Always consistent with cursor.
+    has_more: bool,
+}
+
+/// Cursor payload: `(created_at, id)` of the LAST row of the previous
+/// page, base64url(JSON). Composite key prevents the same-timestamp skip:
+/// rows sharing `created_at` with the cursor row are ordered by `id`,
+/// and the WHERE advances strictly past the pair, never past the timestamp
+/// alone.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ListCursor {
+    /// RFC 3339 `created_at` of the boundary row.
+    c: String,
+    /// UUID of the boundary row (tiebreak).
+    i: String,
+}
+
+fn encode_cursor(row: &medical_db::content_sync::SyncRecording) -> String {
+    let payload = serde_json::to_string(&ListCursor {
+        c: row.created_at.clone(),
+        i: row.id.clone(),
+    })
+    .unwrap_or_default();
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+}
+
+fn decode_cursor(raw: &str) -> Option<ListCursor> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw)
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// GET /v1/recordings — newest-first by consultation date (`created_at`
+/// DESC), tombstoned rows excluded, composite-cursor paging.
+///
+/// Ordering AND the cursor predicate both use `julianday`-parsed
+/// comparison — `created_at` mixes RFC 3339 (T-format) and legacy SQLite
+/// space-format stamps; a plain string ORDER BY disagrees with a parsed
+/// cursor predicate on mixed populations and skips/duplicates rows at
+/// page boundaries (the bug class `changed_since` fixed for `updated_at`).
+/// Unparseable stamps are EXCLUDED (`julianday(created_at) IS NOT
+/// NULL`): such rows cannot be hydrated anyway — row_to_recording's
+/// parse_db_timestamp fails and load_sync_recordings drops them (the
+/// sync pull path's established behavior for corrupt rows) — so serving
+/// their id would produce a phantom page slot. Exclusion keeps the list
+/// and the sync view consistent: corrupt-stamp rows are invisible to
+/// both, visible only in the error log. The cursor's boundary value is
+/// always a hydrated row's stamp, so it always parses.
+pub(super) async fn list_recordings_handler<R: tauri::Runtime>(
+    AxumState(state): AxumState<ApiState<R>>,
+    headers: HeaderMap,
+    Query(q): Query<ListRecordingsQuery>,
+) -> Result<Json<ListRecordingsResponse>, StatusCode> {
+    let _ = authorize(&state, &headers)?;
+
+    let limit = q.limit.unwrap_or(20).clamp(1, 100);
+    let cursor = match q.cursor.as_deref() {
+        None => None,
+        Some(raw) => match decode_cursor(raw) {
+            Some(c) => Some(c),
+            None => {
+                warn!("mobile: recordings list rejected, malformed cursor");
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        },
+    };
+
+    let db = Arc::clone(&state.db);
+    let out = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<medical_db::content_sync::SyncRecording>, bool), StatusCode> {
+            // ONE pooled connection for both the id query and hydration:
+            // in-memory test pools are max_size=1, and a second
+            // spawn_blocking's db.conn() would block on the pool until the
+            // first releases — a self-deadlock surfaced as 500s.
+            let conn = db.conn().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            // Fetch limit+1 to detect has_more without a COUNT.
+            let fetch = limit as i64 + 1;
+
+            let ids: Vec<String> = match &cursor {
+                Some(cur) => {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT id FROM recordings
+                             WHERE deleted_at IS NULL
+                               AND julianday(created_at) IS NOT NULL
+                               AND (julianday(created_at), id) < (julianday(?1), ?2)
+                             ORDER BY julianday(created_at) DESC, id DESC
+                             LIMIT ?3",
+                        )
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    stmt.query_map(rusqlite::params![cur.c, cur.i, fetch], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                }
+                None => {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT id FROM recordings
+                             WHERE deleted_at IS NULL
+                               AND julianday(created_at) IS NOT NULL
+                             ORDER BY julianday(created_at) DESC, id DESC
+                             LIMIT ?1",
+                        )
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    stmt.query_map(rusqlite::params![fetch], |row| row.get::<_, String>(0))
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                }
+            };
+
+            let has_more = ids.len() as u32 > limit;
+            let page_ids: Vec<String> = ids.into_iter().take(limit as usize).collect();
+
+            // Hydrate through the SAME wire serializer the sync API uses
+            // (client's SyncRecording model unchanged) — same connection.
+            // The IN (...) query returns rows in index order, NOT the
+            // requested order — re-sort by page_ids to preserve the
+            // (created_at, id) pagination order.
+            let hydrated = super::content_sync::load_sync_recordings(&conn, &page_ids)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let by_id: std::collections::HashMap<String, _> =
+                hydrated.into_iter().map(|r| (r.id.clone(), r)).collect();
+            let recordings = page_ids
+                .iter()
+                .filter_map(|id| by_id.get(id).cloned())
+                .collect();
+            Ok((recordings, has_more))
+        },
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    let (recordings, has_more) = out;
+    let next_cursor = if has_more {
+        recordings.last().map(encode_cursor)
+    } else {
+        None
+    };
+
+    info!(
+        count = recordings.len(),
+        has_more, "mobile: recordings list"
+    );
+    Ok(Json(ListRecordingsResponse {
+        recordings,
+        next_cursor,
+        has_more,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // POST /v1/recordings — create a recording row
 // ---------------------------------------------------------------------------
 
