@@ -279,51 +279,80 @@ fn clean_ocr_text(raw: &str) -> String {
 
 fn is_separator_line(line: &str) -> bool {
     let t = line.trim();
-    t.is_empty() || t.starts_with("```")
+    if t.is_empty() || t.starts_with("```") {
+        return true;
+    }
+    // Markdown horizontal rules (`---`, `***`, `___`, spaced variants) —
+    // vision models commonly divide an extraction from its echo with one.
+    let unspaced: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+    is_horizontal_rule(&unspaced)
 }
 
-/// Collapse an exact whole-text repetition to a single copy: glm-ocr
-/// sometimes appends a verbatim copy of the entire extraction. A match
-/// requires the remainder after the first block to be EXACTLY one copy of
-/// it (separator/blank/fence lines aside) — so repeated content inside a
-/// larger document (a table row printed twice, a repeated form label) does
-/// NOT collapse, only whole-output echoes do.
+/// A run of 3+ of a single markdown rule marker char (`-`/`*`/`_`).
+fn is_horizontal_rule(s: &str) -> bool {
+    s.len() >= 3
+        && (s.chars().all(|c| c == '-')
+            || s.chars().all(|c| c == '*')
+            || s.chars().all(|c| c == '_'))
+}
+
+/// Collapse whole-text verbatim repetitions to a single copy: vision OCR
+/// models (observed with glm-ocr) sometimes append one or more echoes of
+/// the entire extraction, separated by a blank line, a bare fence, or a
+/// markdown horizontal rule.
+///
+/// A collapse requires the repeated unit to start at the FIRST line and the
+/// copies (with separator lines between and after them) to consume the text
+/// exactly, compared line-by-line modulo whitespace. Two conservatism rules
+/// keep genuine content intact:
+/// - a single-LINE unit may collapse only when there are exactly two copies
+///   (three identical rows in a form are content, not an echo);
+/// - a multi-line unit may collapse for any copy count — a multi-line
+///   stanza repeated verbatim across the ENTIRE capture is an echo, never
+///   selectable content worth keeping triplicated.
 fn dedupe_exact_repeat(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let mut prefix_len = lines.len() / 2;
-    while prefix_len >= 1 {
-        let prefix = &lines[..prefix_len];
-        // The echoed block must carry content — never collapse to blank lines.
-        if prefix.iter().any(|l| !l.trim().is_empty()) {
-            let mut i = prefix_len;
+    // Longest unit first: prefer collapsing the largest repeat.
+    for unit_len in (1..=lines.len() / 2).rev() {
+        let unit = &lines[..unit_len];
+        // The repeated unit must carry content — never collapse to blanks.
+        if unit.iter().all(|l| is_separator_line(l)) {
+            continue;
+        }
+        let mut i = unit_len;
+        let mut copies = 1usize;
+        loop {
+            // Separators may sit between copies and trail the last one
+            // (bare-fence tails).
             while i < lines.len() && is_separator_line(lines[i]) {
                 i += 1;
             }
-            let available = lines.len() - i;
-            let echo = &lines[i..];
-            // The echo must be the prefix verbatim (modulo line whitespace)
-            // and consume the remainder exactly.
-            if available == prefix_len
-                && prefix
+            if lines.len() - i >= unit_len
+                && unit
                     .iter()
-                    .zip(echo.iter())
+                    .zip(lines[i..].iter())
                     .all(|(a, b)| a.trim() == b.trim())
             {
-                let mut start = 0;
-                let mut end = prefix.len();
-                while start < end && is_separator_line(prefix[start]) {
-                    start += 1;
-                }
-                while end > start && is_separator_line(prefix[end - 1]) {
-                    end -= 1;
-                }
-                let joined = prefix[start..end].join("\n");
-                if !joined.trim().is_empty() {
-                    return joined;
-                }
+                i += unit_len;
+                copies += 1;
+            } else {
+                break;
             }
         }
-        prefix_len -= 1;
+        if i == lines.len() && copies >= 2 && (unit_len >= 2 || copies == 2) {
+            let mut start = 0;
+            let mut end = unit.len();
+            while start < end && is_separator_line(unit[start]) {
+                start += 1;
+            }
+            while end > start && is_separator_line(unit[end - 1]) {
+                end -= 1;
+            }
+            let joined = unit[start..end].join("\n");
+            if !joined.trim().is_empty() {
+                return joined;
+            }
+        }
     }
     text.to_string()
 }
@@ -694,6 +723,53 @@ mod tests {
         let line = "Med list: aspirin";
         let raw = format!("{line}\n{line}\n```markdown\n{line}\n```\n```");
         assert_eq!(clean_ocr_text(&raw), line);
+    }
+
+    #[test]
+    fn clean_ocr_text_collapses_echo_separated_by_horizontal_rule() {
+        // A markdown-flavored model divides the extraction from its echo
+        // with `---` (also `***` / `___` / spaced variants).
+        let block = "HbA1c: 7.2 %\nBP: 128/76";
+        assert_eq!(clean_ocr_text(&format!("{block}\n---\n{block}")), block);
+        assert_eq!(clean_ocr_text(&format!("{block}\n***\n{block}")), block);
+        assert_eq!(clean_ocr_text(&format!("{block}\n_ _ _\n{block}")), block);
+    }
+
+    #[test]
+    fn clean_ocr_text_collapses_plain_echo_with_bare_fence_tail() {
+        // Unfenced echo followed by stray fences (the glm-ocr tail without
+        // the fenced duplicate).
+        let line = "Next review: 3 months";
+        assert_eq!(clean_ocr_text(&format!("{line}\n{line}\n```\n```")), line);
+    }
+
+    #[test]
+    fn clean_ocr_text_collapses_triple_multi_line_echo() {
+        // A multi-line stanza echoed twice more (three copies) is an echo,
+        // not content — the whole capture cannot be one stanza thrice.
+        let block = "HbA1c: 7.2 %\nBP: 128/76";
+        assert_eq!(
+            clean_ocr_text(&format!("{block}\n\n{block}\n\n{block}\n")),
+            block
+        );
+    }
+
+    #[test]
+    fn clean_ocr_text_keeps_partial_repeat_inside_larger_document() {
+        // A doubled final line under DIFFERENT preceding content is not a
+        // whole-text echo — the echo must consume the entire text.
+        let doc = "Weight: 70 kg\nHeight: 175 cm\nN/A\nN/A";
+        assert_eq!(clean_ocr_text(doc), doc);
+    }
+
+    #[test]
+    fn clean_ocr_text_keeps_document_with_rule_between_distinct_blocks() {
+        // Two different stanzas around a rule, and a rule inside content:
+        // no verbatim copy → nothing collapses.
+        let doc = "Page one text\n---\nPage two text";
+        assert_eq!(clean_ocr_text(doc), doc);
+        let doc2 = "----\nsignature line above\n----";
+        assert_eq!(clean_ocr_text(doc2), doc2.trim());
     }
 
     #[test]

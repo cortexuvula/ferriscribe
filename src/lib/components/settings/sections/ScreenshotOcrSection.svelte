@@ -8,12 +8,11 @@
   import { settings } from '../../../stores/settings.svelte';
   import { toasts } from '../../../stores/toasts.svelte';
   import {
+    DEFAULT_OCR_HOTKEY,
     captureRegionOcr,
     toastOcrFailure,
     toastOcrOutcome,
   } from '../../../api/screenshotOcr';
-
-  const DEFAULT_HOTKEY = 'CmdOrCtrl+Alt+O';
 
   const isLinux =
     typeof navigator !== 'undefined' && /linux/i.test(navigator.userAgent);
@@ -74,7 +73,7 @@
       checked={settings.state.screenshot_ocr_hotkey_enabled}
       onchange={handleEnabledChange}
     />
-    <span>Global hotkey ({settings.state.screenshot_ocr_hotkey || DEFAULT_HOTKEY})</span>
+    <span>Global hotkey ({settings.state.screenshot_ocr_hotkey || DEFAULT_OCR_HOTKEY})</span>
   </label>
   <span class="form-hint">
     Press the hotkey anywhere, drag-select a screen region, and its text is OCR'd by your
@@ -87,7 +86,7 @@
   <input
     id="ocr-hotkey"
     type="text"
-    placeholder={DEFAULT_HOTKEY}
+    placeholder={DEFAULT_OCR_HOTKEY}
     value={settings.state.screenshot_ocr_hotkey ?? ''}
     onchange={handleShortcutChange}
     disabled={!settings.state.screenshot_ocr_hotkey_enabled}
