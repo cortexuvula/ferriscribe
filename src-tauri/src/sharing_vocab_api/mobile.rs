@@ -264,7 +264,10 @@ fn stage_is_terminal(stage: &str) -> bool {
 /// correctly as strings for identical UTC formats (`to_rfc3339` always
 /// emits `+00:00` suffix here, and the stamps are only ever produced by
 /// `Utc::now().to_rfc3339()` in this module). Returns entries removed.
-fn prune_terminal(
+///
+/// `pub(super)` is a visibility-only test seam (route_tests drives it
+/// directly — same precedent as `ocr_image_bytes`).
+pub(super) fn prune_terminal(
     jobs: &mut HashMap<String, (u64, JobSnapshot)>,
     max_age: chrono::Duration,
 ) -> usize {
@@ -291,7 +294,9 @@ fn prune_terminal(
 /// at queue time is dropped if anything newer was recorded since (a newer
 /// job for the same recording must not be clobbered by a slow predecessor).
 pub(crate) struct JobRegistry {
-    inner: std::sync::Mutex<HashMap<String, (u64, JobSnapshot)>>,
+    /// `pub(super)` is a visibility-only test seam: route_tests poisons the
+    /// lock to pin the recovery contract in [`Self::store`].
+    pub(super) inner: std::sync::Mutex<HashMap<String, (u64, JobSnapshot)>>,
     next_seq: std::sync::atomic::AtomicU64,
     changed: tokio::sync::broadcast::Sender<String>,
 }
@@ -376,7 +381,14 @@ impl JobRegistry {
     }
 
     pub(super) fn get(&self, recording_id: &str) -> Option<JobSnapshot> {
-        let guard = self.inner.lock().ok()?;
+        // Poison recovery mirrors `store`: `.ok()?` here made every lookup
+        // return None after a panic-while-locked elsewhere, even as marks
+        // kept landing — the SSE/GET surfaces would report "unknown" for a
+        // live job (found by registry_internals_tests).
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         guard.get(recording_id).map(|(_, snap)| snap.clone())
     }
 
