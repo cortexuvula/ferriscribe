@@ -69,6 +69,17 @@ export default defineConfig({
           functions: 16,
           branches: 5,
         },
+        // API wrapper floor (2026-09-08, measured 86.6/89.8/86.9 after the
+        // translation/support/letterAudiences wrapper tests landed): every
+        // new api module must arrive with its invoke-shape test instead of
+        // hiding under the global average.
+        {
+          glob: 'src/lib/api/**',
+          lines: 70,
+          statements: 70,
+          functions: 70,
+          branches: 70,
+        },
       ],
     },
   },

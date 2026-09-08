@@ -1476,3 +1476,174 @@ mod forwarder_lifecycle_tests {
         );
     }
 }
+
+/// JobRegistry internals + the jobs SSE stream (2026-09-07 review item e):
+/// `mark_if_current` supersession, `prune_terminal` eviction, poisoned-lock
+/// recovery, and `GET /v1/jobs/{id}/events` — previously untested anywhere.
+mod registry_internals_tests {
+    use super::*;
+    use crate::job_stages as stage;
+    use futures_util::StreamExt;
+    use uuid::Uuid;
+
+    /// A registry entry with a fully controlled stamp (prune tests need
+    /// backdated snapshots, which the live API can't produce).
+    fn entry(
+        seq: u64,
+        stage_str: &str,
+        updated_at: &str,
+    ) -> (u64, super::super::mobile::JobSnapshot) {
+        (
+            seq,
+            super::super::mobile::JobSnapshot {
+                recording_id: "rid".to_string(),
+                stage: stage_str.to_string(),
+                error: None,
+                updated_at: updated_at.to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn mark_increments_sequences_and_get_returns_latest() {
+        let jobs = super::super::mobile::JobRegistry::new();
+        let s1 = jobs.mark("rid", stage::QUEUED, None);
+        let s2 = jobs.mark("rid", stage::GENERATING_SOAP, None);
+        assert!(s2 > s1, "sequences must be monotonic ({s1} → {s2})");
+        let snap = jobs.get("rid").expect("snapshot present");
+        assert_eq!(snap.stage, stage::GENERATING_SOAP);
+        assert_eq!(snap.recording_id, "rid");
+        assert!(jobs.get("other").is_none());
+    }
+
+    /// THE safety-net race: a terminal mark captured at queue time must be
+    /// dropped when any newer mark landed since (a newer job for the same
+    /// recording must not be clobbered by its slow predecessor) — and must
+    /// APPLY when its snapshot is still the latest word.
+    #[test]
+    fn mark_if_current_is_gated_on_the_current_sequence() {
+        let jobs = super::super::mobile::JobRegistry::new();
+
+        // Queued at seq 1; live events moved on to seq 2.
+        let queued_seq = jobs.mark("rid", stage::QUEUED, None);
+        let generating_seq = jobs.mark("rid", stage::GENERATING_SOAP, None);
+
+        // The queued-time safety net (completed @ the older seq) is
+        // superseded and must not apply.
+        jobs.mark_if_current("rid", queued_seq, stage::COMPLETED, None);
+        assert_eq!(
+            jobs.get("rid").expect("snapshot").stage,
+            stage::GENERATING_SOAP,
+            "a superseded terminal mark must not apply"
+        );
+
+        // With no newer mark since, the safety net applies — errors included.
+        jobs.mark_if_current("rid", generating_seq, stage::FAILED, Some("boom".into()));
+        let snap = jobs.get("rid").expect("snapshot");
+        assert_eq!(snap.stage, stage::FAILED);
+        assert_eq!(snap.error.as_deref(), Some("boom"));
+
+        // An expect-seq for an EVICTED/never-marked entry inserts nothing.
+        jobs.mark_if_current("ghost", 99, stage::COMPLETED, None);
+        assert!(jobs.get("ghost").is_none());
+    }
+
+    /// Eviction: only TERMINAL stages past the cutoff leave; terminal-but-
+    /// fresh, and non-terminal-no-matter-how-old, stay.
+    #[test]
+    fn prune_terminal_evicts_only_stale_terminal_entries() {
+        let old = (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let mut jobs = std::collections::HashMap::new();
+        jobs.insert("stale-done".to_string(), entry(1, stage::COMPLETED, &old));
+        jobs.insert("fresh-done".to_string(), entry(2, stage::COMPLETED, &fresh));
+        jobs.insert("stale-running".to_string(), entry(3, stage::QUEUED, &old));
+        jobs.insert("stale-failed".to_string(), entry(4, stage::FAILED, &old));
+
+        let removed = super::super::mobile::prune_terminal(&mut jobs, chrono::Duration::hours(24));
+        assert_eq!(removed, 2, "completed + failed past cutoff: {jobs:?}");
+        assert!(!jobs.contains_key("stale-done"));
+        assert!(!jobs.contains_key("stale-failed"));
+        assert!(jobs.contains_key("fresh-done"), "fresh terminal stays");
+        assert!(
+            jobs.contains_key("stale-running"),
+            "a stale NON-terminal entry must never be evicted"
+        );
+    }
+
+    /// Poison recovery: a panic elsewhere while holding the registry lock
+    /// must not silence later progress events.
+    #[test]
+    fn poisoned_lock_is_recovered_not_dropped() {
+        let jobs = super::super::mobile::JobRegistry::new();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = jobs.inner.lock().unwrap();
+            panic!("poison the registry lock");
+        }));
+        assert!(jobs.inner.is_poisoned());
+
+        jobs.mark("rid", stage::QUEUED, None);
+        assert_eq!(
+            jobs.get("rid").expect("mark after poison lands").stage,
+            stage::QUEUED
+        );
+    }
+
+    /// The SSE stream: an unknown job yields an `unknown` snapshot frame,
+    /// and later registry marks for THAT id stream as data frames (other
+    /// ids are filtered out).
+    #[tokio::test]
+    async fn jobs_sse_streams_initial_snapshot_then_live_marks() {
+        let app = test_app().await;
+        let rid = Uuid::new_v4().to_string();
+
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/jobs/{rid}/events"))
+            .header("authorization", format!("Bearer {}", app.token))
+            .body(Body::empty())
+            .expect("request");
+        let response = app
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("sse route");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.starts_with("text/event-stream")),
+            "SSE content type"
+        );
+
+        let mut stream = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("initial frame within 2s")
+            .expect("frame present")
+            .expect("frame ok");
+        let first = String::from_utf8_lossy(&first);
+        assert!(first.contains("unknown"), "unknown job first: {first}");
+
+        // A mark for a DIFFERENT recording must not reach this stream…
+        app.state
+            .jobs
+            .mark(&Uuid::new_v4().to_string(), stage::QUEUED, None);
+        // …but a mark for ours does.
+        app.state.jobs.mark(&rid, stage::QUEUED, None);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("live frame within 2s")
+            .expect("frame present")
+            .expect("frame ok");
+        let second = String::from_utf8_lossy(&second);
+        assert!(
+            second.contains(stage::QUEUED),
+            "live mark streamed: {second}"
+        );
+        assert!(!second.contains("error"), "SSE never carries error text");
+    }
+}
