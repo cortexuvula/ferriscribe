@@ -81,6 +81,12 @@ pub(crate) fn log_dir() -> PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // FIRST, before anything else: the restart exit guard (see
+    // commands/restart.rs). Registered from run() so atexit LIFO ordering
+    // puts it ahead of every pre-main C++ static registration — it is the
+    // update-relaunch crash fix (exit-time ORT/knf destructor abort).
+    commands::restart::install_exit_guard();
+
     // ── Logging ──────────────────────────────────────────────────────────
     //
     // Two layers:
@@ -374,6 +380,7 @@ pub fn run() {
             commands::settings::get_default_prompt,
             commands::specialty::list_specialty_packs,
             commands::specialty::get_specialty_pack_prompt,
+            commands::restart::restart_app,
             commands::export::export_pdf,
             commands::export::export_docx,
             commands::export::export_fhir,

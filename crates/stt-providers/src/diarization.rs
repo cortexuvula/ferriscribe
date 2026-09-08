@@ -552,6 +552,55 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// ORT exit-abort investigation harness (2026-09-08 crash review).
+    ///
+    /// Two app crashes (2026-09-07, 2026-09-08) aborted inside a C++
+    /// static destructor during process exit after sessions where
+    /// diarization (ONNX Runtime) had run. FINDING: this standalone repro
+    /// — full diarize() inference against the real pyannote models, then
+    /// normal process exit — does NOT abort; the abort requires the
+    /// updater-relaunch exit shape (tauri's restart calling exit(0) while
+    /// the app's worker threads are still live), which a test binary
+    /// cannot faithfully produce. Symbolication pinned the aborting frames
+    /// to the ORT/kaldi-native-fbank C++ island (the only named C++
+    /// symbols in the release binary bracket the crash region); the fix
+    /// lives in src-tauri/src/commands/restart.rs (atexit guard +
+    /// `_exit` on restart exits). This harness stays as the fastest way to
+    /// re-check the ORT teardown story after any `ort` re-pin:
+    ///
+    ///     FERRISCRIBE_ORT_REPRO=<models dir> cargo test -p medical-stt-providers --lib ort_exit_repro -- --nocapture
+    #[test]
+    fn ort_exit_repro_builds_session_then_process_exits() {
+        let Some(dir) = std::env::var_os("FERRISCRIBE_ORT_REPRO") else {
+            eprintln!("skipping: set FERRISCRIBE_ORT_REPRO=<models dir> to run");
+            return;
+        };
+        let root = PathBuf::from(&dir);
+        let segmentation = root.join("pyannote").join("segmentation-3.0.onnx");
+        let embedding = root
+            .join("pyannote")
+            .join("wespeaker_en_voxceleb_CAM++.onnx");
+        if !segmentation.exists() || !embedding.exists() {
+            eprintln!("skipping: no diarization models under {}", root.display());
+            return;
+        }
+        // Full pipeline — inference, not just session construction: the
+        // crashed app sessions ran diarize() (thread pools + EP state)
+        // before exiting.
+        let diarizer = SpeakerDiarizer::new(segmentation, embedding);
+        // A quiet, constant tone with envelope changes — zeros alone get
+        // filtered by the VAD and skip embedding inference entirely.
+        let mut samples = vec![0i16; 16000 * 12];
+        for (i, s) in samples.iter_mut().enumerate() {
+            *s = ((i as f32 * 0.05).sin() * 8000.0) as i16;
+        }
+        match diarizer.diarize(&samples, 16000, None) {
+            Ok(turns) => eprintln!("diarize returned {} turns", turns.len()),
+            Err(e) => eprintln!("diarize error (repro continues): {e}"),
+        }
+        eprintln!("pipeline done; exiting normally next — watch for signal 6");
+    }
+
     #[test]
     fn cosine_similarity_identical() {
         let a = Array1::from_vec(vec![1.0, 2.0, 3.0]);
