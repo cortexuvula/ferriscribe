@@ -1290,9 +1290,22 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let plaintext_wav = tmp.path().join("tombstoned.wav");
         std::fs::write(&plaintext_wav, b"RIFF....WAVEfmt ").expect("write wav");
+        // Encrypted audio (the normal at-rest format). encrypt_file needs
+        // the OS keychain, which headless CI Linux lacks — when that setup
+        // fails the fixture becomes a keychain-FREE FE1 blob under a random
+        // key (wrong key by construction), which read_local_audio can never
+        // decrypt: keychain-capable machines pin the happy decrypted Bytes,
+        // headless CI pins the Failed classification (kept in the queue for
+        // retry — the exact behavior that matters there).
         let encrypted_wav = tmp.path().join("encrypted.wav");
-        medical_security::file_crypto::encrypt_file(&encrypted_wav, b"SECRET AUDIO")
-            .expect("encrypt");
+        let keychain_available =
+            medical_security::file_crypto::encrypt_file(&encrypted_wav, b"SECRET AUDIO").is_ok();
+        if !keychain_available {
+            let blob =
+                medical_security::file_crypto::encrypt_bytes_with_key(&[7u8; 32], b"SECRET AUDIO")
+                    .expect("keychain-free encrypt");
+            std::fs::write(&encrypted_wav, blob).expect("write blob");
+        }
 
         // Malformed id → Gone (can never resolve).
         assert!(matches!(
@@ -1341,7 +1354,7 @@ mod tests {
             other => panic!("expected Bytes, got {other:?}"),
         }
 
-        // Encrypted audio (the normal at-rest format) → decrypted Bytes.
+        // Encrypted audio (the normal at-rest format).
         {
             let conn = db.conn().expect("conn");
             let mut rec = RecordingsRepo::get_by_id(&conn, &tombstoned_id).expect("row");
@@ -1349,8 +1362,16 @@ mod tests {
             RecordingsRepo::update(&conn, &rec).expect("update path");
         }
         match read_local_audio(&db, &tombstoned_id.to_string()) {
-            PendingAudioRead::Bytes(b) => assert_eq!(b, b"SECRET AUDIO"),
-            other => panic!("expected Bytes, got {other:?}"),
+            PendingAudioRead::Bytes(b) if keychain_available => {
+                assert_eq!(b, b"SECRET AUDIO");
+            }
+            PendingAudioRead::Failed(_) if !keychain_available => {
+                // Headless CI: decrypt can never succeed — the id must stay
+                // queued for retry, not classify Gone.
+            }
+            other => panic!(
+                "unexpected classification (keychain available: {keychain_available}): {other:?}"
+            ),
         }
     }
 
