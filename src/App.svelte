@@ -391,7 +391,10 @@
     }>('screenshot-ocr', (event) => {
       const { status, chars, error } = event.payload;
       if (status === 'failed') {
-        toasts.error(`Screenshot OCR failed: ${error ?? 'unknown error'}`);
+        // The event carries the error as a plain string — formatError (via
+        // toastOcrFailure) passes strings through, so the toast matches the
+        // command-path failure wording exactly.
+        toastOcrFailure(error ?? 'unknown error');
         return;
       }
       toastOcrOutcome({ status: status as CaptureOcrOutcome['status'], chars });

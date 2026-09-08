@@ -2,6 +2,11 @@ import { invokeWithOfflineHandling } from './invokeWithOfflineHandling';
 import { toasts } from '../stores/toasts.svelte';
 import { formatError } from '../types/errors';
 
+/** The built-in hotkey fallback, mirroring `DEFAULT_HOTKEY` in
+ *  src-tauri/src/commands/screenshot_ocr.rs. Single frontend source for the
+ *  Settings label/placeholder and any consumer needing the default. */
+export const DEFAULT_OCR_HOTKEY = 'CmdOrCtrl+Alt+O';
+
 /** Outcome of a screenshot-region OCR capture run.
  *  Mirrors `CaptureOcrOutcome` in src-tauri/src/commands/screenshot_ocr.rs. */
 export interface CaptureOcrOutcome {

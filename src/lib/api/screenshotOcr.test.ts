@@ -93,4 +93,18 @@ describe('screenshotOcr api', () => {
       'Screenshot OCR failed: provider offline'
     );
   });
+
+  it('toastOcrFailure passes plain-string errors through (event payloads)', () => {
+    // The App.svelte event listener hands the emitted error string straight
+    // to the shared helper — same wording as the command path.
+    toastOcrFailure('No OCR model configured');
+    expect(mockToasts.error).toHaveBeenCalledWith(
+      'Screenshot OCR failed: No OCR model configured'
+    );
+  });
+
+  it('exposes the default hotkey constant for the Settings surfaces', async () => {
+    const { DEFAULT_OCR_HOTKEY } = await import('./screenshotOcr');
+    expect(DEFAULT_OCR_HOTKEY).toBe('CmdOrCtrl+Alt+O');
+  });
 });
