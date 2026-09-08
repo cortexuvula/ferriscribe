@@ -13,6 +13,10 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
+pub mod clean;
+
+pub use clean::clean_ocr_text;
+
 use medical_core::traits::ai_provider::AiProvider;
 use medical_core::types::ai::{
     CompletionRequest, ContentPart, ImageUrlData, Message, MessageContent, Role,
@@ -116,10 +120,22 @@ fn encode_image_as_data_url(data: &[u8], format: &str) -> String {
     format!("data:image/{mime};base64,{b64}")
 }
 
-/// The OCR system prompt instructing the model to extract text.
+/// The OCR system prompt instructing the model to extract text. The
+/// "exactly once" clause is a source-level mitigation for the echo family
+/// (fenced echoes, plain echoes, degenerate echo loops — all observed from
+/// glm-ocr 2026-09-06/08): ask for no repetition up front, and the
+/// `clean` module catches what the model does anyway.
 const OCR_SYSTEM_PROMPT: &str = "Extract all text from this document image. \
     Output only the extracted text, preserving the document's structure, headings, \
-    and table layout. Do not add commentary or descriptions.";
+    and table layout. Do not add commentary or descriptions. Output the complete \
+    text exactly once — never repeat or echo any part of it.";
+
+/// Generation cap for OCR requests. An extraction of a screenshot or a
+/// single PDF page is never more than a few thousand tokens — but an
+/// echo-looping model (observed: 2,421 lines from one knee report) runs
+/// unbounded until the per-file timeout without a cap, burning minutes of
+/// local-GPU time per capture.
+const OCR_MAX_TOKENS: u32 = 4096;
 
 /// Build a CompletionRequest for a single image OCR call.
 fn build_image_ocr_request(image_data_url: &str, model: &str) -> CompletionRequest {
@@ -140,7 +156,7 @@ fn build_image_ocr_request(image_data_url: &str, model: &str) -> CompletionReque
             tool_calls: vec![],
         }],
         temperature: Some(0.0),
-        max_tokens: None,
+        max_tokens: Some(OCR_MAX_TOKENS),
         system_prompt: Some(OCR_SYSTEM_PROMPT.to_string()),
         reasoning_effort: None,
     }
@@ -151,8 +167,11 @@ fn build_image_ocr_request(image_data_url: &str, model: &str) -> CompletionReque
 /// Shared by the `Image` strategy (implicitly — same flow), the scanned-PDF
 /// page loop, and the screenshot-region-OCR feature in the app shell (which
 /// captures screen pixels, never a file). `format` is the MIME subtype for
-/// the data URL ("png", "jpeg", …). Returns the trimmed extracted text, or
-/// an `OcrError` on provider failure or per-file timeout.
+/// the data URL ("png", "jpeg", …). The response runs through
+/// [`clean_ocr_text`] — the model's echo artifacts (fenced echoes, plain
+/// echoes, degenerate loops) are stripped at this single choke point every
+/// OCR consumer shares. Returns the trimmed, cleaned text, or an
+/// `OcrError` on provider failure or per-file timeout.
 pub async fn ocr_image_bytes(
     image_bytes: &[u8],
     format: &str,
@@ -162,7 +181,7 @@ pub async fn ocr_image_bytes(
     let data_url = encode_image_as_data_url(image_bytes, format);
     let request = build_image_ocr_request(&data_url, ocr_model);
     match tokio::time::timeout(OCR_PER_FILE_TIMEOUT, provider.complete(request)).await {
-        Ok(Ok(response)) => Ok(response.content.trim().to_string()),
+        Ok(Ok(response)) => Ok(clean_ocr_text(response.content.trim())),
         Ok(Err(e)) => Err(OcrError::ModelError(e.to_string())),
         Err(_) => Err(OcrError::ModelError(
             "OCR timed out after 120 seconds".to_string(),
@@ -609,12 +628,22 @@ pub fn init_pdfium(lib_dir: &Path) -> Result<(), String> {
 }
 
 /// Render up to [`MAX_PDF_OCR_PAGES`] pages of `pdf_path` to in-memory PNG
-/// bytes at [`PDF_OCR_DPI`], via the bundled pdfium. Returns `(page_number,
-/// png_bytes)` in page order. PHI never touches disk — rendered pages live only
-/// in RAM. Synchronous (CPU + FFI work); callers should run it on a
+/// bytes at [`PDF_OCR_DPI`], via the bundled pdfium. Returns
+/// `((page_number, png_bytes) in page order, total page count)` — the total
+/// lets the caller surface truncation instead of silently dropping pages
+/// past the cap. PHI never touches disk — rendered pages live only in RAM.
+/// Synchronous (CPU + FFI work); callers should run it on a
 /// `spawn_blocking` thread. Returns `Err(PDFIUM_UNAVAILABLE_MSG.to_string())`
 /// if pdfium wasn't initialized, or `Err(<reason>)` on load/render failure.
-fn render_pdf_pages(pdf_path: &Path) -> Result<Vec<(usize, Vec<u8>)>, String> {
+/// The pages a scanned PDF rendered to PNG, plus the document's TOTAL page
+/// count (the total lets the caller surface truncation past
+/// [`MAX_PDF_OCR_PAGES`] instead of silently dropping pages).
+struct RenderedPdfPages {
+    pages: Vec<(usize, Vec<u8>)>,
+    total_pages: usize,
+}
+
+fn render_pdf_pages(pdf_path: &Path) -> Result<RenderedPdfPages, String> {
     use std::io::Cursor;
 
     let pdfium = PDFIUM
@@ -628,6 +657,7 @@ fn render_pdf_pages(pdf_path: &Path) -> Result<Vec<(usize, Vec<u8>)>, String> {
         .load_pdf_from_file(pdf_path, None)
         .map_err(|e| format!("pdfium load_pdf: {e}"))?;
 
+    let total_pages = document.pages().len() as usize;
     // PDF user-space units are 1/72 inch; scale to the target DPI.
     let scale = PDF_OCR_DPI as f32 / 72.0;
     let mut pages: Vec<(usize, Vec<u8>)> = Vec::new();
@@ -648,7 +678,7 @@ fn render_pdf_pages(pdf_path: &Path) -> Result<Vec<(usize, Vec<u8>)>, String> {
             .map_err(|e| format!("png encode page {}: {e}", i + 1))?;
         pages.push((i + 1, png));
     }
-    Ok(pages)
+    Ok(RenderedPdfPages { pages, total_pages })
 }
 
 /// Per-format labels for [`run_extractor_blocking`] so the office-document
@@ -901,7 +931,11 @@ pub async fn extract_text(
                                 tokio::task::spawn_blocking(move || render_pdf_pages(&path_buf))
                                     .await;
                             match render_res {
-                                Ok(Ok(rendered_pages)) => {
+                                Ok(Ok(rendered)) => {
+                                    let RenderedPdfPages {
+                                        pages: rendered_pages,
+                                        total_pages,
+                                    } = rendered;
                                     let page_count = rendered_pages.len();
                                     let mut pages: Vec<String> = Vec::with_capacity(page_count);
                                     for (page_num, png_bytes) in rendered_pages {
@@ -920,6 +954,14 @@ pub async fn extract_text(
                                         pages.push(format!(
                                             "--- Page {} ---\n{}",
                                             page_num, page_text
+                                        ));
+                                    }
+                                    // Pages past the cap were never rendered —
+                                    // say so instead of silently dropping them.
+                                    if total_pages > page_count {
+                                        pages.push(format!(
+                                            "[Truncated: only the first {page_count} of \
+                                             {total_pages} pages were OCR'd.]"
                                         ));
                                     }
                                     let text = pages.join("\n\n");
@@ -1079,42 +1121,29 @@ pub async fn extract_text(
                         continue;
                     }
                 };
-                let data_url = encode_image_as_data_url(&image_data, ext_for_url);
-                let request = build_image_ocr_request(&data_url, ocr_model);
 
                 tracing::info!(filename = %filename, bytes = image_data.len(), "OCR: sending image to vision model");
-                match tokio::time::timeout(OCR_PER_FILE_TIMEOUT, provider.complete(request)).await {
-                    Ok(Ok(response)) => {
-                        let text = response.content.trim().to_string();
-                        if text.is_empty() {
+                match ocr_image_bytes(&image_data, ext_for_url, ocr_model, &provider).await {
+                    Ok(text) => {
+                        let text = if text.is_empty() {
                             tracing::warn!(filename = %filename, "OCR: vision model returned empty text");
-                        }
+                            "[No text detected in this image. The model may not have recognized any text, or the image quality may be too low.]".to_string()
+                        } else {
+                            text
+                        };
                         results.push(OcrPageResult {
                             filename,
-                            text: if text.is_empty() {
-                                "[No text detected in this image. The model may not have recognized any text, or the image quality may be too low.]".to_string()
-                            } else {
-                                text
-                            },
+                            text,
                             page_count: 1,
                         });
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         tracing::warn!(filename = %filename, error = %e, "OCR: vision model error");
                         results.push(OcrPageResult {
                             filename,
                             text: format!(
                                 "[Vision model error: {e}. Check that your OCR model is running.]"
                             ),
-                            page_count: 0,
-                        });
-                        continue;
-                    }
-                    Err(_) => {
-                        tracing::warn!(filename = %filename, "OCR: per-file timeout (120s)");
-                        results.push(OcrPageResult {
-                            filename,
-                            text: "[OCR timed out after 120 seconds. The file may be too large or the model too slow.]".to_string(),
                             page_count: 0,
                         });
                         continue;
@@ -1247,6 +1276,32 @@ mod tests {
             other => panic!("expected Parts, got {other:?}"),
         }
         assert!(req.system_prompt.is_some());
+    }
+
+    /// The generation cap is load-bearing (2026-09-08 pipeline review): an
+    /// echo-looping model runs unbounded until the 120 s per-file timeout
+    /// without it — one knee-report capture produced 2,421 lines. 4096 is
+    /// comfortably above any real single-page extraction.
+    #[test]
+    fn build_image_ocr_request_caps_generation() {
+        let req = build_image_ocr_request("data:image/png;base64,iVBOR=", "glm-ocr");
+        assert_eq!(req.max_tokens, Some(OCR_MAX_TOKENS));
+        assert_eq!(OCR_MAX_TOKENS, 4096);
+    }
+
+    /// The prompt asks for single-output extraction — the source-level half
+    /// of the echo mitigation (the cleaner is the fallback half).
+    #[test]
+    fn ocr_system_prompt_forbids_repetition() {
+        let lower = OCR_SYSTEM_PROMPT.to_lowercase();
+        assert!(
+            lower.contains("exactly once"),
+            "prompt must demand single output: {OCR_SYSTEM_PROMPT}"
+        );
+        assert!(
+            lower.contains("repeat") || lower.contains("echo"),
+            "prompt must forbid repetition: {OCR_SYSTEM_PROMPT}"
+        );
     }
 
     #[test]
@@ -1472,9 +1527,13 @@ mod tests {
         let pdf_path = dir.path().join("scan.pdf");
         doc.save(&pdf_path).unwrap();
 
-        let pages = render_pdf_pages(&pdf_path).expect("render should succeed");
-        assert!(!pages.is_empty(), "should render at least one page");
-        let (_, png) = &pages[0];
+        let rendered = render_pdf_pages(&pdf_path).expect("render should succeed");
+        assert!(
+            !rendered.pages.is_empty(),
+            "should render at least one page"
+        );
+        assert_eq!(rendered.total_pages, 1, "fixture has one page");
+        let (_, png) = &rendered.pages[0];
         assert!(
             png.len() > 100,
             "PNG bytes should be non-trivial, got {}",
