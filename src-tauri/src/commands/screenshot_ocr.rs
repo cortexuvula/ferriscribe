@@ -274,7 +274,112 @@ fn clean_ocr_text(raw: &str) -> String {
     };
     // The echo isn't always fenced — glm-ocr sometimes repeats the whole
     // selection as plain text (identical lines appended verbatim).
-    dedupe_exact_repeat(&unfenced)
+    let deduped = dedupe_exact_repeat(&unfenced);
+    // Line-level matching misses echoes whose copies differ by line
+    // wrapping or a word of OCR noise (observed 2026-09-08): a
+    // word-stream comparison tolerates both.
+    collapse_word_normalized_repeat(&deduped)
+}
+
+/// Whitespace-noise-tolerant two-copy echo collapse (2026-09-08, second
+/// user report). `dedupe_exact_repeat` compares line-by-line verbatim, so
+/// an echo whose second copy REWRAPS the text at different points — or
+/// carries one word of OCR noise ("Subject-Clien" vs "Subject-Client") —
+/// defeats it and both copies reach the clipboard. This stage compares
+/// the text as a flattened WORD stream instead: wrapping is invisible and
+/// a bounded word-edit tolerance absorbs per-copy noise.
+///
+/// A collapse requires the whole text to be exactly one copy plus one
+/// more copy (complete, or truncated by a max_tokens cut — the tail must
+/// still be at least half the head), with ≤5% differing words, and the
+/// split point must land on a line boundary so the output keeps the
+/// FIRST copy's own line breaks.
+///
+/// Conservatism: when every content line is identical, the shape is the
+/// line-level rule's business (three identical form rows are content) —
+/// refuse, so this stage can never override that decision. Giant inputs
+/// (a degenerate loop the salvage should have handled) are skipped for
+/// time; the edit-distance pass is quadratic.
+fn collapse_word_normalized_repeat(text: &str) -> String {
+    const SKIP_ABOVE_WORDS: usize = 2000;
+    const MIN_WORDS: usize = 12;
+
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 2 {
+        return text.to_string();
+    }
+    // Word stream over content lines, remembering each content line's
+    // cumulative word count so the split can align with a line end.
+    let mut words: Vec<&str> = Vec::new();
+    let mut line_end_words: Vec<usize> = Vec::new();
+    let mut line_index: Vec<usize> = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if is_separator_line(line) {
+            continue;
+        }
+        words.extend(line.split_whitespace());
+        line_end_words.push(words.len());
+        line_index.push(idx);
+    }
+    let n = words.len();
+    if !(MIN_WORDS..=SKIP_ABOVE_WORDS).contains(&n) {
+        return text.to_string();
+    }
+    // All-identical content lines: the line-level rule owns this shape
+    // (and may have deliberately kept it as content).
+    let first = lines.iter().find(|l| !is_separator_line(l));
+    if let Some(first) = first
+        && lines
+            .iter()
+            .filter(|l| !is_separator_line(l))
+            .all(|l| l.trim() == first.trim())
+    {
+        return text.to_string();
+    }
+
+    // Candidate split points: the exact half (complete second copy), then
+    // truncated second copies, longest tail first. The tail must be at
+    // least half the head (a max_tokens cut, not a repeated opening
+    // phrase).
+    let mut candidates: Vec<usize> = Vec::new();
+    if n.is_multiple_of(2) {
+        candidates.push(n / 2);
+    }
+    let h_min = n / 2 + 1;
+    let h_max = (2 * n / 3).min(n.saturating_sub(4));
+    let mut h = h_max;
+    while h >= h_min {
+        candidates.push(h);
+        h -= 1;
+    }
+
+    for &h in &candidates {
+        // Compare the tail against the head's prefix OF THE TAIL'S LENGTH:
+        // for a truncated second copy the length difference is the
+        // legitimate cut, not noise — only word-level differences count.
+        let tail_len = n - h;
+        let head_prefix = words[..tail_len].join(" ");
+        let tail = words[h..].join(" ");
+        let (dist, _) = medical_processing::edit_distance::word_edit_distance(&head_prefix, &tail);
+        // ≤5% differing words (at least one word of slack).
+        if dist > (tail_len / 20).max(1) {
+            continue;
+        }
+        // The split must land at the end of one of the first copy's lines.
+        let Some(pos) = line_end_words.iter().position(|&e| e == h) else {
+            continue;
+        };
+        let last_idx = line_index[pos];
+        let mut out: Vec<&str> = lines[..=last_idx].to_vec();
+        while out.last().is_some_and(|l| is_separator_line(l)) {
+            out.pop();
+        }
+        let joined = out.join("\n");
+        if !joined.trim().is_empty() {
+            return joined;
+        }
+    }
+    text.to_string()
 }
 
 fn is_separator_line(line: &str) -> bool {
@@ -853,6 +958,61 @@ mod tests {
         let stanza = "EXAM TYPE:\nLeft knee x-ray";
         let tail = "IMPRESSION:\nSomething else entirely.";
         let raw = format!("{stanza}\n{stanza}\n{tail}");
+        assert_eq!(clean_ocr_text(&raw), raw);
+    }
+
+    /// THE 2026-09-08 second user report shape: two copies of the same
+    /// note where the second copy REWRAPS at different points — the
+    /// line-verbatim rule never matches, the word-stream stage collapses
+    /// to the first copy (keeping its own line breaks).
+    #[test]
+    fn clean_ocr_text_collapses_rewrapped_two_copy_echo() {
+        let copy1 = "Phone Call Appointment Note: Victoria understands and accepts\nthe limitations and expectations of Virtual Care.\nSubject-Client complaint: Ongoing loose, watery stools.";
+        let copy2 = "Phone Call Appointment Note: Victoria understands and accepts the\nlimitations and expectations of Virtual Care. Subject-Client\ncomplaint: Ongoing loose, watery stools.";
+        let raw = format!("{copy1}\n{copy2}");
+        assert_eq!(clean_ocr_text(&raw), copy1);
+    }
+
+    /// Per-copy OCR noise ("Subject-Clien" vs "Subject-Client") — one word
+    /// of edit distance is inside the 5% tolerance.
+    #[test]
+    fn clean_ocr_text_collapses_two_copy_echo_with_one_noisy_word() {
+        let copy1 = "Phone Call Appointment Note: Victoria understands and accepts the limitations and expectations of Virtual Care. Subject-Client complaint: Ongoing loose watery stools.";
+        let copy2 = "Phone Call Appointment Note: Victoria understands and accepts the limitations and expectations of Virtual Care. Subject-Clien complaint: Ongoing loose watery stools.";
+        let raw = format!("{copy1}\n{copy2}");
+        assert_eq!(clean_ocr_text(&raw), copy1);
+    }
+
+    /// A max_tokens cut mid-second-copy: the tail is still ≥ half the head
+    /// and word-matches the head's opening — keep the complete first copy.
+    #[test]
+    fn clean_ocr_text_collapses_truncated_second_copy() {
+        let words: Vec<String> = (0..30).map(|i| format!("word{i}")).collect();
+        let head = words.join(" ");
+        let tail = words[..20].join(" ");
+        let raw = format!("{head}\n{tail}");
+        assert_eq!(clean_ocr_text(&raw), head);
+    }
+
+    /// All-identical content lines are the LINE rule's shape (repeated
+    /// form rows are content) — the WORD stage's guard must refuse so it
+    /// can never override that decision. (Checked against the word stage
+    /// directly: the line rule independently treats [row ×4] as two
+    /// copies of a two-row unit — long-standing behavior, not this
+    /// stage's business.)
+    #[test]
+    fn clean_ocr_text_word_stage_never_overrides_identical_row_content() {
+        let rows = "Not applicable here sir.\nNot applicable here sir.\nNot applicable here sir.";
+        assert_eq!(collapse_word_normalized_repeat(rows), rows);
+    }
+
+    /// Two genuinely DIFFERENT paragraphs are not an echo — the 5% word
+    /// tolerance must not bridge real content differences.
+    #[test]
+    fn clean_ocr_text_keeps_two_different_paragraphs() {
+        let a = "Phone Call Appointment Note: Victoria understands and accepts the limitations and expectations of Virtual Care entirely.";
+        let b = "Plan: oral rehydration, return if symptoms persist beyond forty-eight hours or bloody diarrhea develops.";
+        let raw = format!("{a}\n{b}");
         assert_eq!(clean_ocr_text(&raw), raw);
     }
 
