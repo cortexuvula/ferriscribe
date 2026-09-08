@@ -296,24 +296,71 @@ fn is_horizontal_rule(s: &str) -> bool {
             || s.chars().all(|c| c == '_'))
 }
 
+/// Words of a line for echo-residue comparison: lowercase, punctuation
+/// stripped, order-insensitive.
+fn word_set(line: &str) -> std::collections::HashSet<String> {
+    line.split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Does `line` look like a (mutated) copy of some unit line — at least 60%
+/// of its words appear in one unit line? Used ONLY after an echo loop is
+/// confirmed (≥3 exact consecutive copies), to tell a degenerated echo tail
+/// (resembling) from genuinely fresh content (not resembling). A line with
+/// no alphanumeric words at all (",,," / "or ...") counts as residue.
+fn resembles_unit_line(line: &str, unit: &[&str]) -> bool {
+    let words = word_set(line);
+    if words.is_empty() {
+        return true; // punctuation/token soup — pure model breakdown
+    }
+    unit.iter().any(|u| {
+        let unit_words = word_set(u);
+        let hits = words.iter().filter(|w| unit_words.contains(*w)).count();
+        hits * 10 >= words.len() * 6
+    })
+}
+
 /// Collapse whole-text verbatim repetitions to a single copy: vision OCR
 /// models (observed with glm-ocr) sometimes append one or more echoes of
 /// the entire extraction, separated by a blank line, a bare fence, or a
 /// markdown horizontal rule.
 ///
-/// A collapse requires the repeated unit to start at the FIRST line and the
-/// copies (with separator lines between and after them) to consume the text
-/// exactly, compared line-by-line modulo whitespace. Two conservatism rules
-/// keep genuine content intact:
-/// - a single-LINE unit may collapse only when there are exactly two copies
-///   (three identical rows in a form are content, not an echo);
-/// - a multi-line unit may collapse for any copy count — a multi-line
-///   stanza repeated verbatim across the ENTIRE capture is an echo, never
-///   selectable content worth keeping triplicated.
+/// The unit is searched SHORTEST-first: any echo of k copies also matches
+/// with a unit of k/2 copies, so a longest-first search would collapse a
+/// 10-copy echo to 5 copies instead of 1.
+///
+/// Two collapse modes:
+///
+/// 1. Exact-whole-text (conservative, unchanged in spirit since the first
+///    echo fix): the copies (with separator lines between/after) consume
+///    the text exactly, compared line-by-line modulo whitespace.
+///    A single-LINE unit may collapse only with exactly two copies (three
+///    identical rows in a form are content, not an echo); a multi-line
+///    unit may collapse for any copy count.
+///
+/// 2. Confirmed echo loop with a degenerate tail (2026-09-08 user report):
+///    ≥3 exact consecutive copies of a multi-line unit opening the text,
+///    followed by a NON-empty remainder. Real documents never open with
+///    the same multi-line stanza three times in a row — that is a model
+///    echo loop, and in the observed failure the loop then DEGENERATED
+///    (later copies mutate, shed lines, and finally dissolve into token
+///    soup like "such, such,," / ",, or"), which broke the exact-whole-
+///    text requirement and shipped the whole loop to the clipboard. The
+///    salvage keeps ONE unit; the remainder is kept only when its first
+///    substantive line does NOT resemble any unit line (genuinely fresh
+///    content after the loop) and dropped when it resembles (a mutated
+///    echo) or carries no words at all (breakdown soup).
 fn dedupe_exact_repeat(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    // Longest unit first: prefer collapsing the largest repeat.
-    for unit_len in (1..=lines.len() / 2).rev() {
+    // Shortest unit first: prefer collapsing to the minimal repeating unit.
+    for unit_len in 1..=lines.len() / 2 {
         let unit = &lines[..unit_len];
         // The repeated unit must carry content — never collapse to blanks.
         if unit.iter().all(|l| is_separator_line(l)) {
@@ -339,18 +386,48 @@ fn dedupe_exact_repeat(text: &str) -> String {
                 break;
             }
         }
-        if i == lines.len() && copies >= 2 && (unit_len >= 2 || copies == 2) {
-            let mut start = 0;
-            let mut end = unit.len();
-            while start < end && is_separator_line(unit[start]) {
-                start += 1;
+        // Edge-trim separators from the unit for the collapsed output.
+        let mut start = 0;
+        let mut end = unit.len();
+        while start < end && is_separator_line(unit[start]) {
+            start += 1;
+        }
+        while end > start && is_separator_line(unit[end - 1]) {
+            end -= 1;
+        }
+        let joined = unit[start..end].join("\n");
+
+        // Mode 1: the exact copies consume the whole text.
+        if i == lines.len()
+            && copies >= 2
+            && (unit_len >= 2 || copies == 2)
+            && !joined.trim().is_empty()
+        {
+            return joined;
+        }
+
+        // Mode 2: confirmed echo loop with a remainder. The separator skip
+        // above may have walked past trailing blanks/fences up to the first
+        // substantive remainder line already; back i up to the end of the
+        // last exact copy (no further — a unit can contain internal
+        // separator lines) so separators/fresh content are not lost.
+        if copies >= 3 && unit_len >= 2 && i < lines.len() {
+            let floor = copies * unit_len;
+            let mut remainder_start = i;
+            while remainder_start > floor && is_separator_line(lines[remainder_start - 1]) {
+                remainder_start -= 1;
             }
-            while end > start && is_separator_line(unit[end - 1]) {
-                end -= 1;
-            }
-            let joined = unit[start..end].join("\n");
-            if !joined.trim().is_empty() {
-                return joined;
+            let remainder = &lines[remainder_start..];
+            let first_substantive = remainder.iter().find(|l| !is_separator_line(l));
+            match first_substantive {
+                Some(line) if !resembles_unit_line(line, unit) => {
+                    // Fresh content after the loop — keep it.
+                    return format!("{joined}\n{}", remainder.join("\n"));
+                }
+                _ => {
+                    // Degenerated echo / breakdown soup — salvage one unit.
+                    return joined;
+                }
             }
         }
     }
@@ -723,6 +800,82 @@ mod tests {
         let line = "Med list: aspirin";
         let raw = format!("{line}\n{line}\n```markdown\n{line}\n```\n```");
         assert_eq!(clean_ocr_text(&raw), line);
+    }
+
+    /// A pure multi-copy echo collapses to ONE copy, not half — the unit
+    /// search must run shortest-first (any k-copy echo also matches with a
+    /// k/2-copy unit, so longest-first kept 2 of 4 copies).
+    #[test]
+    fn clean_ocr_text_collapses_quadruple_echo_to_one_copy() {
+        let block = "HbA1c: 7.2 %\nBP: 128/76";
+        let raw = format!("{block}\n\n{block}\n\n{block}\n\n{block}\n");
+        assert_eq!(clean_ocr_text(&raw), block);
+    }
+
+    /// THE 2026-09-08 user report shape: ~100 exact copies, then copies
+    /// that MUTATE and shed lines, then pure token soup — the degeneration
+    /// broke the exact-whole-text requirement and the whole loop reached
+    /// the clipboard. ≥3 exact consecutive copies confirm an echo loop;
+    /// the salvage keeps one unit and drops the resembling/soup tail.
+    #[test]
+    fn clean_ocr_text_salvages_degenerate_echo_loop() {
+        let report = "EXAM TYPE:\nAP/PA weight-bearing, lateral and skyline view left knee x-ray\nCOMPARISON:\nNo previous for comparison.\nFINDINGS:\nMild joint space narrowing medial compartment.";
+        let mut raw = String::new();
+        for _ in 0..6 {
+            raw.push_str(report);
+            raw.push('\n');
+        }
+        // Degenerated copies: mutated exam line, shed lines, then soup.
+        raw.push_str("EXAM TYPE:\nAP/PA weight-bearing, lateral view left knee x-ray\nCOMPARISON:\nNo previous for comparison.\n");
+        raw.push_str("COMPARISON:\nNo previous for comparison.\nFINDINGS:\nMild joint space narrowing medics,待\n");
+        raw.push_str(",,,, or\nsuch, such, such\n...\n");
+
+        assert_eq!(clean_ocr_text(&raw), report);
+    }
+
+    /// Fresh content after a confirmed echo loop SURVIVES the salvage: the
+    /// remainder's first substantive line shares no 60%-word overlap with
+    /// any unit line, so it is content, not residue.
+    #[test]
+    fn clean_ocr_text_keeps_fresh_content_after_confirmed_echo_loop() {
+        let stanza = "EXAM TYPE:\nLeft knee x-ray";
+        let tail = "IMPRESSION:\nEarly tricompartmental osteoarthritis.";
+        let raw = format!("{stanza}\n\n{stanza}\n\n{stanza}\n\n{tail}");
+        // The separating blank line survives with the fresh content.
+        assert_eq!(clean_ocr_text(&raw), format!("{stanza}\n\n{tail}"));
+    }
+
+    /// Two exact copies + other content is BELOW the echo-loop threshold —
+    /// the conservative exact-whole-text rule alone applies, and a partial
+    /// echo passes through unchanged (as it always has).
+    #[test]
+    fn clean_ocr_text_below_three_copies_never_triggers_the_salvage() {
+        let stanza = "EXAM TYPE:\nLeft knee x-ray";
+        let tail = "IMPRESSION:\nSomething else entirely.";
+        let raw = format!("{stanza}\n{stanza}\n{tail}");
+        assert_eq!(clean_ocr_text(&raw), raw);
+    }
+
+    /// Real-sample harness: run the cleaner on a pasted raw/failed OCR
+    /// output and report the collapse. Re-check any future echo shape with
+    ///
+    ///     FERRISCRIBE_OCR_SAMPLE=<file> cargo test -p rust-medical-assistant --lib real_sample -- --nocapture
+    #[test]
+    fn clean_ocr_text_real_sample_harness() {
+        let Some(path) = std::env::var_os("FERRISCRIBE_OCR_SAMPLE") else {
+            return;
+        };
+        let raw = std::fs::read_to_string(path).expect("sample readable");
+        let cleaned = clean_ocr_text(&raw);
+        eprintln!(
+            "raw {} lines -> cleaned {} lines",
+            raw.lines().count(),
+            cleaned.lines().count()
+        );
+        eprintln!(
+            "--- cleaned ---\n{}",
+            cleaned.lines().take(25).collect::<Vec<_>>().join("\n")
+        );
     }
 
     #[test]
