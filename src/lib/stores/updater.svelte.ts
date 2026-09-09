@@ -98,14 +98,17 @@ class UpdaterStore {
   /// ends in std::process::exit(0), whose C++ static-destructor run aborts
   /// (ONNX Runtime / kaldi-native-fbank teardown with live worker
   /// threads — a SIGABRT crash report on every update relaunch before the
-  /// fix; see src-tauri/src/commands/restart.rs). restart_app sets the
-  /// exit-guard flag first so the process terminates via _exit instead.
+  /// fix; see src-tauri/src/commands/restart.rs). restart_app runs the
+  /// coordinated-shutdown checks first and sets the exit-guard flag so
+  /// the process terminates via _exit instead.
+  ///
+  /// A refused restart (recording active / pending save failed) THROWS
+  /// with a typed message so both update surfaces (UpdateBanner,
+  /// Settings → About) can show actionable guidance; the "installed"
+  /// state is preserved — the update stays applied and the restart can
+  /// be retried once the work is resolved.
   async relaunch(): Promise<void> {
-    try {
-      await invoke('restart_app');
-    } catch (e) {
-      console.error('Failed to relaunch:', e);
-    }
+    await invoke('restart_app');
   }
 
   /// Dismiss the banner (state → idle) without installing. The next auto-check

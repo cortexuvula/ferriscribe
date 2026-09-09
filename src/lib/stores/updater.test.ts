@@ -35,13 +35,16 @@ describe('UpdaterStore — relaunch', () => {
     expect(vi.mocked(pluginRelaunch)).not.toHaveBeenCalled();
   });
 
-  it('relaunch() swallows failures (logged, no throw)', async () => {
-    vi.mocked(invoke).mockRejectedValue(new Error('failed to restart the app'));
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('relaunch() rejections propagate (typed refusals surface in the UI)', async () => {
+    // U1/ui-consultant fix: the old contract swallowed failures with a
+    // console.error, stranding the user on "restart required" with no
+    // feedback. Refusals (recording active / save failed) must reach the
+    // update surfaces so they can show actionable guidance.
+    vi.mocked(invoke).mockRejectedValue(
+      new Error('RESTART_REFUSED_RECORDING_ACTIVE: stop the recording first'),
+    );
 
-    await expect(updater.relaunch()).resolves.toBeUndefined();
-    expect(errorSpy).toHaveBeenCalledWith('Failed to relaunch:', expect.any(Error));
-    errorSpy.mockRestore();
+    await expect(updater.relaunch()).rejects.toThrow('RESTART_REFUSED_RECORDING_ACTIVE');
   });
 });
 

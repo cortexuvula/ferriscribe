@@ -28,20 +28,30 @@ jobs:
     outputs:
       release_id: ${{ steps.create.outputs.release_id }}
     steps:
-      - name: Create draft release
+      - name: Create draft release (never reuse a published one)
         id: create
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          # Reruns (or a leftover from a failed attempt) must reuse the
-          # existing release for this tag, not create a duplicate.
+          # Reruns (or a leftover from a failed attempt) may reuse an
+          # existing DRAFT release for this tag — but a PUBLISHED release
+          # is immutable: reusing it would let a later build failure's
+          # cleanup delete a live public release (U3). If a published
+          # release for this tag exists, fail loudly instead.
           EXISTING=$(gh api "repos/$GH_REPO/releases" --paginate \
-            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1)
+            --jq ".[] | select(.tag_name == \"$TAG\") | [.id, .draft] | @tsv" | head -1)
           if [ -n "$EXISTING" ]; then
-            echo "release_id=$EXISTING" >> "$GITHUB_OUTPUT"
-            echo "Reusing existing release for $TAG (id $EXISTING)"
+            ID=$(echo "$EXISTING" | cut -f1)
+            IS_DRAFT=$(echo "$EXISTING" | cut -f2)
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "::error::A PUBLISHED release for $TAG already exists (id $ID). Published releases are immutable — delete it manually first if a rebuild is truly intended."
+              exit 1
+            fi
+            echo "release_id=$ID" >> "$GITHUB_OUTPUT"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            echo "Reusing existing DRAFT release for $TAG (id $ID)"
             exit 0
           fi
           if [[ "$TAG" == *-* ]]; then PRERELEASE=true; else PRERELEASE=false; fi
@@ -53,10 +63,43 @@ jobs:
             -F prerelease=$PRERELEASE)
           ID=$(echo "$RESPONSE" | jq '.id')
           echo "release_id=$ID" >> "$GITHUB_OUTPUT"
+          echo "created=true" >> "$GITHUB_OUTPUT"
           echo "Draft release created for $TAG (id $ID)"
 
+  # U6: the tag must match the version embedded in the three synced
+  # version files — a mismatched tag makes the manifest advertise a
+  # version the installed binary doesn't report, so clients re-offer the
+  # "update" forever (and a beta-configured commit could ship as stable).
+  version-gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout (full, for the tag's commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Tag must equal the app version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          if ! echo "$TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "::error::Unexpected tag shape: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version *= *"\(.*\)"/\1/')
+          PKG=$(node -p "require('./package.json').version")
+          CONF=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "tag=$TAG cargo=$CARGO package.json=$PKG tauri.conf.json=$CONF"
+          for V in "$CARGO" "$PKG" "$CONF"; do
+            if [ "$V" != "$TAG" ]; then
+              echo "::error::Version mismatch: tag $TAG != embedded version $V. Bump all three version files (src-tauri/Cargo.toml, package.json, src-tauri/tauri.conf.json) to match the tag before re-tagging."
+              exit 1
+            fi
+          done
+          echo "Tag/version agreement verified."
+
+
   release:
-    needs: prepare
+    needs: [prepare, version-gate]
     strategy:
       fail-fast: false
       matrix:
@@ -201,91 +244,52 @@ jobs:
             taskkill //F //IM rust-medical-assistant.exe >/dev/null 2>&1 || true
           fi
           sleep 2
+          wait "$APP_PID" 2>/dev/null
+          EXIT_STATUS=$?
           set -e
 
           echo "──── boot log (tail) ────"
           tail -40 boot_smoke.log || true
 
+          # U5: positive readiness gate. The startup banner logs BEFORE
+          # initialization, so it only proves the binary launched — a boot
+          # that died in a recovery/fatal dialog also printed it. Require
+          # the post-init success line AND fail on the init-failure
+          # markers, so the v0.74.1 class (crash after banner) and the
+          # dialog-stuck class both fail this gate.
           if ! grep -q "FerriScribe starting" boot_smoke.log; then
             echo "::error::Boot smoke FAILED — the app never logged its startup banner"
             exit 1
           fi
-          if grep -E -q "PANIC|panicked at" boot_smoke.log; then
-            echo "::error::Boot smoke FAILED — the app panicked during boot (see log above)"
+          if ! grep -q "FerriScribe initialization complete" boot_smoke.log; then
+            echo "::error::Boot smoke FAILED — no positive post-initialization readiness signal (init failed, crashed mid-init, or never completed). See log above."
             exit 1
           fi
-          echo "Boot smoke passed: app started, got through init, no panic."
+          if grep -E -q "PANIC|panicked at|Database recovery needed|Fatal application initialization error" boot_smoke.log; then
+            echo "::error::Boot smoke FAILED — the app panicked or booted into a recovery/fatal state (see log above)"
+            exit 1
+          fi
+          # A hard crash mid-boot (SIGSEGV/SIGABRT under panic=abort) can
+          # beat every grep above when the log file never got the lines —
+          # the readiness grep already catches that. This check catches
+          # the inverse: init completed but the process died right after
+          # (native teardown crash) — nonzero exit after kill -TERM is
+          # expected, so only treat 129-165 signal-range exits as failure
+          # when the readiness line is ABSENT (handled above). Keep the
+          # explicit panic-class check regardless:
+          if grep -E -q "SIGABRT|SIGSEGV|Segmentation fault|Aborted" boot_smoke.log; then
+            echo "::error::Boot smoke FAILED — native crash signature in boot log"
+            exit 1
+          fi
+          echo "Boot smoke passed: startup banner, positive init-complete signal, no panic/recovery markers."
 
   # Runs once, after EVERY platform job has built, uploaded, and passed its
-  # boot smoke. Verifies the draft holds all three platforms' assets, then
-  # makes the release public. Publishing here (never inside the matrix) is
-  # what makes the draft gate sound: a partial or crashing build stays a
-  # private draft.
-  publish:
-    needs: release
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Verify all platform assets, then publish
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
-          echo "──── assets on the draft ────"
-          echo "$ASSETS"
-          MISSING=0
-          echo "$ASSETS" | grep -q "aarch64.app" || { echo "::error::missing macOS (aarch64) assets"; MISSING=1; }
-          echo "$ASSETS" | grep -qE -- "-setup\.exe|\.msi$" || { echo "::error::missing Windows assets"; MISSING=1; }
-          echo "$ASSETS" | grep -q "\.AppImage" || { echo "::error::missing Linux (AppImage) asset"; MISSING=1; }
-          if [ "$MISSING" != "0" ]; then exit 1; fi
-          gh release edit "$TAG" --draft=false
-          echo "Release published."
-
-  # Anything failed after the draft was created — remove it so no broken or
-  # partial artifacts linger hidden on the tag. The tag itself stays.
-  cleanup:
-    needs: [release, publish]
-    if: failure()
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Delete draft release on failure
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: gh release delete "$TAG" --yes || true
-
-  # Prune old releases after a successful build, keeping only the 5 newest
-  # (by semver). Deletes both the release assets and the git tag. Only
-  # matches FerriScribe version tags (vX.Y.Z); leaves whisper-server-* and
-  # other non-version tags untouched. Runs once after all platform builds.
-  prune:
-    needs: [publish, manifest]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Prune to 5 newest releases
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/prune-old-releases.mjs
-
-  # Generate a consolidated latest.json AFTER the publish job has made the
-  # (complete) release public. Each platform job auto-generates its own
-  # partial latest.json via tauri-action; this job overwrites it with a
-  # manifest that includes ALL platforms, eliminating the updater race
-  # condition where clients see a new version before their platform binary
-  # is uploaded.
+  # boot smoke. Verifies the draft holds all three platforms' assets AND a
+  # complete, validated consolidated latest.json (U4: publish LAST — the
+  # release goes public only when the updater manifest clients will fetch
+  # is fully built and verified), then makes the release public.
   manifest:
-    needs: publish
+    needs: release
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -298,6 +302,9 @@ jobs:
         with:
           node-version: 22
 
+      # Generate the consolidated latest.json from the DRAFT's assets and
+      # upload it back to the draft. The release is still private here, so
+      # clients cannot observe a partial manifest state (U4).
       - name: Generate consolidated latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -386,7 +393,7 @@ jobs:
           fs.writeFileSync('latest.json', JSON.stringify(manifest, null, 2));
           SCRIPT
 
-      - name: Upload consolidated latest.json
+      - name: Upload consolidated latest.json (to the DRAFT)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -398,4 +405,82 @@ jobs:
             exit 1
           fi
           gh release upload "$TAG" latest.json --clobber
-          echo "Consolidated latest.json uploaded to release $TAG"
+          echo "Consolidated latest.json uploaded to draft release $TAG"
+
+  publish:
+    needs: manifest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Verify all platform assets, then publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          echo "──── assets on the draft ────"
+          echo "$ASSETS"
+          MISSING=0
+          echo "$ASSETS" | grep -q "aarch64.app" || { echo "::error::missing macOS (aarch64) assets"; MISSING=1; }
+          echo "$ASSETS" | grep -qE -- "-setup\.exe|\.msi$" || { echo "::error::missing Windows assets"; MISSING=1; }
+          echo "$ASSETS" | grep -q "\.AppImage" || { echo "::error::missing Linux (AppImage) asset"; MISSING=1; }
+          # U4: the consolidated manifest must already be on the draft —
+          # publishing without it strands auto-updater clients.
+          echo "$ASSETS" | grep -q "^latest\.json$" || { echo "::error::missing consolidated latest.json (manifest job)"; MISSING=1; }
+          if [ "$MISSING" != "0" ]; then exit 1; fi
+          gh release edit "$TAG" --draft=false
+          echo "Release published."
+
+  # Anything failed after the draft was created — remove it so no broken or
+  # partial artifacts linger hidden on the tag. The tag itself stays.
+  # U3: deletes ONLY the exact draft this run created/reused (by ID, after
+  # re-verifying it is still a draft) — never by tag, which could match a
+  # published release.
+  cleanup:
+    needs: [release, publish]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Delete draft release on failure (by ID, drafts only)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        run: |
+          if [ -z "$RELEASE_ID" ]; then
+            echo "No release id from prepare — nothing to clean up."
+            exit 0
+          fi
+          IS_DRAFT=$(gh api "repos/$GH_REPO/releases/$RELEASE_ID" --jq '.draft' 2>/dev/null || echo "gone")
+          if [ "$IS_DRAFT" = "gone" ]; then
+            echo "Release $RELEASE_ID already deleted — nothing to do."
+            exit 0
+          fi
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "::error::Refusing to delete release $RELEASE_ID: it is PUBLISHED, not a draft. A failure after publication must not remove a live release."
+            exit 1
+          fi
+          gh api -X DELETE "repos/$GH_REPO/releases/$RELEASE_ID"
+          echo "Draft release $RELEASE_ID deleted."
+
+  # Prune old releases after a successful build, keeping only the 5 newest
+  # (by semver). Deletes both the release assets and the git tag. Only
+  # matches FerriScribe version tags (vX.Y.Z); leaves whisper-server-* and
+  # other non-version tags untouched. Runs once after all platform builds.
+  prune:
+    needs: [publish, manifest]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Prune to 5 newest releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/prune-old-releases.mjs

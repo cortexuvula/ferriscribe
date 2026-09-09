@@ -274,6 +274,18 @@ impl TranslationState {
 ///
 /// # Lifetime
 ///
+/// Latest not-yet-persisted editor edit, registered by the frontend at
+/// edit time (`register_pending_edit`) and flushed by `restart_app`
+/// before an update relaunch (U1). See `AppState::pending_edit`.
+#[derive(Debug, Clone)]
+pub struct PendingEdit {
+    pub recording_id: String,
+    pub field: String,
+    pub value: String,
+}
+
+/// Shared application state.
+///
 /// `AppState` lives for the duration of the Tauri app. Commands borrow it via
 /// `tauri::State<'_, AppState>` which ties the borrow to the command's
 /// execution. Don't move it out or store it beyond the command's lifetime.
@@ -296,6 +308,13 @@ pub struct AppState {
     /// Whether an audio recording is currently in progress. Checked-and-set
     /// atomically under the mutex to prevent concurrent recordings.
     pub recording_active: Arc<Mutex<bool>>,
+    /// Latest not-yet-persisted editor edit (U1 coordinated shutdown).
+    /// The frontend registers the edit here the moment it is made (before
+    /// its 1 s debounce fires) and clears it once the save completes, so
+    /// `restart_app` can flush the freshest clinical edit before an update
+    /// relaunch. `None` when nothing is pending. Content is never logged
+    /// (PHI) — only lengths.
+    pub pending_edit: Arc<Mutex<Option<PendingEdit>>>,
     /// Registry of AI providers (Ollama, LM Studio). Commands resolve the
     /// active provider by name from this registry.
     pub ai_providers: Arc<Mutex<ProviderRegistry>>,
@@ -966,6 +985,7 @@ impl AppState {
             keys: Arc::new(keys),
             data_dir,
             recording_active: Arc::new(Mutex::new(false)),
+            pending_edit: Arc::new(Mutex::new(None)),
             ai_providers: Arc::new(Mutex::new(ai_handles.registry)),
             stt_providers: Arc::new(Mutex::new(stt_handles.provider)),
             orchestrator: Arc::new(orchestrator),

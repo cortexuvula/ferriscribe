@@ -50,26 +50,23 @@ pub(crate) fn max_chars_for_field(field: &str) -> usize {
     }
 }
 
-/// Save a clinician-edited text field on a recording.
-///
-/// Thinly wraps [`save_recording_field_inner`] so the inner logic can be
-/// unit-tested without needing `tauri::State`.
-#[tauri::command]
-pub async fn save_recording_field(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    recording_id: String,
-    field: String,
-    value: String,
+/// Core save used by both the Tauri command and the restart-time pending
+/// edit flush (`commands::restart`). Loads `capture_for_training` off the
+/// async worker, then persists the edit. Content-sync push stays in the
+/// command path only (it is a fire-and-forget debounced task — pointless
+/// to spawn right before a restart exit).
+pub(crate) async fn save_recording_field_core(
+    db: &Arc<medical_db::Database>,
+    recording_id: &str,
+    field: &str,
+    value: &str,
 ) -> AppResult<()> {
-    let db = state.db.clone();
     // Load capture_for_training off the async worker — preserve the
     // `unwrap_or_default()` semantics so a settings load failure still lets
-    // the edit go through without training capture (the same behavior as
-    // before, but no longer on the runtime thread). The JoinError itself is
+    // the edit go through without training capture. The JoinError itself is
     // surfaced as a real error (it indicates a panic).
     let capture = {
-        let db_cfg = Arc::clone(&db);
+        let db_cfg = Arc::clone(db);
         tokio::task::spawn_blocking(move || -> bool {
             let conn = match db_cfg.conn() {
                 Ok(c) => c,
@@ -82,22 +79,39 @@ pub async fn save_recording_field(
         .await
         .map_err(crate::commands::join_err)?
     };
-    let recording_id_inner = recording_id.clone();
-    let field_inner = field.clone();
-    let value_inner = value.clone();
+    let recording_id = recording_id.to_string();
+    let field = field.to_string();
+    let value = value.to_string();
+    let db = Arc::clone(db);
     tokio::task::spawn_blocking(move || {
         let conn = db.conn()?;
         save_recording_field_inner(
-            db,
+            Arc::clone(&db),
             &conn,
-            &recording_id_inner,
-            &field_inner,
-            &value_inner,
+            &recording_id,
+            &field,
+            &value,
             capture,
         )
     })
     .await
-    .map_err(crate::commands::join_err)??;
+    .map_err(crate::commands::join_err)?
+}
+
+/// Save a clinician-edited text field on a recording.
+///
+/// Thinly wraps [`save_recording_field_core`] + a best-effort content-sync
+/// push so the inner logic can be unit-tested without `tauri::State`.
+#[tauri::command]
+pub async fn save_recording_field(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    recording_id: String,
+    field: String,
+    value: String,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    save_recording_field_core(&db, &recording_id, &field, &value).await?;
 
     // Best-effort content sync push (fire-and-forget, debounced ~2s). The
     // debounce coaleses back-to-back edits (e.g. the frontend saving SOAP
