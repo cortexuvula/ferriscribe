@@ -13,6 +13,13 @@ class UpdaterStore {
   downloadProgress = $state<number>(0);
   errorMessage = $state<string | null>(null);
   lastCheckedAt = $state<Date | null>(null);
+  /// An update has been downloaded and installed but the app has NOT been
+  /// relaunched yet — including across a refused restart. This is SEPARATE
+  /// from `state` (banner visibility): "Later" after install dismisses the
+  /// banner without losing the restart obligation, and an intervening
+  /// auto-check (which finds the still-pending version) must not clobber
+  /// it. Cleared only by a successful relaunch.
+  pendingRestart = $state<string | null>(null);
 
   private intervalId: ReturnType<typeof setInterval> | null = null;
 
@@ -29,10 +36,14 @@ class UpdaterStore {
       this.lastCheckedAt = new Date();
       if (update?.available) {
         this.availableVersion = update.version;
-        this.state = 'available';
+        // If an update is already installed-but-not-restarted, "available"
+        // means the pending one — surface the restart, not a re-download.
+        this.state = this.pendingRestart !== null ? 'installed' : 'available';
       } else {
         this.availableVersion = null;
-        this.state = 'idle';
+        // No update available per the endpoint, but one is already
+        // installed and un-restarted: the restart obligation stands.
+        this.state = this.pendingRestart !== null ? 'installed' : 'idle';
       }
     } catch (e) {
       this.availableVersion = null;
@@ -82,6 +93,9 @@ class UpdaterStore {
         }
       });
       this.state = 'installed';
+      // Track the pending restart independently of banner visibility —
+      // see the field doc. Survives dismiss() and intervening checks.
+      this.pendingRestart = this.availableVersion;
     } catch (e) {
       this.state = 'error';
       const raw = e instanceof Error ? e.message : String(e);
@@ -109,10 +123,17 @@ class UpdaterStore {
   /// be retried once the work is resolved.
   async relaunch(): Promise<void> {
     await invoke('restart_app');
+    // Only a successful restart clears the pending-restart obligation. A
+    // refusal throws above, so this line is unreachable when the app is
+    // still running — exactly the invariant we want.
+    this.pendingRestart = null;
   }
 
   /// Dismiss the banner (state → idle) without installing. The next auto-check
   /// or manual check will re-surface the banner if the version is still newer.
+  /// A pending restart SURVIVES dismissal — `pendingRestart` is separate from
+  /// banner visibility, so "Later" after an install keeps the restart
+  /// obligation reachable from Settings → About.
   dismiss(): void {
     if (this.state !== 'downloading') {
       this.state = 'idle';

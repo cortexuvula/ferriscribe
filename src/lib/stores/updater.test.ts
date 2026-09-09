@@ -117,3 +117,65 @@ describe('UpdaterStore — startAutoCheck gating', () => {
     updater.stopAutoCheck();
   });
 });
+
+describe('UpdaterStore — pendingRestart (restart obligation survives)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    updater.state = 'idle';
+    updater.availableVersion = null;
+    updater.errorMessage = null;
+    updater.lastCheckedAt = null;
+    updater.downloadProgress = 0;
+    updater.pendingRestart = null;
+    updater.stopAutoCheck();
+  });
+
+  it('refusal → Later → check → Settings restart still available', async () => {
+    // Install completes, restart is refused, user hits "Later", an
+    // auto-check intervenes — the restart obligation must survive all of
+    // it and remain restartable from Settings → About.
+    updater.state = 'installed';
+    updater.availableVersion = '99.0.0';
+    updater.pendingRestart = '99.0.0';
+
+    // Refused restart: pendingRestart must NOT clear.
+    vi.mocked(invoke).mockRejectedValue(
+      new Error('RESTART_REFUSED_RECORDING_ACTIVE: stop the recording first'),
+    );
+    await expect(updater.relaunch()).rejects.toThrow('RESTART_REFUSED');
+    expect(updater.pendingRestart).toBe('99.0.0');
+
+    // "Later" dismisses the banner…
+    updater.dismiss();
+    expect(updater.state).toBe('idle');
+    // …but the obligation survives.
+    expect(updater.pendingRestart).toBe('99.0.0');
+
+    // An intervening auto-check (endpoint still reports the version — and
+    // even one that reports nothing new) must not clobber it.
+    await updater.checkForUpdate();
+    expect(updater.pendingRestart).toBe('99.0.0');
+    expect(updater.state).toBe('installed');
+
+    // Settings → About path: a successful restart clears it.
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await updater.relaunch();
+    expect(updater.pendingRestart).toBeNull();
+  });
+
+  it('pendingRestart set only on successful install', async () => {
+    // downloadAndInstall failing (e.g. signature failure) must not create
+    // a phantom restart obligation.
+    const { check } = await import('@tauri-apps/plugin-updater');
+    vi.mocked(check).mockResolvedValueOnce({
+      available: true,
+      version: '99.0.0',
+      downloadAndInstall: vi.fn(async () => {
+        throw new Error('invalid signature');
+      }),
+    } as never);
+    await updater.downloadAndInstall();
+    expect(updater.state).toBe('error');
+    expect(updater.pendingRestart).toBeNull();
+  });
+});

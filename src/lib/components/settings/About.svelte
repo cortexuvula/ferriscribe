@@ -121,6 +121,13 @@
       ✓ Update installed.
       <button class="btn-install" onclick={() => handleRestart()}>Restart now</button>
     </div>
+  {:else if updater.pendingRestart !== null}
+    <!-- Banner dismissed ("Later") but a restart is still owed: the
+         obligation must stay reachable here even though state === 'idle'. -->
+    <div class="update-status installed">
+      ✓ FerriScribe {updater.pendingRestart} is installed — restart to finish.
+      <button class="btn-install" onclick={() => handleRestart()}>Restart now</button>
+    </div>
   {:else if updater.state === 'error'}
     <div class="update-status error">
       ⚠ {updater.errorMessage}
