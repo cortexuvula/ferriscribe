@@ -1,6 +1,7 @@
 import { check } from '@tauri-apps/plugin-updater';
 import { invoke } from '@tauri-apps/api/core';
 import { settings } from './settings.svelte';
+import { toasts } from './toasts.svelte';
 
 /// How often to auto-check for updates while the app is running.
 const CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
@@ -12,6 +13,10 @@ class UpdaterStore {
   availableVersion = $state<string | null>(null);
   downloadProgress = $state<number>(0);
   errorMessage = $state<string | null>(null);
+  /// Set when `relaunch()` fails — the update is installed but the restart
+  /// command itself refused or errored. The UI surfaces this inline and via
+  /// a toast so the user is never left staring at a dead "Restart now" button.
+  restartError = $state<string | null>(null);
   lastCheckedAt = $state<Date | null>(null);
   /// An update has been downloaded and installed but the app has NOT been
   /// relaunched yet — including across a refused restart. This is SEPARATE
@@ -120,13 +125,21 @@ class UpdaterStore {
   /// with a typed message so both update surfaces (UpdateBanner,
   /// Settings → About) can show actionable guidance; the "installed"
   /// state is preserved — the update stays applied and the restart can
-  /// be retried once the work is resolved.
+  /// be retried once the work is resolved. On any failure (refusal or
+  /// other error), `restartError` is set and a toast fires so the user
+  /// sees actionable feedback instead of a silent console error.
   async relaunch(): Promise<void> {
-    await invoke('restart_app');
-    // Only a successful restart clears the pending-restart obligation. A
-    // refusal throws above, so this line is unreachable when the app is
-    // still running — exactly the invariant we want.
-    this.pendingRestart = null;
+    this.restartError = null;
+    try {
+      await invoke('restart_app');
+      // Only a successful restart clears the pending-restart obligation.
+      this.pendingRestart = null;
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e);
+      this.restartError = `Could not restart automatically: ${raw}. Please save your work and restart FerriScribe manually.`;
+      console.error('Failed to relaunch:', e);
+      toasts.error(this.restartError);
+    }
   }
 
   /// Dismiss the banner (state → idle) without installing. The next auto-check

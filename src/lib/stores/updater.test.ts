@@ -35,16 +35,50 @@ describe('UpdaterStore — relaunch', () => {
     expect(vi.mocked(pluginRelaunch)).not.toHaveBeenCalled();
   });
 
-  it('relaunch() rejections propagate (typed refusals surface in the UI)', async () => {
-    // U1/ui-consultant fix: the old contract swallowed failures with a
+  it('relaunch() surfaces refusals via restartError and toast (not console-only)', async () => {
+    // U1/ui-consultant fix + U7: the old contract swallowed failures with a
     // console.error, stranding the user on "restart required" with no
-    // feedback. Refusals (recording active / save failed) must reach the
-    // update surfaces so they can show actionable guidance.
+    // feedback. Refusals (recording active / save failed) must now be
+    // caught, set restartError, fire a toast, and keep state 'installed'.
     vi.mocked(invoke).mockRejectedValue(
       new Error('RESTART_REFUSED_RECORDING_ACTIVE: stop the recording first'),
     );
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await expect(updater.relaunch()).rejects.toThrow('RESTART_REFUSED_RECORDING_ACTIVE');
+    updater.state = 'installed';
+    updater.pendingRestart = '99.0.0';
+    await expect(updater.relaunch()).resolves.toBeUndefined();
+    expect(updater.state).toBe('installed');
+    expect(updater.restartError).toContain('Could not restart automatically');
+    expect(updater.restartError).toContain('RESTART_REFUSED_RECORDING_ACTIVE');
+    // pendingRestart survives a refusal — the update is installed, only
+    // the restart command failed.
+    expect(updater.pendingRestart).toBe('99.0.0');
+
+    const { toasts } = await import('./toasts.svelte');
+    expect(toasts.list.length).toBeGreaterThan(0);
+    expect(toasts.list[toasts.list.length - 1].type).toBe('error');
+
+    errorSpy.mockRestore();
+    toasts.destroy();
+  });
+
+  it('relaunch() surfaces non-refusal errors via restartError and toast', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('failed to restart the app'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    updater.state = 'installed';
+    await expect(updater.relaunch()).resolves.toBeUndefined();
+    expect(updater.state).toBe('installed');
+    expect(updater.restartError).toContain('Could not restart automatically');
+    expect(updater.restartError).toContain('failed to restart the app');
+
+    const { toasts } = await import('./toasts.svelte');
+    expect(toasts.list.length).toBeGreaterThan(0);
+    expect(toasts.list[toasts.list.length - 1].type).toBe('error');
+
+    errorSpy.mockRestore();
+    toasts.destroy();
   });
 });
 
@@ -95,6 +129,8 @@ describe('UpdaterStore — startAutoCheck gating', () => {
     updater.errorMessage = null;
     updater.lastCheckedAt = null;
     updater.downloadProgress = 0;
+    updater.pendingRestart = null;
+    updater.restartError = null;
     updater.stopAutoCheck();
   });
 
@@ -138,12 +174,17 @@ describe('UpdaterStore — pendingRestart (restart obligation survives)', () => 
     updater.availableVersion = '99.0.0';
     updater.pendingRestart = '99.0.0';
 
-    // Refused restart: pendingRestart must NOT clear.
+    // Refused restart: pendingRestart must NOT clear. The merged
+    // contract catches the error (sets restartError + toast) rather
+    // than throwing, so assert resolves + state preserved.
     vi.mocked(invoke).mockRejectedValue(
       new Error('RESTART_REFUSED_RECORDING_ACTIVE: stop the recording first'),
     );
-    await expect(updater.relaunch()).rejects.toThrow('RESTART_REFUSED');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(updater.relaunch()).resolves.toBeUndefined();
     expect(updater.pendingRestart).toBe('99.0.0');
+    expect(updater.restartError).toContain('RESTART_REFUSED_RECORDING_ACTIVE');
+    errorSpy.mockRestore();
 
     // "Later" dismisses the banner…
     updater.dismiss();
