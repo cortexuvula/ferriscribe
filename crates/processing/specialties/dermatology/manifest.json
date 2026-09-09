@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "dermatology",
+  "name": "Dermatology",
+  "version": "1.0.0",
+  "description": "Dermatology SOAP notes: lesion history, morphologic examination findings, and biopsy/pathology results as transcript-supported sections. Referral, letter, synopsis, and peer-discussion documents keep the built-in prompts.",
+  "prompts": {
+    "soap": "soap_prompt.md"
+  }
+}

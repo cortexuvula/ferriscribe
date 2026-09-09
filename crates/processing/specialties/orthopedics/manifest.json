@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "orthopedics",
+  "name": "Orthopedics",
+  "version": "1.0.0",
+  "description": "Orthopedic SOAP notes: injury mechanism, focused musculoskeletal examination, and imaging review as transcript-supported sections. Referral, letter, synopsis, and peer-discussion documents keep the built-in prompts.",
+  "prompts": {
+    "soap": "soap_prompt.md"
+  }
+}
