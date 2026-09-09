@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "obstetrics-gynecology",
+  "name": "Obstetrics & Gynecology",
+  "version": "1.0.0",
+  "description": "Obstetrics-and-gynecology SOAP notes: obstetric and gynecologic history, obstetric assessment, and pelvic examination as transcript-supported sections. Referral, letter, synopsis, and peer-discussion documents keep the built-in prompts.",
+  "prompts": {
+    "soap": "soap_prompt.md"
+  }
+}

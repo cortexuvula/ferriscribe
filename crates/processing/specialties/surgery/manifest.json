@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "surgery",
+  "name": "General Surgery",
+  "version": "1.0.0",
+  "description": "General-surgery SOAP notes: surgical history, wound and procedure findings, and consent discussion as transcript-supported sections. Referral, letter, synopsis, and peer-discussion documents keep the built-in prompts.",
+  "prompts": {
+    "soap": "soap_prompt.md"
+  }
+}

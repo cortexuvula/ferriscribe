@@ -503,6 +503,8 @@ struct BundledPack {
 
 /// The packs compiled into this build. A pack is added to the app by adding
 /// its directory under `crates/processing/specialties/<id>/` and a line here.
+/// Order here is the Settings picker order: family-medicine (the general
+/// default) first, then alphabetical.
 const BUNDLED_PACKS: &[BundledPack] = &[
     BundledPack {
         label: "specialties/family-medicine",
@@ -513,11 +515,67 @@ const BUNDLED_PACKS: &[BundledPack] = &[
         )],
     },
     BundledPack {
+        label: "specialties/cardiology",
+        manifest: include_str!("../../specialties/cardiology/manifest.json"),
+        artifacts: &[(
+            "soap_prompt.md",
+            include_str!("../../specialties/cardiology/soap_prompt.md"),
+        )],
+    },
+    BundledPack {
+        label: "specialties/dermatology",
+        manifest: include_str!("../../specialties/dermatology/manifest.json"),
+        artifacts: &[(
+            "soap_prompt.md",
+            include_str!("../../specialties/dermatology/soap_prompt.md"),
+        )],
+    },
+    BundledPack {
+        label: "specialties/internal-medicine",
+        manifest: include_str!("../../specialties/internal-medicine/manifest.json"),
+        artifacts: &[(
+            "soap_prompt.md",
+            include_str!("../../specialties/internal-medicine/soap_prompt.md"),
+        )],
+    },
+    BundledPack {
+        label: "specialties/obstetrics-gynecology",
+        manifest: include_str!("../../specialties/obstetrics-gynecology/manifest.json"),
+        artifacts: &[(
+            "soap_prompt.md",
+            include_str!("../../specialties/obstetrics-gynecology/soap_prompt.md"),
+        )],
+    },
+    BundledPack {
+        label: "specialties/orthopedics",
+        manifest: include_str!("../../specialties/orthopedics/manifest.json"),
+        artifacts: &[(
+            "soap_prompt.md",
+            include_str!("../../specialties/orthopedics/soap_prompt.md"),
+        )],
+    },
+    BundledPack {
+        label: "specialties/pediatrics",
+        manifest: include_str!("../../specialties/pediatrics/manifest.json"),
+        artifacts: &[(
+            "soap_prompt.md",
+            include_str!("../../specialties/pediatrics/soap_prompt.md"),
+        )],
+    },
+    BundledPack {
         label: "specialties/psychiatry",
         manifest: include_str!("../../specialties/psychiatry/manifest.json"),
         artifacts: &[(
             "soap_prompt.md",
             include_str!("../../specialties/psychiatry/soap_prompt.md"),
+        )],
+    },
+    BundledPack {
+        label: "specialties/surgery",
+        manifest: include_str!("../../specialties/surgery/manifest.json"),
+        artifacts: &[(
+            "soap_prompt.md",
+            include_str!("../../specialties/surgery/soap_prompt.md"),
         )],
     },
 ];
@@ -1264,8 +1322,19 @@ mod tests {
         }
         // Both shipped packs are present and distinct.
         let ids: Vec<_> = packs.iter().map(|p| p.id().to_string()).collect();
-        assert!(ids.contains(&"family-medicine".to_string()));
-        assert!(ids.contains(&"psychiatry".to_string()));
+        for expected in [
+            "family-medicine",
+            "cardiology",
+            "dermatology",
+            "internal-medicine",
+            "obstetrics-gynecology",
+            "orthopedics",
+            "pediatrics",
+            "psychiatry",
+            "surgery",
+        ] {
+            assert!(ids.contains(&expected.to_string()), "{expected} bundled");
+        }
     }
 
     /// Two packs sharing an id (bundled or user) must never silently
@@ -1334,65 +1403,92 @@ mod tests {
         );
     }
 
-    /// Golden files per bundled pack: each pack's assembled prompt is
-    /// pinned independently, so an edit to one pack's body (or to
-    /// SAFETY_BLOCK) fails loudly here instead of drifting users' prompts.
-    /// Regenerate deliberately via `cargo test -p medical-processing
-    /// write_goldens -- --ignored --nocapture` and commit the diff.
-    #[test]
-    fn family_medicine_assembled_soap_matches_golden() {
-        assert_eq!(
-            assemble_pack_prompt(family_medicine_soap_body()),
+    /// Golden files per bundled pack: each pack's assembled prompt is pinned
+    /// independently, so an edit to one pack's body (or to SAFETY_BLOCK)
+    /// fails loudly here instead of drifting users' prompts. Regenerate
+    /// deliberately via `cargo test -p medical-processing write_goldens --
+    /// --ignored --nocapture` and commit the diff. Adding a bundled pack
+    /// means adding its directory, its `BUNDLED_PACKS` line, and one row
+    /// here.
+    const SOAP_GOLDENS: &[(&str, &str)] = &[
+        (
+            "family-medicine",
             include_str!("testdata/golden/family-medicine-soap.golden"),
-            "family-medicine assembled SOAP prompt drifted from its golden"
-        );
-    }
+        ),
+        (
+            "cardiology",
+            include_str!("testdata/golden/cardiology-soap.golden"),
+        ),
+        (
+            "dermatology",
+            include_str!("testdata/golden/dermatology-soap.golden"),
+        ),
+        (
+            "internal-medicine",
+            include_str!("testdata/golden/internal-medicine-soap.golden"),
+        ),
+        (
+            "obstetrics-gynecology",
+            include_str!("testdata/golden/obstetrics-gynecology-soap.golden"),
+        ),
+        (
+            "orthopedics",
+            include_str!("testdata/golden/orthopedics-soap.golden"),
+        ),
+        (
+            "pediatrics",
+            include_str!("testdata/golden/pediatrics-soap.golden"),
+        ),
+        (
+            "psychiatry",
+            include_str!("testdata/golden/psychiatry-soap.golden"),
+        ),
+        (
+            "surgery",
+            include_str!("testdata/golden/surgery-soap.golden"),
+        ),
+    ];
 
     #[test]
-    fn psychiatry_assembled_soap_matches_golden() {
+    fn every_bundled_soap_pack_matches_its_golden() {
         let (packs, errors) = bundled_packs();
-        assert!(errors.is_empty());
-        let psychiatry = packs
-            .into_iter()
-            .find(|p| p.id() == "psychiatry")
-            .expect("psychiatry bundled");
-        let body = psychiatry
-            .artifacts
-            .get(&DocType::Soap)
-            .expect("psychiatry soap");
-        assert_eq!(
-            assemble_pack_prompt(body),
-            include_str!("testdata/golden/psychiatry-soap.golden"),
-            "psychiatry assembled SOAP prompt drifted from its golden"
-        );
+        assert!(errors.is_empty(), "bundled pack errors: {errors:?}");
+        for (id, golden) in SOAP_GOLDENS {
+            let body = packs
+                .iter()
+                .find(|p| p.id() == *id)
+                .and_then(|p| p.artifacts.get(&DocType::Soap))
+                .unwrap_or_else(|| panic!("{id} must be bundled with a soap artifact"));
+            assert_eq!(
+                assemble_pack_prompt(body),
+                *golden,
+                "{id} assembled SOAP prompt drifted from its golden"
+            );
+        }
+        // The table covers every bundled SOAP pack exactly — no pack skips
+        // pinning, no golden row goes stale for a removed pack.
+        let with_soap = packs
+            .iter()
+            .filter(|p| p.artifacts.contains_key(&DocType::Soap))
+            .count();
+        assert_eq!(with_soap, SOAP_GOLDENS.len());
     }
 
     /// Golden generator — run explicitly with `--ignored` when a pack body
     /// or SAFETY_BLOCK changes ON PURPOSE, then commit the golden diff.
+    /// Writes one `<id>-soap.golden` per bundled pack that provides SOAP.
     #[test]
     #[ignore = "golden generator: run explicitly when regenerating goldens"]
     fn write_goldens() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/specialty/testdata/golden");
         std::fs::create_dir_all(&root).expect("mkdir goldens");
-        for (id, body) in [
-            ("family-medicine", family_medicine_soap_body()),
-            (
-                "psychiatry",
-                {
-                    let (packs, _) = bundled_packs();
-                    packs
-                        .into_iter()
-                        .find(|p| p.id() == "psychiatry")
-                        .expect("psychiatry bundled")
-                        .artifacts
-                        .get(&DocType::Soap)
-                        .expect("psychiatry soap")
-                        .clone()
-                }
-                .as_str(),
-            ),
-        ] {
-            let path = root.join(format!("{id}-soap.golden"));
+        let (packs, errors) = bundled_packs();
+        assert!(errors.is_empty(), "bundled pack errors: {errors:?}");
+        for pack in &packs {
+            let Some(body) = pack.artifacts.get(&DocType::Soap) else {
+                continue;
+            };
+            let path = root.join(format!("{}-soap.golden", pack.id()));
             std::fs::write(&path, assemble_pack_prompt(body)).expect("write golden");
             println!("wrote {}", path.display());
         }
