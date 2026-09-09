@@ -1,5 +1,25 @@
 <script lang="ts">
   import { updater } from '../stores/updater.svelte';
+  import { toasts } from '../stores/toasts.svelte';
+
+  // Typed restart refusals from the backend's coordinated shutdown
+  // (src-tauri/src/commands/restart.rs). The backend message starts with
+  // the machine prefix; map it to actionable guidance. The banner stays
+  // in "installed" — the update is applied and the restart can be retried.
+  async function handleRestart() {
+    try {
+      await updater.relaunch();
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e);
+      if (raw.includes('RESTART_REFUSED_RECORDING_ACTIVE')) {
+        toasts.error('Restart paused — stop the recording first, then tap Restart now. Your recording is safe.');
+      } else if (raw.includes('RESTART_REFUSED_SAVE_FAILED')) {
+        toasts.error('Restart paused — a pending edit could not be saved. Check the editor for a save error, then tap Restart now.');
+      } else {
+        toasts.error(`Restart failed — ${raw}`);
+      }
+    }
+  }
 </script>
 
 {#if updater.state === 'available' || updater.state === 'downloading' || updater.state === 'installed' || updater.state === 'error'}
@@ -22,7 +42,7 @@
     {:else if updater.state === 'installed'}
       <span class="banner-text">✓ Update installed</span>
       <div class="banner-actions">
-        <button class="btn-install" onclick={() => updater.relaunch()}>Restart now</button>
+        <button class="btn-install" onclick={() => handleRestart()}>Restart now</button>
         <button class="btn-later" onclick={() => updater.dismiss()}>Later</button>
       </div>
     {:else if updater.state === 'error'}

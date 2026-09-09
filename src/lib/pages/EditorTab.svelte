@@ -240,6 +240,17 @@
     const editRecordingId = recordings.selectedRecording.id;
     const editField = String(config.field);
     const editKey = currentKey;
+    // Register the edit with the backend immediately: `restart_app`'s
+    // coordinated shutdown (U1) flushes the LATEST registered edit before
+    // an update relaunch, so a restart during the debounce window can no
+    // longer discard clinical edits. Cleared once the save completes.
+    // Errors are non-fatal — restart protection degrades to the old
+    // behavior (debounce-only), never blocks editing.
+    void invoke('register_pending_edit', {
+      recordingId: editRecordingId,
+      field: editField,
+      value: newValue,
+    }).catch(() => {});
     saveTimer = setTimeout(async () => {
       saveTimer = null;
       const value = pendingValue;
@@ -253,6 +264,10 @@
           field: editField,
           value,
         });
+        // Persisted — drop the backend's restart-protection copy of this
+        // edit. Fire-and-forget with catch: worst case it lingers and a
+        // later restart re-saves the same value (idempotent upsert).
+        void invoke('clear_pending_edit', { field: editField }).catch(() => {});
         // Scope the completion writes to the edit's context: if the user
         // switched recording/tab mid-save, the new context already reset
         // these and a stale "Saved"/error badge would mislead.

@@ -926,6 +926,7 @@ mod preflight_tests {
             keys: Arc::new(keys),
             data_dir: std::path::PathBuf::from("/tmp/test-data"),
             recording_active: Arc::new(Mutex::new(false)),
+            pending_edit: Arc::new(Mutex::new(None)),
             ai_providers: Arc::new(Mutex::new(registry)),
             stt_providers: Arc::new(Mutex::new(None)),
             orchestrator,

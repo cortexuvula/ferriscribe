@@ -191,6 +191,13 @@ pub fn run() {
         Ok(state) => {
             builder = builder.manage(state);
             app_state_managed = true;
+            // Positive readiness signal for the Release workflow's boot
+            // smoke test (and log forensics): the banner above logs BEFORE
+            // initialization, and the failure branches log warn/error —
+            // this line is the only one that proves init SUCCEEDED. The
+            // smoke gate requires it and fails on the recovery/fatal
+            // markers, so a boot that lands in a dialog can't pass.
+            tracing::info!("FerriScribe initialization complete");
         }
         Err(InitError::DatabaseRecoveryNeeded { reason }) => {
             tracing::warn!(%reason, "Database recovery needed");
@@ -381,6 +388,8 @@ pub fn run() {
             commands::specialty::list_specialty_packs,
             commands::specialty::get_specialty_pack_prompt,
             commands::restart::restart_app,
+            commands::restart::register_pending_edit,
+            commands::restart::clear_pending_edit,
             commands::export::export_pdf,
             commands::export::export_docx,
             commands::export::export_fhir,

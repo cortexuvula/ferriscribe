@@ -30,6 +30,24 @@
     await updater.checkForUpdate();
   }
 
+  // Mirrors UpdateBanner's handleRestart: typed refusals from the backend's
+  // coordinated shutdown become actionable toasts; "installed" state is
+  // preserved so the restart can be retried.
+  async function handleRestart() {
+    try {
+      await updater.relaunch();
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e);
+      if (raw.includes('RESTART_REFUSED_RECORDING_ACTIVE')) {
+        toasts.error('Restart paused — stop the recording first, then tap Restart now. Your recording is safe.');
+      } else if (raw.includes('RESTART_REFUSED_SAVE_FAILED')) {
+        toasts.error('Restart paused — a pending edit could not be saved. Check the editor for a save error, then tap Restart now.');
+      } else {
+        toasts.error(`Restart failed — ${formatError(e)}`);
+      }
+    }
+  }
+
   let preparingLogs = $state(false);
 
   async function shareLogsForSupport() {
@@ -101,7 +119,14 @@
   {:else if updater.state === 'installed'}
     <div class="update-status installed">
       ✓ Update installed.
-      <button class="btn-install" onclick={() => updater.relaunch()}>Restart now</button>
+      <button class="btn-install" onclick={() => handleRestart()}>Restart now</button>
+    </div>
+  {:else if updater.pendingRestart !== null}
+    <!-- Banner dismissed ("Later") but a restart is still owed: the
+         obligation must stay reachable here even though state === 'idle'. -->
+    <div class="update-status installed">
+      ✓ FerriScribe {updater.pendingRestart} is installed — restart to finish.
+      <button class="btn-install" onclick={() => handleRestart()}>Restart now</button>
     </div>
   {:else if updater.state === 'error'}
     <div class="update-status error">

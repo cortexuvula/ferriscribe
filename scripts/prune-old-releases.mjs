@@ -1,15 +1,27 @@
 #!/usr/bin/env node
 /**
- * Prunes old GitHub releases, keeping only the N newest (by semver).
+ * Prunes old GitHub releases with SEPARATE stable and prerelease retention
+ * (U2 fix), so prereleases can never displace the stable update channel.
+ *
+ * The app's updater resolves through GitHub's /releases/latest endpoint,
+ * which excludes prereleases — if pruning deleted every stable release
+ * (the old behavior: one mixed pool, KEEP newest overall), update clients
+ * would have no usable release. Retention is now two pools:
+ *
+ *   - stable (vX.Y.Z):      keep the STABLE_KEEP newest
+ *   - prerelease (vX.Y.Z-*): keep the PRE_KEEP newest
+ *
+ * Drafts are never deleted by this script (a draft is mid-flight in the
+ * Release workflow — its lifecycle belongs to that workflow's cleanup job).
  *
  * Deletes both the release (binary assets + release page) AND its git tag
  * for every release beyond the keep-count. Run automatically after each
  * release build by the Release workflow, or manually for one-time cleanup.
  *
  * Usage:
- *   node scripts/prune-old-releases.mjs           # live run, keeps 5
+ *   node scripts/prune-old-releases.mjs           # live run
  *   node scripts/prune-old-releases.mjs --dry-run # preview what would be deleted
- *   KEEP=3 node scripts/prune-old-releases.mjs     # keep 3 instead of 5
+ *   STABLE_KEEP=3 PRE_KEEP=5 node scripts/prune-old-releases.mjs
  *
  * Requires GH_TOKEN (or GITHUB_TOKEN) env var with repo:delete scope.
  * Only deletes releases whose tag matches a clean semver pattern
@@ -23,18 +35,22 @@ const VERSION_RE = /^v\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$/;
 // Reject tags containing shell metacharacters (defense against injection).
 const SHELL_SAFE = /^[a-zA-Z0-9._-]+$/;
 
-// Validate KEEP: must be a positive integer. A bad value (e.g. "abc") would
-// produce NaN, and slice(0, NaN) === [] → every release deleted.
-let KEEP;
-const KEEP_RAW = process.env.KEEP ?? '5';
-if (!/^\d+$/.test(KEEP_RAW) || Number(KEEP_RAW) < 1) {
-  console.error(
-    `Invalid KEEP value: "${process.env.KEEP}". Must be a positive integer. Defaulting to 5.`,
-  );
-  KEEP = 5;
-} else {
-  KEEP = Number(KEEP_RAW);
+// Validate keep counts: must be positive integers. A bad value (e.g. "abc")
+// would produce NaN, and slice(0, NaN) === [] → every release in that pool
+// deleted. Fail-safe to the documented defaults instead.
+function positiveIntEnv(name, fallback) {
+  const raw = process.env[name] ?? String(fallback);
+  if (!/^\d+$/.test(raw) || Number(raw) < 1) {
+    console.error(
+      `Invalid ${name} value: "${process.env[name]}". Must be a positive integer. Defaulting to ${fallback}.`,
+    );
+    return fallback;
+  }
+  return Number(raw);
 }
+
+const STABLE_KEEP = positiveIntEnv('STABLE_KEEP', 5);
+const PRE_KEEP = positiveIntEnv('PRE_KEEP', 5);
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -107,56 +123,83 @@ function compareSemver(a, b) {
   return 0;
 }
 
-// 1. List all releases as JSON, sorted newest-first by semver tag.
-const raw = gh('release', 'list', '--limit', '200', '--json', 'tagName');
-const tags = JSON.parse(raw)
-  .map((r) => r.tagName)
-  // Only FerriScribe version tags (vX.Y.Z or vX.Y.Z-beta.N), fully anchored.
-  .filter((t) => VERSION_RE.test(t))
-  // Semver-aware sort, highest precedence first.
-  .sort((a, b) => compareSemver(a, b) * -1);
-
-const keep = tags.slice(0, KEEP);
-const delete_ = tags.slice(KEEP);
-
-console.log(`Release prune: ${tags.length} versioned releases found.`);
-console.log(`Keeping ${keep.length} newest: ${keep.join(', ')}`);
-console.log(`${delete_.length} to delete${DRY_RUN ? ' (DRY RUN)' : ''}:`);
-
-if (DRY_RUN) {
-  for (const t of delete_) console.log(`  would delete: ${t}`);
-  console.log(`\nDry run complete. ${delete_.length} releases would be deleted.`);
-  process.exit(0);
+/**
+ * Pure retention planning (U2 regression-testable): given release records
+ * `{ tagName, isDraft }`, split stable/prerelease pools and compute what
+ * survives. Exported for tests; the live path calls it below.
+ */
+export function planPrune(
+  releases,
+  { stableKeep = STABLE_KEEP, preKeep = PRE_KEEP } = {},
+) {
+  const versioned = releases.filter((r) => VERSION_RE.test(r.tagName) && !r.isDraft);
+  const stable = versioned
+    .map((r) => r.tagName)
+    .filter((t) => !t.includes('-'))
+    .sort((a, b) => compareSemver(a, b) * -1);
+  const prerelease = versioned
+    .map((r) => r.tagName)
+    .filter((t) => t.includes('-'))
+    .sort((a, b) => compareSemver(a, b) * -1);
+  const keep = new Set([...stable.slice(0, stableKeep), ...prerelease.slice(0, preKeep)]);
+  const delete_ = versioned.map((r) => r.tagName).filter((t) => !keep.has(t));
+  return { stable, prerelease, keep: [...keep], delete_ };
 }
 
-let deleted = 0;
-let tagOnly = 0;
-let failed = 0;
-for (const tag of delete_) {
-  // Defense in depth: skip any tag that slipped past the regex but contains
-  // shell metacharacters, since gh args are joined into a single shell string.
-  if (!SHELL_SAFE.test(tag)) {
-    console.warn(`Skipping tag with unsafe characters: ${tag}`);
-    continue;
+// Live path — guarded so importing this module (tests) never runs it.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  // 1. List all releases as JSON. Draft flag comes along so in-flight drafts
+  //    can be excluded from pruning entirely.
+  const raw = gh('release', 'list', '--limit', '200', '--json', 'tagName,isDraft');
+  const releases = JSON.parse(raw);
+
+  // 2. Split into separate pools. A prerelease tag (contains '-') can never
+  //    displace a stable one, and vice versa: each pool keeps its own N.
+  const { stable, prerelease, delete_ } = planPrune(releases);
+
+  console.log(
+    `Release prune: ${stable.length} stable / ${prerelease.length} prerelease releases found.`,
+  );
+  console.log(`Keeping ${STABLE_KEEP} newest stable: ${stable.slice(0, STABLE_KEEP).join(', ')}`);
+  console.log(`Keeping ${PRE_KEEP} newest prerelease: ${prerelease.slice(0, PRE_KEEP).join(', ')}`);
+  console.log(`${delete_.length} to delete${DRY_RUN ? ' (DRY RUN)' : ''}:`);
+
+  if (DRY_RUN) {
+    for (const t of delete_) console.log(`  would delete: ${t}`);
+    console.log(`\nDry run complete. ${delete_.length} releases would be deleted.`);
+    process.exit(0);
   }
-  // --cleanup-tag deletes the git ref alongside the release.
-  if (ghOk('release', 'delete', tag, '--yes', '--cleanup-tag')) {
-    deleted++;
-    console.log(`  deleted: ${tag}`);
-  } else {
-    // Retry: release may already be gone but tag lingers. This is a
-    // PARTIAL outcome — the release page/assets may still exist (e.g. a
-    // transient release-delete failure); counted separately so it is not
-    // reported as a clean delete. It is retried on the next prune run
-    // because enumeration is by release, not by tag.
-    if (ghOk('api', '-X', 'DELETE', `repos/:owner/:repo/git/refs/tags/${tag}`)) {
-      tagOnly++;
-      console.log(`  deleted tag only (release may remain): ${tag}`);
+
+  let deleted = 0;
+  let tagOnly = 0;
+  let failed = 0;
+  for (const tag of delete_) {
+    // Defense in depth: skip any tag that slipped past the regex but contains
+    // shell metacharacters, since gh args are joined into a single shell string.
+    if (!SHELL_SAFE.test(tag)) {
+      console.warn(`Skipping tag with unsafe characters: ${tag}`);
+      continue;
+    }
+    // --cleanup-tag deletes the git ref alongside the release.
+    if (ghOk('release', 'delete', tag, '--yes', '--cleanup-tag')) {
+      deleted++;
+      console.log(`  deleted: ${tag}`);
     } else {
-      failed++;
-      console.log(`  FAILED: ${tag}`);
+      // Retry: release may already be gone but tag lingers. This is a
+      // PARTIAL outcome — the release page/assets may still exist (e.g. a
+      // transient release-delete failure); counted separately so it is not
+      // reported as a clean delete. It is retried on the next prune run
+      // because enumeration is by release, not by tag.
+      if (ghOk('api', '-X', 'DELETE', `repos/:owner/:repo/git/refs/tags/${tag}`)) {
+        tagOnly++;
+        console.log(`  deleted tag only (release may remain): ${tag}`);
+      } else {
+        failed++;
+        console.log(`  FAILED: ${tag}`);
+      }
     }
   }
-}
 
-console.log(`\nDone: ${deleted} deleted, ${tagOnly} tag-only (release may remain), ${failed} failed.`);
+  console.log(`\nDone: ${deleted} deleted, ${tagOnly} tag-only (release may remain), ${failed} failed.`);
+
+}
