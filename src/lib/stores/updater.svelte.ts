@@ -1,6 +1,7 @@
 import { check } from '@tauri-apps/plugin-updater';
 import { invoke } from '@tauri-apps/api/core';
 import { settings } from './settings.svelte';
+import { toasts } from './toasts.svelte';
 
 /// How often to auto-check for updates while the app is running.
 const CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
@@ -12,6 +13,10 @@ class UpdaterStore {
   availableVersion = $state<string | null>(null);
   downloadProgress = $state<number>(0);
   errorMessage = $state<string | null>(null);
+  /// Set when `relaunch()` fails — the update is installed but the restart
+  /// command itself refused or errored. The UI surfaces this inline and via
+  /// a toast so the user is never left staring at a dead "Restart now" button.
+  restartError = $state<string | null>(null);
   lastCheckedAt = $state<Date | null>(null);
 
   private intervalId: ReturnType<typeof setInterval> | null = null;
@@ -100,11 +105,19 @@ class UpdaterStore {
   /// threads — a SIGABRT crash report on every update relaunch before the
   /// fix; see src-tauri/src/commands/restart.rs). restart_app sets the
   /// exit-guard flag first so the process terminates via _exit instead.
+  ///
+  /// On failure, sets `restartError` and fires a toast so the user sees
+  /// actionable feedback instead of a silent console error. State stays
+  /// `'installed'` — the update IS installed, only the restart command failed.
   async relaunch(): Promise<void> {
+    this.restartError = null;
     try {
       await invoke('restart_app');
     } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e);
+      this.restartError = `Could not restart automatically: ${raw}. Please save your work and restart FerriScribe manually.`;
       console.error('Failed to relaunch:', e);
+      toasts.error(this.restartError);
     }
   }
 

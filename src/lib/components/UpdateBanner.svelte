@@ -20,11 +20,16 @@
         <div class="progress-fill" style="width: {updater.downloadProgress}%"></div>
       </div>
     {:else if updater.state === 'installed'}
-      <span class="banner-text">✓ Update installed</span>
-      <div class="banner-actions">
-        <button class="btn-install" onclick={() => updater.relaunch()}>Restart now</button>
-        <button class="btn-later" onclick={() => updater.dismiss()}>Later</button>
+      <div class="installed-section">
+        <span class="banner-text">✓ Update installed</span>
+        <div class="banner-actions">
+          <button class="btn-install" onclick={() => updater.relaunch()}>Restart now</button>
+          <button class="btn-later" onclick={() => updater.dismiss()}>Later</button>
+        </div>
       </div>
+      {#if updater.restartError}
+        <span class="banner-text banner-error">⚠ {updater.restartError}</span>
+      {/if}
     {:else if updater.state === 'error'}
       <span class="banner-text banner-error">⚠ Update failed: {updater.errorMessage}</span>
       <div class="banner-actions">
@@ -69,5 +74,8 @@
   .progress-fill {
     height: 100%; background-color: var(--accent, #3b82f6);
     transition: width 0.3s ease;
+  }
+  .installed-section {
+    display: flex; align-items: center; gap: 14px;
   }
 </style>

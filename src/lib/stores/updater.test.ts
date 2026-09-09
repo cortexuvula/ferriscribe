@@ -35,13 +35,25 @@ describe('UpdaterStore — relaunch', () => {
     expect(vi.mocked(pluginRelaunch)).not.toHaveBeenCalled();
   });
 
-  it('relaunch() swallows failures (logged, no throw)', async () => {
+  it('relaunch() surfaces failures to the user via restartError and toast', async () => {
     vi.mocked(invoke).mockRejectedValue(new Error('failed to restart the app'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
+    // State stays 'installed' — the update IS installed, only restart failed.
+    updater.state = 'installed';
     await expect(updater.relaunch()).resolves.toBeUndefined();
     expect(errorSpy).toHaveBeenCalledWith('Failed to relaunch:', expect.any(Error));
+    expect(updater.state).toBe('installed');
+    expect(updater.restartError).toContain('Could not restart automatically');
+    expect(updater.restartError).toContain('failed to restart the app');
+
+    // The toasts store should have received an error toast for immediate visibility.
+    const { toasts } = await import('./toasts.svelte');
+    expect(toasts.list.length).toBeGreaterThan(0);
+    expect(toasts.list[toasts.list.length - 1].type).toBe('error');
+
     errorSpy.mockRestore();
+    toasts.destroy();
   });
 });
 

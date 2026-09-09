@@ -102,6 +102,9 @@
     <div class="update-status installed">
       ✓ Update installed.
       <button class="btn-install" onclick={() => updater.relaunch()}>Restart now</button>
+      {#if updater.restartError}
+        <span class="restart-error">⚠ {updater.restartError}</span>
+      {/if}
     </div>
   {:else if updater.state === 'error'}
     <div class="update-status error">
@@ -178,6 +181,7 @@
   .btn-install:hover { background-color: var(--accent-hover, #2563eb); }
   .progress-bar { flex: 1; min-width: 100px; height: 6px; background-color: var(--border, #333); border-radius: 3px; overflow: hidden; }
   .progress-fill { height: 100%; background-color: var(--accent, #3b82f6); transition: width 0.3s ease; }
+  .restart-error { width: 100%; color: var(--danger, #ef4444); font-size: 12px; }
   .privacy-note { font-size: 11px; color: var(--text-muted); line-height: 1.5; margin: 0; }
   .privacy-note code { font-family: ui-monospace, monospace; }
 </style>
