@@ -1,6 +1,6 @@
 # FerriScribe
 
-A privacy-first medical transcription desktop application built with Rust and Svelte. Record doctor-patient encounters, transcribe them locally with speaker diarization, generate SOAP notes and clinical documents, draft letters from scanned paper documents, OCR supporting documents or any region of your screen, hold live translated conversations with patients, sync across machines, and export to PDF, DOCX, or FHIR.
+A privacy-first medical transcription desktop application built with Rust and Svelte. Record doctor-patient encounters, transcribe them locally with speaker diarization, generate specialty-tailored SOAP notes and clinical documents, draft letters from scanned paper documents, OCR supporting documents or any region of your screen, hold live translated conversations with patients, sync across machines, and export to PDF, DOCX, or FHIR.
 
 ## Features
 
@@ -106,7 +106,7 @@ crates/
   tts-providers/  — text-to-speech
   agents/         — agentic orchestrator with tool registry
   rag/            — vector store, BM25, embeddings, ingestion
-  processing/     — transcription pipeline, SOAP generation, OCR, ICD-9 selector
+  processing/     — transcription pipeline, SOAP/document generation, specialty prompt packs, OCR, ICD-9 selector
   export/         — PDF, DOCX, FHIR export
   translation/    — text translation
   sharing/        — office-server sharing, mDNS, Tailscale, auth proxy, whisper supervisor
@@ -121,7 +121,7 @@ src/              — Svelte 5 frontend
 
 - [Rust](https://rustup.rs/) 1.85+ (required by `edition = "2024"`)
 - [Node.js](https://nodejs.org/) 20+
-- [CMake](https://cmake.org/) and Clang (for whisper.cpp, ONNX Runtime, and libheif)
+- [CMake](https://cmake.org/) and Clang (for whisper.cpp and ONNX Runtime)
 - macOS: Xcode Command Line Tools
 
 ### Build & Run
@@ -130,6 +130,8 @@ src/              — Svelte 5 frontend
 npm install
 npm run tauri dev
 ```
+
+The first `npm run tauri dev` also builds the `ferriscribe-backup` sidecar (a one-time `medical-backup` release build; cargo's cache makes later runs take seconds).
 
 Release builds are produced by the GitHub Actions workflow on tag pushes matching `v*`. Artifacts are attached to the release page.
 
@@ -182,7 +184,7 @@ Models are downloaded from HuggingFace / GitHub and stored under the app's data 
 1. **Record** — Start a new recording or import an existing audio file.
 2. **Add Context** — Enter medications, allergies, conditions, and notes. Drop supporting documents (PDFs, images, Word/Excel files) for OCR extraction.
 3. **Transcribe** — Local Whisper runs on-device by default; Custom Vocabulary corrections are applied automatically after STT.
-4. **Generate** — Produce a SOAP note, referral, clinical letter, or synopsis from the transcript, optionally guided by a Context Template. Supporting documents and patient context are automatically included.
+4. **Generate** — Produce a SOAP note, referral, clinical letter, synopsis, or peer-discussion note from the transcript, optionally guided by a Context Template and shaped by your selected specialty pack. Supporting documents and patient context are automatically included.
 5. **Review** — Preview inline in the Generate tab, edit in the Editor tab, or use the RSVP speed reader.
 6. **Export** — Save as PDF, DOCX, or FHIR R4.
 7. **Chat** — Ask a local model anything, with grounded anti-fabrication rules. Drop documents (or a whole chart) into the conversation and ask questions about them — see [Chat & Document Q&A](#chat--document-qa).
