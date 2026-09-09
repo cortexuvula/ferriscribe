@@ -89,6 +89,17 @@ pub async fn start_recording(
 ) -> AppResult<String> {
     info!("Starting audio recording");
 
+    // Restart TOCTOU guard (Codie review, 2026-09-09): once `restart_app`
+    // has committed to relaunching, refuse new takes — otherwise a
+    // recording started in the milliseconds between the coordinated-
+    // shutdown checks and process exit would be destroyed mid-capture.
+    if crate::commands::restart::restart_committed() {
+        warn!("Refusing to start recording: app restart is in progress");
+        return Err(AppError::audio(
+            "An app restart is in progress — try again in a moment".to_string(),
+        ));
+    }
+
     // Atomically check-and-set recording flag to prevent concurrent recordings.
     {
         let mut active = state.recording_active.lock().await;

@@ -70,9 +70,19 @@ use tauri::State;
 
 use crate::state::{AppState, PendingEdit};
 
-/// Set when the process is exiting ONLY to relaunch a fresh copy (the
-/// update flow). Read by [`exit_guard`] — see the module docs.
+/// Set when the process is preparing to exit ONLY to relaunch a fresh copy
+/// (the update flow). Read by [`exit_guard`] — see the module docs — AND by
+/// `start_recording` to close the restart TOCTOU window: once a restart is
+/// committed, new recordings must not start (Codie review, 2026-09-09).
+/// Cleared by `reset_restarting` when a restart is refused/aborted.
 static RESTARTING: AtomicBool = AtomicBool::new(false);
+
+/// True when a restart has been committed (checks passed, exit imminent).
+/// `start_recording` consults this to refuse new takes during the window
+/// between the coordinated-shutdown checks and process exit.
+pub fn restart_committed() -> bool {
+    RESTARTING.load(Ordering::SeqCst)
+}
 
 /// Terminate immediately when `restarting`, skipping the remaining atexit
 /// chain. Split from the `extern "C"` shim so the no-op path is testable
@@ -211,8 +221,13 @@ pub async fn clear_pending_edit(state: State<'_, AppState>, field: String) -> Ap
 #[tauri::command]
 pub async fn restart_app(app: tauri::AppHandle, state: State<'_, AppState>) -> AppResult<()> {
     ensure_safe_to_restart(&state).await?;
-    // All work settled — only now set the flag. Ordering matters: the
-    // guard must never fire with unsaved work still in flight.
+    // All work settled — commit the restart. Once RESTARTING is set,
+    // `start_recording` refuses new takes, closing the check→exit TOCTOU
+    // window (Codie review, 2026-09-09). Ordering vs. the guard is
+    // unchanged: work settles first, always. `app.restart()` never
+    // returns (its signature is `!`): it spawns the replacement and exits
+    // the process via the guard, so there is no failure path that leaves
+    // the process alive with the flag set.
     RESTARTING.store(true, Ordering::SeqCst);
     app.restart()
 }
