@@ -1,0 +1,60 @@
+{
+  "counts": {
+    "requested": 60,
+    "collected": 60,
+    "passed": 60,
+    "failed": 0,
+    "themePairs": 30,
+    "distinctPairs": 30,
+    "actionSamples": 672
+  },
+  "unexpectedBoundaryCalls": 0,
+  "blockedRequests": 0,
+  "browserErrors": 0,
+  "expectedSyntheticFailures": 12,
+  "geometrySamples": 264,
+  "badgeContrast": [
+    {
+      "theme": "light",
+      "foreground": "rgb(73, 80, 87)",
+      "background": "rgb(248, 249, 250)",
+      "contrast": 7.757
+    },
+    {
+      "theme": "dark",
+      "foreground": "rgb(144, 146, 150)",
+      "background": "rgb(37, 38, 43)",
+      "contrast": 4.845
+    }
+  ],
+  "productionDefects": [],
+  "visuallyInspected": [
+    "empty-dark-390x360.png",
+    "active-light-390x360.png",
+    "output-completed-dark-390x360.png"
+  ],
+  "visualFindings": "No visible overlaps or horizontal clipping in inspected images. Short-height output/context intentionally extend below viewport; scroll reachability tested separately.",
+  "limits": [
+    "No native App startup, DB, settings reads, patient data, OS clipboard, provider or external service.",
+    "SpeedRead dispatch sink mocked, reader overlay not mounted.",
+    "Only SOAP generation/Preview/Copy/SpeedRead and retry exercised, not all document-specific fields.",
+    "Freshness backend missing. Real GenerateTab remains Unknown after mocked successful generation; no current/stale verdict injected.",
+    "No complete accessibility claim or production lint/build rerun."
+  ],
+  "priorHarnessFailures": {
+    "report": "browser-second-attempt.json",
+    "passed": 48,
+    "failed": 12,
+    "cause": "Active badge CSS uppercase makes innerText ACTIVE; semantic textContent Active. Corrected harness assertion only. Active child boundary calls discovered fail-closed and explicitly mocked after source inspection.",
+    "missingThemePairs": 6,
+    "identicalNonemptyHashPairs": 0,
+    "preservedScreenshots": "browser-evidence/initial-errors/"
+  },
+  "server": {
+    "url": "http://127.0.0.1:14749/docs/generation-design/browser-index.html?state=completed&theme=dark",
+    "process": "proc_0a0c0c6b4c8e",
+    "ownership": "handed off to parent",
+    "restart": "../../node_modules/.bin/vite --config docs/generation-design/browser-vite.config.ts"
+  },
+  "rerun": "uv run --with playwright python docs/generation-design/browser-verify.py && python docs/generation-design/browser-evidence-summary.py"
+}

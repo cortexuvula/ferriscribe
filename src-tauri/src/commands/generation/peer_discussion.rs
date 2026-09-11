@@ -10,10 +10,10 @@ use crate::state::AppState;
 
 use super::super::specialty::resolve_specialty_prompt;
 use super::helpers::{
-    acquire_generation_lock, build_completion_request, ensure_nonempty_output,
-    ensure_prompt_within_cap, fresh_stats_patch, load_recording_and_settings,
-    persist_producer_patch, require_transcript, resolve_provider, run_generation_command,
-    stream_with_events,
+    acquire_generation_lock, build_completion_request, context_metadata_patch,
+    ensure_nonempty_output, ensure_prompt_within_cap, fold_structured_context, fresh_stats_patch,
+    load_recording_and_settings, persist_producer_patch, persist_provenance, require_transcript,
+    resolve_provider, run_generation_command, stream_with_events, validate_patient_context,
 };
 
 use medical_processing::specialty::DocType as PackDocType;
@@ -23,6 +23,7 @@ use medical_processing::specialty::DocType as PackDocType;
 /// Emits `generation-progress` events with `type: "peer_discussion"` and
 /// statuses `"started"` / `"completed"` / `"failed"`.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri command args map the frontend payload 1:1
 pub async fn generate_peer_discussion(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -31,6 +32,7 @@ pub async fn generate_peer_discussion(
     specialty: String,
     reason: String,
     context: Option<String>,
+    patient_context: Option<medical_core::types::PatientContext>,
 ) -> AppResult<String> {
     // One generation per recording at a time (see acquire_generation_lock).
     let _generation_lock = acquire_generation_lock(&state, &recording_id)?;
@@ -46,6 +48,13 @@ pub async fn generate_peer_discussion(
         ));
     }
 
+    if let Some(ref pc) = patient_context {
+        validate_patient_context(pc)?;
+    }
+
+    // F2 Rust fold: structured lists + freeform notes/OCR, one string.
+    let folded = fold_structured_context(patient_context.as_ref(), context.as_deref());
+
     let inner = generate_peer_discussion_inner(
         &state,
         Some(&app),
@@ -53,18 +62,21 @@ pub async fn generate_peer_discussion(
         &physician_name,
         &specialty,
         &reason,
+        folded.as_deref(),
+        patient_context.as_ref(),
         context.as_deref(),
     );
     run_generation_command(
         &app,
         &recording_id,
         "peer_discussion",
-        context.as_deref(),
+        folded.as_deref(),
         inner,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn generate_peer_discussion_inner(
     state: &AppState,
     app: Option<&tauri::AppHandle>,
@@ -73,6 +85,8 @@ async fn generate_peer_discussion_inner(
     specialty: &str,
     reason: &str,
     context: Option<&str>,
+    patient_context: Option<&medical_core::types::PatientContext>,
+    raw_context: Option<&str>,
 ) -> AppResult<String> {
     let (mut recording, settings, config) =
         load_recording_and_settings(&state.db, recording_id).await?;
@@ -161,6 +175,8 @@ async fn generate_peer_discussion_inner(
         }),
     )];
     metadata_patch.extend(fresh_stats_patch(&recording, "peer_discussion"));
+    // F3: context + patient_context mirror with uniform null-clearing.
+    metadata_patch.extend(context_metadata_patch(raw_context, patient_context));
 
     persist_producer_patch(
         state,
@@ -173,7 +189,54 @@ async fn generate_peer_discussion_inner(
     )
     .await?;
 
+    // Freshness provenance (best-effort): peer mirrors the transcript (its
+    // true input), so no SOAP source binding.
+    let input_digest = super::freshness::peer_input_digest(
+        &recording,
+        context,
+        physician_name,
+        specialty,
+        reason,
+        &config,
+    );
+    persist_provenance(
+        state,
+        recording.id,
+        "peer_discussion",
+        provider.name().to_string(),
+        model_name,
+        input_digest,
+        discussion_text.clone(),
+        None,
+    )
+    .await;
+
     Ok(discussion_text)
+}
+
+
+#[cfg(test)]
+pub(crate) async fn generate_peer_discussion_inner_for_test(
+    state: &AppState,
+    recording_id: &str,
+    inputs: &super::freshness::CurrentDocInputs,
+) -> AppResult<String> {
+    let folded = super::helpers::fold_structured_context(
+        inputs.patient_context.as_ref(),
+        inputs.context.as_deref(),
+    );
+    generate_peer_discussion_inner(
+        state,
+        None,
+        recording_id,
+        inputs.physician_name.as_deref().unwrap_or("Smith"),
+        inputs.specialty.as_deref().unwrap_or("Cardiology"),
+        inputs.reason.as_deref().unwrap_or("chest pain evaluation"),
+        folded.as_deref(),
+        inputs.patient_context.as_ref(),
+        inputs.context.as_deref(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -202,6 +265,8 @@ mod preflight_tests {
             "Cardiology",
             "chest pain evaluation",
             None, // context
+            None, // patient_context
+            None, // raw_context
         )
         .await;
         assert_endpoint_offline(result, "Ollama", start);
@@ -241,7 +306,9 @@ mod stats_tests {
             "Smith",
             "Cardiology",
             "chest pain evaluation",
-            None,
+            None, // context
+            None, // patient_context
+            None, // raw_context
         )
         .await
         .expect("peer discussion generation succeeds");
@@ -292,7 +359,9 @@ mod stats_tests {
             "Smith",
             "Cardiology",
             "chest pain evaluation",
-            None,
+            None, // context
+            None, // patient_context
+            None, // raw_context
         )
         .await
         .expect("peer discussion generation succeeds");

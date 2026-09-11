@@ -1,0 +1,1678 @@
+{
+  "scope": "Real GenerateTab and stores; mocked Tauri, clipboard, SpeedRead sink; no App startup or provenance backend",
+  "cases": [
+    {
+      "state": "empty",
+      "theme": "light",
+      "width": 390,
+      "height": 700,
+      "errors": [],
+      "computed": {
+        "theme": "light",
+        "bg": "rgb(255, 255, 255)",
+        "fg": "rgb(33, 37, 41)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 390,
+              "top": 39,
+              "bottom": 700,
+              "width": 390,
+              "height": 661,
+              "scrollWidth": 390,
+              "clientWidth": 390,
+              "scrollHeight": 661,
+              "clientHeight": 661
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 390,
+              "top": 39,
+              "bottom": 700,
+              "width": 390,
+              "height": 661,
+              "scrollWidth": 390,
+              "clientWidth": 390,
+              "scrollHeight": 661,
+              "clientHeight": 661
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 194.9921875,
+          "y": 419.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-light-390x700.png",
+      "sha256": "69946de2b6b2ba93d210c2adbc2859ff487ef67d96cff0a41db411ecfddb5530",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "light",
+      "width": 390,
+      "height": 360,
+      "errors": [],
+      "computed": {
+        "theme": "light",
+        "bg": "rgb(255, 255, 255)",
+        "fg": "rgb(33, 37, 41)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 390,
+              "top": 39,
+              "bottom": 360,
+              "width": 390,
+              "height": 321,
+              "scrollWidth": 390,
+              "clientWidth": 390,
+              "scrollHeight": 321,
+              "clientHeight": 321
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 390,
+              "top": 39,
+              "bottom": 360,
+              "width": 390,
+              "height": 321,
+              "scrollWidth": 390,
+              "clientWidth": 390,
+              "scrollHeight": 321,
+              "clientHeight": 321
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 194.9921875,
+          "y": 249.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-light-390x360.png",
+      "sha256": "fab1b3bd1cc986a09e3ee59fbf2761d7a28392487cbeb16e7ad6fecff0f11509",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "light",
+      "width": 800,
+      "height": 700,
+      "errors": [],
+      "computed": {
+        "theme": "light",
+        "bg": "rgb(255, 255, 255)",
+        "fg": "rgb(33, 37, 41)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 800,
+              "top": 26,
+              "bottom": 700,
+              "width": 800,
+              "height": 674,
+              "scrollWidth": 800,
+              "clientWidth": 800,
+              "scrollHeight": 674,
+              "clientHeight": 674
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 800,
+              "top": 26,
+              "bottom": 700,
+              "width": 800,
+              "height": 674,
+              "scrollWidth": 800,
+              "clientWidth": 800,
+              "scrollHeight": 674,
+              "clientHeight": 674
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 399.9921875,
+          "y": 402.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-light-800x700.png",
+      "sha256": "4c9e61e9f44500fa0eb7fff8fcf67987bbe66f227b6b491f3887195c8a90ee3a",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "light",
+      "width": 800,
+      "height": 360,
+      "errors": [],
+      "computed": {
+        "theme": "light",
+        "bg": "rgb(255, 255, 255)",
+        "fg": "rgb(33, 37, 41)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 800,
+              "top": 26,
+              "bottom": 360,
+              "width": 800,
+              "height": 334,
+              "scrollWidth": 800,
+              "clientWidth": 800,
+              "scrollHeight": 334,
+              "clientHeight": 334
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 800,
+              "top": 26,
+              "bottom": 360,
+              "width": 800,
+              "height": 334,
+              "scrollWidth": 800,
+              "clientWidth": 800,
+              "scrollHeight": 334,
+              "clientHeight": 334
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 399.9921875,
+          "y": 232.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-light-800x360.png",
+      "sha256": "a7bb41909ddf883ec3ad7a18661a0a9f1c92a4138884fe406bfb5463bfff6d45",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "light",
+      "width": 1200,
+      "height": 700,
+      "errors": [],
+      "computed": {
+        "theme": "light",
+        "bg": "rgb(255, 255, 255)",
+        "fg": "rgb(33, 37, 41)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 1200,
+              "top": 26,
+              "bottom": 700,
+              "width": 1200,
+              "height": 674,
+              "scrollWidth": 1200,
+              "clientWidth": 1200,
+              "scrollHeight": 674,
+              "clientHeight": 674
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 1200,
+              "top": 26,
+              "bottom": 700,
+              "width": 1200,
+              "height": 674,
+              "scrollWidth": 1200,
+              "clientWidth": 1200,
+              "scrollHeight": 674,
+              "clientHeight": 674
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 599.9921875,
+          "y": 402.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-light-1200x700.png",
+      "sha256": "9cefb007285d81bc879ae43ffae001224394a08849bc95dfd1b3fed49d9f2a82",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "light",
+      "width": 1200,
+      "height": 360,
+      "errors": [],
+      "computed": {
+        "theme": "light",
+        "bg": "rgb(255, 255, 255)",
+        "fg": "rgb(33, 37, 41)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 1200,
+              "top": 26,
+              "bottom": 360,
+              "width": 1200,
+              "height": 334,
+              "scrollWidth": 1200,
+              "clientWidth": 1200,
+              "scrollHeight": 334,
+              "clientHeight": 334
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 1200,
+              "top": 26,
+              "bottom": 360,
+              "width": 1200,
+              "height": 334,
+              "scrollWidth": 1200,
+              "clientWidth": 1200,
+              "scrollHeight": 334,
+              "clientHeight": 334
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 599.9921875,
+          "y": 232.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-light-1200x360.png",
+      "sha256": "f17e190a2c83aa0f57fb040b3ef3b1ced387ff02ca0c57f185abe0d11cc23f5a",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "dark",
+      "width": 390,
+      "height": 700,
+      "errors": [],
+      "computed": {
+        "theme": "dark",
+        "bg": "rgb(26, 27, 30)",
+        "fg": "rgb(193, 194, 197)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 390,
+              "top": 39,
+              "bottom": 700,
+              "width": 390,
+              "height": 661,
+              "scrollWidth": 390,
+              "clientWidth": 390,
+              "scrollHeight": 661,
+              "clientHeight": 661
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 390,
+              "top": 39,
+              "bottom": 700,
+              "width": 390,
+              "height": 661,
+              "scrollWidth": 390,
+              "clientWidth": 390,
+              "scrollHeight": 661,
+              "clientHeight": 661
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 194.9921875,
+          "y": 419.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-dark-390x700.png",
+      "sha256": "3084dbebbbbc09ff39cf912bc87fd72d297f9992a1a5a17bbf7dd3f8e8137add",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "dark",
+      "width": 390,
+      "height": 360,
+      "errors": [],
+      "computed": {
+        "theme": "dark",
+        "bg": "rgb(26, 27, 30)",
+        "fg": "rgb(193, 194, 197)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 390,
+              "top": 39,
+              "bottom": 360,
+              "width": 390,
+              "height": 321,
+              "scrollWidth": 390,
+              "clientWidth": 390,
+              "scrollHeight": 321,
+              "clientHeight": 321
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 390,
+              "top": 39,
+              "bottom": 360,
+              "width": 390,
+              "height": 321,
+              "scrollWidth": 390,
+              "clientWidth": 390,
+              "scrollHeight": 321,
+              "clientHeight": 321
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 194.9921875,
+          "y": 249.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-dark-390x360.png",
+      "sha256": "9192c3d792f2f85ad889ab566396f45775034968e5758511ad80bbb701c610dd",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "dark",
+      "width": 800,
+      "height": 700,
+      "errors": [],
+      "computed": {
+        "theme": "dark",
+        "bg": "rgb(26, 27, 30)",
+        "fg": "rgb(193, 194, 197)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 800,
+              "top": 26,
+              "bottom": 700,
+              "width": 800,
+              "height": 674,
+              "scrollWidth": 800,
+              "clientWidth": 800,
+              "scrollHeight": 674,
+              "clientHeight": 674
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 800,
+              "top": 26,
+              "bottom": 700,
+              "width": 800,
+              "height": 674,
+              "scrollWidth": 800,
+              "clientWidth": 800,
+              "scrollHeight": 674,
+              "clientHeight": 674
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 399.9921875,
+          "y": 402.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-dark-800x700.png",
+      "sha256": "6a0776176841aca860b8e2a2e602f082ef8c160ba07d8da160a771e61f4883c6",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "dark",
+      "width": 800,
+      "height": 360,
+      "errors": [],
+      "computed": {
+        "theme": "dark",
+        "bg": "rgb(26, 27, 30)",
+        "fg": "rgb(193, 194, 197)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 800,
+              "top": 26,
+              "bottom": 360,
+              "width": 800,
+              "height": 334,
+              "scrollWidth": 800,
+              "clientWidth": 800,
+              "scrollHeight": 334,
+              "clientHeight": 334
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 800,
+              "top": 26,
+              "bottom": 360,
+              "width": 800,
+              "height": 334,
+              "scrollWidth": 800,
+              "clientWidth": 800,
+              "scrollHeight": 334,
+              "clientHeight": 334
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 399.9921875,
+          "y": 232.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-dark-800x360.png",
+      "sha256": "3bf83e8ec8ff4944bed5006505f47d3241e69b9966c488d9f796b3fde194fd29",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "dark",
+      "width": 1200,
+      "height": 700,
+      "errors": [],
+      "computed": {
+        "theme": "dark",
+        "bg": "rgb(26, 27, 30)",
+        "fg": "rgb(193, 194, 197)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 1200,
+              "top": 26,
+              "bottom": 700,
+              "width": 1200,
+              "height": 674,
+              "scrollWidth": 1200,
+              "clientWidth": 1200,
+              "scrollHeight": 674,
+              "clientHeight": 674
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 1200,
+              "top": 26,
+              "bottom": 700,
+              "width": 1200,
+              "height": 674,
+              "scrollWidth": 1200,
+              "clientWidth": 1200,
+              "scrollHeight": 674,
+              "clientHeight": 674
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 599.9921875,
+          "y": 402.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-dark-1200x700.png",
+      "sha256": "b8f1f40ed084fb18060dd9ed7716c2451c299b4f969144f1c3b459a321482d5a",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "empty",
+      "theme": "dark",
+      "width": 1200,
+      "height": 360,
+      "errors": [],
+      "computed": {
+        "theme": "dark",
+        "bg": "rgb(26, 27, 30)",
+        "fg": "rgb(193, 194, 197)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 1200,
+              "top": 26,
+              "bottom": 360,
+              "width": 1200,
+              "height": 334,
+              "scrollWidth": 1200,
+              "clientWidth": 1200,
+              "scrollHeight": 334,
+              "clientHeight": 334
+            }
+          ]
+        },
+        {
+          "selector": ".empty-state",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 1200,
+              "top": 26,
+              "bottom": 360,
+              "width": 1200,
+              "height": 334,
+              "scrollWidth": 1200,
+              "clientWidth": 1200,
+              "scrollHeight": 334,
+              "clientHeight": 334
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "Go to Recordings",
+          "height": 44,
+          "x": 599.9921875,
+          "y": 232.5,
+          "hit": true,
+          "disabled": false
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/empty-dark-1200x360.png",
+      "sha256": "ab180a3effdccee8f4f222d5e3129dd34277e7bdba3204c5091c5481ce045d54",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 1,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    },
+    {
+      "state": "active",
+      "theme": "light",
+      "width": 390,
+      "height": 700,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "light",
+      "width": 390,
+      "height": 360,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "light",
+      "width": 800,
+      "height": 700,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "light",
+      "width": 800,
+      "height": 360,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "light",
+      "width": 1200,
+      "height": 700,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "light",
+      "width": 1200,
+      "height": 360,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "dark",
+      "width": 390,
+      "height": 700,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "dark",
+      "width": 390,
+      "height": 360,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "dark",
+      "width": 800,
+      "height": 700,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "dark",
+      "width": 800,
+      "height": 360,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "dark",
+      "width": 1200,
+      "height": 700,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "active",
+      "theme": "dark",
+      "width": 1200,
+      "height": 360,
+      "errors": [
+        "Active badge missing"
+      ],
+      "passed": false,
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "list_condition_chips",
+            "args": {}
+          },
+          {
+            "command": "list_context_templates",
+            "args": {}
+          },
+          {
+            "command": "onDragDropEvent",
+            "args": null
+          }
+        ],
+        "unknown": [
+          "list_condition_chips",
+          "listen:condition-chips-changed"
+        ],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      }
+    },
+    {
+      "state": "generating",
+      "theme": "light",
+      "width": 390,
+      "height": 700,
+      "errors": [],
+      "computed": {
+        "theme": "light",
+        "bg": "rgb(255, 255, 255)",
+        "fg": "rgb(33, 37, 41)"
+      },
+      "geometry": [
+        {
+          "selector": ".generate-tab",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 390,
+              "top": 39,
+              "bottom": 700,
+              "width": 390,
+              "height": 661,
+              "scrollWidth": 390,
+              "clientWidth": 390,
+              "scrollHeight": 661,
+              "clientHeight": 661
+            }
+          ]
+        },
+        {
+          "selector": ".generate-content",
+          "count": 1,
+          "elements": [
+            {
+              "left": 0,
+              "right": 390,
+              "top": 39,
+              "bottom": 700,
+              "width": 390,
+              "height": 661,
+              "scrollWidth": 390,
+              "clientWidth": 390,
+              "scrollHeight": 685,
+              "clientHeight": 661
+            }
+          ]
+        },
+        {
+          "selector": ".context-panel",
+          "count": 1,
+          "elements": [
+            {
+              "left": 16,
+              "right": 374,
+              "top": 136,
+              "bottom": 177.5,
+              "width": 358,
+              "height": 41.5,
+              "scrollWidth": 356,
+              "clientWidth": 356,
+              "scrollHeight": 40,
+              "clientHeight": 40
+            }
+          ]
+        },
+        {
+          "selector": ".create-section",
+          "count": 1,
+          "elements": [
+            {
+              "left": 16,
+              "right": 374,
+              "top": 205.5,
+              "bottom": 465,
+              "width": 358,
+              "height": 259.5,
+              "scrollWidth": 358,
+              "clientWidth": 358,
+              "scrollHeight": 260,
+              "clientHeight": 260
+            }
+          ]
+        },
+        {
+          "selector": ".output-section",
+          "count": 1,
+          "elements": [
+            {
+              "left": 16,
+              "right": 374,
+              "top": 493,
+              "bottom": 708,
+              "width": 358,
+              "height": 215,
+              "scrollWidth": 358,
+              "clientWidth": 358,
+              "scrollHeight": 215,
+              "clientHeight": 215
+            }
+          ]
+        }
+      ],
+      "reachability": [
+        {
+          "text": "\u25b8\nAdditional Context",
+          "height": 39.5,
+          "x": 195,
+          "y": 156.75,
+          "hit": true,
+          "disabled": false
+        },
+        {
+          "text": "Generating SOAP note\u2026",
+          "height": 44,
+          "x": 195,
+          "y": 362,
+          "hit": true,
+          "disabled": true
+        },
+        {
+          "text": "Referral letter",
+          "height": 44,
+          "x": 75.1953125,
+          "y": 443,
+          "hit": true,
+          "disabled": false
+        },
+        {
+          "text": "Letter",
+          "height": 44,
+          "x": 176.4453125,
+          "y": 443,
+          "hit": true,
+          "disabled": false
+        },
+        {
+          "text": "Peer discussion",
+          "height": 44,
+          "x": 284.2578125,
+          "y": 443,
+          "hit": true,
+          "disabled": false
+        },
+        {
+          "text": "Generating\u2026",
+          "height": 44,
+          "x": 98.7890625,
+          "y": 640.5,
+          "hit": true,
+          "disabled": true
+        }
+      ],
+      "screenshot": "/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/generation-design/docs/generation-design/browser-evidence/generating-light-390x700.png",
+      "sha256": "c0b483e8282d65afc2c07b45037c5f380a5bd834f44829f1fb9b5775cba04020",
+      "audit": {
+        "calls": [
+          {
+            "command": "list_letter_audiences",
+            "args": {}
+          },
+          {
+            "command": "generate_soap",
+            "args": {
+              "recordingId": "synthetic-browser",
+              "template": null,
+              "context": null,
+              "patientContext": null
+            }
+          }
+        ],
+        "unknown": [],
+        "copies": [],
+        "speed": [],
+        "navigation": 0,
+        "expectedFailures": []
+      },
+      "blockedRequests": [],
+      "passed": true
+    }
+  ],
+  "pairs": [],
+  "errors": [
+    {
+      "case": [
+        "active",
+        "light",
+        390,
+        700
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "light",
+        390,
+        360
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "light",
+        800,
+        700
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "light",
+        800,
+        360
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "light",
+        1200,
+        700
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "light",
+        1200,
+        360
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "dark",
+        390,
+        700
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "dark",
+        390,
+        360
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "dark",
+        800,
+        700
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "dark",
+        800,
+        360
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "dark",
+        1200,
+        700
+      ],
+      "error": "Active badge missing"
+    },
+    {
+      "case": [
+        "active",
+        "dark",
+        1200,
+        360
+      ],
+      "error": "Active badge missing"
+    }
+  ],
+  "interactions": [],
+  "identical_hash_guard_test": "passed"
+}

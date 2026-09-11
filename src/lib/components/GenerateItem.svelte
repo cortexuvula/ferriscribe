@@ -17,6 +17,8 @@
     generatedText?: string | null;
     progressText?: string | null;
     failed?: boolean;
+    /** Only an authoritative backend verdict may mark retained output current. */
+    freshness?: 'current' | 'stale' | 'unknown' | 'checking';
     onGenerate: () => void;
     onCopy: () => void;
     onSpeedRead?: () => void;
@@ -36,82 +38,55 @@
     generatedText = null,
     progressText = null,
     failed = false,
+    freshness = 'unknown',
     onGenerate,
     onCopy,
     onSpeedRead,
   }: Props = $props();
 </script>
 
-<div class="generate-item" class:failed>
+<article class="generate-item" class:failed aria-label={title}>
   {#if icon}<span class="item-icon" aria-hidden="true">{icon}</span>{/if}
   <div class="item-info">
-    <div class="item-title">{title}</div>
+    <h4 class="item-title">{title}</h4>
     <div class="item-desc">{description}</div>
     {#if useWhen}<div class="item-use-when">Use when: {useWhen}</div>{/if}
+    {#if failed}<span class="failed-badge">Failed</span>{/if}
+    {#if done}
+      <span class="output-badge" class:stale={freshness === 'stale'} class:current={freshness === 'current'}>
+        {freshness === 'stale' ? 'Stale' : freshness === 'current' ? 'Current' : freshness === 'checking' ? 'Checking freshness…' : 'Freshness unavailable'}
+      </span>
+      {#if freshness === 'stale'}
+        <p class="stale-hint">Inputs changed. Regenerate before using this output.</p>
+      {:else if freshness === 'unknown'}
+        <p class="output-hint">Input history is unavailable. Review or regenerate before use.</p>
+      {/if}
+    {/if}
   </div>
   <div class="item-action">
     {#if generating}
-      <button class="btn-generate" type="button" disabled>
-        <span class="spinner"></span> Generating...
-      </button>
-      {#if progressText}
-        <span class="progress-phase" role="status" aria-live="polite">{progressText}</span>
-      {/if}
-    {:else if done}
+      <button class="btn-generate" type="button" disabled><span class="spinner" aria-hidden="true"></span> Generating…</button>
+      <span class="progress-phase" role="status" aria-live="polite">{progressText ?? 'Preparing generation…'}</span>
+    {:else if !done}
+      <button class="btn-generate" type="button" onclick={onGenerate} disabled={anyGenerating}>{failed ? 'Retry' : 'Generate'}</button>
+    {/if}
+    {#if done}
       <div class="done-group">
-        <span class="done-badge">Done</span>
-        <button
-          class="btn-copy"
-          type="button"
-          class:copied={copyStatus === 'copied'}
-          onclick={onCopy}
-          disabled={copyStatus === 'copying' || copyStatus === 'copied'}
-        >
+        <button class="btn-copy" type="button" class:copied={copyStatus === 'copied'} onclick={onCopy} disabled={copyStatus === 'copying' || copyStatus === 'copied'}>
           {copyStatus === 'copying' ? 'Copying…' : copyStatus === 'copied' ? 'Copied!' : 'Copy'}
         </button>
-        {#if onSpeedRead}
-          <button
-            class="btn-copy"
-            type="button"
-            onclick={onSpeedRead}
-            title="Speed Read (Cmd/Ctrl+Shift+R)"
-          >
-            Speed Read
-          </button>
-        {/if}
-        <button
-          class="btn-regenerate"
-          type="button"
-          onclick={onGenerate}
-          disabled={anyGenerating}
-        >
-          Regenerate
-        </button>
+        {#if onSpeedRead}<button class="btn-copy" type="button" onclick={onSpeedRead} title="Speed Read (Cmd/Ctrl+Shift+R)">Speed Read</button>{/if}
+        <button class="btn-regenerate" type="button" onclick={onGenerate} disabled={anyGenerating}>Regenerate</button>
       </div>
-    {:else}
-      <button
-        class="btn-generate"
-        type="button"
-        onclick={onGenerate}
-        disabled={anyGenerating}
-      >
-        Generate
-      </button>
     {/if}
   </div>
   {#if done && icdCodes && icdCodes.length > 0}
-    <div class="icd-list-row">
-      <IcdCodeList codes={icdCodes} label={icdLabel} />
-    </div>
+    <div class="icd-list-row"><IcdCodeList codes={icdCodes} label={icdLabel} /></div>
   {/if}
   {#if done && generatedText}
-    <details class="generated-preview">
-      <summary>Preview</summary>
-      <pre class="preview-text">{generatedText}</pre>
-    </details>
+    <details class="generated-preview"><summary>Preview</summary><pre class="preview-text">{generatedText}</pre></details>
   {/if}
-</div>
-
+</article>
 <style>
   .generate-item {
     display: flex;
@@ -134,19 +109,20 @@
 
   .item-info {
     flex: 1;
-    min-width: 0;
+    min-width: min(220px, 100%);
+    overflow-wrap: anywhere;
   }
 
   .item-title {
     font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
-    margin-bottom: 2px;
+    margin: 0 0 2px;
   }
 
   .item-desc {
     font-size: 12px;
-    color: var(--text-muted);
+    color: var(--text-secondary);
   }
 
   .item-use-when {
@@ -199,21 +175,24 @@
 
   .done-group {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
   }
 
-  .done-badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 6px 12px;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
-    font-weight: 500;
-    background-color: var(--accent-light);
-    color: var(--success);
-    border: 1px solid var(--success);
+  .output-badge, .failed-badge {
+    display: inline-block; margin-top: 8px; padding: 4px 8px;
+    font-size: 12px; font-weight: 600; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); color: var(--text-secondary); background: var(--bg-secondary);
   }
+  .output-badge.stale {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--warning) 18%, var(--bg-card));
+    border-color: var(--warning);
+  }
+  .output-badge.current { border-color: var(--success); color: var(--text-primary); }
+  .failed-badge { border-color: var(--danger); color: var(--danger); }
+  .stale-hint, .output-hint { font-size: 12px; color: var(--text-secondary); margin: 6px 0 0; }
 
   .btn-regenerate {
     padding: 6px 12px;
@@ -273,7 +252,7 @@
   .generated-preview summary {
     cursor: pointer;
     font-size: 12px;
-    color: var(--text-muted);
+    color: var(--text-secondary);
     margin-bottom: 6px;
   }
 
@@ -295,7 +274,7 @@
 
   .progress-phase {
     font-size: 11px;
-    color: var(--text-muted);
+    color: var(--text-secondary);
     font-style: italic;
     margin-top: 4px;
   }
@@ -304,4 +283,11 @@
     border-left: 3px solid var(--danger, #ef4444);
     padding-left: 8px;
   }
+  button, summary { min-height: 44px; box-sizing: border-box; }
+  summary { display: flex; align-items: center; }
+  summary::before { content: '▸'; margin-right: 8px; }
+  details[open] summary::before { content: '▾'; }
+  button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .progress-phase { display: block; margin-bottom: 8px; }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
 </style>

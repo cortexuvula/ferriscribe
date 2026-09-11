@@ -50,6 +50,7 @@ describe('generation api', () => {
       recipientType: null,
       urgency: null,
       context: null,
+      patientContext: null,
     });
   });
 
@@ -60,6 +61,7 @@ describe('generation api', () => {
       recipientType: 'cardiology',
       urgency: 'routine',
       context: 'extra context',
+      patientContext: null,
     });
   });
 
@@ -70,6 +72,7 @@ describe('generation api', () => {
       letterType: 'discharge',
       audienceId: null,
       context: null,
+      patientContext: null,
     });
     invokeMock.mockReset();
     invokeMock.mockResolvedValue('');
@@ -79,6 +82,7 @@ describe('generation api', () => {
       letterType: null,
       audienceId: null,
       context: null,
+      patientContext: null,
     });
   });
 
@@ -89,6 +93,7 @@ describe('generation api', () => {
       letterType: 'discharge',
       audienceId: 'aud-1',
       context: 'extra context',
+      patientContext: null,
     });
   });
 
@@ -100,6 +105,7 @@ describe('generation api', () => {
       specialty: 'Cardiology',
       reason: 'follow-up',
       context: null,
+      patientContext: null,
     });
   });
 
@@ -111,6 +117,7 @@ describe('generation api', () => {
       specialty: 'Cardiology',
       reason: 'follow-up',
       context: 'extra context',
+      patientContext: null,
     });
   });
 

@@ -23,6 +23,7 @@ pub mod m016_user_dictionary_sync;
 pub mod m017_condition_chip_use_count;
 pub mod m018_purge_ledger;
 pub mod m019_recordings_sync_cursor_index;
+pub mod m020_generation_provenance;
 
 use rusqlite::Connection;
 
@@ -141,6 +142,11 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 19,
             name: "recordings_sync_cursor_index",
             up: m019_recordings_sync_cursor_index::up,
+        },
+        Migration {
+            version: 20,
+            name: "generation_provenance",
+            up: m020_generation_provenance::up,
         },
     ]
 }

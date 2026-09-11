@@ -1,0 +1,17 @@
+import '../../src/app.css';
+import { mount } from 'svelte';
+import { recordings } from '../../src/lib/stores/recordings.svelte';
+import { generation } from '../../src/lib/stores/generation.svelte';
+import { settings } from '../../src/lib/stores/settings.svelte';
+import { rsvp } from '../../src/lib/stores/rsvp.svelte';
+import { audit,seed,setMode } from './browser-tauri';
+const q=new URLSearchParams(location.search), state=q.get('state')||'empty', theme=q.get('theme')==='dark'?'dark':'light';
+document.documentElement.dataset.theme=theme;
+settings.state.soap_notification_sound=false;
+const recording={id:'synthetic-browser',filename:'synthetic.wav',transcript:'SYNTHETIC transcript only',soap_note:null,referral:null,letter:null,peer_discussion:null,chat:null,patient_name:null,audio_path:'/synthetic/not-read.wav',duration_seconds:null,file_size_bytes:null,stt_provider:null,ai_provider:null,tags:[],status:{status:'pending'},created_at:'',metadata:state==='active'?{context:'SYNTHETIC supporting notes',patient_context:{medications:['SYNTHETIC medication'],allergies:[],conditions:[]}}:null};
+seed(recording); recordings.selectedRecording=state==='empty'?null:recording as any;recordings.loading=false;generation.finish();generation.clearError();
+rsvp.openSoap=(text:string)=>{audit.speed.push({kind:'soap',text});};
+rsvp.openGeneric=(text:string,kind:any)=>{audit.speed.push({kind,text});};
+Object.assign(window,{fixture:{audit,setMode,state,theme}});
+const {default:Harness}=await import('./browser-Harness.svelte');
+mount(Harness,{target:document.getElementById('app')!});

@@ -294,6 +294,30 @@ async fn generate_soap_inner(
 
     finalize_training_generation(&state.db, capture_generation_id, recording_uuid, &soap_text);
 
+    // Freshness provenance: Rust-owned effective-input digest, persisted
+    // atomically with this output (inside the generation lock). Best-effort
+    // — a failure leaves soap freshness `unknown`, never breaks generation.
+    {
+        let input_digest = super::freshness::soap_input_digest(
+            &recording,
+            &config,
+            template,
+            context,
+            patient_context,
+        );
+        super::helpers::persist_provenance(
+            state,
+            recording.id,
+            "soap",
+            provider.name().to_string(),
+            model_name,
+            input_digest,
+            soap_text.clone(),
+            None, // transcript-based: no SOAP source binding
+        )
+        .await;
+    }
+
     Ok(soap_text)
 }
 
@@ -438,6 +462,32 @@ pub(crate) fn spawn_edit_distance_task(
             }
         }
     });
+}
+
+
+#[cfg(test)]
+pub(crate) async fn generate_soap_inner_for_test_with(
+    state: &AppState,
+    recording_id: &str,
+    inputs: &super::freshness::CurrentDocInputs,
+) -> AppResult<String> {
+    generate_soap_inner(
+        state,
+        None,
+        recording_id,
+        inputs.template.as_deref(),
+        inputs.context.as_deref(),
+        inputs.patient_context.as_ref(),
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn generate_soap_inner_for_test(
+    state: &AppState,
+    recording_id: &str,
+) -> AppResult<String> {
+    generate_soap_inner(state, None, recording_id, None, None, None).await
 }
 
 #[cfg(test)]

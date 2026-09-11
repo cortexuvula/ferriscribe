@@ -1,7 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { recordings, selectRecording } from '../stores/recordings.svelte';
-  import { generateSoap, generateReferral, generateLetter, generatePeerDiscussion } from '../api/generation';
+  import {
+    generateSoap,
+    generateReferral,
+    generateLetter,
+    generatePeerDiscussion,
+    getGenerationFreshness,
+    type FreshnessReport,
+  } from '../api/generation';
   import { generation } from '../stores/generation.svelte';
   import { copyWithStatus } from '../utils/clipboard';
   import { buildPatientContext } from '../utils/patient_context';
@@ -72,6 +79,13 @@
     medicationsText = fields.medicationsText;
     allergiesText = fields.allergiesText;
     conditionsText = fields.conditionsText;
+    contextExpanded = Object.values(fields).some((value) => value.trim().length > 0);
+    // Document-specific encounter details must not follow a different recording.
+    physicianName = '';
+    specialty = '';
+    discussionReason = '';
+    letterType = '';
+    copyStatus = {};
     // Clear OCR state on recording switch — OCR text from a previous patient
     // must never leak into the next patient's generation context.
     ocr.clearOcr();
@@ -85,6 +99,12 @@
       conditionsText.trim().length > 0 ||
       ocr.ocrTextDisplay.trim().length > 0,
   );
+
+  const contextSummary = $derived([
+    medicationsText.trim() && 'medications', allergiesText.trim() && 'allergies',
+    conditionsText.trim() && 'conditions', contextText.trim() && 'notes',
+    ocr.ocrTextDisplay.trim() && 'OCR',
+  ].filter(Boolean).join(', '));
 
   const contextCharCount = $derived(
     contextText.length + ocr.ocrTextDisplay.length +
@@ -137,52 +157,128 @@
   /// If OCR text + notes exceed this, the user must trim the preview.
   const MAX_CONTEXT_CHARS = 50_000;
 
-  /** Format medications/allergies/conditions as context text for non-SOAP docs. */
-  function formatStructuredContext(): string {
-    const parts: string[] = [];
-    if (medicationsText.trim()) {
-      parts.push(`Medications:\n${medicationsText.trim()}`);
-    }
-    if (allergiesText.trim()) {
-      parts.push(`Allergies:\n${allergiesText.trim()}`);
-    }
-    if (conditionsText.trim()) {
-      parts.push(`Known conditions:\n${conditionsText.trim()}`);
-    }
-    return parts.join('\n\n');
+  /// Freeform supporting context: notes + OCR text only (F1 — structured
+  /// fields NEVER ride the freeform context; SOAP receives them
+  /// exclusively via patient_context, the derived types via the Rust-side
+  /// fold of the same patient_context payload).
+  function freeformContext(): string | undefined {
+    return [contextText.trim(), ocr.ocrTextDisplay.trim()]
+      .filter(Boolean)
+      .join('\n\n') || undefined;
   }
+
+  // ── Freshness (backend-authoritative tri-state) ──────────────────────
+  // The Rust command rebuilds the effective-input digest from these live
+  // values + current settings and compares against provenance. The
+  // frontend only renders the verdict — it never guesses, and never
+  // assumes a just-succeeded generation is current.
+  type FreshnessView = 'current' | 'stale' | 'unknown' | 'checking';
+  let freshness: Partial<Record<'soap' | 'referral' | 'letter' | 'peer_discussion', FreshnessView>> = $state({});
+  // Monotonic request revision: bumped when a generation completes so a
+  // freshness response computed against the pre-generation row is dropped.
+  let freshnessReq = $state(0);
+
+  $effect(() => {
+    // Reactive inputs the digest depends on (mirrors handleGenerate's
+    // payload): recording identity, freeform context sources, structured
+    // lists, and the per-type document fields.
+    const rec = recordings.selectedRecording;
+    const rid = rec?.id;
+    const ctx = freeformContext();
+    const meds = medicationsText;
+    const allergies = allergiesText;
+    const conditions = conditionsText;
+    const lt = letterType;
+    const aud = selectedAudienceId;
+    const phys = physicianName;
+    const spec = specialty;
+    const reason = discussionReason;
+    const req = freshnessReq;
+    if (!rid) {
+      freshness = {};
+      return;
+    }
+    // Debounce: keystroke-level refetches would stampede the command.
+    const timer = setTimeout(async () => {
+      // Types with a stored output start as 'checking' — the badge must
+      // not show an older verdict while a newer one is in flight.
+      const hasOutput = {
+        soap: !!rec?.soap_note,
+        referral: !!rec?.referral,
+        letter: !!rec?.letter,
+        peer_discussion: !!rec?.peer_discussion,
+      };
+      freshness = Object.fromEntries(
+        (Object.keys(hasOutput) as (keyof typeof hasOutput)[])
+          .filter((k) => hasOutput[k])
+          .map((k) => [k, 'checking' as FreshnessView]),
+      );
+      try {
+        const report: FreshnessReport = await getGenerationFreshness(rid, {
+          context: ctx ?? null,
+          patientContext: buildPatientContext(meds, allergies, conditions) ?? null,
+          template: null,
+          letterType: lt || null,
+          audienceId: aud ?? null,
+          recipientType: null,
+          urgency: null,
+          physicianName: phys,
+          specialty: spec,
+          reason,
+        });
+        // Request-scoped invalidation: apply only if this is still the
+        // current recording AND no newer request/generation superseded
+        // this one. Otherwise drop the response entirely — a late reply
+        // must never paint another recording's (or an older input
+        // state's) verdicts.
+        if (req !== freshnessReq || recordings.selectedRecording?.id !== rid) return;
+        freshness = {
+          soap: report.soap.status === 'fresh' ? 'current' : report.soap.status,
+          referral: report.referral.status === 'fresh' ? 'current' : report.referral.status,
+          letter: report.letter.status === 'fresh' ? 'current' : report.letter.status,
+          peer_discussion: report.peer_discussion.status === 'fresh' ? 'current' : report.peer_discussion.status,
+        };
+      } catch {
+        if (req !== freshnessReq || recordings.selectedRecording?.id !== rid) return;
+        // A failed read must never look like a verdict — unknown.
+        freshness = Object.fromEntries(
+          (Object.keys(hasOutput) as (keyof typeof hasOutput)[])
+            .filter((k) => hasOutput[k])
+            .map((k) => [k, 'unknown' as FreshnessView]),
+        );
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  });
 
   async function handleGenerate(type: 'soap' | 'referral' | 'letter' | 'peer_discussion') {
     if (!recordings.selectedRecording) return;
     const recordingId = recordings.selectedRecording.id;
     generation.startGenerating(type, recordingId);
-    // Combine structured patient context + notes context + OCR text into a
-    // single context string threaded to every generation type. SOAP already
-    // passes the structured fields via buildPatientContext, but including them
-    // here too is harmless redundancy. Empty/whitespace-only input yields
-    // undefined so the backend treats context as absent.
-    const combinedContext = [formatStructuredContext(), contextText.trim(), ocr.ocrTextDisplay.trim()]
-      .filter(Boolean)
-      .join('\n\n') || undefined;
+    // F1/F2: the freeform context carries ONLY notes + OCR. Structured
+    // fields travel via patient_context on every type; Rust folds them
+    // into the prompt for the derived types (and into the digest).
+    const ctx = freeformContext();
+    const pc = buildPatientContext(medicationsText, allergiesText, conditionsText);
 
-    // Guard against oversized context — the backend enforces this for SOAP,
-    // but letter/referral/peer-discussion don't have the check yet.
-    if (combinedContext && combinedContext.length > MAX_CONTEXT_CHARS) {
+    // Guard against oversized freeform context — the backend enforces the
+    // cap too (on the folded string), but failing fast here names the
+    // fields the user can actually trim.
+    if (ctx && ctx.length > MAX_CONTEXT_CHARS) {
       generation.setError(
-        `Supporting context is ${combinedContext.length.toLocaleString()} characters (max ${MAX_CONTEXT_CHARS.toLocaleString()}). Please trim the OCR preview or notes.`,
+        `Supporting context is ${ctx.length.toLocaleString()} characters (max ${MAX_CONTEXT_CHARS.toLocaleString()}). Please trim the OCR preview or notes.`,
       );
       return;
     }
     try {
       if (type === 'soap') {
-        const pc = buildPatientContext(medicationsText, allergiesText, conditionsText);
-        await generateSoap(recordingId, undefined, combinedContext, pc);
+        await generateSoap(recordingId, undefined, ctx, pc);
       } else if (type === 'referral') {
-        await generateReferral(recordingId, undefined, undefined, combinedContext);
+        await generateReferral(recordingId, undefined, undefined, ctx, pc);
       } else if (type === 'letter') {
-        await generateLetter(recordingId, letterType || undefined, selectedAudienceId ?? undefined, combinedContext);
+        await generateLetter(recordingId, letterType || undefined, selectedAudienceId ?? undefined, ctx, pc);
       } else if (type === 'peer_discussion') {
-        await generatePeerDiscussion(recordingId, physicianName, specialty, discussionReason, combinedContext);
+        await generatePeerDiscussion(recordingId, physicianName, specialty, discussionReason, ctx, pc);
       }
       // Only re-select when the user hasn't moved on mid-generation —
       // an unconditional selectRecording would hijack the view back to a
@@ -194,6 +290,9 @@
         recordings.load(),
       ]);
       generation.finish();
+      // Invalidate in-flight freshness responses: they were computed
+      // against the pre-generation row and must not be applied.
+      freshnessReq++;
       const label = type === 'soap' ? 'SOAP note' : type === 'referral' ? 'Referral letter' : type === 'letter' ? 'Letter' : 'Peer discussion note';
       toasts.success(`${label} generated`);
       if (type === 'soap' && settings.state.soap_notification_sound) {
@@ -211,9 +310,10 @@
 </script>
 
 <div class="generate-tab">
-  {#if !recordings.selectedRecording}
+  {#if !recordings.selectedRecording && recordings.loading}
+    <div class="empty-state" role="status">Loading recordings…</div>
+  {:else if !recordings.selectedRecording}
     <div class="empty-state">
-      <div class="empty-icon">⚡</div>
       <h2>Generate Documentation</h2>
       <p>Select a recording from the <strong>Recordings</strong> tab first.</p>
       <button class="btn-goto-recordings" onclick={() => onNavigateRecordings()}>
@@ -230,6 +330,7 @@
         {/if}
       </div>
 
+      <p class="workspace-step">Configure</p>
       <!-- Context Panel -->
       <ContextPanel
         {medicationsText}
@@ -254,6 +355,10 @@
         onRemoveOcrFile={ocr.handleRemoveOcrFile}
       />
 
+      {#if hasActiveContext && !contextExpanded}
+        <p class="context-summary">Included: {contextSummary}</p>
+      {/if}
+
       <GenerateControls
         recording={recordings.selectedRecording}
         generationState={generation.state}
@@ -277,6 +382,7 @@
         generatedReferral={recordings.selectedRecording.referral}
         generatedLetter={recordings.selectedRecording.letter}
         generatedPeerDiscussion={recordings.selectedRecording.peer_discussion}
+        {freshness}
       />
     </div>
   {/if}
@@ -302,11 +408,6 @@
     color: var(--text-muted);
   }
 
-  .empty-icon {
-    font-size: 48px;
-    margin-bottom: 12px;
-  }
-
   h2 {
     font-size: 20px;
     font-weight: 600;
@@ -326,6 +427,10 @@
     flex: 1;
     overflow-y: auto;
     padding: 24px;
+    width: 100%;
+    max-width: 1080px;
+    box-sizing: border-box;
+    margin: 0 auto;
   }
 
   .generate-header {
@@ -360,4 +465,9 @@
   .btn-goto-recordings:hover {
     opacity: 0.9;
   }
+  .workspace-step { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 12px; }
+  .context-summary { color: var(--text-secondary); font-size: 12px; margin-top: -8px; }
+  .btn-goto-recordings { min-height: 44px; }
+  .btn-goto-recordings:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  @media (max-width: 600px) { .generate-content { padding: 16px; } }
 </style>

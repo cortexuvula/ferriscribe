@@ -1231,6 +1231,7 @@ async fn generate_handler(
                     req.recipient_type.clone(),
                     req.urgency.clone(),
                     req.context.clone(),
+                    req.patient_context.clone(),
                 )
                 .await
             }
@@ -1242,6 +1243,7 @@ async fn generate_handler(
                     req.letter_type.clone(),
                     req.audience_id,
                     req.context.clone(),
+                    req.patient_context.clone(),
                 )
                 .await
             }
@@ -1265,6 +1267,7 @@ async fn generate_handler(
                     specialty,
                     reason,
                     req.context.clone(),
+                    req.patient_context.clone(),
                 )
                 .await
             }

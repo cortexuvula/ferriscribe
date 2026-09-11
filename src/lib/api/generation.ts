@@ -22,12 +22,14 @@ export async function generateReferral(
   recipientType?: string,
   urgency?: string,
   context?: string,
+  patientContext?: PatientContext,
 ): Promise<string> {
   return invokeWithOfflineHandling('generate_referral', {
     recordingId,
     recipientType: recipientType ?? null,
     urgency: urgency ?? null,
     context: context ?? null,
+    patientContext: patientContext ?? null,
   });
 }
 
@@ -36,12 +38,14 @@ export async function generateLetter(
   letterType?: string,
   audienceId?: string,
   context?: string,
+  patientContext?: PatientContext,
 ): Promise<string> {
   return invokeWithOfflineHandling('generate_letter', {
     recordingId,
     letterType: letterType ?? null,
     audienceId: audienceId ?? null,
     context: context ?? null,
+    patientContext: patientContext ?? null,
   });
 }
 
@@ -82,6 +86,7 @@ export async function generatePeerDiscussion(
   specialty: string,
   reason: string,
   context?: string,
+  patientContext?: PatientContext,
 ): Promise<string> {
   return invokeWithOfflineHandling('generate_peer_discussion', {
     recordingId,
@@ -89,5 +94,50 @@ export async function generatePeerDiscussion(
     specialty,
     reason,
     context: context ?? null,
+    patientContext: patientContext ?? null,
+  });
+}
+
+// ── Generation freshness ─────────────────────────────────────────────────────
+
+/** Per-type freshness verdict from the backend. PHI-free by contract. */
+export interface FreshnessVerdict {
+  status: 'fresh' | 'stale' | 'unknown';
+  reasons: string[];
+}
+
+export interface FreshnessReport {
+  soap: FreshnessVerdict;
+  referral: FreshnessVerdict;
+  letter: FreshnessVerdict;
+  peer_discussion: FreshnessVerdict;
+}
+
+/**
+ * Live document inputs for freshness — mirrors the generate commands'
+ * parameters. Rust builds the canonical effective-input digest from these
+ * plus current settings; the frontend never computes digests.
+ */
+export interface CurrentDocInputs {
+  context?: string | null;
+  patientContext?: PatientContext | null;
+  template?: string | null;
+  letterType?: string | null;
+  audienceId?: string | null;
+  recipientType?: string | null;
+  urgency?: string | null;
+  physicianName?: string | null;
+  specialty?: string | null;
+  reason?: string | null;
+}
+
+/** Read-only freshness verdicts for the four surfaced document types. */
+export async function getGenerationFreshness(
+  recordingId: string,
+  inputs: CurrentDocInputs,
+): Promise<FreshnessReport> {
+  return invokeWithOfflineHandling('get_generation_freshness', {
+    recordingId,
+    inputs,
   });
 }

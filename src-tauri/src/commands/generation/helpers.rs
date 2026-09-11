@@ -128,6 +128,42 @@ pub(super) async fn persist_producer_patch(
     .map_err(crate::commands::join_err)?
 }
 
+/// Record freshness provenance for one generated output (blocking worker,
+/// best-effort — see [`crate::commands::generation::freshness::record_provenance`]).
+/// Called by the generation commands AFTER their output persist, inside
+/// the generation lock.
+#[allow(clippy::too_many_arguments)] // flat args mirror the generation call sites
+pub(super) async fn persist_provenance(
+    state: &AppState,
+    recording_id: Uuid,
+    doc_type: &'static str,
+    provider_name: String,
+    model_name: String,
+    input_digest: String,
+    output_text: String,
+    source_digest: Option<String>,
+) {
+    let db = Arc::clone(&state.db);
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        super::freshness::record_provenance(
+            &conn,
+            recording_id,
+            doc_type,
+            &provider_name,
+            &model_name,
+            input_digest,
+            &output_text,
+            source_digest,
+        );
+        Ok::<(), AppError>(())
+    })
+    .await
+    {
+        tracing::warn!(error = %e, doc_type, "provenance persist task failed");
+    }
+}
+
 /// Build the metadata patch carrying just this doc-type's FRESH
 /// generation stats — extracted from the in-memory recording where
 /// `record_completion_stat` wrote them moments ago. The persist-time
@@ -584,6 +620,68 @@ pub(crate) fn validate_patient_context(pc: &PatientContext) -> AppResult<()> {
 /// be persisted, so the recording metadata stays clean.
 pub(super) fn patient_context_is_empty(pc: &PatientContext) -> bool {
     pc.medications.is_empty() && pc.allergies.is_empty() && pc.conditions.is_empty()
+}
+
+/// F3: uniform context-metadata mirror for the derived generators. Both
+/// keys are written unconditionally — null when absent — so a
+/// regeneration without context clears the previous generation's values
+/// instead of silently retaining them (same contract SOAP already has).
+/// Stores the RAW freeform context (not the F2 fold) so the metadata
+/// round-trips losslessly through `contextFromMetadata`.
+pub(super) fn context_metadata_patch(
+    context: Option<&str>,
+    patient_context: Option<&PatientContext>,
+) -> Vec<(String, serde_json::Value)> {
+    vec![
+        (
+            "context".to_string(),
+            context
+                .filter(|c| !c.is_empty())
+                .map(|c| serde_json::Value::String(c.to_string()))
+                .unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "patient_context".to_string(),
+            patient_context
+                .filter(|pc| !patient_context_is_empty(pc))
+                .and_then(|pc| serde_json::to_value(pc).ok())
+                .unwrap_or(serde_json::Value::Null),
+        ),
+    ]
+}
+
+/// F2: fold structured patient-context lists into a context string for the
+/// SOAP-derived types (referral, letter, peer discussion) — the Rust-owned
+/// mirror of the frontend's `formatStructuredContext`. The freeform
+/// `context` (notes + OCR) is appended after the structured block.
+///
+/// Returns None when the fold and the freeform context are both empty, so
+/// an absent input digests identically on the generation and freshness
+/// sides. Ordering is fixed: Medications, Allergies, Known conditions.
+pub(crate) fn fold_structured_context(
+    patient_context: Option<&PatientContext>,
+    context: Option<&str>,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(pc) = patient_context.filter(|pc| !patient_context_is_empty(pc)) {
+        if !pc.medications.is_empty() {
+            parts.push(format!("Medications:\n{}", pc.medications.join("\n")));
+        }
+        if !pc.allergies.is_empty() {
+            parts.push(format!("Allergies:\n{}", pc.allergies.join("\n")));
+        }
+        if !pc.conditions.is_empty() {
+            parts.push(format!("Known conditions:\n{}", pc.conditions.join("\n")));
+        }
+    }
+    if let Some(ctx) = context.map(str::trim).filter(|c| !c.is_empty()) {
+        parts.push(ctx.to_string());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
 }
 
 #[cfg(test)]

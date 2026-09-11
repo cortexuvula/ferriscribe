@@ -31,6 +31,7 @@ pub mod search;
 pub mod settings;
 pub mod vocabulary;
 pub use letter_audiences::LetterAudiencesRepo;
+pub mod generation_provenance;
 pub mod generations;
 pub mod vectors;
 pub use generations::{Generation, GenerationInsert, GenerationsRepo};

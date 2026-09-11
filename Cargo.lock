@@ -5645,7 +5645,7 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.77.1"
+version = "0.77.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5680,6 +5680,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
