@@ -67,7 +67,10 @@ async fn a9_migration_legacy_rows_read_unknown_after_upgrade() {
         )
         .expect("schema_version table");
         for migration in medical_db::migrations::all_migrations() {
-            assert!(migration.version <= 20, "new migrations appended: bump the pre-provenance pin (currently m020 = generation_provenance)");
+            assert!(
+                migration.version <= 20,
+                "new migrations appended: bump the pre-provenance pin (currently m020 = generation_provenance)"
+            );
             if migration.version >= 20 {
                 break; // freeze at m019 — the world before provenance
             }
@@ -91,7 +94,8 @@ async fn a9_migration_legacy_rows_read_unknown_after_upgrade() {
         rec.letter = Some("Legacy synthetic letter".into());
         rec.peer_discussion = Some("Legacy synthetic discussion".into());
         medical_db::recordings::RecordingsRepo::insert(&conn, &rec).expect("insert legacy row");
-        medical_db::settings::SettingsRepo::save_config(&conn, &base_config()).expect("save config");
+        medical_db::settings::SettingsRepo::save_config(&conn, &base_config())
+            .expect("save config");
         rec.id
         // conn dropped here: the file closes with the legacy schema on disk
     };
@@ -109,11 +113,9 @@ async fn a9_migration_legacy_rows_read_unknown_after_upgrade() {
 
     let r = {
         let conn = db.conn().expect("conn");
-        let recording = medical_db::recordings::RecordingsRepo::get_by_id_active(
-            &conn,
-            &legacy_recording_id,
-        )
-        .expect("legacy row survives migration");
+        let recording =
+            medical_db::recordings::RecordingsRepo::get_by_id_active(&conn, &legacy_recording_id)
+                .expect("legacy row survives migration");
         let mut config = medical_db::settings::SettingsRepo::load_config(&conn).expect("config");
         config.migrate();
         compute_report_for_test(&conn, &recording, &config, &CurrentDocInputs::default())
@@ -126,7 +128,11 @@ async fn a9_migration_legacy_rows_read_unknown_after_upgrade() {
         ("letter", &r.letter),
         ("peer_discussion", &r.peer_discussion),
     ] {
-        assert_eq!(v.status, FreshnessStatus::Unknown, "{name}: legacy rows read unknown after upgrade");
+        assert_eq!(
+            v.status,
+            FreshnessStatus::Unknown,
+            "{name}: legacy rows read unknown after upgrade"
+        );
         assert_eq!(v.reasons, vec!["missing_provenance"], "{name}: reason code");
     }
 }
@@ -190,7 +196,10 @@ async fn a12_provenance_snapshots_inputs_actually_sent() {
     );
     let r = report(&state, &rid, &edited_inputs).await;
     assert!(
-        matches!(r.soap.status, FreshnessStatus::Stale | FreshnessStatus::Unknown),
+        matches!(
+            r.soap.status,
+            FreshnessStatus::Stale | FreshnessStatus::Unknown
+        ),
         "row state at completion must never count as the generation's input (got {:?})",
         r.soap.status
     );

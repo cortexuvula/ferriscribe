@@ -150,7 +150,6 @@ async fn generate_referral_inner(
     Ok(text)
 }
 
-
 #[cfg(test)]
 pub(crate) async fn generate_referral_inner_for_test(
     state: &AppState,

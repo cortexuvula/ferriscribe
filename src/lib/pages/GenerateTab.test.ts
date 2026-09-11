@@ -215,6 +215,12 @@ describe('Freshness request-scoped invalidation (repo-auditor race cases)', () =
     expect(within(row).getByText('Checking freshness…')).toBeTruthy();
 
     pending[1].resolve(report('fresh'));
+    // The post-generation selectRecording() replaces the recording object,
+    // legitimately re-running the effect once more and superseding request
+    // 2 with request 3 — resolve every remaining deferred as the newest
+    // state; the assertion is that the late STALE verdict stayed dropped
+    // and the current inputs read Current.
+    for (const p of pending.slice(2)) p.resolve(report('fresh'));
     await waitFor(() => expect(within(row).getByText('Current')).toBeTruthy());
     expect(within(row).queryByText('Stale')).toBeNull();
   });

@@ -214,7 +214,6 @@ async fn generate_peer_discussion_inner(
     Ok(discussion_text)
 }
 
-
 #[cfg(test)]
 pub(crate) async fn generate_peer_discussion_inner_for_test(
     state: &AppState,

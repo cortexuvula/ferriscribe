@@ -8,9 +8,7 @@
 //! written by the same code production uses, then read back through the
 //! same `compute_report` the command runs.
 
-use super::freshness::{
-    CurrentDocInputs, FreshnessStatus, compute_report_for_test,
-};
+use super::freshness::{CurrentDocInputs, FreshnessStatus, compute_report_for_test};
 use super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
 use crate::state::AppState;
 use medical_core::types::PatientContext;
@@ -75,12 +73,17 @@ async fn a1_soap_fresh_on_unchanged_stale_on_edit_fresh_on_reversion() {
         patient_context: Some(pc(&["Synthetic medication"])),
         ..Default::default()
     };
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
 
     // Unchanged → fresh.
     let r = report(&state, &rid, &inputs).await;
-    assert_eq!(r.soap.status, FreshnessStatus::Fresh, "unchanged inputs must be fresh");
+    assert_eq!(
+        r.soap.status,
+        FreshnessStatus::Fresh,
+        "unchanged inputs must be fresh"
+    );
 
     // Partial notes edit, structured fields intact → stale.
     let edited = CurrentDocInputs {
@@ -94,7 +97,11 @@ async fn a1_soap_fresh_on_unchanged_stale_on_edit_fresh_on_reversion() {
 
     // Exact reversion → fresh again.
     let r = report(&state, &rid, &inputs).await;
-    assert_eq!(r.soap.status, FreshnessStatus::Fresh, "exact reversion must be fresh");
+    assert_eq!(
+        r.soap.status,
+        FreshnessStatus::Fresh,
+        "exact reversion must be fresh"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -122,13 +129,17 @@ async fn a2_transcript_edit_stales_soap_only_and_document_isolation() {
         reason: Some("chest pain evaluation".into()),
         ..Default::default()
     };
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
-    super::referral::generate_referral_inner_for_test(&state, &rid, &inputs).await
+    super::referral::generate_referral_inner_for_test(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
-    super::letter::generate_letter_inner_for_test(&state, &rid, &inputs).await
+    super::letter::generate_letter_inner_for_test(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
-    super::peer_discussion::generate_peer_discussion_inner_for_test(&state, &rid, &inputs).await
+    super::peer_discussion::generate_peer_discussion_inner_for_test(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
 
     // Everything fresh to start.
@@ -149,7 +160,11 @@ async fn a2_transcript_edit_stales_soap_only_and_document_isolation() {
         medical_db::recordings::RecordingsRepo::update(&conn, &rec).expect("update");
     }
     let r = report(&state, &rid, &inputs).await;
-    assert_eq!(r.soap.status, FreshnessStatus::Stale, "transcript edit stales SOAP");
+    assert_eq!(
+        r.soap.status,
+        FreshnessStatus::Stale,
+        "transcript edit stales SOAP"
+    );
     assert_eq!(
         r.peer_discussion.status,
         FreshnessStatus::Stale,
@@ -187,11 +202,14 @@ async fn a3_soap_change_stales_derived_types_via_source() {
         build_test_state_with_provider(base_config(), "Patient reports back pain.", provider).await;
 
     let inputs = CurrentDocInputs::default();
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
-    super::referral::generate_referral_inner_for_test(&state, &rid, &inputs).await
+    super::referral::generate_referral_inner_for_test(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
-    super::letter::generate_letter_inner_for_test(&state, &rid, &inputs).await
+    super::letter::generate_letter_inner_for_test(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
 
     // Hand-edit the SOAP note on the row (regeneration path is covered by
@@ -241,7 +259,8 @@ async fn a4_missing_provenance_is_unknown_never_current() {
     {
         let uuid = uuid::Uuid::parse_str(&rid).expect("uuid");
         let conn = state.db.conn().expect("conn");
-        conn.execute("DELETE FROM generation_provenance", []).expect("wipe provenance");
+        conn.execute("DELETE FROM generation_provenance", [])
+            .expect("wipe provenance");
         let mut rec =
             medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid).expect("recording");
         rec.referral = Some("Legacy synthetic referral".into());
@@ -257,7 +276,11 @@ async fn a4_missing_provenance_is_unknown_never_current() {
         ("letter", &r.letter),
         ("peer_discussion", &r.peer_discussion),
     ] {
-        assert_eq!(v.status, FreshnessStatus::Unknown, "{name}: missing provenance");
+        assert_eq!(
+            v.status,
+            FreshnessStatus::Unknown,
+            "{name}: missing provenance"
+        );
         assert_eq!(v.reasons, vec!["missing_provenance"], "{name}: reason code");
     }
 }
@@ -276,7 +299,8 @@ async fn a5_settings_change_stales_everything() {
         build_test_state_with_provider(base_config(), "Patient reports back pain.", provider).await;
 
     let inputs = CurrentDocInputs::default();
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
 
     // Change the model in settings. Single pooled connection held across
@@ -290,7 +314,11 @@ async fn a5_settings_change_stales_everything() {
         medical_db::settings::SettingsRepo::save_config(&conn, &config).expect("save");
     }
     let r = report(&state, &rid, &inputs).await;
-    assert_eq!(r.soap.status, FreshnessStatus::Stale, "model change must stale SOAP");
+    assert_eq!(
+        r.soap.status,
+        FreshnessStatus::Stale,
+        "model change must stale SOAP"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -311,7 +339,8 @@ async fn a6_switch_away_and_back_no_cross_recording_leakage() {
         context: Some("Synthetic A".into()),
         ..Default::default()
     };
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
 
     // A second recording with no provenance.
@@ -331,7 +360,11 @@ async fn a6_switch_away_and_back_no_cross_recording_leakage() {
     assert_eq!(r.soap.status, FreshnessStatus::Unknown);
     // Switch back: still fresh with the same inputs — no leakage.
     let r = report(&state, &rid, &inputs).await;
-    assert_eq!(r.soap.status, FreshnessStatus::Fresh, "switch away/back must not leak");
+    assert_eq!(
+        r.soap.status,
+        FreshnessStatus::Fresh,
+        "switch away/back must not leak"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -355,12 +388,16 @@ async fn a7_phi_boundary_wire_payload_is_metadata_only() {
         patient_context: Some(pc(&[secret_med])),
         ..Default::default()
     };
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
 
     let r = report(&state, &rid, &inputs).await;
     let wire = serde_json::to_string(&r).expect("serialize wire payload");
-    assert!(!wire.contains("SECRET"), "wire payload must carry no content: {wire}");
+    assert!(
+        !wire.contains("SECRET"),
+        "wire payload must carry no content: {wire}"
+    );
     // Shape: exactly {status, reasons} per type.
     let value: serde_json::Value = serde_json::from_str(&wire).unwrap();
     for key in ["soap", "referral", "letter", "peer_discussion"] {
@@ -385,18 +422,25 @@ async fn a8_tri_state_fresh_stale_unknown_distinct() {
         build_test_state_with_provider(base_config(), "Patient reports back pain.", provider).await;
 
     let inputs = CurrentDocInputs::default();
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs)
+        .await
         .expect("generation must succeed");
 
     // fresh
-    assert_eq!(report(&state, &rid, &inputs).await.soap.status, FreshnessStatus::Fresh);
+    assert_eq!(
+        report(&state, &rid, &inputs).await.soap.status,
+        FreshnessStatus::Fresh
+    );
 
     // stale (input changed)
     let edited = CurrentDocInputs {
         context: Some("changed".into()),
         ..Default::default()
     };
-    assert_eq!(report(&state, &rid, &edited).await.soap.status, FreshnessStatus::Stale);
+    assert_eq!(
+        report(&state, &rid, &edited).await.soap.status,
+        FreshnessStatus::Stale
+    );
 
     // unknown (output hand-edited → provenance can no longer vouch)
     {

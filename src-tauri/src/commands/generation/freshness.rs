@@ -484,11 +484,6 @@ fn unknown_read(reason: &'static str) -> FreshnessVerdict {
 }
 
 #[cfg(test)]
-mod tests {
-    // The 9-case acceptance matrix lives in freshness_acceptance.rs.
-}
-
-#[cfg(test)]
 pub(crate) fn compute_report_for_test(
     conn: &rusqlite::Connection,
     recording: &Recording,
@@ -496,4 +491,9 @@ pub(crate) fn compute_report_for_test(
     inputs: &CurrentDocInputs,
 ) -> FreshnessReport {
     compute_report(conn, recording, config, inputs)
+}
+
+#[cfg(test)]
+mod tests {
+    // The 9-case acceptance matrix lives in freshness_acceptance.rs.
 }

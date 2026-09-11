@@ -177,7 +177,6 @@ async fn generate_letter_inner(
     Ok(text)
 }
 
-
 #[cfg(test)]
 pub(crate) async fn generate_letter_inner_for_test(
     state: &AppState,
@@ -188,7 +187,10 @@ pub(crate) async fn generate_letter_inner_for_test(
         inputs.patient_context.as_ref(),
         inputs.context.as_deref(),
     );
-    let ltype = inputs.letter_type.clone().unwrap_or_else(|| "follow-up".to_string());
+    let ltype = inputs
+        .letter_type
+        .clone()
+        .unwrap_or_else(|| "follow-up".to_string());
     generate_letter_inner(
         state,
         None,

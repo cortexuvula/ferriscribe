@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use medical_core::error::AppError;
 
 pub mod freshness;
+#[cfg(test)]
+pub mod freshness_acceptance;
+#[cfg(test)]
+pub mod freshness_acceptance2;
 mod helpers;
 pub mod letter;
 pub mod letter_writer;
@@ -19,10 +23,6 @@ pub(super) mod stream;
 pub mod synopsis;
 #[cfg(test)]
 pub(crate) mod test_helpers;
-#[cfg(test)]
-pub mod freshness_acceptance;
-#[cfg(test)]
-pub mod freshness_acceptance2;
 
 // Re-exposed for `commands::pipeline`, which validates the same payload before
 // kicking off its own generation flow.

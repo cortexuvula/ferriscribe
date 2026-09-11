@@ -464,7 +464,6 @@ pub(crate) fn spawn_edit_distance_task(
     });
 }
 
-
 #[cfg(test)]
 pub(crate) async fn generate_soap_inner_for_test_with(
     state: &AppState,

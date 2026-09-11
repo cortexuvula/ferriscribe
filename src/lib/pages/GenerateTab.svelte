@@ -174,8 +174,16 @@
   // assumes a just-succeeded generation is current.
   type FreshnessView = 'current' | 'stale' | 'unknown' | 'checking';
   let freshness: Partial<Record<'soap' | 'referral' | 'letter' | 'peer_discussion', FreshnessView>> = $state({});
-  // Monotonic request revision: bumped when a generation completes so a
-  // freshness response computed against the pre-generation row is dropped.
+  // Monotonic request revision, NOT reactive state: bumped on every input
+  // change (below) and on generation completion, so any still-pending
+  // freshness response from a PREVIOUS input state fails the
+  // `req !== freshnessRevision` guard and is dropped in both the success
+  // and error paths. An in-flight comparison computed against the
+  // pre-edit inputs must never paint its verdict after the user types.
+  let freshnessRevision = 0;
+  // Reactive trigger the effect also depends on: bumped ONLY when a
+  // generation completes, so a response computed against the
+  // pre-generation row is dropped as well.
   let freshnessReq = $state(0);
 
   $effect(() => {
@@ -193,10 +201,37 @@
     const phys = physicianName;
     const spec = specialty;
     const reason = discussionReason;
-    const req = freshnessReq;
     if (!rid) {
       freshness = {};
       return;
+    }
+    // Invalidate immediately on THIS run: any still-pending response from
+    // a previous input state now fails the revision guard and is dropped
+    // in both the success and error paths. The verdict also resets right
+    // away (not after the debounce) so a stale "Current" never lingers
+    // through the debounce window while the user types.
+    freshnessRevision++;
+    const req = freshnessRevision;
+    // Dependency ONLY: bumping freshnessReq (generation completed) must
+    // re-run this effect so a fresh comparison is issued against the new
+    // row. The verdict guard uses freshnessRevision, not this value.
+    const genRev = freshnessReq;
+    void genRev;
+    {
+      // Clear the previous verdict synchronously: types with stored
+      // outputs show 'checking' — the badge must never display the
+      // pre-edit verdict once the inputs have changed.
+      const hasOutputNow = {
+        soap: !!rec?.soap_note,
+        referral: !!rec?.referral,
+        letter: !!rec?.letter,
+        peer_discussion: !!rec?.peer_discussion,
+      };
+      freshness = Object.fromEntries(
+        (Object.keys(hasOutputNow) as (keyof typeof hasOutputNow)[])
+          .filter((k) => hasOutputNow[k])
+          .map((k) => [k, 'checking' as FreshnessView]),
+      );
     }
     // Debounce: keystroke-level refetches would stampede the command.
     const timer = setTimeout(async () => {
@@ -231,7 +266,7 @@
         // this one. Otherwise drop the response entirely — a late reply
         // must never paint another recording's (or an older input
         // state's) verdicts.
-        if (req !== freshnessReq || recordings.selectedRecording?.id !== rid) return;
+        if (req !== freshnessRevision || recordings.selectedRecording?.id !== rid) return;
         freshness = {
           soap: report.soap.status === 'fresh' ? 'current' : report.soap.status,
           referral: report.referral.status === 'fresh' ? 'current' : report.referral.status,
@@ -239,7 +274,7 @@
           peer_discussion: report.peer_discussion.status === 'fresh' ? 'current' : report.peer_discussion.status,
         };
       } catch {
-        if (req !== freshnessReq || recordings.selectedRecording?.id !== rid) return;
+        if (req !== freshnessRevision || recordings.selectedRecording?.id !== rid) return;
         // A failed read must never look like a verdict — unknown.
         freshness = Object.fromEntries(
           (Object.keys(hasOutput) as (keyof typeof hasOutput)[])
@@ -293,6 +328,7 @@
       // Invalidate in-flight freshness responses: they were computed
       // against the pre-generation row and must not be applied.
       freshnessReq++;
+      freshnessRevision++;
       const label = type === 'soap' ? 'SOAP note' : type === 'referral' ? 'Referral letter' : type === 'letter' ? 'Letter' : 'Peer discussion note';
       toasts.success(`${label} generated`);
       if (type === 'soap' && settings.state.soap_notification_sound) {
