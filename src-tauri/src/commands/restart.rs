@@ -74,7 +74,8 @@ use crate::state::{AppState, PendingEdit};
 /// (the update flow). Read by [`exit_guard`] — see the module docs — AND by
 /// `start_recording` to close the restart TOCTOU window: once a restart is
 /// committed, new recordings must not start (Codie review, 2026-09-09).
-/// Cleared by `reset_restarting` when a restart is refused/aborted.
+/// Never cleared: it is only set after all refusal checks pass, and the
+/// process exits via `_exit` immediately after, so no reset path is needed.
 static RESTARTING: AtomicBool = AtomicBool::new(false);
 
 /// True when a restart has been committed (checks passed, exit imminent).
