@@ -12,6 +12,7 @@ import { generation } from '../stores/generation.svelte';
 import { rsvp } from '../stores/rsvp.svelte';
 import { settings } from '../stores/settings.svelte';
 import type { Recording } from '../types';
+import type { FreshnessReport, FreshnessVerdict } from '../api/generation';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/webview', () => ({ getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => () => {}) }) }));
@@ -131,5 +132,90 @@ describe('Generation workspace production page', () => {
     expect(writeText).toHaveBeenCalledWith('Synthetic discussion text');
     await fireEvent.click(within(row).getByRole('button', { name: 'Speed Read' }));
     expect(speed).toHaveBeenCalledWith('Synthetic discussion text', 'peer_discussion');
+  });
+});
+
+describe('Freshness request-scoped invalidation (repo-auditor race cases)', () => {
+  /** Deferred freshness responses: each get_generation_freshness call returns a
+   * promise the test resolves manually, so response ordering is deterministic. */
+  function deferredFreshnessQueue() {
+    const pending: { resolve: (report: FreshnessReport) => void }[] = [];
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === 'get_generation_freshness') {
+        let resolve!: (report: FreshnessReport) => void;
+        const response = new Promise<FreshnessReport>((res) => (resolve = res));
+        pending.push({ resolve });
+        return response;
+      }
+      if (command === 'get_recording') return saved;
+      if (command === 'generate_soap') {
+        saved = { ...saved, soap_note: 'Synthetic regenerated SOAP' };
+        return saved.soap_note;
+      }
+      if (command.startsWith('generate_')) return 'Synthetic generated output';
+      return [];
+    });
+    return pending;
+  }
+
+  const freshnessCalls = () =>
+    vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'get_generation_freshness');
+
+  /** Metadata-only report: status/reasons, never document content. */
+  const report = (status: FreshnessVerdict['status']): FreshnessReport => {
+    const verdict = { status, reasons: status === 'stale' ? ['inputs_changed'] : [] };
+    return { soap: verdict, referral: verdict, letter: verdict, peer_discussion: verdict };
+  };
+
+  const flushMicrotasks = () => new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+  it('drops a late freshness response for recording A arriving after the user switched to recording B', async () => {
+    const pending = deferredFreshnessQueue();
+    recordings.selectedRecording = { ...saved, letter: 'Synthetic letter A' };
+    render(GenerateTab);
+    await waitFor(() => expect(freshnessCalls()).toHaveLength(1));
+    expect(freshnessCalls()[0]?.[1]).toMatchObject({ recordingId: 'synthetic-a' });
+
+    // User switches recordings BEFORE A's freshness response arrives.
+    recordings.selectedRecording = { ...fixture('synthetic-b'), letter: 'Synthetic letter B' };
+    await waitFor(() => expect(freshnessCalls()).toHaveLength(2));
+    expect(freshnessCalls()[1]?.[1]).toMatchObject({ recordingId: 'synthetic-b' });
+
+    // A's response resolves LAST — it must be dropped, never painted onto B's row.
+    pending[0].resolve(report('stale'));
+    await flushMicrotasks();
+    const row = screen.getByRole('article', { name: 'Letter' });
+    expect(within(row).queryByText('Stale')).toBeNull();
+    expect(within(row).getByText('Checking freshness…')).toBeTruthy();
+
+    // B's own response still applies normally.
+    pending[1].resolve(report('fresh'));
+    await waitFor(() => expect(within(row).getByText('Current')).toBeTruthy());
+    expect(within(row).queryByText('Stale')).toBeNull();
+  });
+
+  it('drops an older freshness response that arrives after a completed generation superseded it', async () => {
+    const pending = deferredFreshnessQueue();
+    saved = { ...saved, soap_note: 'Synthetic SOAP v1' };
+    recordings.selectedRecording = saved;
+    render(GenerateTab);
+    // Pre-generation freshness check is in flight (deferred, unresolved).
+    await waitFor(() => expect(freshnessCalls()).toHaveLength(1));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Generate SOAP note' }));
+    // Generation completing bumps the freshness revision and issues a new check.
+    await waitFor(() => expect(freshnessCalls()).toHaveLength(2), { timeout: 3000 });
+
+    // The pre-generation response resolves late — computed against the old row,
+    // so its 'stale' verdict must be dropped in favor of the newer request.
+    pending[0].resolve(report('stale'));
+    await flushMicrotasks();
+    const row = screen.getByRole('article', { name: 'SOAP note' });
+    expect(within(row).queryByText('Stale')).toBeNull();
+    expect(within(row).getByText('Checking freshness…')).toBeTruthy();
+
+    pending[1].resolve(report('fresh'));
+    await waitFor(() => expect(within(row).getByText('Current')).toBeTruthy());
+    expect(within(row).queryByText('Stale')).toBeNull();
   });
 });
