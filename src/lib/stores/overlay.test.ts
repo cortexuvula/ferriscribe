@@ -45,6 +45,27 @@ describe('overlay stack', () => {
 });
 
 describe('trapTabWithin', () => {
+  it('includes disclosure summaries after buttons in the focus cycle', () => {
+    const root = el();
+    const button = document.createElement('button');
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Help';
+    details.append(summary);
+    root.append(button, details);
+    document.body.append(root);
+    for (const control of [button, summary]) Object.defineProperty(control, 'offsetParent', { get: () => root });
+    button.focus();
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', cancelable: true });
+    trapTabWithin(root, tab);
+    expect(tab.defaultPrevented).toBe(false);
+    summary.focus();
+    const wrap = new KeyboardEvent('keydown', { key: 'Tab', cancelable: true });
+    trapTabWithin(root, wrap);
+    expect(wrap.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(button);
+    root.remove();
+  });
   it('ignores non-Tab keys', () => {
     const root = el();
     const focusSpy = vi.spyOn(root, 'focus');

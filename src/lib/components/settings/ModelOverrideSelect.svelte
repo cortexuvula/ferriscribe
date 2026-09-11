@@ -26,7 +26,8 @@
 
   async function handleChange(e: Event) {
     const val = (e.currentTarget as HTMLSelectElement).value;
-    await settings.updateField(field, val || null);
+    try { await settings.updateField(field, val || null); }
+    catch { /* SettingsContent shows saveError; value follows rollback. */ }
   }
 </script>
 

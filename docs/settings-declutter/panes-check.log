@@ -1,0 +1,33 @@
+
+> rust-medical-assistant@0.77.1 check
+> svelte-check --tsconfig ./tsconfig.json
+
+Loading svelte-check in workspace: /Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/settings-declutter
+Getting Svelte diagnostics...
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/settings-declutter/src/lib/components/settings/Audio.svelte:26:5
+Error: Block-scoped variable 'pyannoteModels' used before its declaration. (ts)
+  const speakerModelsSummary = $derived(
+    pyannoteModels.length > 0 && pyannoteModels.every((model) => model.downloaded)
+      ? 'Speaker models ready' : 'Speaker models needed',
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/settings-declutter/src/lib/components/settings/Audio.svelte:26:5
+Error: Variable 'pyannoteModels' is used before being assigned. (ts)
+  const speakerModelsSummary = $derived(
+    pyannoteModels.length > 0 && pyannoteModels.every((model) => model.downloaded)
+      ? 'Speaker models ready' : 'Speaker models needed',
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/settings-declutter/src/lib/components/settings/Audio.svelte:26:34
+Error: Block-scoped variable 'pyannoteModels' used before its declaration. (ts)
+  const speakerModelsSummary = $derived(
+    pyannoteModels.length > 0 && pyannoteModels.every((model) => model.downloaded)
+      ? 'Speaker models ready' : 'Speaker models needed',
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/settings-declutter/src/lib/components/settings/Audio.svelte:26:34
+Error: Variable 'pyannoteModels' is used before being assigned. (ts)
+  const speakerModelsSummary = $derived(
+    pyannoteModels.length > 0 && pyannoteModels.every((model) => model.downloaded)
+      ? 'Speaker models ready' : 'Speaker models needed',
+
+====================================
+svelte-check found 4 errors and 0 warnings in 1 file

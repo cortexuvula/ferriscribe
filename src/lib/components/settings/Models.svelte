@@ -11,6 +11,37 @@
   import Callout from './Callout.svelte';
   import { staleFeatureModelFields } from '../../utils/modelOverrides';
 
+  const providerNames: Record<string, string> = { lmstudio: 'LM Studio', ollama: 'Ollama', omlx: 'oMLX' };
+  const providerOrder = $derived([
+    settings.state.ai_provider,
+    ...Object.keys(providerNames).filter((provider) => provider !== settings.state.ai_provider),
+  ]);
+  const modelOptionsSummary = $derived([
+    settings.state.ocr_model ? `OCR: ${settings.state.ocr_model}` : '',
+    settings.state.translation_model ? `Translation: ${settings.state.translation_model}` : '',
+    settings.state.temperature !== 0.2 ? `Temperature: ${settings.state.temperature.toFixed(1)}` : '',
+  ].filter(Boolean).join(' · ') || 'Generation defaults');
+
+  /** Child sections own validation / connection state. Keep their existing
+   * errors visible without changing those contracts or duplicating them.
+   * Also handles errors arriving after the user has closed the disclosure. */
+  function keepErrorsVisible(node: HTMLDetailsElement) {
+    function revealErrors() {
+      for (const error of node.querySelectorAll('[role="alert"], .test-error')) {
+        let section = error.closest('details');
+        while (section && node.contains(section)) {
+          section.open = true;
+          section = section.parentElement?.closest('details') ?? null;
+        }
+      }
+    }
+    const observer = new MutationObserver(revealErrors);
+    observer.observe(node, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+    node.addEventListener('toggle', revealErrors, true);
+    revealErrors();
+    return { destroy() { observer.disconnect(); node.removeEventListener('toggle', revealErrors, true); } };
+  }
+
   let availableModels = $state<ModelInfo[]>([]);
   let modelsLoading = $state(false);
   /** Why the model list couldn't load (provider offline / empty list) —
@@ -75,6 +106,7 @@
     if (oldProvider && settings.state.ai_model) {
       modelMemory[oldProvider] = settings.state.ai_model;
     }
+    try {
     await settings.updateField('ai_provider', newProvider);
     await setActiveProvider(newProvider);
     // Fence the whole post-fetch chain on the request token: fetch already
@@ -102,20 +134,27 @@
     for (const field of staleFeatureModelFields(models, settings.state)) {
       await settings.updateField(field, null);
     }
+    } catch (err) {
+      if (!settings.saveError) modelsError = formatError(err);
+    }
   }
 
   async function handleAiModelChange(e: Event) {
     const value = (e.target as HTMLSelectElement).value;
-    await settings.updateField('ai_model', value);
-    modelMemory[settings.state.ai_provider] = value;
+    try {
+      await settings.updateField('ai_model', value);
+      modelMemory[settings.state.ai_provider] = value;
+    } catch { /* SettingsContent shows saveError. */ }
   }
 
   /** Live drag value — the temperature persists on release, not per tick
    *  (every oninput tick would queue a full-config IPC save). */
   let temperatureDraft = $state(settings.state.temperature);
+  $effect(() => { temperatureDraft = settings.state.temperature; });
 
   async function handleTemperatureCommit() {
-    await settings.updateField('temperature', temperatureDraft);
+    try { await settings.updateField('temperature', temperatureDraft); }
+    catch { temperatureDraft = settings.state.temperature; }
   }
 </script>
 
@@ -175,6 +214,8 @@
     {/if}
   </div>
 
+  <details class="settings-disclosure">
+    <summary><span>Model options</span><span class="disclosure-hint">{modelOptionsSummary}</span></summary>
   <ModelOverrideSelect
     id="ocr-model"
     label="OCR / Vision Model"
@@ -218,7 +259,11 @@
     </div>
   </div>
 
-  <!-- LM Studio Server -->
+  </details>
+
+  <details class="settings-disclosure" use:keepErrorsVisible>
+    <summary><span>Server configuration</span><span class="disclosure-hint">{providerNames[settings.state.ai_provider]} · host, port, authentication &amp; thinking</span></summary>
+    {#snippet lmstudioServer()}
   <details class="provider-section" bind:open={openSections.lmstudio}>
     <summary>LM Studio Server</summary>
     <ProviderServerSection
@@ -245,8 +290,8 @@
       {/snippet}
   </ProviderServerSection>
   </details>
-
-  <!-- Ollama Server -->
+    {/snippet}
+    {#snippet ollamaServer()}
   <details class="provider-section" bind:open={openSections.ollama}>
     <summary>Ollama Server</summary>
     <ProviderServerSection
@@ -270,8 +315,8 @@
       {/snippet}
   </ProviderServerSection>
   </details>
-
-  <!-- oMLX Server -->
+    {/snippet}
+    {#snippet omlxServer()}
   <details class="provider-section" bind:open={openSections.omlx}>
     <summary>oMLX Server</summary>
     <ProviderServerSection
@@ -297,9 +342,41 @@
       {/snippet}
   </ProviderServerSection>
   </details>
+    {/snippet}
+    {#each providerOrder as provider (provider)}
+      {#if provider === 'lmstudio'}{@render lmstudioServer()}
+      {:else if provider === 'ollama'}{@render ollamaServer()}
+      {:else}{@render omlxServer()}{/if}
+    {/each}
+  </details>
 </section>
 
 <style>
+  .settings-disclosure {
+    border-top: 1px solid var(--border);
+    margin-top: 24px;
+  }
+
+  .settings-disclosure > summary {
+    padding: 14px 0;
+    min-height: 44px;
+    cursor: pointer;
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  .disclosure-hint {
+    display: block;
+    margin-top: 4px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 400;
+    overflow-wrap: anywhere;
+  }
+
+  .settings-section :global(.form-hint),
+  .settings-section :global(.subsection-hint) { color: var(--text-secondary); }
+
   .provider-section {
     border-top: 1px solid var(--border);
     margin-top: 20px;
@@ -310,7 +387,8 @@
     font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
-    padding: 4px 0 8px;
+    padding: 12px 0;
+    min-height: 44px;
     user-select: none;
   }
 
@@ -330,8 +408,8 @@
 
   .btn-refresh {
     flex-shrink: 0;
-    width: 32px;
-    height: 32px;
+    width: 44px;
+    height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -383,7 +461,7 @@
     display: flex;
     justify-content: space-between;
     font-size: 11px;
-    color: var(--text-muted);
+    color: var(--text-secondary);
   }
 
   .model-list-error-message {

@@ -4,8 +4,8 @@
   import { confirmDialog } from '../../../stores/confirm.svelte';
 </script>
 
-<details class="advanced-section">
-  <summary>Advanced</summary>
+<section class="advanced-section">
+  <h3 class="section-title">Data handling</h3>
   <div class="advanced-content">
     <label class="form-row">
       <input
@@ -60,18 +60,19 @@
       </span>
     </label>
   </div>
-</details>
+</section>
 
 <style>
-  .advanced-section summary {
-    cursor: pointer;
+  .advanced-section h3 {
     font-weight: 600;
     margin-top: 16px;
   }
 
   .advanced-content {
     margin-top: 8px;
-    padding-left: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
   }
 
   .form-row {
@@ -81,7 +82,7 @@
   }
 
   .hint {
-    color: var(--text-muted);
+    color: var(--text-secondary);
     font-size: 0.8rem;
     margin: 4px 0 0 0;
   }

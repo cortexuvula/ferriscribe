@@ -71,7 +71,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 // Import AFTER mocks are registered.
-import DataManagement from './DataManagement.svelte';
+import DataManagement from './RecordingRetention.svelte';
 
 function renderSection() {
   render(DataManagement);

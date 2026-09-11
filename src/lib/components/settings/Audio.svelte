@@ -6,6 +6,8 @@
   import { reinitProviders } from '../../api/chat';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { AudioDevice } from '../../types';
+  import TranscriptionLanguage from './sections/TranscriptionLanguage.svelte';
+  import Callout from './Callout.svelte';
   import AudioInputSection from './AudioInputSection.svelte';
   import WhisperLocalSection from './WhisperLocalSection.svelte';
   import SttRemoteSection from './SttRemoteSection.svelte';
@@ -16,22 +18,39 @@
 
   let audioDevices = $state<AudioDevice[]>([]);
   let devicesLoading = $state(false);
-
+  let devicesError = $state('');
+  let whisperError = $state('');
+  let speakerError = $state('');
+  let modelActionError = $state('');
   let whisperModels = $state<WhisperModelInfo[]>([]);
   let pyannoteModels = $state<WhisperModelInfo[]>([]);
+  const speakerModelsSummary = $derived(
+    pyannoteModels.length > 0 && pyannoteModels.every((model) => model.downloaded)
+      ? 'Speaker models ready' : 'Speaker models needed',
+  );
   let modelsRefreshing = $state(false);
   let downloadingModels = $state<Set<string>>(new Set());
   let downloadProgress = $state<Record<string, { downloaded: number; total: number }>>({});
   let sttMode = $state<'local' | 'remote'>((settings.state.stt_mode as 'local' | 'remote') ?? 'local');
+  $effect(() => { sttMode = (settings.state.stt_mode as 'local' | 'remote') ?? 'local'; });
   let progressUnlisten: UnlistenFn | null = null;
+
+  async function handleSttModeChange() {
+    try { await settings.updateField('stt_mode', sttMode); }
+    catch { sttMode = (settings.state.stt_mode as 'local' | 'remote') ?? 'local'; return; }
+    try { await reinitProviders(); }
+    catch (err) { modelActionError = `Could not apply transcription mode: ${formatError(err)}`; }
+  }
 
   async function fetchAudioDevices() {
     devicesLoading = true;
+    devicesError = '';
     try {
       audioDevices = await listAudioDevices();
     } catch (e) {
       console.error('Failed to list audio devices:', e);
       audioDevices = [];
+      devicesError = `Failed to list audio devices: ${formatError(e)}`;
       toasts.error(`Failed to list audio devices: ${e}`);
     } finally {
       devicesLoading = false;
@@ -40,25 +59,30 @@
 
   async function fetchWhisperModels() {
     modelsRefreshing = true;
+    whisperError = '';
     try {
       whisperModels = await listWhisperModels();
     } catch (e) {
       console.error('Failed to list whisper models:', e);
+      whisperError = `Could not list transcription models: ${formatError(e)}`;
     } finally {
       modelsRefreshing = false;
     }
   }
 
   async function fetchPyannoteModels() {
+    speakerError = '';
     try {
       pyannoteModels = await listPyannoteModels();
     } catch (e) {
       console.error('Failed to list pyannote models:', e);
+      speakerError = `Could not list speaker models: ${formatError(e)}`;
     }
   }
 
   async function handleDownloadModel(modelId: string) {
     if (downloadingModels.has(modelId)) return; // Already downloading
+    modelActionError = '';
     downloadingModels = new Set([...downloadingModels, modelId]);
     try {
       await downloadModel(modelId);
@@ -66,7 +90,8 @@
       await Promise.all([fetchWhisperModels(), fetchPyannoteModels()]);
     } catch (e) {
       console.error(`Failed to download model ${modelId}:`, e);
-      toasts.error(`Could not download ${modelId}: ${formatError(e)}`);
+      modelActionError = `Could not download ${modelId}: ${formatError(e)}`;
+      toasts.error(modelActionError);
     } finally {
       // eslint-disable-next-line svelte/prefer-svelte-reactivity -- transient local Set, not reactive state
       const next = new Set(downloadingModels);
@@ -91,13 +116,15 @@
       danger: true,
     });
     if (!ok) return;
+    modelActionError = '';
     try {
       await deleteModel(modelId);
       toasts.success(`Deleted ${modelId}`);
       await Promise.all([fetchWhisperModels(), fetchPyannoteModels()]);
     } catch (e) {
       console.error(`Failed to delete model ${modelId}:`, e);
-      toasts.error(`Could not delete ${modelId}: ${formatError(e)}`);
+      modelActionError = `Could not delete ${modelId}: ${formatError(e)}`;
+      toasts.error(modelActionError);
     }
   }
 
@@ -109,7 +136,7 @@
   }
 
   async function handleWhisperModelChange(modelId: string) {
-    await settings.updateField('whisper_model', modelId);
+    try { await settings.updateField('whisper_model', modelId); } catch { return; }
     // The provider resolves the whisper model at build time — rebuild it so
     // the new selection (and its context cache) takes effect immediately
     // instead of at the next reinit/restart.
@@ -163,35 +190,36 @@
 
   async function handleSampleRateChange(e: Event) {
     const value = parseInt((e.target as HTMLSelectElement).value, 10);
-    await settings.updateField('sample_rate', value);
+    try { await settings.updateField('sample_rate', value); } catch { return; }
   }
 
   /** Live drag value — max speakers persists on release, not per tick
    *  (every oninput tick would queue a full-config IPC save). */
   let maxSpeakersDraft = $state(settings.state.max_speakers ?? 3);
+  $effect(() => { maxSpeakersDraft = settings.state.max_speakers ?? 3; });
 
   async function handleMaxSpeakersCommit() {
-    await settings.updateField('max_speakers', maxSpeakersDraft);
+    try { await settings.updateField('max_speakers', maxSpeakersDraft); }
+    catch { maxSpeakersDraft = settings.state.max_speakers ?? 3; }
   }
 </script>
 
 <section class="settings-section">
-  <h3 class="section-title">Audio / STT</h3>
+  <h3 class="section-title">Recording &amp; Transcription</h3>
 
   <AudioInputSection {audioDevices} {devicesLoading} />
+  {#if devicesError}<Callout kind="danger">{devicesError}</Callout>{/if}
+  <TranscriptionLanguage />
 
   <fieldset class="form-group radio-fieldset">
-    <legend class="form-label">STT Mode</legend>
+    <legend class="form-label">Transcription mode</legend>
     <div class="radio-row">
       <label class="radio-label">
         <input
           type="radio"
           bind:group={sttMode}
           value="local"
-          onchange={async () => {
-            await settings.updateField('stt_mode', sttMode);
-            await reinitProviders();
-          }}
+          onchange={handleSttModeChange}
         /> Local
       </label>
       <label class="radio-label">
@@ -199,10 +227,7 @@
           type="radio"
           bind:group={sttMode}
           value="remote"
-          onchange={async () => {
-            await settings.updateField('stt_mode', sttMode);
-            await reinitProviders();
-          }}
+          onchange={handleSttModeChange}
         /> Remote
       </label>
     </div>
@@ -223,6 +248,20 @@
     <SttRemoteSection />
   {/if}
 
+  {#if whisperError}<Callout kind="danger">{whisperError}</Callout>{/if}
+  {#if speakerError}<Callout kind="danger">{speakerError}</Callout>{/if}
+  {#if modelActionError}<Callout kind="danger">{modelActionError}</Callout>{/if}
+
+  <details class="settings-disclosure">
+    <summary>
+      <span>Advanced transcription</span>
+      <span class="disclosure-hint">{speakerModelsSummary} · {maxSpeakersDraft} speakers · {settings.state.sample_rate} Hz</span>
+      {#each [...downloadingModels] as modelId (modelId)}
+        <span class="disclosure-hint" role="status">
+          Downloading {modelId}{downloadProgress[modelId] ? ` · ${Math.round(downloadProgress[modelId].downloaded / (downloadProgress[modelId].total || 1) * 100)}%` : '…'}
+        </span>
+      {/each}
+    </summary>
   <DiarizationModelsSection
     {pyannoteModels}
     downloadingModels={downloadingModels}
@@ -264,6 +303,8 @@
     </select>
   </div>
 
+  </details>
+
   <div class="form-group">
     <label class="form-label checkbox-label">
       <input
@@ -271,7 +312,7 @@
         checked={settings.state.auto_generate_soap}
         onchange={(e: Event) => {
           const checked = (e.target as HTMLInputElement).checked;
-          settings.updateField('auto_generate_soap', checked);
+          void settings.updateField('auto_generate_soap', checked).catch(() => {});
         }}
       />
       <span>Auto-generate SOAP after recording</span>
@@ -282,6 +323,27 @@
 </section>
 
 <style>
+  .settings-disclosure { border-top: 1px solid var(--border); }
+  .settings-disclosure > summary {
+    min-height: 44px;
+    padding: 14px 0;
+    font-weight: 600;
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  .settings-disclosure > .form-group { margin-top: 16px; }
+  .disclosure-hint {
+    display: block;
+    margin-top: 4px;
+    font-weight: 400;
+    font-size: 13px;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .settings-section :global(.form-hint),
+  .settings-section :global(.model-desc),
+  .settings-section :global(.model-size) { color: var(--text-secondary); }
+
   .settings-section {
     display: flex;
     flex-direction: column;
@@ -324,7 +386,7 @@
 
   .form-hint {
     font-size: 11px;
-    color: var(--text-muted);
+    color: var(--text-secondary);
   }
 
   .badge-value {

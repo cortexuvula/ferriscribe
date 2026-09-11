@@ -4,7 +4,7 @@
  * model selects (OCR, translation): the sentinel option, option population
  * from the provider's model list, and the updateField persistence calls.
  */
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import Models from './Models.svelte';
 
@@ -71,6 +71,60 @@ describe('Models', () => {
     mockState.translation_model = null;
   });
   afterEach(cleanup);
+
+  it('keeps model options collapsed with a summary of configured overrides', async () => {
+    mockState.ocr_model = 'qwen3:8b';
+    mockState.translation_model = 'qwen3:1.7b';
+    const { container } = await rendered();
+    const options = screen.getByText('Model options').closest('details')!;
+    expect(options.open).toBe(false);
+    expect(options.querySelector('summary')?.textContent).toContain('OCR: qwen3:8b');
+    expect(options.querySelector('summary')?.textContent).toContain('Translation: qwen3:1.7b');
+    expect(container.querySelector('#ai-provider')?.closest('details')).toBeNull();
+    expect(container.querySelector('#ai-model')?.closest('details')).toBeNull();
+    options.open = true;
+    await fireEvent.input(screen.getByLabelText(/Temperature/), { target: { value: '0.7' } });
+    expect(mockUpdateField).not.toHaveBeenCalled();
+    await fireEvent.change(screen.getByLabelText(/Temperature/));
+    expect(mockUpdateField).toHaveBeenCalledWith('temperature', 0.7);
+  });
+
+  it('keeps all server controls reachable with the active provider first', async () => {
+    const { container } = await rendered();
+    const servers = screen.getByText('Server configuration').closest('details')!;
+    expect(servers.open).toBe(false);
+    servers.open = true;
+    const summaries = Array.from(servers.querySelectorAll('.provider-section > summary'));
+    expect(summaries[0].textContent).toContain('Ollama Server');
+    expect(summaries).toHaveLength(3);
+    for (const provider of ['ollama', 'lmstudio', 'omlx']) {
+      for (const field of ['host', 'port', 'api-key']) {
+        expect(container.querySelector(`#${provider}-${field}`)).toBeTruthy();
+      }
+    }
+    expect(within(servers).getAllByText('Save key')).toHaveLength(3);
+    expect(within(servers).getAllByText(/Disable thinking/)).toHaveLength(3);
+  });
+
+  it('shows model-list failures outside collapsed server configuration', async () => {
+    mockListModels.mockRejectedValueOnce(new Error('Synthetic provider offline'));
+    render(Models);
+    const error = await screen.findByText('Synthetic provider offline');
+    expect(screen.getByText('Server configuration').closest('details')!.open).toBe(false);
+    expect(error.closest('details')).toBeNull();
+  });
+
+  it('keeps validation failures visible when server configuration is collapsed', async () => {
+    const { container } = await rendered();
+    const servers = screen.getByText('Server configuration').closest('details')!;
+    servers.open = true;
+    await fireEvent.change(container.querySelector('#ollama-port')!, { target: { value: '0' } });
+    const error = await screen.findByRole('alert');
+    servers.open = false;
+    await fireEvent(servers, new Event('toggle'));
+    await waitFor(() => expect(servers.open).toBe(true));
+    expect(error.textContent).toContain('Port must be between 1 and 65535');
+  });
 
   it('renders the translation-model select with the inherit sentinel first', async () => {
     await rendered();

@@ -83,6 +83,8 @@ class SettingsStore {
    *  retryable error UI instead of a permanent blank screen. Cleared on a
    *  successful reload. */
   loadError = $state(false);
+  /** Save failures remain visible independently of startup/load errors. */
+  saveError = $state<string | null>(null);
   private saveQueue: Promise<void> = Promise.resolve();
   /** The last config known to be persisted server-side (from load(),
    *  successful saves, or the post-failure reload). updateField payloads
@@ -147,6 +149,7 @@ class SettingsStore {
     const prev = this.saveQueue;
     this.saveQueue = (async () => {
       await prev.catch(() => {});
+      this.saveError = null;
       // Derive the payload at DRAIN time from the last known persisted
       // state + ONLY this call's delta (config vs. its base). Sending the
       // call-time snapshot wholesale would resurrect sibling changes whose
@@ -165,6 +168,7 @@ class SettingsStore {
       try {
         await saveSettings(payload);
         this.serverState = payload;
+        this.saveError = null;
       } catch (err) {
         console.error('Failed to save settings:', err);
         try {
@@ -172,8 +176,9 @@ class SettingsStore {
           this.state = latest;
           this.serverState = latest;
           this.notify();
+          this.saveError = "Could not save settings. Saved values have been reloaded.";
         } catch (_reloadErr) {
-          // If reload also fails, leave local state as-is.
+          this.saveError = "Could not save settings and could not reload saved values. Displayed values may not be saved.";
         }
         throw err;
       }
@@ -195,6 +200,7 @@ class SettingsStore {
     const prev = this.saveQueue;
     this.saveQueue = (async () => {
       await prev.catch(() => {});
+      this.saveError = null;
       // Derive the payload at DRAIN time from the last known persisted
       // state + ONLY this call's delta. Sending the call-time optimistic
       // snapshot instead let a queued updateField resurrect a sibling
@@ -204,6 +210,7 @@ class SettingsStore {
       try {
         await saveSettings(payload);
         this.serverState = payload;
+        this.saveError = null;
       } catch (err) {
         console.error('Save failed:', err);
         try {
@@ -211,8 +218,9 @@ class SettingsStore {
           this.state = latest;
           this.serverState = latest;
           this.notify();
+          this.saveError = "Could not save settings. Saved values have been reloaded.";
         } catch (_reloadErr) {
-          // If reload also fails, leave local state as-is.
+          this.saveError = "Could not save settings and could not reload saved values. Displayed values may not be saved.";
         }
         throw err;
       }

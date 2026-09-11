@@ -5,11 +5,13 @@
   interface Props {
     open: boolean;
     title: string;
+    /** Settings owns its own body scroll; all other dialogs keep defaults. */
+    settingsShell?: boolean;
     onClose: () => void;
     children?: import('svelte').Snippet;
   }
 
-  const { open, title, onClose, children }: Props = $props();
+  const { open, title, onClose, children, settingsShell = false }: Props = $props();
 
   let root: HTMLElement | undefined = $state();
   let unregister: (() => void) | null = null;
@@ -62,7 +64,7 @@
 {#if open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="modal-backdrop" bind:this={root} onclick={handleBackdropClick} role="dialog" aria-modal="true" aria-label={title} tabindex="-1">
-    <div class="modal-container">
+    <div class="modal-container" class:settings-shell={settingsShell}>
       <div class="modal-header">
         <span class="modal-title">{title}</span>
         <button class="modal-close" onclick={onClose} aria-label="Close dialog">×</button>
@@ -131,6 +133,16 @@
     color: var(--text-primary);
     background-color: var(--bg-hover);
   }
+
+  .settings-shell {
+    width: calc(100vw - 32px);
+    max-width: 1160px;
+    height: min(820px, calc(100dvh - 48px));
+    max-height: calc(100dvh - 32px);
+  }
+
+  .settings-shell .modal-body { min-height: 0; overflow: hidden; }
+  .settings-shell .modal-close { min-width: 44px; min-height: 44px; }
 
   .modal-body {
     overflow-y: auto;

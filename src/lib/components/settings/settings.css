@@ -1,0 +1,34 @@
+/* Scoped to the Settings shell, never the rest of the app or nested dialogs. */
+.settings-layout { --settings-link: #3b5bdb; }
+[data-theme='dark'] .settings-layout { --settings-link: #91a7ff; }
+.settings-page { color: var(--text-primary); }
+.settings-page .preference-heading { font-size: 14px; margin: 26px 0 0; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.settings-page .settings-section > .section-title { font-size: 24px; margin-bottom: 12px; }
+.settings-page .settings-section > .form-group { margin-bottom: 20px; }
+.settings-page .settings-section > .form-group > .form-label { display: block; margin-bottom: 8px; }
+.settings-page .settings-section > .form-group > select { width: 100%; }
+.settings-page .settings-section { min-width: 0; }
+.settings-page :is(.section-title) { color: var(--text-primary); }
+.settings-page :is(.form-hint, .section-desc) { color: var(--text-secondary); line-height: 1.5; }
+.settings-page :is(button, select, input:not([type="checkbox"]):not([type="radio"]), summary):not(.settings-page .modal-backdrop *) { min-height: 44px; }
+.settings-page :is(button, select, input, textarea, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.settings-page :is(input, select, textarea):not(.settings-page .modal-backdrop *) { max-width: 100%; min-width: 0; box-sizing: border-box; }
+.settings-page :is(.settings-preferences, .settings-composition) > .form-group {
+  display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 18px 0; border-bottom: 1px solid var(--border);
+}
+.settings-page :is(.settings-preferences, .settings-composition) > .section-title { font-size: 18px; margin: 0 0 16px; }
+.settings-page :is(.settings-preferences, .settings-composition) > .section-desc { margin: 0 0 16px; font-size: 13px; }
+.settings-page .settings-preferences > .form-group {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 240px); align-items: center; column-gap: 24px;
+}
+.settings-page .settings-preferences > .form-group > :is(.form-hint, .field-error) { grid-column: 1 / -1; }
+.settings-page .settings-preferences .checkbox-label { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; min-height: 44px; }
+.settings-page .settings-preferences .checkbox-label input { order: 2; margin-left: auto; }
+.settings-page :is(.settings-secondary-action, .settings-composition .btn-reset) {
+  width: fit-content; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary); background: var(--bg-secondary);
+}
+.settings-page :is(.settings-secondary-action, .settings-composition .btn-reset):hover { background: var(--bg-hover); color: var(--text-primary); }
+@container (max-width: 600px) {
+  .settings-page .settings-preferences > .form-group { grid-template-columns: minmax(0, 1fr); }
+  .settings-page .settings-preferences > .form-group > :is(select, input) { width: 100%; }
+}
