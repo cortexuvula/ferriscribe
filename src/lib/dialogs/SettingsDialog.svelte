@@ -21,6 +21,6 @@
   }
 </script>
 
-<Modal {open} title="Settings" onClose={handleClose}>
+<Modal {open} title="Settings" onClose={handleClose} settingsShell>
   <SettingsContent bind:this={content} />
 </Modal>

@@ -1,0 +1,1829 @@
+{
+  "renders": [
+    {
+      "theme": "light",
+      "page": "general",
+      "width": 390,
+      "screenshot": "browser-production-general-light-390.png",
+      "geometry": {
+        "document": {
+          "client": 390,
+          "scroll": 390
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "general",
+      "width": 800,
+      "screenshot": "browser-production-general-light-800.png",
+      "geometry": {
+        "document": {
+          "client": 800,
+          "scroll": 800
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "general",
+      "width": 1200,
+      "screenshot": "browser-production-general-light.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "models",
+      "width": 390,
+      "screenshot": "browser-production-models-light-390.png",
+      "geometry": {
+        "document": {
+          "client": 390,
+          "scroll": 390
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "ollama_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "lmstudio_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "omlx_api_key"
+            }
+          },
+          {
+            "command": "paired_endpoint",
+            "args": {}
+          },
+          {
+            "command": "list_models",
+            "args": {
+              "providerName": "ollama"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "models",
+      "width": 800,
+      "screenshot": "browser-production-models-light-800.png",
+      "geometry": {
+        "document": {
+          "client": 800,
+          "scroll": 800
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "ollama_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "lmstudio_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "omlx_api_key"
+            }
+          },
+          {
+            "command": "paired_endpoint",
+            "args": {}
+          },
+          {
+            "command": "list_models",
+            "args": {
+              "providerName": "ollama"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "models",
+      "width": 1200,
+      "screenshot": "browser-production-models-light.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "ollama_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "lmstudio_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "omlx_api_key"
+            }
+          },
+          {
+            "command": "paired_endpoint",
+            "args": {}
+          },
+          {
+            "command": "list_models",
+            "args": {
+              "providerName": "ollama"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "prompts",
+      "width": 390,
+      "screenshot": "browser-production-prompts-light-390.png",
+      "geometry": {
+        "document": {
+          "client": 390,
+          "scroll": 390
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "list_specialty_packs",
+            "args": {}
+          },
+          {
+            "command": "get_default_prompt",
+            "args": {
+              "docType": "soap"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "prompts",
+      "width": 800,
+      "screenshot": "browser-production-prompts-light-800.png",
+      "geometry": {
+        "document": {
+          "client": 800,
+          "scroll": 800
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "list_specialty_packs",
+            "args": {}
+          },
+          {
+            "command": "get_default_prompt",
+            "args": {
+              "docType": "soap"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "prompts",
+      "width": 1200,
+      "screenshot": "browser-production-prompts-light.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "list_specialty_packs",
+            "args": {}
+          },
+          {
+            "command": "get_default_prompt",
+            "args": {
+              "docType": "soap"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "general",
+      "width": 390,
+      "screenshot": "browser-production-general-dark-390.png",
+      "geometry": {
+        "document": {
+          "client": 390,
+          "scroll": 390
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "general",
+      "width": 800,
+      "screenshot": "browser-production-general-dark-800.png",
+      "geometry": {
+        "document": {
+          "client": 800,
+          "scroll": 800
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "general",
+      "width": 1200,
+      "screenshot": "browser-production-general-dark.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "models",
+      "width": 390,
+      "screenshot": "browser-production-models-dark-390.png",
+      "geometry": {
+        "document": {
+          "client": 390,
+          "scroll": 390
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "ollama_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "lmstudio_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "omlx_api_key"
+            }
+          },
+          {
+            "command": "paired_endpoint",
+            "args": {}
+          },
+          {
+            "command": "list_models",
+            "args": {
+              "providerName": "ollama"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "models",
+      "width": 800,
+      "screenshot": "browser-production-models-dark-800.png",
+      "geometry": {
+        "document": {
+          "client": 800,
+          "scroll": 800
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "ollama_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "lmstudio_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "omlx_api_key"
+            }
+          },
+          {
+            "command": "paired_endpoint",
+            "args": {}
+          },
+          {
+            "command": "list_models",
+            "args": {
+              "providerName": "ollama"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "models",
+      "width": 1200,
+      "screenshot": "browser-production-models-dark.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "ollama_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "lmstudio_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "omlx_api_key"
+            }
+          },
+          {
+            "command": "paired_endpoint",
+            "args": {}
+          },
+          {
+            "command": "list_models",
+            "args": {
+              "providerName": "ollama"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "prompts",
+      "width": 390,
+      "screenshot": "browser-production-prompts-dark-390.png",
+      "geometry": {
+        "document": {
+          "client": 390,
+          "scroll": 390
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "list_specialty_packs",
+            "args": {}
+          },
+          {
+            "command": "get_default_prompt",
+            "args": {
+              "docType": "soap"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "prompts",
+      "width": 800,
+      "screenshot": "browser-production-prompts-dark-800.png",
+      "geometry": {
+        "document": {
+          "client": 800,
+          "scroll": 800
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "list_specialty_packs",
+            "args": {}
+          },
+          {
+            "command": "get_default_prompt",
+            "args": {
+              "docType": "soap"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "prompts",
+      "width": 1200,
+      "screenshot": "browser-production-prompts-dark.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "list_specialty_packs",
+            "args": {}
+          },
+          {
+            "command": "get_default_prompt",
+            "args": {
+              "docType": "soap"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    }
+  ],
+  "interactions": [
+    {
+      "name": "General immediate simulated save, interval validation, keyboard sidebar navigation",
+      "pass": true
+    },
+    {
+      "name": "Models options collapsed, keyboard disclosure, override save",
+      "pass": true
+    },
+    {
+      "name": "Prompt selector cancel/accept discard, explicit save, Escape close/reopen",
+      "pass": true
+    },
+    {
+      "name": "Settings keyboard focus remains trapped for 35 tabs",
+      "pass": true
+    },
+    {
+      "name": "Tab (not programmatic focus) reaches Model options and Prompts Help; Enter opens",
+      "pass": true
+    }
+  ],
+  "problemStates": [
+    {
+      "theme": "light",
+      "page": "general",
+      "case": "save-failure",
+      "details": {
+        "storeRollback": true,
+        "controlRollback": true,
+        "visibleFeedback": true
+      },
+      "text": "SYNTHETIC FIXTURE \u00b7 production SettingsDialog \u00b7 all saves simulated in memory\nReopen fixture settings\nSettings\n\u00d7\nEVERYDAY\nGeneralRecording & TranscriptionAI Models\nCLINICAL CONTENT\nPrompts & SpecialtiesVocabulary & TemplatesLetter Audiences\nSYSTEM\nStorage & BackupSharingAdvancedAbout & Updates\nCould not save settings. Saved values have been reloaded. Check the values before trying again. Unsaved prompt edits remain in the editor.\n\nChanges apply immediately and are saved automatically. There is no Save button.\n\nGeneral\n\nMake FerriScribe comfortable to work in.\n\nAppearance\nTheme\nDark\nLight\nSaving\n Enable Autosave\nAutosave Interval (seconds)\nBetween 10 and 600 seconds\nNotifications\n Play a sound when a SOAP note is generated\nA short completion chime, played locally.",
+      "screenshot": "browser-problem-general-light.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "save_settings",
+            "args": {
+              "config": {
+                "theme": "light",
+                "language": "en-US",
+                "translation_provider_language": "en",
+                "translation_patient_language": "",
+                "ai_provider": "ollama",
+                "ai_model": "qwen3:8b",
+                "ocr_model": null,
+                "translation_model": null,
+                "whisper_model": "large-v3-turbo",
+                "tts_provider": "local",
+                "tts_voice": "default",
+                "temperature": 0.2,
+                "input_device": null,
+                "sample_rate": 44100,
+                "autosave_enabled": false,
+                "autosave_interval_secs": 60,
+                "auto_generate_soap": false,
+                "soap_notification_sound": true,
+                "search_top_k": 5,
+                "mmr_lambda": 0.7,
+                "storage_path": null,
+                "lmstudio_host": "localhost",
+                "lmstudio_port": 1234,
+                "lmstudio_disable_thinking": false,
+                "stt_mode": "local",
+                "stt_remote_host": "",
+                "stt_remote_port": 8080,
+                "stt_remote_model": "whisper-1",
+                "ollama_host": "localhost",
+                "ollama_port": 11434,
+                "ollama_disable_thinking": false,
+                "omlx_host": "localhost",
+                "omlx_port": 8000,
+                "omlx_disable_thinking": false,
+                "vocabulary_enabled": true,
+                "medical_dict_enabled": true,
+                "max_speakers": 3,
+                "custom_context_templates": [],
+                "specialty": null,
+                "custom_soap_prompt": null,
+                "custom_referral_prompt": null,
+                "custom_letter_prompt": null,
+                "custom_synopsis_prompt": null,
+                "custom_peer_discussion_prompt": null,
+                "icd_version": "icd9",
+                "rsvp_wpm": 300,
+                "rsvp_font_size": 48,
+                "rsvp_chunk_size": 1,
+                "rsvp_dark_theme": true,
+                "rsvp_show_context": false,
+                "rsvp_audio_cue": false,
+                "rsvp_auto_start": true,
+                "rsvp_remember_sections": false,
+                "rsvp_remembered_sections": [],
+                "capture_for_training": false,
+                "allow_public_endpoint": false,
+                "backup_target_url": null,
+                "backup_append_token": null,
+                "backup_dest_path": null,
+                "onboarding_completed": true,
+                "tos_accepted_at": null,
+                "auto_update_check": true,
+                "custom_conditions": [],
+                "sync_condition_chips": false,
+                "sync_content": false,
+                "retention_days": null,
+                "screenshot_ocr_hotkey_enabled": true,
+                "screenshot_ocr_hotkey": null
+              }
+            }
+          },
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "models",
+      "case": "offline",
+      "details": {
+        "visibleFeedback": true
+      },
+      "text": "SYNTHETIC FIXTURE \u00b7 production SettingsDialog \u00b7 all saves simulated in memory\nReopen fixture settings\nSettings\n\u00d7\nEVERYDAY\nGeneralRecording & TranscriptionAI Models\nCLINICAL CONTENT\nPrompts & SpecialtiesVocabulary & TemplatesLetter Audiences\nSYSTEM\nStorage & BackupSharingAdvancedAbout & Updates\n\nChanges apply immediately and are saved automatically. There is no Save button.\n\nAI Models\nAI Provider\nLM Studio\nOllama\noMLX\nModel\nCould not load models\n\u21bb\n\nSYNTHETIC FIXTURE provider offline\n\nStart the Ollama app (menu-bar icon) or run `ollama serve`, and make sure at least one model is pulled (`ollama list`).\n\nModel options\nGeneration defaults\nServer configuration\nOllama \u00b7 host, port, authentication & thinking",
+      "screenshot": "browser-problem-models-light.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "ollama_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "lmstudio_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "omlx_api_key"
+            }
+          },
+          {
+            "command": "paired_endpoint",
+            "args": {}
+          },
+          {
+            "command": "list_models",
+            "args": {
+              "providerName": "ollama"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "prompts",
+      "case": "save-failure",
+      "details": {
+        "draftRetained": true,
+        "savedValue": null,
+        "visibleFeedback": true
+      },
+      "text": "SYNTHETIC FIXTURE \u00b7 production SettingsDialog \u00b7 all saves simulated in memory\nReopen fixture settings\nSettings\n\u00d7\nEVERYDAY\nGeneralRecording & TranscriptionAI Models\nCLINICAL CONTENT\nPrompts & SpecialtiesVocabulary & TemplatesLetter Audiences\nSYSTEM\nStorage & BackupSharingAdvancedAbout & Updates\nCould not save settings. Saved values have been reloaded. Check the values before trying again. Unsaved prompt edits remain in the editor.\n\nPrompt edits are saved only when you select Save. Specialty selection applies immediately.\n\nPrompts & Specialties\n\nView and customize the system prompts sent to the AI for each document type. Placeholder tokens are substituted at generation time.\n\nSpecialty\n\nChoose the local prompt pack used for your documents.\n\nDefault \u2014 Family Medicine (built-in)\nDocument type\nSOAP Note\nReferral Letter\nPatient Letter\nClinical Synopsis\nPeer Discussion\nSOAP Note\nUsing: default (unsaved changes)\nSave as custom\nReset to default\nHelp\nPrompt sources, specialty packs and tokens\nCould not save the prompt: SYNTHETIC FIXTURE save failed\nDismiss",
+      "screenshot": "browser-problem-prompts-light.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "list_specialty_packs",
+            "args": {}
+          },
+          {
+            "command": "get_default_prompt",
+            "args": {
+              "docType": "soap"
+            }
+          },
+          {
+            "command": "save_settings",
+            "args": {
+              "config": {
+                "theme": "light",
+                "language": "en-US",
+                "translation_provider_language": "en",
+                "translation_patient_language": "",
+                "ai_provider": "ollama",
+                "ai_model": "qwen3:8b",
+                "ocr_model": null,
+                "translation_model": null,
+                "whisper_model": "large-v3-turbo",
+                "tts_provider": "local",
+                "tts_voice": "default",
+                "temperature": 0.2,
+                "input_device": null,
+                "sample_rate": 44100,
+                "autosave_enabled": true,
+                "autosave_interval_secs": 60,
+                "auto_generate_soap": false,
+                "soap_notification_sound": true,
+                "search_top_k": 5,
+                "mmr_lambda": 0.7,
+                "storage_path": null,
+                "lmstudio_host": "localhost",
+                "lmstudio_port": 1234,
+                "lmstudio_disable_thinking": false,
+                "stt_mode": "local",
+                "stt_remote_host": "",
+                "stt_remote_port": 8080,
+                "stt_remote_model": "whisper-1",
+                "ollama_host": "localhost",
+                "ollama_port": 11434,
+                "ollama_disable_thinking": false,
+                "omlx_host": "localhost",
+                "omlx_port": 8000,
+                "omlx_disable_thinking": false,
+                "vocabulary_enabled": true,
+                "medical_dict_enabled": true,
+                "max_speakers": 3,
+                "custom_context_templates": [],
+                "specialty": null,
+                "custom_soap_prompt": "SYNTHETIC UNSAVED FAILURE DRAFT",
+                "custom_referral_prompt": null,
+                "custom_letter_prompt": null,
+                "custom_synopsis_prompt": null,
+                "custom_peer_discussion_prompt": null,
+                "icd_version": "icd9",
+                "rsvp_wpm": 300,
+                "rsvp_font_size": 48,
+                "rsvp_chunk_size": 1,
+                "rsvp_dark_theme": true,
+                "rsvp_show_context": false,
+                "rsvp_audio_cue": false,
+                "rsvp_auto_start": true,
+                "rsvp_remember_sections": false,
+                "rsvp_remembered_sections": [],
+                "capture_for_training": false,
+                "allow_public_endpoint": false,
+                "backup_target_url": null,
+                "backup_append_token": null,
+                "backup_dest_path": null,
+                "onboarding_completed": true,
+                "tos_accepted_at": null,
+                "auto_update_check": true,
+                "custom_conditions": [],
+                "sync_condition_chips": false,
+                "sync_content": false,
+                "retention_days": null,
+                "screenshot_ocr_hotkey_enabled": true,
+                "screenshot_ocr_hotkey": null
+              }
+            }
+          },
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "light",
+      "page": "about",
+      "case": "restart-public",
+      "details": {
+        "visibleFeedback": true
+      },
+      "text": "SYNTHETIC FIXTURE \u00b7 production SettingsDialog \u00b7 all saves simulated in memory\nReopen fixture settings\nSettings\n\u00d7\nEVERYDAY\nGeneralRecording & TranscriptionAI Models\nCLINICAL CONTENT\nPrompts & SpecialtiesVocabulary & TemplatesLetter Audiences\nSYSTEM\nStorage & BackupSharingAdvancedAbout & Updates\n\u26a0 Public endpoints enabled. AI / STT requests may leave your device.\n\ud83c\udf99\ufe0f\nFerriScribe\nVersion SYNTHETIC FIXTURE\nCheck for updates automatically\nChecks GitHub Releases on launch and every 12 hours. No patient data is sent \u2014 only an anonymous version check.\nCheck for updates now\n\u2713 FerriScribe 99.0.0-fixture is installed \u2014 restart to finish.\nRestart now\n\nFerriScribe never sends patient data to any server. Update checks contact only github.com/cortexuvula/ferriscribe for the latest version manifest.\n\nTerms of Service\nView Terms of Service\nNot yet accepted \u2014 you will be asked to accept on next launch.\nSupport\nShare logs for support\nExports application logs with PHI (phone numbers, emails, etc.) automatically redacted. Safe to share with support.",
+      "screenshot": "browser-problem-about-light.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "general",
+      "case": "save-failure",
+      "details": {
+        "storeRollback": true,
+        "controlRollback": true,
+        "visibleFeedback": true
+      },
+      "text": "SYNTHETIC FIXTURE \u00b7 production SettingsDialog \u00b7 all saves simulated in memory\nReopen fixture settings\nSettings\n\u00d7\nEVERYDAY\nGeneralRecording & TranscriptionAI Models\nCLINICAL CONTENT\nPrompts & SpecialtiesVocabulary & TemplatesLetter Audiences\nSYSTEM\nStorage & BackupSharingAdvancedAbout & Updates\nCould not save settings. Saved values have been reloaded. Check the values before trying again. Unsaved prompt edits remain in the editor.\n\nChanges apply immediately and are saved automatically. There is no Save button.\n\nGeneral\n\nMake FerriScribe comfortable to work in.\n\nAppearance\nTheme\nDark\nLight\nSaving\n Enable Autosave\nAutosave Interval (seconds)\nBetween 10 and 600 seconds\nNotifications\n Play a sound when a SOAP note is generated\nA short completion chime, played locally.",
+      "screenshot": "browser-problem-general-dark.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "save_settings",
+            "args": {
+              "config": {
+                "theme": "dark",
+                "language": "en-US",
+                "translation_provider_language": "en",
+                "translation_patient_language": "",
+                "ai_provider": "ollama",
+                "ai_model": "qwen3:8b",
+                "ocr_model": null,
+                "translation_model": null,
+                "whisper_model": "large-v3-turbo",
+                "tts_provider": "local",
+                "tts_voice": "default",
+                "temperature": 0.2,
+                "input_device": null,
+                "sample_rate": 44100,
+                "autosave_enabled": false,
+                "autosave_interval_secs": 60,
+                "auto_generate_soap": false,
+                "soap_notification_sound": true,
+                "search_top_k": 5,
+                "mmr_lambda": 0.7,
+                "storage_path": null,
+                "lmstudio_host": "localhost",
+                "lmstudio_port": 1234,
+                "lmstudio_disable_thinking": false,
+                "stt_mode": "local",
+                "stt_remote_host": "",
+                "stt_remote_port": 8080,
+                "stt_remote_model": "whisper-1",
+                "ollama_host": "localhost",
+                "ollama_port": 11434,
+                "ollama_disable_thinking": false,
+                "omlx_host": "localhost",
+                "omlx_port": 8000,
+                "omlx_disable_thinking": false,
+                "vocabulary_enabled": true,
+                "medical_dict_enabled": true,
+                "max_speakers": 3,
+                "custom_context_templates": [],
+                "specialty": null,
+                "custom_soap_prompt": null,
+                "custom_referral_prompt": null,
+                "custom_letter_prompt": null,
+                "custom_synopsis_prompt": null,
+                "custom_peer_discussion_prompt": null,
+                "icd_version": "icd9",
+                "rsvp_wpm": 300,
+                "rsvp_font_size": 48,
+                "rsvp_chunk_size": 1,
+                "rsvp_dark_theme": true,
+                "rsvp_show_context": false,
+                "rsvp_audio_cue": false,
+                "rsvp_auto_start": true,
+                "rsvp_remember_sections": false,
+                "rsvp_remembered_sections": [],
+                "capture_for_training": false,
+                "allow_public_endpoint": false,
+                "backup_target_url": null,
+                "backup_append_token": null,
+                "backup_dest_path": null,
+                "onboarding_completed": true,
+                "tos_accepted_at": null,
+                "auto_update_check": true,
+                "custom_conditions": [],
+                "sync_condition_chips": false,
+                "sync_content": false,
+                "retention_days": null,
+                "screenshot_ocr_hotkey_enabled": true,
+                "screenshot_ocr_hotkey": null
+              }
+            }
+          },
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "models",
+      "case": "offline",
+      "details": {
+        "visibleFeedback": true
+      },
+      "text": "SYNTHETIC FIXTURE \u00b7 production SettingsDialog \u00b7 all saves simulated in memory\nReopen fixture settings\nSettings\n\u00d7\nEVERYDAY\nGeneralRecording & TranscriptionAI Models\nCLINICAL CONTENT\nPrompts & SpecialtiesVocabulary & TemplatesLetter Audiences\nSYSTEM\nStorage & BackupSharingAdvancedAbout & Updates\n\nChanges apply immediately and are saved automatically. There is no Save button.\n\nAI Models\nAI Provider\nLM Studio\nOllama\noMLX\nModel\nCould not load models\n\u21bb\n\nSYNTHETIC FIXTURE provider offline\n\nStart the Ollama app (menu-bar icon) or run `ollama serve`, and make sure at least one model is pulled (`ollama list`).\n\nModel options\nGeneration defaults\nServer configuration\nOllama \u00b7 host, port, authentication & thinking",
+      "screenshot": "browser-problem-models-dark.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "ollama_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "lmstudio_api_key"
+            }
+          },
+          {
+            "command": "get_api_key",
+            "args": {
+              "provider": "omlx_api_key"
+            }
+          },
+          {
+            "command": "paired_endpoint",
+            "args": {}
+          },
+          {
+            "command": "list_models",
+            "args": {
+              "providerName": "ollama"
+            }
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "prompts",
+      "case": "save-failure",
+      "details": {
+        "draftRetained": true,
+        "savedValue": null,
+        "visibleFeedback": true
+      },
+      "text": "SYNTHETIC FIXTURE \u00b7 production SettingsDialog \u00b7 all saves simulated in memory\nReopen fixture settings\nSettings\n\u00d7\nEVERYDAY\nGeneralRecording & TranscriptionAI Models\nCLINICAL CONTENT\nPrompts & SpecialtiesVocabulary & TemplatesLetter Audiences\nSYSTEM\nStorage & BackupSharingAdvancedAbout & Updates\nCould not save settings. Saved values have been reloaded. Check the values before trying again. Unsaved prompt edits remain in the editor.\n\nPrompt edits are saved only when you select Save. Specialty selection applies immediately.\n\nPrompts & Specialties\n\nView and customize the system prompts sent to the AI for each document type. Placeholder tokens are substituted at generation time.\n\nSpecialty\n\nChoose the local prompt pack used for your documents.\n\nDefault \u2014 Family Medicine (built-in)\nDocument type\nSOAP Note\nReferral Letter\nPatient Letter\nClinical Synopsis\nPeer Discussion\nSOAP Note\nUsing: default (unsaved changes)\nSave as custom\nReset to default\nHelp\nPrompt sources, specialty packs and tokens\nCould not save the prompt: SYNTHETIC FIXTURE save failed\nDismiss",
+      "screenshot": "browser-problem-prompts-dark.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          },
+          {
+            "command": "list_specialty_packs",
+            "args": {}
+          },
+          {
+            "command": "get_default_prompt",
+            "args": {
+              "docType": "soap"
+            }
+          },
+          {
+            "command": "save_settings",
+            "args": {
+              "config": {
+                "theme": "dark",
+                "language": "en-US",
+                "translation_provider_language": "en",
+                "translation_patient_language": "",
+                "ai_provider": "ollama",
+                "ai_model": "qwen3:8b",
+                "ocr_model": null,
+                "translation_model": null,
+                "whisper_model": "large-v3-turbo",
+                "tts_provider": "local",
+                "tts_voice": "default",
+                "temperature": 0.2,
+                "input_device": null,
+                "sample_rate": 44100,
+                "autosave_enabled": true,
+                "autosave_interval_secs": 60,
+                "auto_generate_soap": false,
+                "soap_notification_sound": true,
+                "search_top_k": 5,
+                "mmr_lambda": 0.7,
+                "storage_path": null,
+                "lmstudio_host": "localhost",
+                "lmstudio_port": 1234,
+                "lmstudio_disable_thinking": false,
+                "stt_mode": "local",
+                "stt_remote_host": "",
+                "stt_remote_port": 8080,
+                "stt_remote_model": "whisper-1",
+                "ollama_host": "localhost",
+                "ollama_port": 11434,
+                "ollama_disable_thinking": false,
+                "omlx_host": "localhost",
+                "omlx_port": 8000,
+                "omlx_disable_thinking": false,
+                "vocabulary_enabled": true,
+                "medical_dict_enabled": true,
+                "max_speakers": 3,
+                "custom_context_templates": [],
+                "specialty": null,
+                "custom_soap_prompt": "SYNTHETIC UNSAVED FAILURE DRAFT",
+                "custom_referral_prompt": null,
+                "custom_letter_prompt": null,
+                "custom_synopsis_prompt": null,
+                "custom_peer_discussion_prompt": null,
+                "icd_version": "icd9",
+                "rsvp_wpm": 300,
+                "rsvp_font_size": 48,
+                "rsvp_chunk_size": 1,
+                "rsvp_dark_theme": true,
+                "rsvp_show_context": false,
+                "rsvp_audio_cue": false,
+                "rsvp_auto_start": true,
+                "rsvp_remember_sections": false,
+                "rsvp_remembered_sections": [],
+                "capture_for_training": false,
+                "allow_public_endpoint": false,
+                "backup_target_url": null,
+                "backup_append_token": null,
+                "backup_dest_path": null,
+                "onboarding_completed": true,
+                "tos_accepted_at": null,
+                "auto_update_check": true,
+                "custom_conditions": [],
+                "sync_condition_chips": false,
+                "sync_content": false,
+                "retention_days": null,
+                "screenshot_ocr_hotkey_enabled": true,
+                "screenshot_ocr_hotkey": null
+              }
+            }
+          },
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    },
+    {
+      "theme": "dark",
+      "page": "about",
+      "case": "restart-public",
+      "details": {
+        "visibleFeedback": true
+      },
+      "text": "SYNTHETIC FIXTURE \u00b7 production SettingsDialog \u00b7 all saves simulated in memory\nReopen fixture settings\nSettings\n\u00d7\nEVERYDAY\nGeneralRecording & TranscriptionAI Models\nCLINICAL CONTENT\nPrompts & SpecialtiesVocabulary & TemplatesLetter Audiences\nSYSTEM\nStorage & BackupSharingAdvancedAbout & Updates\n\u26a0 Public endpoints enabled. AI / STT requests may leave your device.\n\ud83c\udf99\ufe0f\nFerriScribe\nVersion SYNTHETIC FIXTURE\nCheck for updates automatically\nChecks GitHub Releases on launch and every 12 hours. No patient data is sent \u2014 only an anonymous version check.\nCheck for updates now\n\u2713 FerriScribe 99.0.0-fixture is installed \u2014 restart to finish.\nRestart now\n\nFerriScribe never sends patient data to any server. Update checks contact only github.com/cortexuvula/ferriscribe for the latest version manifest.\n\nTerms of Service\nView Terms of Service\nNot yet accepted \u2014 you will be asked to accept on next launch.\nSupport\nShare logs for support\nExports application logs with PHI (phone numbers, emails, etc.) automatically redacted. Safe to share with support.",
+      "screenshot": "browser-problem-about-dark.png",
+      "geometry": {
+        "document": {
+          "client": 1200,
+          "scroll": 1200
+        },
+        "panels": []
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "get_settings",
+            "args": {}
+          }
+        ],
+        "unknown": []
+      }
+    }
+  ],
+  "errors": [
+    {
+      "url": "http://127.0.0.1:14739/docs/settings-declutter/browser-index.html?page=general&theme=light&case=save-failure",
+      "type": "error",
+      "message": "Save failed: Error: SYNTHETIC FIXTURE save failed\n    at invoke (http://127.0.0.1:14739/docs/settings-declutter/browser-tauri.ts:20:83)\n    at saveSettings (http://127.0.0.1:14739/src/lib/api/settings.ts:6:9)\n    at http://127.0.0.1:14739/src/lib/stores/settings.svelte.ts:243:36\n    at async Module.track_reactivity_loss (http://127.0.0.1:14739/docs/settings-declutter/browser-cache/deps/runtime-DE0EIGrP.js?v=99638b5d:1826:14)\n    at async HTMLInputElement.handleAutosaveChange (http://127.0.0.1:14739/src/lib/components/settings/sections/GeneralBasics.svelte:50:5)"
+    },
+    {
+      "url": "http://127.0.0.1:14739/docs/settings-declutter/browser-index.html?page=models&theme=light&case=offline",
+      "type": "error",
+      "message": "Failed to fetch models: Error: SYNTHETIC FIXTURE provider offline\n    at invoke (http://127.0.0.1:14739/docs/settings-declutter/browser-tauri.ts:26:78)\n    at listModels (http://127.0.0.1:14739/src/lib/api/chat.ts:40:9)\n    at fetchModelsForProvider (http://127.0.0.1:14739/src/lib/components/settings/Models.svelte:224:50)\n    at http://127.0.0.1:14739/src/lib/components/settings/Models.svelte:263:35"
+    },
+    {
+      "url": "http://127.0.0.1:14739/docs/settings-declutter/browser-index.html?page=prompts&theme=light&case=save-failure",
+      "type": "error",
+      "message": "Save failed: Error: SYNTHETIC FIXTURE save failed\n    at invoke (http://127.0.0.1:14739/docs/settings-declutter/browser-tauri.ts:20:83)\n    at saveSettings (http://127.0.0.1:14739/src/lib/api/settings.ts:6:9)\n    at http://127.0.0.1:14739/src/lib/stores/settings.svelte.ts:243:36\n    at async Module.track_reactivity_loss (http://127.0.0.1:14739/docs/settings-declutter/browser-cache/deps/runtime-DE0EIGrP.js?v=99638b5d:1826:14)\n    at async HTMLButtonElement.handlePromptSave (http://127.0.0.1:14739/src/lib/components/settings/Prompts.svelte:403:5)"
+    },
+    {
+      "url": "http://127.0.0.1:14739/docs/settings-declutter/browser-index.html?page=prompts&theme=light&case=save-failure",
+      "type": "error",
+      "message": "Failed to save custom prompt: Error: SYNTHETIC FIXTURE save failed\n    at invoke (http://127.0.0.1:14739/docs/settings-declutter/browser-tauri.ts:20:83)\n    at saveSettings (http://127.0.0.1:14739/src/lib/api/settings.ts:6:9)\n    at http://127.0.0.1:14739/src/lib/stores/settings.svelte.ts:243:36\n    at async Module.track_reactivity_loss (http://127.0.0.1:14739/docs/settings-declutter/browser-cache/deps/runtime-DE0EIGrP.js?v=99638b5d:1826:14)\n    at async HTMLButtonElement.handlePromptSave (http://127.0.0.1:14739/src/lib/components/settings/Prompts.svelte:403:5)"
+    },
+    {
+      "url": "http://127.0.0.1:14739/docs/settings-declutter/browser-index.html?page=general&theme=dark&case=save-failure",
+      "type": "error",
+      "message": "Save failed: Error: SYNTHETIC FIXTURE save failed\n    at invoke (http://127.0.0.1:14739/docs/settings-declutter/browser-tauri.ts:20:83)\n    at saveSettings (http://127.0.0.1:14739/src/lib/api/settings.ts:6:9)\n    at http://127.0.0.1:14739/src/lib/stores/settings.svelte.ts:243:36\n    at async Module.track_reactivity_loss (http://127.0.0.1:14739/docs/settings-declutter/browser-cache/deps/runtime-DE0EIGrP.js?v=99638b5d:1826:14)\n    at async HTMLInputElement.handleAutosaveChange (http://127.0.0.1:14739/src/lib/components/settings/sections/GeneralBasics.svelte:50:5)"
+    },
+    {
+      "url": "http://127.0.0.1:14739/docs/settings-declutter/browser-index.html?page=models&theme=dark&case=offline",
+      "type": "error",
+      "message": "Failed to fetch models: Error: SYNTHETIC FIXTURE provider offline\n    at invoke (http://127.0.0.1:14739/docs/settings-declutter/browser-tauri.ts:26:78)\n    at listModels (http://127.0.0.1:14739/src/lib/api/chat.ts:40:9)\n    at fetchModelsForProvider (http://127.0.0.1:14739/src/lib/components/settings/Models.svelte:224:50)\n    at http://127.0.0.1:14739/src/lib/components/settings/Models.svelte:263:35"
+    },
+    {
+      "url": "http://127.0.0.1:14739/docs/settings-declutter/browser-index.html?page=prompts&theme=dark&case=save-failure",
+      "type": "error",
+      "message": "Save failed: Error: SYNTHETIC FIXTURE save failed\n    at invoke (http://127.0.0.1:14739/docs/settings-declutter/browser-tauri.ts:20:83)\n    at saveSettings (http://127.0.0.1:14739/src/lib/api/settings.ts:6:9)\n    at http://127.0.0.1:14739/src/lib/stores/settings.svelte.ts:243:36\n    at async Module.track_reactivity_loss (http://127.0.0.1:14739/docs/settings-declutter/browser-cache/deps/runtime-DE0EIGrP.js?v=99638b5d:1826:14)\n    at async HTMLButtonElement.handlePromptSave (http://127.0.0.1:14739/src/lib/components/settings/Prompts.svelte:403:5)"
+    },
+    {
+      "url": "http://127.0.0.1:14739/docs/settings-declutter/browser-index.html?page=prompts&theme=dark&case=save-failure",
+      "type": "error",
+      "message": "Failed to save custom prompt: Error: SYNTHETIC FIXTURE save failed\n    at invoke (http://127.0.0.1:14739/docs/settings-declutter/browser-tauri.ts:20:83)\n    at saveSettings (http://127.0.0.1:14739/src/lib/api/settings.ts:6:9)\n    at http://127.0.0.1:14739/src/lib/stores/settings.svelte.ts:243:36\n    at async Module.track_reactivity_loss (http://127.0.0.1:14739/docs/settings-declutter/browser-cache/deps/runtime-DE0EIGrP.js?v=99638b5d:1826:14)\n    at async HTMLButtonElement.handlePromptSave (http://127.0.0.1:14739/src/lib/components/settings/Prompts.svelte:403:5)"
+    }
+  ],
+  "blockedRequests": [],
+  "contrast": [
+    {
+      "theme": "light",
+      "page": "general",
+      "colors": [
+        {
+          "label": "General",
+          "active": true,
+          "fg": "rgb(59, 91, 219)",
+          "bg": "rgb(233, 236, 239)",
+          "ratio": 4.7794658300102855,
+          "passes": true
+        },
+        {
+          "label": "Recording & Transcription",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "AI Models",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Prompts & Specialties",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Vocabulary & Templates",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Letter Audiences",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Storage & Backup",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Sharing",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Advanced",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "About & Updates",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        }
+      ]
+    },
+    {
+      "theme": "light",
+      "page": "models",
+      "colors": [
+        {
+          "label": "General",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Recording & Transcription",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "AI Models",
+          "active": true,
+          "fg": "rgb(59, 91, 219)",
+          "bg": "rgb(233, 236, 239)",
+          "ratio": 4.7794658300102855,
+          "passes": true
+        },
+        {
+          "label": "Prompts & Specialties",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Vocabulary & Templates",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Letter Audiences",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Storage & Backup",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Sharing",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Advanced",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "About & Updates",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        }
+      ]
+    },
+    {
+      "theme": "light",
+      "page": "prompts",
+      "colors": [
+        {
+          "label": "General",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Recording & Transcription",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "AI Models",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Prompts & Specialties",
+          "active": true,
+          "fg": "rgb(59, 91, 219)",
+          "bg": "rgb(233, 236, 239)",
+          "ratio": 4.7794658300102855,
+          "passes": true
+        },
+        {
+          "label": "Vocabulary & Templates",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Letter Audiences",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Storage & Backup",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Sharing",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "Advanced",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        },
+        {
+          "label": "About & Updates",
+          "active": false,
+          "fg": "rgb(73, 80, 87)",
+          "bg": "rgb(248, 249, 250)",
+          "ratio": 7.756631072165828,
+          "passes": true
+        }
+      ]
+    },
+    {
+      "theme": "dark",
+      "page": "general",
+      "colors": [
+        {
+          "label": "General",
+          "active": true,
+          "fg": "rgb(145, 167, 255)",
+          "bg": "rgb(55, 58, 64)",
+          "ratio": 4.982045152337198,
+          "passes": true
+        },
+        {
+          "label": "Recording & Transcription",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "AI Models",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Prompts & Specialties",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Vocabulary & Templates",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Letter Audiences",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Storage & Backup",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Sharing",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Advanced",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "About & Updates",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        }
+      ]
+    },
+    {
+      "theme": "dark",
+      "page": "models",
+      "colors": [
+        {
+          "label": "General",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Recording & Transcription",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "AI Models",
+          "active": true,
+          "fg": "rgb(145, 167, 255)",
+          "bg": "rgb(55, 58, 64)",
+          "ratio": 4.982045152337198,
+          "passes": true
+        },
+        {
+          "label": "Prompts & Specialties",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Vocabulary & Templates",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Letter Audiences",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Storage & Backup",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Sharing",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Advanced",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "About & Updates",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        }
+      ]
+    },
+    {
+      "theme": "dark",
+      "page": "prompts",
+      "colors": [
+        {
+          "label": "General",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Recording & Transcription",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "AI Models",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Prompts & Specialties",
+          "active": true,
+          "fg": "rgb(145, 167, 255)",
+          "bg": "rgb(55, 58, 64)",
+          "ratio": 4.982045152337198,
+          "passes": true
+        },
+        {
+          "label": "Vocabulary & Templates",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Letter Audiences",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Storage & Backup",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Sharing",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "Advanced",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        },
+        {
+          "label": "About & Updates",
+          "active": false,
+          "fg": "rgb(144, 146, 150)",
+          "bg": "rgb(37, 38, 43)",
+          "ratio": 4.844588239832686,
+          "passes": true
+        }
+      ]
+    }
+  ],
+  "sourceHashes": {
+    "src/lib/components/SettingsContent.svelte": "050a666124093d9e847a88227748a050b1a5a340a171bd9ec000817257347005",
+    "src/lib/components/Modal.svelte": "6de07fbd5ac3070dedff7fe1c12550c69b7eb5ba35215b18cf392655ff817d83",
+    "src/lib/components/settings/Models.svelte": "0b8006a8f511a8047493bb4b899a3538a7fc0f17af9a888ee50dae9bb1e598f9",
+    "src/lib/components/settings/Prompts.svelte": "45c1a4ea8d8fc560d1dd291a4fcdbc59f7789bf16bf2708e13da5b5bbec1479c",
+    "src/lib/components/settings/sections/GeneralBasics.svelte": "b86d81cb342561af4feb6ffedf810ac3ac4b90ff43dfc529c24b24e52f82c63c",
+    "src/lib/components/settings/settings.css": "db21f592721b224835c1108f7f98288966e47db5e1073c7c81ee4913b1cc6525"
+  }
+}

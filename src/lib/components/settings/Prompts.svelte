@@ -246,6 +246,17 @@
     activePromptKey = docType;
   }
 
+  async function handleDocumentTypeChange(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    const requested = select.value as DocType;
+    // Keep the native control aligned with the editor while confirming.
+    // A cancelled switch does not change reactive state, so explicitly
+    // restore the DOM value rather than relying on a Svelte rerender.
+    select.value = activePromptKey;
+    await handlePromptSelect(requested);
+    select.value = activePromptKey;
+  }
+
   async function handlePromptSave() {
     const info = PROMPT_TYPES.find((p) => p.key === activePromptKey)!;
     const gen = promptLoadGen;
@@ -346,22 +357,18 @@
 </script>
 
 <section class="settings-section prompts-section">
-  <h2>Prompts</h2>
+  <h2>Prompts &amp; Specialties</h2>
   <p class="section-description">
     View and customize the system prompts sent to the AI for each document type.
     Placeholder tokens are substituted at generation time.
   </p>
 
   <div class="specialty-section">
-    <h3>Specialty</h3>
-    <p class="section-description">
-      Select a specialty prompt pack to tailor every generated document. A
-      locked anti-fabrication safety block is always appended to pack prompts
-      and cannot be altered. Packs are read from the app's local
-      <code>specialties</code> folder only — nothing is downloaded.
-    </p>
+    <label for="specialty-select" class="form-label">Specialty</label>
+    <p class="section-description">Choose the local prompt pack used for your documents.</p>
 
     <select
+      id="specialty-select"
       class="specialty-select"
       value={specialtySelectValue}
       onchange={handleSpecialtyChange}
@@ -414,46 +421,30 @@
   </div>
 
   <div class="prompts-layout">
-    <aside class="prompts-sidebar">
-      {#each PROMPT_TYPES as pt (pt.key)}
-        <button
-          class="prompts-nav-item"
-          class:active={activePromptKey === pt.key}
-          aria-current={activePromptKey === pt.key ? 'true' : undefined}
-          onclick={() => handlePromptSelect(pt.key)}
-        >
-          {pt.label}
-        </button>
-      {/each}
-    </aside>
+    <div class="form-group document-picker">
+      <label for="prompt-document-type" class="form-label">Document type</label>
+      <select id="prompt-document-type" value={activePromptKey} onchange={handleDocumentTypeChange}>
+        {#each PROMPT_TYPES as pt (pt.key)}
+          <option value={pt.key}>{pt.label}</option>
+        {/each}
+      </select>
+    </div>
 
     <div class="prompts-editor">
       {#if promptLoading}
         <div class="prompts-loading">Loading…</div>
       {:else}
         {@const info = PROMPT_TYPES.find((p) => p.key === activePromptKey)}
-        <h3>{info?.label}</h3>
+        <label for="prompt-editor">{info?.label}</label>
 
         <textarea
+          id="prompt-editor"
           class="prompt-textarea"
           bind:value={promptEditorText}
           oninput={() => (promptDirty = true)}
           rows="20"
           spellcheck="false"
         ></textarea>
-
-        {#if info && info.placeholders.length > 0}
-          <details class="prompts-placeholders">
-            <summary>Available placeholders</summary>
-            <ul>
-              {#each info.placeholders as ph (ph.token)}
-                <li>
-                  <code>{ph.token}</code> — {ph.description}
-                </li>
-              {/each}
-            </ul>
-          </details>
-        {/if}
 
         {@const currentCustom = settings.state?.[info?.configField ?? 'custom_soap_prompt']}
         {@const currentSource = activeSource(activePromptKey, currentCustom, selectedPack)}
@@ -492,6 +483,28 @@
             Reset to default
           </button>
         </div>
+        <details class="prompts-help">
+          <summary><span>Help</span><span class="help-hint">Prompt sources, specialty packs and tokens</span></summary>
+          <p>
+            Select a specialty prompt pack to tailor every generated document. A
+            locked anti-fabrication safety block is always appended to pack prompts
+            and cannot be altered. Packs are read from the app's local
+            <code>specialties</code> folder only — nothing is downloaded.
+          </p>
+        {#if info && info.placeholders.length > 0}
+          <div class="prompts-placeholders">
+            <h4>Available placeholders</h4>
+            <ul>
+              {#each info.placeholders as ph (ph.token)}
+                <li>
+                  <code>{ph.token}</code> — {ph.description}
+                </li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+
+        </details>
       {/if}
     </div>
   </div>
@@ -509,12 +522,9 @@
     gap: 0.5rem;
   }
 
-  .specialty-section h3 {
-    margin: 0;
-  }
-
   .specialty-select {
-    max-width: 380px;
+    width: 100%;
+    min-height: 44px;
     padding: 0.4rem 0.5rem;
     background: var(--bg-input);
     color: var(--text-primary);
@@ -553,40 +563,19 @@
   }
 
   .prompts-layout {
-    display: grid;
-    grid-template-columns: 160px 1fr;
-    gap: 1.25rem;
-    align-items: start;
-    margin-top: 1rem;
-  }
-
-  .prompts-sidebar {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
-    border-right: 1px solid var(--border);
-    padding-right: 0.75rem;
+    gap: 20px;
+    margin-top: 24px;
   }
 
-  .prompts-nav-item {
-    text-align: left;
-    padding: 0.5rem 0.75rem;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    color: var(--text-primary);
-    cursor: pointer;
-    font-size: 0.9rem;
-  }
-
-  .prompts-nav-item:hover {
-    background: var(--bg-hover);
-  }
-
-  .prompts-nav-item.active {
-    background: var(--accent-light);
-    border-color: var(--accent);
-  }
+  .document-picker, .prompts-editor { width: 100%; min-width: 0; }
+  .document-picker { display: flex; flex-direction: column; gap: 8px; }
+  .document-picker select { min-height: 44px; }
+  .prompts-help { border-top: 1px solid var(--border); margin-top: 12px; }
+  .prompts-help summary { min-height: 44px; padding: 14px 0; cursor: pointer; font-weight: 600; }
+  .prompts-help p, .prompts-help ul { color: var(--text-secondary); line-height: 1.5; }
+  .help-hint { display: block; margin-top: 4px; font-size: 13px; font-weight: 400; color: var(--text-secondary); }
 
   .prompts-editor {
     display: flex;
@@ -605,7 +594,7 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     resize: vertical;
-    min-height: 400px;
+    min-height: 280px;
   }
 
   .prompts-placeholders {
@@ -613,11 +602,6 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.5rem 0.75rem;
-  }
-
-  .prompts-placeholders summary {
-    cursor: pointer;
-    font-weight: 500;
   }
 
   .prompts-placeholders ul {
@@ -643,6 +627,7 @@
 
   .prompts-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
   }
 

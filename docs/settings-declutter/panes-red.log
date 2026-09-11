@@ -1,0 +1,3518 @@
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - import "./vite-plugins/dictionary-en" without a file extension (vitest.config.ts:3:43). Add the file extension
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/settings-declutter
+
+stderr | src/lib/components/settings/Models.test.ts > Models > shows model-list failures outside collapsed server configuration
+Failed to fetch models: Error: Synthetic provider offline
+    at /Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/settings-declutter/src/lib/components/settings/Models.test.ts:110:42
+    at file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:2956:64
+
+ ❯ src/lib/components/settings/Models.test.ts (8 tests | 4 failed) 172ms
+     × keeps model options collapsed with a summary of configured overrides 58ms
+     × keeps all server controls reachable with the active provider first 23ms
+     × shows model-list failures outside collapsed server configuration 17ms
+     × keeps validation failures visible when server configuration is collapsed 17ms
+ ❯ src/lib/components/settings/Prompts.test.ts (10 tests | 5 failed) 1148ms
+     × restores the document selector and draft when discard is cancelled 74ms
+     × loads the selected document only after accepting discard 9ms
+     × keeps source and explicit actions outside collapsed Help 6ms
+     × falls back to the built-in default for doc types the pack does not provide 1005ms
+     × a reset confirmed after switching prompt types clears the custom but never loads the old doc under the new heading 7ms
+stderr | src/lib/components/settings/Audio.test.ts > Audio focused layout > shows speaker model list failures outside advanced settings
+Failed to list pyannote models: Error: Synthetic model list unavailable
+    at /Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/settings-declutter/src/lib/components/settings/Audio.test.ts:82:40
+    at file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:302:11
+    at file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:1903:26
+    at file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel (file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:2323:10)
+    at file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:2305:20
+    at new Promise (<anonymous>)
+    at runWithTimeout (file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:2272:10)
+    at file:///Users/cortexuvula/Development/rustMedicalAssistant/node_modules/@vitest/runner/dist/chunk-artifact.js:2956:64
+
+ ❯ src/lib/components/settings/Audio.test.ts (4 tests | 3 failed) 1110ms
+     × keeps microphone, language, mode and engine above advanced settings 38ms
+     × keeps download progress in the collapsed advanced summary and failures outside it 10ms
+     × shows speaker model list failures outside advanced settings 1007ms
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 12 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/components/settings/Audio.test.ts > Audio focused layout > keeps microphone, language, mode and engine above advanced settings
+TestingLibraryElementError: Unable to find an element with the text: Advanced transcription. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section svelte-1cva6a0"[39m
+    [36m>[39m
+      [36m<h3[39m
+        [33mclass[39m=[32m"section-title svelte-1cva6a0"[39m
+      [36m>[39m
+        [0mAudio / STT[0m
+      [36m</h3>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1k21221"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1k21221"[39m
+          [33mfor[39m=[32m"input-device"[39m
+        [36m>[39m
+          [0mInput Device[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"input-device"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m""[39m
+          [36m>[39m
+            [0mSystem Default[0m
+          [36m</option>[39m
+          [0m [0m
+          [36m<option[39m
+            [33mvalue[39m=[32m"Synthetic microphone"[39m
+          [36m>[39m
+            [0mSynthetic microphone (Default)[0m
+          [36m</option>[39m
+        [36m</select>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"probe-row svelte-1k21221"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn-test svelte-1k21221"[39m
+          [36m>[39m
+            [0mTest microphone[0m
+          [36m</button>[39m
+          [0m [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"form-hint svelte-1k21221"[39m
+          [36m>[39m
+            [0mCaptures ~1 s from the selected device to confirm it is live before recording.[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<fieldset[39m
+        [33mclass[39m=[32m"form-group radio-fieldset svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<legend[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mSTT Mode[0m
+        [36m</legend>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"radio-row svelte-1cva6a0"[39m
+        [36m>[39m
+          [36m<label[39m
+            [33mclass[39m=[32m"radio-label svelte-1cva6a0"[39m
+          [36m>[39m
+            [36m<input[39m
+              [33mclass[39m=[32m"svelte-1cva6a0"[39m
+              [33mtype[39m=[32m"radio"[39m
+              [33mvalue[39m=[32m"local"[39m
+            [36m/>[39m
+            [0m Local[0m
+          [36m</label>[39m
+          [0m [0m
+          [36m<label[39m
+            [33mclass[39m=[32m"radio-label svelte-1cva6a0"[39m
+          [36m>[39m
+            [36m<input[39m
+              [33mclass[39m=[32m"svelte-1cva6a0"[39m
+              [33mtype[39m=[32m"radio"[39m
+              [33mvalue[39m=[32m"remote"[39m
+            [36m/>[39m
+            [0m Remote[0m
+          [36m</label>[39m
+        [36m</div>[39m
+      [36m</fieldset>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-sexdr2"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-sexdr2"[39m
+          [33mfor[39m=[32m"whisper-model"[39m
+        [36m>[39m
+          [0mWhisper Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"whisper-model"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"tiny"[39m
+          [36m>[39m
+            [0mtiny (1 KB) [0m
+          [36m</option>[39m
+          [0m[0m
+        [36m</select>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-sexdr2"[39m
+        [36m>[39m
+          [0mLarger models are more accurate but use more memory and take longer.[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-sexdr2"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-label svelte-sexdr2"[39m
+        [36m>[39m
+          [0mModel Management[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-list svelte-14yjxrp"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"model-row svelte-14yjxrp"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-info svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-name svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mtiny[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-desc svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mSynthetic engine[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-size svelte-14yjxrp"[39m
+              [36m>[39m
+                [0m1 KB[0m
+              [36m</span>[39m
+            [36m</div>[39m
+            [0m [0m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-actions svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"badge-downloaded svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mDownloaded[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn-delete-model svelte-14yjxrp"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"Cannot delete the active model"[39m
+              [36m>[39m
+                [0mDelete[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [0m[0m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<p[39m
+        [33mclass[39m=[32m"form-hint svelte-1273n6j"[39m
+      [36m>[39m
+        [0mDiarization runs on this machine regardless of STT mode — pyannote models below are required for speaker labels.[0m
+      [36m</p>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1273n6j"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-label svelte-1273n6j"[39m
+        [36m>[39m
+          [0mDiarization Models (Speaker Identification)[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1273n6j"[39m
+        [36m>[39m
+          [0mBoth models are required for speaker diarization. Without them, transcripts will not have speaker labels.[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-list svelte-14yjxrp"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"model-row svelte-14yjxrp"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-info svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-name svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mspeaker-model[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-desc svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mSynthetic speaker model[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-size svelte-14yjxrp"[39m
+              [36m>[39m
+                [0m1 KB[0m
+              [36m</span>[39m
+            [36m</div>[39m
+            [0m [0m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-actions svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn-download-model svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mDownload[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [0m[0m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+          [33mfor[39m=[32m"max-speakers"[39m
+        [36m>[39m
+          [0mMax speakers [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"badge-value svelte-1cva6a0"[39m
+          [36m>[39m
+            [0m3[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<input[39m
+          [33mid[39m=[32m"max-speakers"[39m
+          [33mmax[39m=[32m"8"[39m
+          [33mmin[39m=[32m"1"[39m
+          [33mtype[39m=[32m"range"[39m
+        [36m/>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mLimits the number of speaker clusters. Set to the expected number of people in the conversation (typically 2–3).[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+          [33mfor[39m=[32m"sample-rate"[39m
+        [36m>[39m
+          [0mSample Rate[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"sample-rate"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"16000"[39m
+          [36m>[39m
+            [0m16000 Hz[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"44100"[39m
+          [36m>[39m
+            [0m44100 Hz[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"48000"[39m
+          [36m>[39m
+            [0m48000 Hz[0m
+          [36m</option>[39m
+        [36m</select>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label checkbox-label svelte-1cva6a0"[39m
+        [36m>[39m
+          [36m<input[39m
+            [33mclass[39m=[32m"svelte-1cva6a0"[39m
+            [33mtype[39m=[32m"checkbox"[39m
+          [36m/>[39m
+          [0m [0m
+          [36m<span>[39m
+            [0mAuto-generate SOAP after recording[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mWhen enabled, transcription and SOAP generation start automatically after you stop recording.[0m
+        [36m</span>[39m
+      [36m</div>[39m
+    [36m</section>[39m
+    [0m[0m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError ../../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/lib/components/settings/Audio.test.ts:42:29
+     40|     render(Audio);
+     41|     await waitFor(() => expect((screen.getByLabelText('Whisper Model')…
+     42|     const advanced = screen.getByText('Advanced transcription').closes…
+       |                             ^
+     43|     expect(advanced.open).toBe(false);
+     44|     for (const label of ['Input Device', 'Transcription Language', 'Wh…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/12]⎯
+
+ FAIL  src/lib/components/settings/Audio.test.ts > Audio focused layout > keeps download progress in the collapsed advanced summary and failures outside it
+TestingLibraryElementError: Unable to find an element with the text: Advanced transcription. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section svelte-1cva6a0"[39m
+    [36m>[39m
+      [36m<h3[39m
+        [33mclass[39m=[32m"section-title svelte-1cva6a0"[39m
+      [36m>[39m
+        [0mAudio / STT[0m
+      [36m</h3>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1k21221"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1k21221"[39m
+          [33mfor[39m=[32m"input-device"[39m
+        [36m>[39m
+          [0mInput Device[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"input-device"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m""[39m
+          [36m>[39m
+            [0mSystem Default[0m
+          [36m</option>[39m
+          [0m [0m
+          [36m<option[39m
+            [33mvalue[39m=[32m"Synthetic microphone"[39m
+          [36m>[39m
+            [0mSynthetic microphone (Default)[0m
+          [36m</option>[39m
+        [36m</select>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"probe-row svelte-1k21221"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn-test svelte-1k21221"[39m
+          [36m>[39m
+            [0mTest microphone[0m
+          [36m</button>[39m
+          [0m [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"form-hint svelte-1k21221"[39m
+          [36m>[39m
+            [0mCaptures ~1 s from the selected device to confirm it is live before recording.[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<fieldset[39m
+        [33mclass[39m=[32m"form-group radio-fieldset svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<legend[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mSTT Mode[0m
+        [36m</legend>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"radio-row svelte-1cva6a0"[39m
+        [36m>[39m
+          [36m<label[39m
+            [33mclass[39m=[32m"radio-label svelte-1cva6a0"[39m
+          [36m>[39m
+            [36m<input[39m
+              [33mclass[39m=[32m"svelte-1cva6a0"[39m
+              [33mtype[39m=[32m"radio"[39m
+              [33mvalue[39m=[32m"local"[39m
+            [36m/>[39m
+            [0m Local[0m
+          [36m</label>[39m
+          [0m [0m
+          [36m<label[39m
+            [33mclass[39m=[32m"radio-label svelte-1cva6a0"[39m
+          [36m>[39m
+            [36m<input[39m
+              [33mclass[39m=[32m"svelte-1cva6a0"[39m
+              [33mtype[39m=[32m"radio"[39m
+              [33mvalue[39m=[32m"remote"[39m
+            [36m/>[39m
+            [0m Remote[0m
+          [36m</label>[39m
+        [36m</div>[39m
+      [36m</fieldset>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-sexdr2"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-sexdr2"[39m
+          [33mfor[39m=[32m"whisper-model"[39m
+        [36m>[39m
+          [0mWhisper Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"whisper-model"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"tiny"[39m
+          [36m>[39m
+            [0mtiny (1 KB) [0m
+          [36m</option>[39m
+          [0m[0m
+        [36m</select>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-sexdr2"[39m
+        [36m>[39m
+          [0mLarger models are more accurate but use more memory and take longer.[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-sexdr2"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-label svelte-sexdr2"[39m
+        [36m>[39m
+          [0mModel Management[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-list svelte-14yjxrp"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"model-row svelte-14yjxrp"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-info svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-name svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mtiny[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-desc svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mSynthetic engine[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-size svelte-14yjxrp"[39m
+              [36m>[39m
+                [0m1 KB[0m
+              [36m</span>[39m
+            [36m</div>[39m
+            [0m [0m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-actions svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"badge-downloaded svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mDownloaded[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn-delete-model svelte-14yjxrp"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"Cannot delete the active model"[39m
+              [36m>[39m
+                [0mDelete[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [0m[0m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<p[39m
+        [33mclass[39m=[32m"form-hint svelte-1273n6j"[39m
+      [36m>[39m
+        [0mDiarization runs on this machine regardless of STT mode — pyannote models below are required for speaker labels.[0m
+      [36m</p>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1273n6j"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-label svelte-1273n6j"[39m
+        [36m>[39m
+          [0mDiarization Models (Speaker Identification)[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1273n6j"[39m
+        [36m>[39m
+          [0mBoth models are required for speaker diarization. Without them, transcripts will not have speaker labels.[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-list svelte-14yjxrp"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"model-row svelte-14yjxrp"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-info svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-name svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mspeaker-model[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-desc svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mSynthetic speaker model[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-size svelte-14yjxrp"[39m
+              [36m>[39m
+                [0m1 KB[0m
+              [36m</span>[39m
+            [36m</div>[39m
+            [0m [0m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-actions svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn-download-model svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mDownload[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [0m[0m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+          [33mfor[39m=[32m"max-speakers"[39m
+        [36m>[39m
+          [0mMax speakers [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"badge-value svelte-1cva6a0"[39m
+          [36m>[39m
+            [0m3[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<input[39m
+          [33mid[39m=[32m"max-speakers"[39m
+          [33mmax[39m=[32m"8"[39m
+          [33mmin[39m=[32m"1"[39m
+          [33mtype[39m=[32m"range"[39m
+        [36m/>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mLimits the number of speaker clusters. Set to the expected number of people in the conversation (typically 2–3).[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+          [33mfor[39m=[32m"sample-rate"[39m
+        [36m>[39m
+          [0mSample Rate[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"sample-rate"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"16000"[39m
+          [36m>[39m
+            [0m16000 Hz[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"44100"[39m
+          [36m>[39m
+            [0m44100 Hz[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"48000"[39m
+          [36m>[39m
+            [0m48000 Hz[0m
+          [36m</option>[39m
+        [36m</select>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label checkbox-label svelte-1cva6a0"[39m
+        [36m>[39m
+          [36m<input[39m
+            [33mclass[39m=[32m"svelte-1cva6a0"[39m
+            [33mtype[39m=[32m"checkbox"[39m
+          [36m/>[39m
+          [0m [0m
+          [36m<span>[39m
+            [0mAuto-generate SOAP after recording[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mWhen enabled, transcription and SOAP generation start automatically after you stop recording.[0m
+        [36m</span>[39m
+      [36m</div>[39m
+    [36m</section>[39m
+    [0m[0m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError ../../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/lib/components/settings/Audio.test.ts:70:29
+     68|     render(Audio);
+     69|     await screen.findByText('Synthetic speaker model');
+     70|     const advanced = screen.getByText('Advanced transcription').closes…
+       |                             ^
+     71|     advanced.open = true;
+     72|     await fireEvent.click(within(advanced).getByRole('button', { name:…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/12]⎯
+
+ FAIL  src/lib/components/settings/Audio.test.ts > Audio focused layout > shows speaker model list failures outside advanced settings
+TestingLibraryElementError: Unable to find role="alert"
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section svelte-1cva6a0"[39m
+    [36m>[39m
+      [36m<h3[39m
+        [33mclass[39m=[32m"section-title svelte-1cva6a0"[39m
+      [36m>[39m
+        [0mAudio / STT[0m
+      [36m</h3>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1k21221"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1k21221"[39m
+          [33mfor[39m=[32m"input-device"[39m
+        [36m>[39m
+          [0mInput Device[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"input-device"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m""[39m
+          [36m>[39m
+            [0mSystem Default[0m
+          [36m</option>[39m
+          [0m [0m
+          [36m<option[39m
+            [33mvalue[39m=[32m"Synthetic microphone"[39m
+          [36m>[39m
+            [0mSynthetic microphone (Default)[0m
+          [36m</option>[39m
+        [36m</select>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"probe-row svelte-1k21221"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn-test svelte-1k21221"[39m
+          [36m>[39m
+            [0mTest microphone[0m
+          [36m</button>[39m
+          [0m [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"form-hint svelte-1k21221"[39m
+          [36m>[39m
+            [0mCaptures ~1 s from the selected device to confirm it is live before recording.[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<fieldset[39m
+        [33mclass[39m=[32m"form-group radio-fieldset svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<legend[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mSTT Mode[0m
+        [36m</legend>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"radio-row svelte-1cva6a0"[39m
+        [36m>[39m
+          [36m<label[39m
+            [33mclass[39m=[32m"radio-label svelte-1cva6a0"[39m
+          [36m>[39m
+            [36m<input[39m
+              [33mclass[39m=[32m"svelte-1cva6a0"[39m
+              [33mtype[39m=[32m"radio"[39m
+              [33mvalue[39m=[32m"local"[39m
+            [36m/>[39m
+            [0m Local[0m
+          [36m</label>[39m
+          [0m [0m
+          [36m<label[39m
+            [33mclass[39m=[32m"radio-label svelte-1cva6a0"[39m
+          [36m>[39m
+            [36m<input[39m
+              [33mclass[39m=[32m"svelte-1cva6a0"[39m
+              [33mtype[39m=[32m"radio"[39m
+              [33mvalue[39m=[32m"remote"[39m
+            [36m/>[39m
+            [0m Remote[0m
+          [36m</label>[39m
+        [36m</div>[39m
+      [36m</fieldset>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-sexdr2"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-sexdr2"[39m
+          [33mfor[39m=[32m"whisper-model"[39m
+        [36m>[39m
+          [0mWhisper Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"whisper-model"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"tiny"[39m
+          [36m>[39m
+            [0mtiny (1 KB) [0m
+          [36m</option>[39m
+          [0m[0m
+        [36m</select>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-sexdr2"[39m
+        [36m>[39m
+          [0mLarger models are more accurate but use more memory and take longer.[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-sexdr2"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-label svelte-sexdr2"[39m
+        [36m>[39m
+          [0mModel Management[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-list svelte-14yjxrp"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"model-row svelte-14yjxrp"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-info svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-name svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mtiny[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-desc svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mSynthetic engine[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-size svelte-14yjxrp"[39m
+              [36m>[39m
+                [0m1 KB[0m
+              [36m</span>[39m
+            [36m</div>[39m
+            [0m [0m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-actions svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"badge-downloaded svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mDownloaded[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn-delete-model svelte-14yjxrp"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"Cannot delete the active model"[39m
+              [36m>[39m
+                [0mDelete[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [0m[0m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<p[39m
+        [33mclass[39m=[32m"form-hint svelte-1273n6j"[39m
+      [36m>[39m
+        [0mDiarization runs on this machine regardless of STT mode — pyannote models below are required for speaker labels.[0m
+      [36m</p>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1273n6j"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-label svelte-1273n6j"[39m
+        [36m>[39m
+          [0mDiarization Models (Speaker Identification)[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1273n6j"[39m
+        [36m>[39m
+          [0mBoth models are required for speaker diarization. Without them, transcripts will not have speaker labels.[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-list svelte-14yjxrp"[39m
+        [36m>[39m
+          [0m[0m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+          [33mfor[39m=[32m"max-speakers"[39m
+        [36m>[39m
+          [0mMax speakers [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"badge-value svelte-1cva6a0"[39m
+          [36m>[39m
+            [0m3[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<input[39m
+          [33mid[39m=[32m"max-speakers"[39m
+          [33mmax[39m=[32m"8"[39m
+          [33mmin[39m=[32m"1"[39m
+          [33mtype[39m=[32m"range"[39m
+        [36m/>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mLimits the number of speaker clusters. Set to the expected number of people in the conversation (typically 2–3).[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+          [33mfor[39m=[32m"sample-rate"[39m
+        [36m>[39m
+          [0mSample Rate[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"sample-rate"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"16000"[39m
+          [36m>[39m
+            [0m16000 Hz[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"44100"[39m
+          [36m>[39m
+            [0m44100 Hz[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"48000"[39m
+          [36m>[39m
+            [0m48000 Hz[0m
+          [36m</option>[39m
+        [36m</select>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label checkbox-label svelte-1cva6a0"[39m
+        [36m>[39m
+          [36m<input[39m
+            [33mclass[39m=[32m"svelte-1cva6a0"[39m
+            [33mtype[39m=[32m"checkbox"[39m
+          [36m/>[39m
+          [0m [0m
+          [36m<span>[39m
+            [0mAuto-generate SOAP after recording[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mWhen enabled, transcription and SOAP generation start automatically after you stop recording.[0m
+        [36m</span>[39m
+      [36m</div>[39m
+    [36m</section>[39m
+    [0m[0m
+  [36m</div>[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section svelte-1cva6a0"[39m
+    [36m>[39m
+      [36m<h3[39m
+        [33mclass[39m=[32m"section-title svelte-1cva6a0"[39m
+      [36m>[39m
+        [0mAudio / STT[0m
+      [36m</h3>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1k21221"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1k21221"[39m
+          [33mfor[39m=[32m"input-device"[39m
+        [36m>[39m
+          [0mInput Device[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"input-device"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m""[39m
+          [36m>[39m
+            [0mSystem Default[0m
+          [36m</option>[39m
+          [0m [0m
+          [36m<option[39m
+            [33mvalue[39m=[32m"Synthetic microphone"[39m
+          [36m>[39m
+            [0mSynthetic microphone (Default)[0m
+          [36m</option>[39m
+        [36m</select>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"probe-row svelte-1k21221"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn-test svelte-1k21221"[39m
+          [36m>[39m
+            [0mTest microphone[0m
+          [36m</button>[39m
+          [0m [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"form-hint svelte-1k21221"[39m
+          [36m>[39m
+            [0mCaptures ~1 s from the selected device to confirm it is live before recording.[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<fieldset[39m
+        [33mclass[39m=[32m"form-group radio-fieldset svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<legend[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mSTT Mode[0m
+        [36m</legend>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"radio-row svelte-1cva6a0"[39m
+        [36m>[39m
+          [36m<label[39m
+            [33mclass[39m=[32m"radio-label svelte-1cva6a0"[39m
+          [36m>[39m
+            [36m<input[39m
+              [33mclass[39m=[32m"svelte-1cva6a0"[39m
+              [33mtype[39m=[32m"radio"[39m
+              [33mvalue[39m=[32m"local"[39m
+            [36m/>[39m
+            [0m Local[0m
+          [36m</label>[39m
+          [0m [0m
+          [36m<label[39m
+            [33mclass[39m=[32m"radio-label svelte-1cva6a0"[39m
+          [36m>[39m
+            [36m<input[39m
+              [33mclass[39m=[32m"svelte-1cva6a0"[39m
+              [33mtype[39m=[32m"radio"[39m
+              [33mvalue[39m=[32m"remote"[39m
+            [36m/>[39m
+            [0m Remote[0m
+          [36m</label>[39m
+        [36m</div>[39m
+      [36m</fieldset>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-sexdr2"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-sexdr2"[39m
+          [33mfor[39m=[32m"whisper-model"[39m
+        [36m>[39m
+          [0mWhisper Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"whisper-model"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"tiny"[39m
+          [36m>[39m
+            [0mtiny (1 KB) [0m
+          [36m</option>[39m
+          [0m[0m
+        [36m</select>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-sexdr2"[39m
+        [36m>[39m
+          [0mLarger models are more accurate but use more memory and take longer.[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-sexdr2"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-label svelte-sexdr2"[39m
+        [36m>[39m
+          [0mModel Management[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-list svelte-14yjxrp"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33mclass[39m=[32m"model-row svelte-14yjxrp"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-info svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-name svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mtiny[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-desc svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mSynthetic engine[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<span[39m
+                [33mclass[39m=[32m"model-size svelte-14yjxrp"[39m
+              [36m>[39m
+                [0m1 KB[0m
+              [36m</span>[39m
+            [36m</div>[39m
+            [0m [0m
+            [36m<div[39m
+              [33mclass[39m=[32m"model-actions svelte-14yjxrp"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"badge-downloaded svelte-14yjxrp"[39m
+              [36m>[39m
+                [0mDownloaded[0m
+              [36m</span>[39m
+              [0m [0m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn-delete-model svelte-14yjxrp"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"Cannot delete the active model"[39m
+              [36m>[39m
+                [0mDelete[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+          [0m[0m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<p[39m
+        [33mclass[39m=[32m"form-hint svelte-1273n6j"[39m
+      [36m>[39m
+        [0mDiarization runs on this machine regardless of STT mode — pyannote models below are required for speaker labels.[0m
+      [36m</p>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1273n6j"[39m
+      [36m>[39m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-label svelte-1273n6j"[39m
+        [36m>[39m
+          [0mDiarization Models (Speaker Identification)[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1273n6j"[39m
+        [36m>[39m
+          [0mBoth models are required for speaker diarization. Without them, transcripts will not have speaker labels.[0m
+        [36m</span>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-list svelte-14yjxrp"[39m
+        [36m>[39m
+          [0m[0m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+          [33mfor[39m=[32m"max-speakers"[39m
+        [36m>[39m
+          [0mMax speakers [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"badge-value svelte-1cva6a0"[39m
+          [36m>[39m
+            [0m3[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<input[39m
+          [33mid[39m=[32m"max-speakers"[39m
+          [33mmax[39m=[32m"8"[39m
+          [33mmin[39m=[32m"1"[39m
+          [33mtype[39m=[32m"range"[39m
+        [36m/>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mLimits the number of speaker clusters. Set to the expected number of people in the conversation (typically 2–3).[0m
+        [36m</span>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label svelte-1cva6a0"[39m
+          [33mfor[39m=[32m"sample-rate"[39m
+        [36m>[39m
+          [0mSample Rate[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"sample-rate"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"16000"[39m
+          [36m>[39m
+            [0m16000 Hz[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"44100"[39m
+          [36m>[39m
+            [0m44100 Hz[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"48000"[39m
+          [36m>[39m
+            [0m48000 Hz[0m
+          [36m</option>[39m
+        [36m</select>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group svelte-1cva6a0"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label checkbox-label svelte-1cva6a0"[39m
+        [36m>[39m
+          [36m<input[39m
+            [33mclass[39m=[32m"svelte-1cva6a0"[39m
+            [33mtype[39m=[32m"checkbox"[39m
+          [36m/>[39m
+          [0m [0m
+          [36m<span>[39m
+            [0mAuto-generate SOAP after recording[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<span[39m
+          [33mclass[39m=[32m"form-hint svelte-1cva6a0"[39m
+        [36m>[39m
+          [0mWhen enabled, transcription and SOAP generation start automatically after you stop recording.[0m
+        [36m</span>[39m
+      [36m</div>[39m
+    [36m</section>[39m
+    [0m[0m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ waitForWrapper ../../node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:86:33
+ ❯ src/lib/components/settings/Audio.test.ts:84:32
+     82|     listPyannote.mockRejectedValueOnce(new Error('Synthetic model list…
+     83|     render(Audio);
+     84|     const error = await screen.findByRole('alert');
+       |                                ^
+     85|     expect(error.textContent).toContain('Synthetic model list unavaila…
+     86|     expect(error.closest('details')).toBeNull();
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/12]⎯
+
+ FAIL  src/lib/components/settings/Models.test.ts > Models > keeps model options collapsed with a summary of configured overrides
+TestingLibraryElementError: Unable to find an element with the text: Model options. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section"[39m
+    [36m>[39m
+      [36m<h3[39m
+        [33mclass[39m=[32m"section-title"[39m
+      [36m>[39m
+        [0mAI Models[0m
+      [36m</h3>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ai-provider"[39m
+        [36m>[39m
+          [0mAI Provider[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"ai-provider"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"lmstudio"[39m
+          [36m>[39m
+            [0mLM Studio[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"ollama"[39m
+          [36m>[39m
+            [0mOllama[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"omlx"[39m
+          [36m>[39m
+            [0moMLX[0m
+          [36m</option>[39m
+        [36m</select>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ai-model"[39m
+        [36m>[39m
+          [0mModel[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-azpgzo"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-azpgzo"[39m
+            [33mid[39m=[32m"ai-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:8b"[39m
+            [36m>[39m
+              [0mqwen3:8b[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:1.7b"[39m
+            [36m>[39m
+              [0mqwen3:1.7b[0m
+            [36m</option>[39m
+            [0m[0m
+          [36m</select>[39m
+          [0m [0m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn-refresh svelte-azpgzo"[39m
+            [33mtitle[39m=[32m"Refresh model list"[39m
+          [36m>[39m
+            [0m↻[0m
+          [36m</button>[39m
+        [36m</div>[39m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ocr-model"[39m
+        [36m>[39m
+          [0mOCR / Vision Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-nrxdv5"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-nrxdv5"[39m
+            [33mid[39m=[32m"ocr-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m""[39m
+            [36m>[39m
+              [0m(use generation model)[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:8b"[39m
+            [36m>[39m
+              [0mqwen3:8b[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:1.7b"[39m
+            [36m>[39m
+              [0mqwen3:1.7b[0m
+            [36m</option>[39m
+          [36m</select>[39m
+        [36m</div>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"form-hint svelte-nrxdv5"[39m
+        [36m>[39m
+          [0mVision model for extracting text from dropped documents (e.g. glm-ocr).
+      If not set, the generation model is used.[0m
+        [36m</p>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"translation-model"[39m
+        [36m>[39m
+          [0mTranslation Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-nrxdv5"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-nrxdv5"[39m
+            [33mid[39m=[32m"translation-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m""[39m
+            [36m>[39m
+              [0m(use generation model)[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:8b"[39m
+            [36m>[39m
+              [0mqwen3:8b[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:1.7b"[39m
+            [36m>[39m
+              [0mqwen3:1.7b[0m
+            [36m</option>[39m
+          [36m</select>[39m
+        [36m</div>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"form-hint svelte-nrxdv5"[39m
+        [36m>[39m
+          [0mModel used by the Translate tab. Conversational translation needs far
+      less model than note generation — a small (1-4 B) model here makes live
+      utterance turnaround much faster. If not set, the generation model is used.[0m
+        [36m</p>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"temperature"[39m
+        [36m>[39m
+          [0mTemperature [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"value-display svelte-azpgzo"[39m
+          [36m>[39m
+            [0m0.2[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<input[39m
+          [33mclass[39m=[32m"range-input svelte-azpgzo"[39m
+          [33mid[39m=[32m"temperature"[39m
+          [33mmax[39m=[32m"2"[39m
+          [33mmin[39m=[32m"0"[39m
+          [33mstep[39m=[32m"0.1"[39m
+          [33mtype[39m=[32m"range"[39m
+        [36m/>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"range-labels svelte-azpgzo"[39m
+        [36m>[39m
+          [36m<span>[39m
+            [0m0 (Precise)[0m
+          [36m</span>[39m
+          [0m [0m
+          [36m<span>[39m
+            [0m2 (Creative)[0m
+          [36m</span>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<details[39m
+        [33mclass[39m=[32m"provider-section svelte-azpgzo"[39m
+      [36m>[39m
+        [36m<summary[39m
+          [33mclass[39m=[32m"svelte-azpgzo"[39m
+        [36m>[39m
+          [0mLM Studio Server[0m
+        [36m</summary>[39m
+        [0m [0m
+        ...
+ ❯ Object.getElementError ../../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/lib/components/settings/Models.test.ts:79:28
+     77|     mockState.translation_model = 'qwen3:1.7b';
+     78|     const { container } = await rendered();
+     79|     const options = screen.getByText('Model options').closest('details…
+       |                            ^
+     80|     expect(options.open).toBe(false);
+     81|     expect(options.querySelector('summary')?.textContent).toContain('O…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/12]⎯
+
+ FAIL  src/lib/components/settings/Models.test.ts > Models > keeps all server controls reachable with the active provider first
+TestingLibraryElementError: Unable to find an element with the text: Server configuration. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section"[39m
+    [36m>[39m
+      [36m<h3[39m
+        [33mclass[39m=[32m"section-title"[39m
+      [36m>[39m
+        [0mAI Models[0m
+      [36m</h3>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ai-provider"[39m
+        [36m>[39m
+          [0mAI Provider[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"ai-provider"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"lmstudio"[39m
+          [36m>[39m
+            [0mLM Studio[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"ollama"[39m
+          [36m>[39m
+            [0mOllama[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"omlx"[39m
+          [36m>[39m
+            [0moMLX[0m
+          [36m</option>[39m
+        [36m</select>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ai-model"[39m
+        [36m>[39m
+          [0mModel[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-azpgzo"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-azpgzo"[39m
+            [33mid[39m=[32m"ai-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:8b"[39m
+            [36m>[39m
+              [0mqwen3:8b[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:1.7b"[39m
+            [36m>[39m
+              [0mqwen3:1.7b[0m
+            [36m</option>[39m
+            [0m[0m
+          [36m</select>[39m
+          [0m [0m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn-refresh svelte-azpgzo"[39m
+            [33mtitle[39m=[32m"Refresh model list"[39m
+          [36m>[39m
+            [0m↻[0m
+          [36m</button>[39m
+        [36m</div>[39m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ocr-model"[39m
+        [36m>[39m
+          [0mOCR / Vision Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-nrxdv5"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-nrxdv5"[39m
+            [33mid[39m=[32m"ocr-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m""[39m
+            [36m>[39m
+              [0m(use generation model)[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:8b"[39m
+            [36m>[39m
+              [0mqwen3:8b[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:1.7b"[39m
+            [36m>[39m
+              [0mqwen3:1.7b[0m
+            [36m</option>[39m
+          [36m</select>[39m
+        [36m</div>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"form-hint svelte-nrxdv5"[39m
+        [36m>[39m
+          [0mVision model for extracting text from dropped documents (e.g. glm-ocr).
+      If not set, the generation model is used.[0m
+        [36m</p>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"translation-model"[39m
+        [36m>[39m
+          [0mTranslation Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-nrxdv5"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-nrxdv5"[39m
+            [33mid[39m=[32m"translation-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m""[39m
+            [36m>[39m
+              [0m(use generation model)[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:8b"[39m
+            [36m>[39m
+              [0mqwen3:8b[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:1.7b"[39m
+            [36m>[39m
+              [0mqwen3:1.7b[0m
+            [36m</option>[39m
+          [36m</select>[39m
+        [36m</div>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"form-hint svelte-nrxdv5"[39m
+        [36m>[39m
+          [0mModel used by the Translate tab. Conversational translation needs far
+      less model than note generation — a small (1-4 B) model here makes live
+      utterance turnaround much faster. If not set, the generation model is used.[0m
+        [36m</p>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"temperature"[39m
+        [36m>[39m
+          [0mTemperature [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"value-display svelte-azpgzo"[39m
+          [36m>[39m
+            [0m0.2[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<input[39m
+          [33mclass[39m=[32m"range-input svelte-azpgzo"[39m
+          [33mid[39m=[32m"temperature"[39m
+          [33mmax[39m=[32m"2"[39m
+          [33mmin[39m=[32m"0"[39m
+          [33mstep[39m=[32m"0.1"[39m
+          [33mtype[39m=[32m"range"[39m
+        [36m/>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"range-labels svelte-azpgzo"[39m
+        [36m>[39m
+          [36m<span>[39m
+            [0m0 (Precise)[0m
+          [36m</span>[39m
+          [0m [0m
+          [36m<span>[39m
+            [0m2 (Creative)[0m
+          [36m</span>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<details[39m
+        [33mclass[39m=[32m"provider-section svelte-azpgzo"[39m
+      [36m>[39m
+        [36m<summary[39m
+          [33mclass[39m=[32m"svelte-azpgzo"[39m
+        [36m>[39m
+          [0mLM Studio Server[0m
+        [36m</summary>[39m
+        [0m [0m
+        ...
+ ❯ Object.getElementError ../../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/lib/components/settings/Models.test.ts:94:28
+     92|   it('keeps all server controls reachable with the active provider fir…
+     93|     const { container } = await rendered();
+     94|     const servers = screen.getByText('Server configuration').closest('…
+       |                            ^
+     95|     expect(servers.open).toBe(false);
+     96|     servers.open = true;
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/12]⎯
+
+ FAIL  src/lib/components/settings/Models.test.ts > Models > shows model-list failures outside collapsed server configuration
+TestingLibraryElementError: Unable to find an element with the text: Server configuration. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section"[39m
+    [36m>[39m
+      [36m<h3[39m
+        [33mclass[39m=[32m"section-title"[39m
+      [36m>[39m
+        [0mAI Models[0m
+      [36m</h3>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ai-provider"[39m
+        [36m>[39m
+          [0mAI Provider[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"ai-provider"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"lmstudio"[39m
+          [36m>[39m
+            [0mLM Studio[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"ollama"[39m
+          [36m>[39m
+            [0mOllama[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"omlx"[39m
+          [36m>[39m
+            [0moMLX[0m
+          [36m</option>[39m
+        [36m</select>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ai-model"[39m
+        [36m>[39m
+          [0mModel[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-azpgzo"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-azpgzo"[39m
+            [33mid[39m=[32m"ai-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m""[39m
+            [36m>[39m
+              [0mCould not load models[0m
+            [36m</option>[39m
+          [36m</select>[39m
+          [0m [0m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn-refresh svelte-azpgzo"[39m
+            [33mtitle[39m=[32m"Refresh model list"[39m
+          [36m>[39m
+            [0m↻[0m
+          [36m</button>[39m
+        [36m</div>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"callout warning svelte-8z4dse"[39m
+          [33mrole[39m=[32m"alert"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"model-list-error-message svelte-azpgzo"[39m
+          [36m>[39m
+            [0mSynthetic provider offline[0m
+          [36m</p>[39m
+          [0m [0m
+          [36m<p[39m
+            [33mclass[39m=[32m"model-list-error-hint svelte-azpgzo"[39m
+          [36m>[39m
+            [0mStart the Ollama app (menu-bar icon) or run `ollama serve`, and make sure at least one model is pulled (`ollama list`).[0m
+          [36m</p>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ocr-model"[39m
+        [36m>[39m
+          [0mOCR / Vision Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-nrxdv5"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-nrxdv5"[39m
+            [33mid[39m=[32m"ocr-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m""[39m
+            [36m>[39m
+              [0m(use generation model)[0m
+            [36m</option>[39m
+          [36m</select>[39m
+        [36m</div>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"form-hint svelte-nrxdv5"[39m
+        [36m>[39m
+          [0mVision model for extracting text from dropped documents (e.g. glm-ocr).
+      If not set, the generation model is used.[0m
+        [36m</p>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"translation-model"[39m
+        [36m>[39m
+          [0mTranslation Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-nrxdv5"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-nrxdv5"[39m
+            [33mid[39m=[32m"translation-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m""[39m
+            [36m>[39m
+              [0m(use generation model)[0m
+            [36m</option>[39m
+          [36m</select>[39m
+        [36m</div>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"form-hint svelte-nrxdv5"[39m
+        [36m>[39m
+          [0mModel used by the Translate tab. Conversational translation needs far
+      less model than note generation — a small (1-4 B) model here makes live
+      utterance turnaround much faster. If not set, the generation model is used.[0m
+        [36m</p>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"temperature"[39m
+        [36m>[39m
+          [0mTemperature [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"value-display svelte-azpgzo"[39m
+          [36m>[39m
+            [0m0.2[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<input[39m
+          [33mclass[39m=[32m"range-input svelte-azpgzo"[39m
+          [33mid[39m=[32m"temperature"[39m
+          [33mmax[39m=[32m"2"[39m
+          [33mmin[39m=[32m"0"[39m
+          [33mstep[39m=[32m"0.1"[39m
+          [33mtype[39m=[32m"range"[39m
+        [36m/>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"range-labels svelte-azpgzo"[39m
+        [36m>[39m
+          [36m<span>[39m
+            [0m0 (Precise)[0m
+          [36m</span>[39m
+          [0m [0m
+          [36m<span>[39m
+            [0m2 (Creative)[0m
+          [36m</span>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<details[39m
+        [33mclass[39m=[32m"provider-section svelte-azpgzo"[39m
+      [36m>[39m
+        [36m<summary[39m
+          [33mclass[39m=[32m"svelte-azpgzo"[39m
+        [36m>[39m
+          [0mLM Studio Server[0m
+        [36m</summary>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"form-group-divider svelte-1yz3689"[39m
+        [36m/>[39m
+        [0m [0m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[3...
+ ❯ Object.getElementError ../../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/lib/components/settings/Models.test.ts:113:19
+    111|     render(Models);
+    112|     const error = await screen.findByText('Synthetic provider offline'…
+    113|     expect(screen.getByText('Server configuration').closest('details')…
+       |                   ^
+    114|     expect(error.closest('details')).toBeNull();
+    115|   });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/12]⎯
+
+ FAIL  src/lib/components/settings/Models.test.ts > Models > keeps validation failures visible when server configuration is collapsed
+TestingLibraryElementError: Unable to find an element with the text: Server configuration. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section"[39m
+    [36m>[39m
+      [36m<h3[39m
+        [33mclass[39m=[32m"section-title"[39m
+      [36m>[39m
+        [0mAI Models[0m
+      [36m</h3>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ai-provider"[39m
+        [36m>[39m
+          [0mAI Provider[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mid[39m=[32m"ai-provider"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"lmstudio"[39m
+          [36m>[39m
+            [0mLM Studio[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"ollama"[39m
+          [36m>[39m
+            [0mOllama[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"omlx"[39m
+          [36m>[39m
+            [0moMLX[0m
+          [36m</option>[39m
+        [36m</select>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ai-model"[39m
+        [36m>[39m
+          [0mModel[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-azpgzo"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-azpgzo"[39m
+            [33mid[39m=[32m"ai-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:8b"[39m
+            [36m>[39m
+              [0mqwen3:8b[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:1.7b"[39m
+            [36m>[39m
+              [0mqwen3:1.7b[0m
+            [36m</option>[39m
+            [0m[0m
+          [36m</select>[39m
+          [0m [0m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn-refresh svelte-azpgzo"[39m
+            [33mtitle[39m=[32m"Refresh model list"[39m
+          [36m>[39m
+            [0m↻[0m
+          [36m</button>[39m
+        [36m</div>[39m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"ocr-model"[39m
+        [36m>[39m
+          [0mOCR / Vision Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-nrxdv5"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-nrxdv5"[39m
+            [33mid[39m=[32m"ocr-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m""[39m
+            [36m>[39m
+              [0m(use generation model)[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:8b"[39m
+            [36m>[39m
+              [0mqwen3:8b[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:1.7b"[39m
+            [36m>[39m
+              [0mqwen3:1.7b[0m
+            [36m</option>[39m
+          [36m</select>[39m
+        [36m</div>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"form-hint svelte-nrxdv5"[39m
+        [36m>[39m
+          [0mVision model for extracting text from dropped documents (e.g. glm-ocr).
+      If not set, the generation model is used.[0m
+        [36m</p>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"translation-model"[39m
+        [36m>[39m
+          [0mTranslation Model[0m
+        [36m</label>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"model-select-row svelte-nrxdv5"[39m
+        [36m>[39m
+          [36m<select[39m
+            [33mclass[39m=[32m"svelte-nrxdv5"[39m
+            [33mid[39m=[32m"translation-model"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m""[39m
+            [36m>[39m
+              [0m(use generation model)[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:8b"[39m
+            [36m>[39m
+              [0mqwen3:8b[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"qwen3:1.7b"[39m
+            [36m>[39m
+              [0mqwen3:1.7b[0m
+            [36m</option>[39m
+          [36m</select>[39m
+        [36m</div>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"form-hint svelte-nrxdv5"[39m
+        [36m>[39m
+          [0mModel used by the Translate tab. Conversational translation needs far
+      less model than note generation — a small (1-4 B) model here makes live
+      utterance turnaround much faster. If not set, the generation model is used.[0m
+        [36m</p>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"form-group"[39m
+      [36m>[39m
+        [36m<label[39m
+          [33mclass[39m=[32m"form-label"[39m
+          [33mfor[39m=[32m"temperature"[39m
+        [36m>[39m
+          [0mTemperature [0m
+          [36m<span[39m
+            [33mclass[39m=[32m"value-display svelte-azpgzo"[39m
+          [36m>[39m
+            [0m0.2[0m
+          [36m</span>[39m
+        [36m</label>[39m
+        [0m [0m
+        [36m<input[39m
+          [33mclass[39m=[32m"range-input svelte-azpgzo"[39m
+          [33mid[39m=[32m"temperature"[39m
+          [33mmax[39m=[32m"2"[39m
+          [33mmin[39m=[32m"0"[39m
+          [33mstep[39m=[32m"0.1"[39m
+          [33mtype[39m=[32m"range"[39m
+        [36m/>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"range-labels svelte-azpgzo"[39m
+        [36m>[39m
+          [36m<span>[39m
+            [0m0 (Precise)[0m
+          [36m</span>[39m
+          [0m [0m
+          [36m<span>[39m
+            [0m2 (Creative)[0m
+          [36m</span>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+      [0m [0m
+      [36m<details[39m
+        [33mclass[39m=[32m"provider-section svelte-azpgzo"[39m
+      [36m>[39m
+        [36m<summary[39m
+          [33mclass[39m=[32m"svelte-azpgzo"[39m
+        [36m>[39m
+          [0mLM Studio Server[0m
+        [36m</summary>[39m
+        [0m [0m
+        ...
+ ❯ Object.getElementError ../../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/lib/components/settings/Models.test.ts:119:28
+    117|   it('keeps validation failures visible when server configuration is c…
+    118|     const { container } = await rendered();
+    119|     const servers = screen.getByText('Server configuration').closest('…
+       |                            ^
+    120|     servers.open = true;
+    121|     await fireEvent.change(container.querySelector('#ollama-port')!, {…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/12]⎯
+
+ FAIL  src/lib/components/settings/Prompts.test.ts > Prompts editor prompt source > restores the document selector and draft when discard is cancelled
+TestingLibraryElementError: Unable to find a label with the text of: Document type
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section prompts-section"[39m
+    [36m>[39m
+      [36m<h2>[39m
+        [0mPrompts[0m
+      [36m</h2>[39m
+      [0m [0m
+      [36m<p[39m
+        [33mclass[39m=[32m"section-description"[39m
+      [36m>[39m
+        [0mView and customize the system prompts sent to the AI for each document type.
+    Placeholder tokens are substituted at generation time.[0m
+      [36m</p>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"specialty-section svelte-yavgiv"[39m
+      [36m>[39m
+        [36m<h3[39m
+          [33mclass[39m=[32m"svelte-yavgiv"[39m
+        [36m>[39m
+          [0mSpecialty[0m
+        [36m</h3>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"section-description"[39m
+        [36m>[39m
+          [0mSelect a specialty prompt pack to tailor every generated document. A
+      locked anti-fabrication safety block is always appended to pack prompts
+      and cannot be altered. Packs are read from the app's local [0m
+          [36m<code>[39m
+            [0mspecialties[0m
+          [36m</code>[39m
+          [0m folder only — nothing is downloaded.[0m
+        [36m</p>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mclass[39m=[32m"specialty-select svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m""[39m
+          [36m>[39m
+            [0mDefault — Family Medicine (built-in)[0m
+          [36m</option>[39m
+        [36m</select>[39m
+        [0m [0m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"prompts-layout svelte-yavgiv"[39m
+      [36m>[39m
+        [36m<aside[39m
+          [33mclass[39m=[32m"prompts-sidebar svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-current[39m=[32m"true"[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv active"[39m
+          [36m>[39m
+            [0mSOAP Note[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mReferral Letter[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPatient Letter[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mClinical Synopsis[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPeer Discussion[0m
+          [36m</button>[39m
+          [0m[0m
+        [36m</aside>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"prompts-editor svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<h3>[39m
+            [0mSOAP Note[0m
+          [36m</h3>[39m
+          [0m [0m
+          [36m<textarea[39m
+            [33mclass[39m=[32m"prompt-textarea svelte-yavgiv"[39m
+            [33mrows[39m=[32m"20"[39m
+            [33mspellcheck[39m=[32m"false"[39m
+          [36m/>[39m
+          [0m [0m
+          [36m<details[39m
+            [33mclass[39m=[32m"prompts-placeholders svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<summary[39m
+              [33mclass[39m=[32m"svelte-yavgiv"[39m
+            [36m>[39m
+              [0mAvailable placeholders[0m
+            [36m</summary>[39m
+            [0m [0m
+            [36m<ul[39m
+              [33mclass[39m=[32m"svelte-yavgiv"[39m
+            [36m>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_label}[0m
+                [36m</code>[39m
+                [0m — ICD code header line (from ICD version setting)[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_instruction}[0m
+                [36m</code>[39m
+                [0m — Inline ICD reference phrase[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{template_guidance}[0m
+                [36m</code>[39m
+                [0m — SOAP template hint (FollowUp, NewPatient, etc.)[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_candidates}[0m
+                [36m</code>[39m
+                [0m — BC MSP candidate-code list (ICD-9/both modes)[0m
+              [36m</li>[39m
+              [0m[0m
+            [36m</ul>[39m
+          [36m</details>[39m
+          [0m  [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-status svelte-yavgiv"[39m
+          [36m>[39m
+            [0mUsing: [0m
+            [36m<strong>[39m
+              [0mdefault[0m
+            [36m</strong>[39m
+            [0m [0m
+            [36m<span[39m
+              [33mclass[39m=[32m"dirty-indicator svelte-yavgiv"[39m
+            [36m>[39m
+              [0m(unsaved changes)[0m
+            [36m</span>[39m
+          [36m</div>[39m
+          [0m [0m
+          [0m [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-actions svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"btn btn-primary"[39m
+            [36m>[39m
+              [0mSave as custom[0m
+            [36m</button>[39m
+            [0m [0m
+            [36m<button[39m
+              [33mclass[39m=[32m"btn"[39m
+            [36m>[39m
+              [0mReset to default[0m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</section>[39m
+    [0m[0m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError ../../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ getAllByLabelText ../../node_modules/@testing-library/dom/dist/queries/label-text.js:111:38
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/lib/components/settings/Prompts.test.ts:88:27
+     86|     await fireEvent.input(textarea(), { target: { value: 'UNSAVED SYNT…
+     87|     vi.mocked(confirmDialog).mockResolvedValueOnce(false);
+     88|     const select = screen.getByLabelText('Document type') as HTMLSelec…
+       |                           ^
+     89|     await fireEvent.change(select, { target: { value: 'referral' } });
+     90|     await waitFor(() => expect(select.value).toBe('soap'));
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/12]⎯
+
+ FAIL  src/lib/components/settings/Prompts.test.ts > Prompts editor prompt source > loads the selected document only after accepting discard
+TestingLibraryElementError: Unable to find a label with the text of: Document type
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section prompts-section"[39m
+    [36m>[39m
+      [36m<h2>[39m
+        [0mPrompts[0m
+      [36m</h2>[39m
+      [0m [0m
+      [36m<p[39m
+        [33mclass[39m=[32m"section-description"[39m
+      [36m>[39m
+        [0mView and customize the system prompts sent to the AI for each document type.
+    Placeholder tokens are substituted at generation time.[0m
+      [36m</p>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"specialty-section svelte-yavgiv"[39m
+      [36m>[39m
+        [36m<h3[39m
+          [33mclass[39m=[32m"svelte-yavgiv"[39m
+        [36m>[39m
+          [0mSpecialty[0m
+        [36m</h3>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"section-description"[39m
+        [36m>[39m
+          [0mSelect a specialty prompt pack to tailor every generated document. A
+      locked anti-fabrication safety block is always appended to pack prompts
+      and cannot be altered. Packs are read from the app's local [0m
+          [36m<code>[39m
+            [0mspecialties[0m
+          [36m</code>[39m
+          [0m folder only — nothing is downloaded.[0m
+        [36m</p>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mclass[39m=[32m"specialty-select svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m""[39m
+          [36m>[39m
+            [0mDefault — Family Medicine (built-in)[0m
+          [36m</option>[39m
+        [36m</select>[39m
+        [0m [0m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"prompts-layout svelte-yavgiv"[39m
+      [36m>[39m
+        [36m<aside[39m
+          [33mclass[39m=[32m"prompts-sidebar svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-current[39m=[32m"true"[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv active"[39m
+          [36m>[39m
+            [0mSOAP Note[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mReferral Letter[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPatient Letter[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mClinical Synopsis[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPeer Discussion[0m
+          [36m</button>[39m
+          [0m[0m
+        [36m</aside>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"prompts-editor svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<h3>[39m
+            [0mSOAP Note[0m
+          [36m</h3>[39m
+          [0m [0m
+          [36m<textarea[39m
+            [33mclass[39m=[32m"prompt-textarea svelte-yavgiv"[39m
+            [33mrows[39m=[32m"20"[39m
+            [33mspellcheck[39m=[32m"false"[39m
+          [36m/>[39m
+          [0m [0m
+          [36m<details[39m
+            [33mclass[39m=[32m"prompts-placeholders svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<summary[39m
+              [33mclass[39m=[32m"svelte-yavgiv"[39m
+            [36m>[39m
+              [0mAvailable placeholders[0m
+            [36m</summary>[39m
+            [0m [0m
+            [36m<ul[39m
+              [33mclass[39m=[32m"svelte-yavgiv"[39m
+            [36m>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_label}[0m
+                [36m</code>[39m
+                [0m — ICD code header line (from ICD version setting)[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_instruction}[0m
+                [36m</code>[39m
+                [0m — Inline ICD reference phrase[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{template_guidance}[0m
+                [36m</code>[39m
+                [0m — SOAP template hint (FollowUp, NewPatient, etc.)[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_candidates}[0m
+                [36m</code>[39m
+                [0m — BC MSP candidate-code list (ICD-9/both modes)[0m
+              [36m</li>[39m
+              [0m[0m
+            [36m</ul>[39m
+          [36m</details>[39m
+          [0m  [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-status svelte-yavgiv"[39m
+          [36m>[39m
+            [0mUsing: [0m
+            [36m<strong>[39m
+              [0mdefault[0m
+            [36m</strong>[39m
+            [0m [0m
+            [36m<span[39m
+              [33mclass[39m=[32m"dirty-indicator svelte-yavgiv"[39m
+            [36m>[39m
+              [0m(unsaved changes)[0m
+            [36m</span>[39m
+          [36m</div>[39m
+          [0m [0m
+          [0m [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-actions svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"btn btn-primary"[39m
+            [36m>[39m
+              [0mSave as custom[0m
+            [36m</button>[39m
+            [0m [0m
+            [36m<button[39m
+              [33mclass[39m=[32m"btn"[39m
+            [36m>[39m
+              [0mReset to default[0m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</section>[39m
+    [0m[0m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError ../../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ getAllByLabelText ../../node_modules/@testing-library/dom/dist/queries/label-text.js:111:38
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/lib/components/settings/Prompts.test.ts:103:27
+    101|     let accept!: (value: boolean) => void;
+    102|     vi.mocked(confirmDialog).mockImplementationOnce(() => new Promise(…
+    103|     const select = screen.getByLabelText('Document type') as HTMLSelec…
+       |                           ^
+    104|     await fireEvent.change(select, { target: { value: 'referral' } });
+    105|     expect(textarea().value).toBe('UNSAVED SYNTHETIC DRAFT');
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/12]⎯
+
+ FAIL  src/lib/components/settings/Prompts.test.ts > Prompts editor prompt source > keeps source and explicit actions outside collapsed Help
+TestingLibraryElementError: Unable to find an element with the text: Help. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section prompts-section"[39m
+    [36m>[39m
+      [36m<h2>[39m
+        [0mPrompts[0m
+      [36m</h2>[39m
+      [0m [0m
+      [36m<p[39m
+        [33mclass[39m=[32m"section-description"[39m
+      [36m>[39m
+        [0mView and customize the system prompts sent to the AI for each document type.
+    Placeholder tokens are substituted at generation time.[0m
+      [36m</p>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"specialty-section svelte-yavgiv"[39m
+      [36m>[39m
+        [36m<h3[39m
+          [33mclass[39m=[32m"svelte-yavgiv"[39m
+        [36m>[39m
+          [0mSpecialty[0m
+        [36m</h3>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"section-description"[39m
+        [36m>[39m
+          [0mSelect a specialty prompt pack to tailor every generated document. A
+      locked anti-fabrication safety block is always appended to pack prompts
+      and cannot be altered. Packs are read from the app's local [0m
+          [36m<code>[39m
+            [0mspecialties[0m
+          [36m</code>[39m
+          [0m folder only — nothing is downloaded.[0m
+        [36m</p>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mclass[39m=[32m"specialty-select svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m""[39m
+          [36m>[39m
+            [0mDefault — Family Medicine (built-in)[0m
+          [36m</option>[39m
+        [36m</select>[39m
+        [0m [0m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"prompts-layout svelte-yavgiv"[39m
+      [36m>[39m
+        [36m<aside[39m
+          [33mclass[39m=[32m"prompts-sidebar svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-current[39m=[32m"true"[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv active"[39m
+          [36m>[39m
+            [0mSOAP Note[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mReferral Letter[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPatient Letter[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mClinical Synopsis[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPeer Discussion[0m
+          [36m</button>[39m
+          [0m[0m
+        [36m</aside>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"prompts-editor svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<h3>[39m
+            [0mSOAP Note[0m
+          [36m</h3>[39m
+          [0m [0m
+          [36m<textarea[39m
+            [33mclass[39m=[32m"prompt-textarea svelte-yavgiv"[39m
+            [33mrows[39m=[32m"20"[39m
+            [33mspellcheck[39m=[32m"false"[39m
+          [36m/>[39m
+          [0m [0m
+          [36m<details[39m
+            [33mclass[39m=[32m"prompts-placeholders svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<summary[39m
+              [33mclass[39m=[32m"svelte-yavgiv"[39m
+            [36m>[39m
+              [0mAvailable placeholders[0m
+            [36m</summary>[39m
+            [0m [0m
+            [36m<ul[39m
+              [33mclass[39m=[32m"svelte-yavgiv"[39m
+            [36m>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_label}[0m
+                [36m</code>[39m
+                [0m — ICD code header line (from ICD version setting)[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_instruction}[0m
+                [36m</code>[39m
+                [0m — Inline ICD reference phrase[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{template_guidance}[0m
+                [36m</code>[39m
+                [0m — SOAP template hint (FollowUp, NewPatient, etc.)[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_candidates}[0m
+                [36m</code>[39m
+                [0m — BC MSP candidate-code list (ICD-9/both modes)[0m
+              [36m</li>[39m
+              [0m[0m
+            [36m</ul>[39m
+          [36m</details>[39m
+          [0m  [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-status svelte-yavgiv"[39m
+          [36m>[39m
+            [0mUsing: [0m
+            [36m<strong>[39m
+              [0mcustom[0m
+            [36m</strong>[39m
+            [0m [0m
+          [36m</div>[39m
+          [0m [0m
+          [0m [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-actions svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"btn btn-primary"[39m
+              [33mdisabled[39m=[32m""[39m
+            [36m>[39m
+              [0mSave as custom[0m
+            [36m</button>[39m
+            [0m [0m
+            [36m<button[39m
+              [33mclass[39m=[32m"btn"[39m
+            [36m>[39m
+              [0mReset to default[0m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</section>[39m
+    [0m[0m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError ../../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:76:38
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/lib/components/settings/Prompts.test.ts:117:19
+    115|     render(Prompts);
+    116|     await waitFor(() => expect(textarea().value).toBe('SYNTHETIC CUSTO…
+    117|     expect(screen.getByText('Help').closest('details')!.open).toBe(fal…
+       |                   ^
+    118|     expect(screen.getByText('custom').closest('details')).toBeNull();
+    119|     expect(screen.getByRole('button', { name: 'Save as custom' }).clos…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/12]⎯
+
+ FAIL  src/lib/components/settings/Prompts.test.ts > Prompts editor prompt source > falls back to the built-in default for doc types the pack does not provide
+TestingLibraryElementError: Unable to find a label with the text of: Document type
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section prompts-section"[39m
+    [36m>[39m
+      [36m<h2>[39m
+        [0mPrompts[0m
+      [36m</h2>[39m
+      [0m [0m
+      [36m<p[39m
+        [33mclass[39m=[32m"section-description"[39m
+      [36m>[39m
+        [0mView and customize the system prompts sent to the AI for each document type.
+    Placeholder tokens are substituted at generation time.[0m
+      [36m</p>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"specialty-section svelte-yavgiv"[39m
+      [36m>[39m
+        [36m<h3[39m
+          [33mclass[39m=[32m"svelte-yavgiv"[39m
+        [36m>[39m
+          [0mSpecialty[0m
+        [36m</h3>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"section-description"[39m
+        [36m>[39m
+          [0mSelect a specialty prompt pack to tailor every generated document. A
+      locked anti-fabrication safety block is always appended to pack prompts
+      and cannot be altered. Packs are read from the app's local [0m
+          [36m<code>[39m
+            [0mspecialties[0m
+          [36m</code>[39m
+          [0m folder only — nothing is downloaded.[0m
+        [36m</p>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mclass[39m=[32m"specialty-select svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m""[39m
+          [36m>[39m
+            [0mDefault — Family Medicine (built-in)[0m
+          [36m</option>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m"psychiatry"[39m
+          [36m>[39m
+            [0mPsychiatry — v1.0.0 (bundled)[0m
+          [36m</option>[39m
+        [36m</select>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"specialty-details svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<p[39m
+            [33mclass[39m=[32m"specialty-description svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPsychiatric SOAP variant[0m
+          [36m</p>[39m
+          [0m [0m
+          [36m<p[39m
+            [33mclass[39m=[32m"specialty-meta svelte-yavgiv"[39m
+          [36m>[39m
+            [0mProvides prompts for: SOAP.
+          Document types without a pack prompt use the built-in default.[0m
+          [36m</p>[39m
+        [36m</div>[39m
+        [0m [0m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"prompts-layout svelte-yavgiv"[39m
+      [36m>[39m
+        [36m<aside[39m
+          [33mclass[39m=[32m"prompts-sidebar svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-current[39m=[32m"true"[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv active"[39m
+          [36m>[39m
+            [0mSOAP Note[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mReferral Letter[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPatient Letter[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mClinical Synopsis[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPeer Discussion[0m
+          [36m</button>[39m
+          [0m[0m
+        [36m</aside>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"prompts-editor svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<h3>[39m
+            [0mSOAP Note[0m
+          [36m</h3>[39m
+          [0m [0m
+          [36m<textarea[39m
+            [33mclass[39m=[32m"prompt-textarea svelte-yavgiv"[39m
+            [33mrows[39m=[32m"20"[39m
+            [33mspellcheck[39m=[32m"false"[39m
+          [36m/>[39m
+          [0m [0m
+          [36m<details[39m
+            [33mclass[39m=[32m"prompts-placeholders svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<summary[39m
+              [33mclass[39m=[32m"svelte-yavgiv"[39m
+            [36m>[39m
+              [0mAvailable placeholders[0m
+            [36m</summary>[39m
+            [0m [0m
+            [36m<ul[39m
+              [33mclass[39m=[32m"svelte-yavgiv"[39m
+            [36m>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_label}[0m
+                [36m</code>[39m
+                [0m — ICD code header line (from ICD version setting)[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_instruction}[0m
+                [36m</code>[39m
+                [0m — Inline ICD reference phrase[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{template_guidance}[0m
+                [36m</code>[39m
+                [0m — SOAP template hint (FollowUp, NewPatient, etc.)[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_candidates}[0m
+                [36m</code>[39m
+                [0m — BC MSP candidate-code list (ICD-9/both modes)[0m
+              [36m</li>[39m
+              [0m[0m
+            [36m</ul>[39m
+          [36m</details>[39m
+          [0m  [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-status svelte-yavgiv"[39m
+          [36m>[39m
+            [0mUsing: [0m
+            [36m<strong>[39m
+              [0mPsychiatry (+ safety block)[0m
+            [36m</strong>[39m
+            [0m [0m
+          [36m</div>[39m
+          [0m [0m
+          [36m<p[39m
+            [33mclass[39m=[32m"specialty-note svelte-yavgiv"[39m
+          [36m>[39m
+            [0mThe Psychiatry pack prompt is shown above — it is what
+            generation sends for this document type (placeholder tokens
+            substitute at generation time, and the trailing safety rules are
+            locked and always appended). Edit and save to create a custom
+            prompt that overrides the pack.[0m
+          [36m</p>[39m
+          [0m [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-actions svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"btn btn-primary"[39m
+              [33mdisabled[39m=[32m""[39m
+            [36m>[39m
+              [0mSave as custom[0m
+            [36m</button>[39m
+            [0m [0m
+            [36m<button[39m
+              [33mclass[39m=[32m"btn"[39m
+              [33mdisabled[39m=[32m""[39m
+            [36m>[39m
+              [0mReset to default[0m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</section>[39m
+    [0m[0m
+  [36m</div>[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"settings-section prompts-section"[39m
+      [36m>[39m
+        [36m<h2>[39m
+          [0mPrompts[0m
+        [36m</h2>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"section-description"[39m
+        [36m>[39m
+          [0mView and customize the system prompts sent to the AI for each document type.
+    Placeholder tokens are substituted at generation time.[0m
+        [36m</p>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"specialty-section svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<h3[39m
+            [33mclass[39m=[32m"svelte-yavgiv"[39m
+          [36m>[39m
+            [0mSpecialty[0m
+          [36m</h3>[39m
+          [0m [0m
+          [36m<p[39m
+            [33mclass[39m=[32m"section-description"[39m
+          [36m>[39m
+            [0mSelect a specialty prompt pack to tailor every generated document. A
+      locked anti-fabrication safety block is always appended to pack prompts
+      and cannot be altered. Packs are read from the app's local [0m
+            [36m<code>[39m
+              [0mspecialties[0m
+            [36m</code>[39m
+            [0m folder only — nothing is downloaded.[0m
+          [36m</p>[39m
+          [0m [0m
+          [36m<select[39m
+            [33mclass[39m=[32m"specialty-select svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m""[39m
+            [36m>[39m
+              [0mDefault — Family Medicine (built-in)[0m
+            [36m</option>[39m
+            [36m<option[39m
+              [33mvalue[39m=[32m"psychiatry"[39m
+            [36m>[39m
+              [0mPsychiatry — v1.0.0 (bundled)[0m
+            [36m</option>[39m
+          [36m</select>[39m
+          [0m [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"specialty-details svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<p[39m
+              [33mclass[39m=[32m"specialty-description svelte-yavgiv"[39m
+            [36m>[39m
+              [0mPsychiatric SOAP variant[0m
+            [36m</p>[39m
+            [0m [0m
+            [36m<p[39m
+              [33mclass[39m=[32m"specialty-meta svelte-yavgiv"[39m
+            [36m>[39m
+              [0mProvides prompts for: SOAP.
+          Document types without a pack prompt use the built-in default.[0m
+            [36m</p>[39m
+          [36m</div>[39m
+          [0m [0m
+          [0m [0m
+        [36m</div>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"prompts-layout svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<aside[39m
+            [33mclass[39m=[32m"prompts-sidebar svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33maria-current[39m=[32m"true"[39m
+              [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv active"[39m
+            [36m>[39m
+              [0mSOAP Note[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+            [36m>[39m
+              [0mReferral Letter[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+            [36m>[39m
+              [0mPatient Letter[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+            [36m>[39m
+              [0mClinical Synopsis[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+            [36m>[39m
+              [0mPeer Discussion[0m
+            [36m</button>[39m
+            [0m[0m
+          [36m</aside>[39m
+          [0m [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-editor svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<h3>[39m
+              [0mSOAP Note[0m
+            [36m</h3>[39m
+            [0m [0m
+            [36m<textarea[39m
+              [33mclass[39m=[32m"prompt-textarea svelte-yavgiv"[39m
+              [33mrows[39m=[32m"20"[39m
+              [33mspellcheck[39m=[32m"false"[39m
+            [36m/>[39m
+            [0m [0m
+            [36m<details[39m
+              [33mclass[39m=[32m"prompts-placeholders svelte-yavgiv"[39m
+            [36m>[39m
+              [36m<summary[39m
+                [33mclass[39m=[32m"svelte-yavgiv"[39m
+              [36m>[39m
+                [0mAvailable placeholders[0m
+              [36m</summary>[39m
+              [0m [0m
+              [36m<ul[39m
+                [33mclass[39m=[32m"svelte-yavgiv"[39m
+              [36m>[39m
+                [36m<li>[39m
+                  [36m<code[39m
+                    [33mclass[39m=[32m"svelte-yavgiv"[39m
+                  [36m>[39m
+                    [0m{icd_label}[0m
+                  [36m</code>[39m
+                  [0m — ICD code header line (from ICD version setting)[0m
+                [36m</li>[39m
+                [36m<li>[39m
+                  [36m<code[39m
+                    [33mclass[39m=[32m"svelte-yavgiv"[39m
+                  [36m>[39m
+                    [0m{icd_instruction}[0m
+                  [36m</code>[39m
+                  [0m — Inline ICD reference phrase[0m
+                [36m</li>[39m
+                [36m<li>[39m
+                  [36m<code[39m
+                    [33mclass[39m=[32m"svelte-yavgiv"[39m
+                  [36m>[39m
+                    [0m{template_guidance}[0m
+                  [36m</code>[39m
+                  [0m — SOAP template hint (FollowUp, NewPatient, etc.)[0m
+                [36m</li>[39m
+                [36m<li>[39m
+                  [36m<code[39m
+                    [33mclass[39m=[32m"svelte-yavgiv"[39m
+                  [36m>[39m
+                    [0m{icd_candidates}[0m
+                  [36m</code>[39m
+                  [0m — BC MSP candidate-code list (ICD-9/both modes)[0m
+                [36m</li>[39m
+                [0m[0m
+              [36m</ul>[39m
+            [36m</details>[39m
+            [0m  [0m
+            [36m<div[39m
+              [33mclass[39m=[32m"prompts-status svelte-yavgiv"[39m
+            [36m>[39m
+              [0mUsing: [0m
+              [36m<strong>[39m
+                [0mPsychiatry (+ safety block)[0m
+              [36m</strong>[39m
+              [0m [0m
+            [36m</div>[39m
+            [0m [0m
+            [36m<p[39m
+              [33mclass[39m=[32m"specialty-note svelte-yavgiv"[39m
+            [36m>[39m
+              [0mThe Psychiatry pack prompt is shown above — it is what
+            generation sends for this document type (placeholder tokens
+            substitute at generation time, and the trailing safety rules are
+            locked and always appended). Edit and save to create a custom
+            prompt that overrides the pack.[0m
+            [36m</p>[39m
+            [0m [0m
+            [36m<div[39m
+              [33mclass[39m=[32m"prompts-actions svelte-yavgiv"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn-primary"[39m
+                [33mdisabled[39m=[32m""[39m
+              [36m>[39m
+                [0mSave as custom[0m
+              [36m</button>[39m
+              [0m [0m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn"[39m
+                [33mdisabled[39m=[32m""[39m
+              [36m>[39m
+                [0mReset to default[0m
+              [36m</button>[39m
+            [36m</div>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+      [0m[0m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+ ❯ Module.waitForWrapper ../../node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ src/lib/components/settings/Prompts.test.ts:155:11
+    153|
+    154|     render(Prompts);
+    155|     await waitFor(() =>
+       |           ^
+    156|       expect(screen.getByLabelText('Document type')).toBeTruthy(),
+    157|     );
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/12]⎯
+
+ FAIL  src/lib/components/settings/Prompts.test.ts > Prompts editor prompt source > a reset confirmed after switching prompt types clears the custom but never loads the old doc under the new heading
+TestingLibraryElementError: Unable to find a label with the text of: Document type
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<section[39m
+      [33mclass[39m=[32m"settings-section prompts-section"[39m
+    [36m>[39m
+      [36m<h2>[39m
+        [0mPrompts[0m
+      [36m</h2>[39m
+      [0m [0m
+      [36m<p[39m
+        [33mclass[39m=[32m"section-description"[39m
+      [36m>[39m
+        [0mView and customize the system prompts sent to the AI for each document type.
+    Placeholder tokens are substituted at generation time.[0m
+      [36m</p>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"specialty-section svelte-yavgiv"[39m
+      [36m>[39m
+        [36m<h3[39m
+          [33mclass[39m=[32m"svelte-yavgiv"[39m
+        [36m>[39m
+          [0mSpecialty[0m
+        [36m</h3>[39m
+        [0m [0m
+        [36m<p[39m
+          [33mclass[39m=[32m"section-description"[39m
+        [36m>[39m
+          [0mSelect a specialty prompt pack to tailor every generated document. A
+      locked anti-fabrication safety block is always appended to pack prompts
+      and cannot be altered. Packs are read from the app's local [0m
+          [36m<code>[39m
+            [0mspecialties[0m
+          [36m</code>[39m
+          [0m folder only — nothing is downloaded.[0m
+        [36m</p>[39m
+        [0m [0m
+        [36m<select[39m
+          [33mclass[39m=[32m"specialty-select svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<option[39m
+            [33mvalue[39m=[32m""[39m
+          [36m>[39m
+            [0mDefault — Family Medicine (built-in)[0m
+          [36m</option>[39m
+        [36m</select>[39m
+        [0m [0m
+        [0m [0m
+      [36m</div>[39m
+      [0m [0m
+      [36m<div[39m
+        [33mclass[39m=[32m"prompts-layout svelte-yavgiv"[39m
+      [36m>[39m
+        [36m<aside[39m
+          [33mclass[39m=[32m"prompts-sidebar svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-current[39m=[32m"true"[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv active"[39m
+          [36m>[39m
+            [0mSOAP Note[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mReferral Letter[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPatient Letter[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mClinical Synopsis[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"prompts-nav-item svelte-yavgiv"[39m
+          [36m>[39m
+            [0mPeer Discussion[0m
+          [36m</button>[39m
+          [0m[0m
+        [36m</aside>[39m
+        [0m [0m
+        [36m<div[39m
+          [33mclass[39m=[32m"prompts-editor svelte-yavgiv"[39m
+        [36m>[39m
+          [36m<h3>[39m
+            [0mSOAP Note[0m
+          [36m</h3>[39m
+          [0m [0m
+          [36m<textarea[39m
+            [33mclass[39m=[32m"prompt-textarea svelte-yavgiv"[39m
+            [33mrows[39m=[32m"20"[39m
+            [33mspellcheck[39m=[32m"false"[39m
+          [36m/>[39m
+          [0m [0m
+          [36m<details[39m
+            [33mclass[39m=[32m"prompts-placeholders svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<summary[39m
+              [33mclass[39m=[32m"svelte-yavgiv"[39m
+            [36m>[39m
+              [0mAvailable placeholders[0m
+            [36m</summary>[39m
+            [0m [0m
+            [36m<ul[39m
+              [33mclass[39m=[32m"svelte-yavgiv"[39m
+            [36m>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_label}[0m
+                [36m</code>[39m
+                [0m — ICD code header line (from ICD version setting)[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_instruction}[0m
+                [36m</code>[39m
+                [0m — Inline ICD reference phrase[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{template_guidance}[0m
+                [36m</code>[39m
+                [0m — SOAP template hint (FollowUp, NewPatient, etc.)[0m
+              [36m</li>[39m
+              [36m<li>[39m
+                [36m<code[39m
+                  [33mclass[39m=[32m"svelte-yavgiv"[39m
+                [36m>[39m
+                  [0m{icd_candidates}[0m
+                [36m</code>[39m
+                [0m — BC MSP candidate-code list (ICD-9/both modes)[0m
+              [36m</li>[39m
+              [0m[0m
+            [36m</ul>[39m
+          [36m</details>[39m
+          [0m  [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-status svelte-yavgiv"[39m
+          [36m>[39m
+            [0mUsing: [0m
+            [36m<strong>[39m
+              [0mcustom[0m
+            [36m</strong>[39m
+            [0m [0m
+          [36m</div>[39m
+          [0m [0m
+          [0m [0m
+          [36m<div[39m
+            [33mclass[39m=[32m"prompts-actions svelte-yavgiv"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"btn btn-primary"[39m
+              [33mdisabled[39m=[32m""[39m
+            [36m>[39m
+              [0mSave as custom[0m
+            [36m</button>[39m
+            [0m [0m
+            [36m<button[39m
+              [33mclass[39m=[32m"btn"[39m
+            [36m>[39m
+              [0mReset to default[0m
+            [36m</button>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</section>[39m
+    [0m[0m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ Object.getElementError ../../node_modules/@testing-library/dom/dist/config.js:37:19
+ ❯ getAllByLabelText ../../node_modules/@testing-library/dom/dist/queries/label-text.js:111:38
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:52:17
+ ❯ ../../node_modules/@testing-library/dom/dist/query-helpers.js:95:19
+ ❯ src/lib/components/settings/Prompts.test.ts:214:35
+    212|     // Reset (soap) → dialog pending → switch to synopsis while it is …
+    213|     await fireEvent.click(screen.getByRole('button', { name: 'Reset to…
+    214|     await fireEvent.change(screen.getByLabelText('Document type'), { t…
+       |                                   ^
+    215|     await waitFor(() => expect(textarea().value).toBe('DEFAULT PROMPT …
+    216|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/12]⎯
+
+
+ Test Files  3 failed (3)
+      Tests  12 failed | 10 passed (22)
+   Start at  05:56:15
+   Duration  2.03s (transform 1.35s, setup 35ms, import 1.64s, tests 2.43s, environment 807ms)
+

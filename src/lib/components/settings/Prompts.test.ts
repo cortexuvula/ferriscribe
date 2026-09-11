@@ -80,6 +80,46 @@ describe('Prompts editor prompt source', () => {
   });
   afterEach(cleanup);
 
+  it('restores the document selector and draft when discard is cancelled', async () => {
+    render(Prompts);
+    await waitFor(() => expect(textarea().value).toBe('DEFAULT PROMPT (soap)'));
+    await fireEvent.input(textarea(), { target: { value: 'UNSAVED SYNTHETIC DRAFT' } });
+    vi.mocked(confirmDialog).mockResolvedValueOnce(false);
+    const select = screen.getByLabelText('Document type') as HTMLSelectElement;
+    await fireEvent.change(select, { target: { value: 'referral' } });
+    await waitFor(() => expect(select.value).toBe('soap'));
+    expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({ title: 'Discard prompt changes?' }));
+    expect(textarea().value).toBe('UNSAVED SYNTHETIC DRAFT');
+    expect(mockGetDefaultPrompt).not.toHaveBeenCalledWith('referral');
+    expect(mockUpdateField).not.toHaveBeenCalled();
+  });
+
+  it('loads the selected document only after accepting discard', async () => {
+    render(Prompts);
+    await waitFor(() => expect(textarea().value).toBe('DEFAULT PROMPT (soap)'));
+    await fireEvent.input(textarea(), { target: { value: 'UNSAVED SYNTHETIC DRAFT' } });
+    let accept!: (value: boolean) => void;
+    vi.mocked(confirmDialog).mockImplementationOnce(() => new Promise(resolve => { accept = resolve; }));
+    const select = screen.getByLabelText('Document type') as HTMLSelectElement;
+    await fireEvent.change(select, { target: { value: 'referral' } });
+    expect(textarea().value).toBe('UNSAVED SYNTHETIC DRAFT');
+    expect(mockGetDefaultPrompt).not.toHaveBeenCalledWith('referral');
+    accept(true);
+    await waitFor(() => expect(textarea().value).toBe('DEFAULT PROMPT (referral)'));
+    expect(select.value).toBe('referral');
+    expect(mockUpdateField).not.toHaveBeenCalled();
+  });
+
+  it('keeps source and explicit actions outside collapsed Help', async () => {
+    mockState.custom_soap_prompt = 'SYNTHETIC CUSTOM';
+    render(Prompts);
+    await waitFor(() => expect(textarea().value).toBe('SYNTHETIC CUSTOM'));
+    expect(screen.getByText('Help').closest('details')!.open).toBe(false);
+    expect(screen.getByText('custom').closest('details')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save as custom' }).closest('details')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Reset to default' }).closest('details')).toBeNull();
+  });
+
   it('shows the built-in default when no specialty is selected', async () => {
     render(Prompts);
     await waitFor(() => expect(textarea().value).toBe('DEFAULT PROMPT (soap)'));
@@ -113,9 +153,9 @@ describe('Prompts editor prompt source', () => {
 
     render(Prompts);
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Clinical Synopsis' })).toBeTruthy(),
+      expect(screen.getByLabelText('Document type')).toBeTruthy(),
     );
-    await fireEvent.click(screen.getByRole('button', { name: 'Clinical Synopsis' }));
+    await fireEvent.change(screen.getByLabelText('Document type'), { target: { value: 'synopsis' } });
     await waitFor(() => expect(textarea().value).toBe('DEFAULT PROMPT (synopsis)'));
     // Psychiatry only provides soap — no pack fetch for synopsis.
     expect(mockGetPackPrompt).not.toHaveBeenCalledWith('synopsis');
@@ -171,7 +211,7 @@ describe('Prompts editor prompt source', () => {
 
     // Reset (soap) → dialog pending → switch to synopsis while it is open.
     await fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }));
-    await fireEvent.click(screen.getByRole('button', { name: 'Clinical Synopsis' }));
+    await fireEvent.change(screen.getByLabelText('Document type'), { target: { value: 'synopsis' } });
     await waitFor(() => expect(textarea().value).toBe('DEFAULT PROMPT (synopsis)'));
 
     resolveConfirm(true);

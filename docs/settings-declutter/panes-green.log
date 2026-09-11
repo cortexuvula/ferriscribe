@@ -1,0 +1,12 @@
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - import "./vite-plugins/dictionary-en" without a file extension (vitest.config.ts:3:43). Add the file extension
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/settings-declutter
+
+
+ Test Files  3 passed (3)
+      Tests  22 passed (22)
+   Start at  06:00:38
+   Duration  1.19s (transform 1.34s, setup 39ms, import 1.65s, tests 627ms, environment 882ms)
+
