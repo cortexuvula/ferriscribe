@@ -56,27 +56,6 @@ async fn report(
     .expect("report")
 }
 
-fn load_config_blocking(state: &AppState) -> AppConfig {
-    let conn = state.db.conn().expect("conn");
-    let mut config = medical_db::settings::SettingsRepo::load_config(&conn).expect("config");
-    config.migrate();
-    config
-}
-
-/// Seed a recording that already has a SOAP note (for derived-type tests)
-/// by running the real SOAP generation once.
-async fn seeded(state: &AppState, recording_id: &str) {
-    let provider = Arc::new(MockCompletionProvider::new(
-        "ollama",
-        "Subjective:\n- Chief complaint: back pain\n\nPlan:\n- Rest",
-        200,
-    ));
-    // build_test_state_with_provider registered its own provider; reuse it
-    // by driving generation with the state as built.
-    let _ = provider;
-    super::soap::generate_soap_inner_for_test(state, recording_id).await;
-}
-
 // ─────────────────────────────────────────────────────────────────────────
 // Case 1: unchanged inputs → fresh; partial notes edit with structured
 // fields intact → stale; exact reversion → fresh.
@@ -96,7 +75,8 @@ async fn a1_soap_fresh_on_unchanged_stale_on_edit_fresh_on_reversion() {
         patient_context: Some(pc(&["Synthetic medication"])),
         ..Default::default()
     };
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await;
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+        .expect("generation must succeed");
 
     // Unchanged → fresh.
     let r = report(&state, &rid, &inputs).await;
@@ -131,11 +111,25 @@ async fn a2_transcript_edit_stales_soap_only_and_document_isolation() {
     let (state, rid) =
         build_test_state_with_provider(base_config(), "Patient reports back pain.", provider).await;
 
-    let inputs = CurrentDocInputs::default();
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await;
-    super::referral::generate_referral_inner_for_test(&state, &rid, &inputs).await;
-    super::letter::generate_letter_inner_for_test(&state, &rid, &inputs).await;
-    super::peer_discussion::generate_peer_discussion_inner_for_test(&state, &rid, &inputs).await;
+    // Peer fields must be explicit: the read side (compute_report) treats
+    // missing peer fields as "" — matching production, where the form
+    // always sends real values — while the generation test helper
+    // substitutes legacy defaults ("Smith"/…). With None here the write
+    // and read digests would legitimately differ.
+    let inputs = CurrentDocInputs {
+        physician_name: Some("Smith".into()),
+        specialty: Some("Cardiology".into()),
+        reason: Some("chest pain evaluation".into()),
+        ..Default::default()
+    };
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+        .expect("generation must succeed");
+    super::referral::generate_referral_inner_for_test(&state, &rid, &inputs).await
+        .expect("generation must succeed");
+    super::letter::generate_letter_inner_for_test(&state, &rid, &inputs).await
+        .expect("generation must succeed");
+    super::peer_discussion::generate_peer_discussion_inner_for_test(&state, &rid, &inputs).await
+        .expect("generation must succeed");
 
     // Everything fresh to start.
     let r = report(&state, &rid, &inputs).await;
@@ -193,9 +187,12 @@ async fn a3_soap_change_stales_derived_types_via_source() {
         build_test_state_with_provider(base_config(), "Patient reports back pain.", provider).await;
 
     let inputs = CurrentDocInputs::default();
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await;
-    super::referral::generate_referral_inner_for_test(&state, &rid, &inputs).await;
-    super::letter::generate_letter_inner_for_test(&state, &rid, &inputs).await;
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+        .expect("generation must succeed");
+    super::referral::generate_referral_inner_for_test(&state, &rid, &inputs).await
+        .expect("generation must succeed");
+    super::letter::generate_letter_inner_for_test(&state, &rid, &inputs).await
+        .expect("generation must succeed");
 
     // Hand-edit the SOAP note on the row (regeneration path is covered by
     // the same digest comparison).
@@ -237,7 +234,8 @@ async fn a4_missing_provenance_is_unknown_never_current() {
         build_test_state_with_provider(base_config(), "Patient reports back pain.", provider).await;
 
     super::soap::generate_soap_inner_for_test_with(&state, &rid, &CurrentDocInputs::default())
-        .await;
+        .await
+        .expect("generation must succeed");
 
     // Simulate a legacy recording: outputs on the row, no provenance rows.
     {
@@ -278,12 +276,16 @@ async fn a5_settings_change_stales_everything() {
         build_test_state_with_provider(base_config(), "Patient reports back pain.", provider).await;
 
     let inputs = CurrentDocInputs::default();
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await;
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+        .expect("generation must succeed");
 
-    // Change the model in settings.
+    // Change the model in settings. Single pooled connection held across
+    // both statements (in-memory pools are max_size=1 — two simultaneous
+    // `conn()` calls would deadlock/exhaust).
     {
         let conn = state.db.conn().expect("conn");
-        let mut config = load_config_blocking(&state);
+        let mut config = medical_db::settings::SettingsRepo::load_config(&conn).expect("config");
+        config.migrate();
         config.ai_model = "qwen3.8".into();
         medical_db::settings::SettingsRepo::save_config(&conn, &config).expect("save");
     }
@@ -309,7 +311,8 @@ async fn a6_switch_away_and_back_no_cross_recording_leakage() {
         context: Some("Synthetic A".into()),
         ..Default::default()
     };
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await;
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+        .expect("generation must succeed");
 
     // A second recording with no provenance.
     let other_id = {
@@ -352,7 +355,8 @@ async fn a7_phi_boundary_wire_payload_is_metadata_only() {
         patient_context: Some(pc(&[secret_med])),
         ..Default::default()
     };
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await;
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+        .expect("generation must succeed");
 
     let r = report(&state, &rid, &inputs).await;
     let wire = serde_json::to_string(&r).expect("serialize wire payload");
@@ -381,7 +385,8 @@ async fn a8_tri_state_fresh_stale_unknown_distinct() {
         build_test_state_with_provider(base_config(), "Patient reports back pain.", provider).await;
 
     let inputs = CurrentDocInputs::default();
-    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await;
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs).await
+        .expect("generation must succeed");
 
     // fresh
     assert_eq!(report(&state, &rid, &inputs).await.soap.status, FreshnessStatus::Fresh);

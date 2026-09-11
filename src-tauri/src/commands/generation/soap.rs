@@ -483,14 +483,6 @@ pub(crate) async fn generate_soap_inner_for_test_with(
 }
 
 #[cfg(test)]
-pub(crate) async fn generate_soap_inner_for_test(
-    state: &AppState,
-    recording_id: &str,
-) -> AppResult<String> {
-    generate_soap_inner(state, None, recording_id, None, None, None).await
-}
-
-#[cfg(test)]
 mod preflight_tests {
     use super::super::test_helpers::{assert_endpoint_offline, build_test_state_with_recording};
     use super::*;

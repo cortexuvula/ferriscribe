@@ -20,7 +20,9 @@ pub mod synopsis;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 #[cfg(test)]
-mod freshness_acceptance;
+pub mod freshness_acceptance;
+#[cfg(test)]
+pub mod freshness_acceptance2;
 
 // Re-exposed for `commands::pipeline`, which validates the same payload before
 // kicking off its own generation flow.
