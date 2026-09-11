@@ -38,3 +38,6 @@ coverage/
 
 # Mimosa security-scan plugin session state (local only)
 .mimosa/
+
+# Vite dev-cache from the settings-declutter browser harness
+docs/settings-declutter/browser-cache/
