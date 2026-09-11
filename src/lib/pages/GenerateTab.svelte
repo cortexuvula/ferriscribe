@@ -189,7 +189,11 @@
   $effect(() => {
     // Reactive inputs the digest depends on (mirrors handleGenerate's
     // payload): recording identity, freeform context sources, structured
-    // lists, and the per-type document fields.
+    // lists, the per-type document fields — AND the settings the backend
+    // folds into every effective-input digest (model, temperature,
+    // specialty, ICD version, custom prompts). Settings changes must
+    // re-run this effect: without these reads, switching the AI model
+    // left a stale "Current" badge and issued no new comparison.
     const rec = recordings.selectedRecording;
     const rid = rec?.id;
     const ctx = freeformContext();
@@ -201,6 +205,18 @@
     const phys = physicianName;
     const spec = specialty;
     const reason = discussionReason;
+    // Digest-relevant settings (must mirror EffectiveSettings in
+    // src-tauri/.../freshness.rs): reading each field registers it as an
+    // effect dependency; void them so lint sees intentional reads.
+    const s = settings.state;
+    void s.ai_model;
+    void s.temperature;
+    void s.icd_version;
+    void s.specialty;
+    void s.custom_soap_prompt;
+    void s.custom_referral_prompt;
+    void s.custom_letter_prompt;
+    void s.custom_peer_discussion_prompt;
     if (!rid) {
       freshness = {};
       return;
