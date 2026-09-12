@@ -159,7 +159,7 @@ impl SpeakerDiarizer {
     ///    speaker changes in 10 s windows (dominant-slot tracking, see module docs)
     /// 2. **Embeddings** — WeSpeaker CAM++ extracts per-segment speaker vectors
     /// 3. **Clustering** — greedy cosine-similarity clustering with weight-carrying
-    ///    centroid merges. If `max_speakers` is set, the most-similar clusters are
+    ///    centroid merges. If `max_speakers` is set, clusters are
     ///    merged until the count is at or below the limit.
     ///
     /// Returns `Ok(vec![])` if no speech is detected. Returns `Err` if models
@@ -597,7 +597,8 @@ fn cluster_speakers(
     // Post-clustering merge: merge centroids with cosine similarity above threshold
     merge_similar_centroids(&mut clusters, &mut assignments, CENTROID_MERGE_THRESHOLD);
 
-    // If max_speakers is set, merge the most-similar centroids until we're at or below the limit.
+    // If max_speakers is set, merge clusters (least-similar first, heavy
+    // clusters protected) until we're at or below the limit.
     // Guard: a zero cap would collapse everything into one cluster — treat 0 as
     // no-limit (the save-time validator rejects it, but this is defense-in-depth
     // for configs arriving via sync or migration).
@@ -722,27 +723,55 @@ fn merge_similar_centroids(
     }
 }
 
-/// Iteratively merge the two most-similar centroids until count <= target.
+/// Iteratively merge centroid pairs until count <= target.
+///
+/// Merge order: least-similar pair first, with the `target` heaviest
+/// clusters (by member count, tie-break lowest id) protected from merging
+/// each other. Rationale (real-audio probe, 2026-09-12): the previous
+/// most-similar-first rule chain-merges — the growing conglomerate's
+/// centroid stays closest to each remaining junk singleton, so it absorbs
+/// dozens of weight-1 clusters in a row and finally glues the two dominant
+/// greedy clusters together, collapsing a two-speaker consult to a
+/// 99.6%/0.4% split. Least-similar-first cannot chain (a merged pair is
+/// more similar to everything than either half was), and protecting the
+/// heaviest clusters keeps the two dominant voices — which the greedy pass
+/// found reliably — on opposite sides of the final split.
 fn merge_to_limit(
     clusters: &mut HashMap<usize, (Array1<f32>, usize)>,
     assignments: &mut [usize],
     target: usize,
 ) {
     while clusters.len() > target {
-        let mut best_merge: Option<(usize, usize, f32)> = None;
+        // Heaviest `target` clusters by (member count desc, id asc) —
+        // deterministic under HashMap iteration order.
+        let mut by_weight: Vec<(usize, usize)> =
+            clusters.iter().map(|(&id, &(_, w))| (w, id)).collect();
+        by_weight.sort_unstable_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
+        let protected: Vec<usize> = by_weight.iter().take(target).map(|&(_, id)| id).collect();
 
+        let mut worst_merge: Option<(usize, usize, f32)> = None;
         for (id_a, id_b) in sorted_cluster_pairs(clusters) {
+            if protected.contains(&id_a) && protected.contains(&id_b) {
+                continue; // never fold the dominant voices into each other
+            }
             let sim = cosine_similarity(&clusters[&id_a].0, &clusters[&id_b].0);
-            if best_merge.is_none() || sim > best_merge.unwrap().2 {
-                best_merge = Some((id_a, id_b, sim));
+            if worst_merge.is_none() || sim < worst_merge.unwrap().2 {
+                worst_merge = Some((id_a, id_b, sim));
             }
         }
 
-        match best_merge {
-            Some((id_to, id_from, _sim)) => {
+        match worst_merge {
+            Some((id_to, id_from, sim)) => {
+                debug!(
+                    surviving = id_to,
+                    absorbed = id_from,
+                    similarity = format!("{:.4}", sim),
+                    clusters = clusters.len(),
+                    "Capping speaker count (least-similar-first merge)"
+                );
                 merge_weighted(clusters, assignments, id_to, id_from);
             }
-            None => break,
+            None => break, // only protected clusters remain — at most `target`
         }
     }
 }
@@ -1238,7 +1267,8 @@ mod tests {
     }
 
     /// D3 regression: chained merges must use the weighted centroid from the
-    /// previous merge, and pair selection must be deterministic.
+    /// previous merge, and pair selection must be deterministic under the
+    /// least-similar-first + heavy-protection rule.
     #[test]
     fn merge_to_limit_uses_weighted_centroids_in_chain() {
         let mut clusters: HashMap<usize, (Array1<f32>, usize)> = HashMap::new();
@@ -1251,22 +1281,62 @@ mod tests {
         merge_to_limit(&mut clusters, &mut assignments, 2);
 
         assert_eq!(clusters.len(), 2);
-        // Merge 1: (0,1) sim ~0.9987 — tie with (2,3); sorted-order tie-break
-        // picks (0,1). Merge 2: (2,3). Weighted centroids:
-        let (c01, w01) = &clusters[&0];
-        assert_eq!(*w01, 2);
-        assert!((c01[0] - 0.99).abs() < 1e-6, "got {}", c01[0]);
-        assert!((c01[1] - 0.025).abs() < 1e-6, "got {}", c01[1]);
-        let (c23, w23) = &clusters[&2];
-        assert_eq!(*w23, 2);
-        assert!((c23[0] - 0.025).abs() < 1e-6, "got {}", c23[0]);
-        assert!((c23[1] - 0.99).abs() < 1e-6, "got {}", c23[1]);
-        // A naive delete-without-update would leave centroid 0 at exactly
-        // [1.0, 0.0]; the weighted value is [0.99, 0.025].
+        // All weights are 1, so the protected pair is the two lowest ids,
+        // (0,1) — it must NOT merge even though its similarity (~0.9987) is
+        // the highest. Least-similar allowed pair first: (0,2) sim 0.0,
+        // then (1,3) sim ~0.1017. Weighted centroids:
+        let (c0, w0) = &clusters[&0];
+        assert_eq!(*w0, 2, "cluster 0 absorbs 2");
         assert!(
-            (c01[1] - 0.025).abs() > 1e-4 || (c01[0] - 1.0).abs() > 1e-4,
-            "sanity"
+            (c0[0] - 0.5).abs() < 1e-6 && (c0[1] - 0.5).abs() < 1e-6,
+            "weighted mean of [1,0] and [0,1], got {:?}",
+            c0
         );
+        let (c1, w1) = &clusters[&1];
+        assert_eq!(*w1, 2, "cluster 1 absorbs 3");
+        assert!(
+            (c1[0] - 0.515).abs() < 1e-6 && (c1[1] - 0.515).abs() < 1e-6,
+            "weighted mean of [0.98,0.05] and [0.05,0.98], got {:?}",
+            c1
+        );
+        assert_eq!(assignments, vec![0, 1, 0, 1], "assignments remapped");
+    }
+
+    /// Real-audio collapse regression (2026-09-12): when greedy clustering
+    /// over-fragments, the two heaviest clusters are the real voices and
+    /// must survive on opposite sides of the cap — the old most-similar-
+    /// first rule chain-merged everything into one conglomerate, producing
+    /// a 99.6%/0.4% speaker split.
+    #[test]
+    fn merge_to_limit_keeps_heaviest_clusters_apart() {
+        // Two heavy "voice" clusters (orthogonal) + junk singletons whose
+        // centroids sit between them — the chain-merge trap.
+        let mut clusters: HashMap<usize, (Array1<f32>, usize)> = HashMap::new();
+        clusters.insert(0, (Array1::from_vec(vec![1.0, 0.0]), 10));
+        clusters.insert(1, (Array1::from_vec(vec![0.0, 1.0]), 9));
+        clusters.insert(2, (Array1::from_vec(vec![0.8, 0.6]), 1));
+        clusters.insert(3, (Array1::from_vec(vec![0.9, 0.1]), 1));
+        clusters.insert(4, (Array1::from_vec(vec![0.1, 0.9]), 1));
+        let mut assignments = vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 10 members of heavy cluster 0
+            1, 1, 1, 1, 1, 1, 1, 1, 1, // 9 members of heavy cluster 1
+            2, 3, 4,
+        ];
+
+        merge_to_limit(&mut clusters, &mut assignments, 2);
+
+        assert_eq!(clusters.len(), 2, "cap enforced");
+        assert!(
+            clusters.contains_key(&0) && clusters.contains_key(&1),
+            "both heavy (voice) clusters must survive, got {:?}",
+            clusters.keys().collect::<Vec<_>>()
+        );
+        // Members of the two heavy clusters must end up on DIFFERENT
+        // speakers — that is the anti-collapse property.
+        assert_ne!(assignments[0], assignments[10], "voices must not merge");
+        // Junk members fold into the survivors, never form their own speaker.
+        let unique: std::collections::HashSet<usize> = assignments.iter().copied().collect();
+        assert_eq!(unique.len(), 2);
     }
 
     /// D3 regression: deterministic output — same embeddings, same assignments.
@@ -1384,5 +1454,112 @@ mod tests {
             ids_one[0], ids_one[1],
             "max_speakers=1 should collapse to one speaker"
         );
+    }
+    // ════════════════════════════════════════════════════════════════════
+    // REAL-AUDIO SWEEP PROBE (merge_to_limit fix validation): content-free
+    // speaker-distribution check on real encrypted recordings, run through
+    // the PRODUCTION cluster_speakers path. Sweep-worktree-only provenance;
+    // kept here env-gated so Codie can re-verify on the same audio.
+    //
+    // PRIVACY: clinical audio (PHI). Local-only, content-free: printed
+    // output is stage counts and per-speaker duration totals only. No
+    // transcript text, no audio content, no segment timestamps.
+    //
+    // Env:
+    //   FERRISCRIBE_SWEEP_AUDIO_DIR     dir containing FE1-encrypted record-*.wav
+    //   FERRISCRIBE_SWEEP_MODELS_DIR    dir containing pyannote/*.onnx
+    //   FERRISCRIBE_SWEEP_FILES         comma-separated file names
+    //   FERRISCRIBE_PROBE_DB_KEY_HEX    32-byte DB key as hex (keychain-free
+    //                                   decrypt; avoids the SecurityAgent
+    //                                   prompt on freshly-built test binaries)
+    // ════════════════════════════════════════════════════════════════════
+    #[test]
+    fn diar_real_audio_merge_fix_sweep() {
+        let Some(audio_dir) = std::env::var_os("FERRISCRIBE_SWEEP_AUDIO_DIR") else {
+            eprintln!("skipping: set FERRISCRIBE_SWEEP_AUDIO_DIR");
+            return;
+        };
+        let Some(models_dir) = std::env::var_os("FERRISCRIBE_SWEEP_MODELS_DIR") else {
+            eprintln!("skipping: set FERRISCRIBE_SWEEP_MODELS_DIR");
+            return;
+        };
+        let Some(db_key_hex) = std::env::var_os("FERRISCRIBE_PROBE_DB_KEY_HEX") else {
+            eprintln!("skipping: set FERRISCRIBE_PROBE_DB_KEY_HEX");
+            return;
+        };
+        let audio_dir = PathBuf::from(&audio_dir);
+        let models = PathBuf::from(&models_dir).join("pyannote");
+        let segmentation = models.join("segmentation-3.0.onnx");
+        let embedding = models.join("wespeaker_en_voxceleb_CAM++.onnx");
+        assert!(
+            segmentation.exists() && embedding.exists(),
+            "models missing"
+        );
+
+        let files: Vec<String> = std::env::var("FERRISCRIBE_SWEEP_FILES")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert!(!files.is_empty(), "no files via FERRISCRIBE_SWEEP_FILES");
+
+        let db_key_hex = db_key_hex.to_string_lossy().into_owned();
+        let mut db_key = [0u8; 32];
+        db_key.copy_from_slice(&hex::decode(db_key_hex.trim()).expect("hex db key"));
+
+        for file in &files {
+            let path = audio_dir.join(file);
+            assert!(path.exists(), "missing audio file {}", file);
+            let file_key = medical_security::file_crypto::derive_file_key(&db_key);
+            let bytes = std::fs::read(&path).expect("read recording");
+            let plain = medical_security::file_crypto::decrypt_bytes_with_key(&file_key, &bytes)
+                .expect("decrypt FE1 recording");
+            let cursor = std::io::Cursor::new(&plain);
+            let mut reader = hound::WavReader::new(cursor).expect("parse WAV");
+            let spec = reader.spec();
+            let samples_f32: Vec<f32> = match spec.sample_format {
+                hound::SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
+                hound::SampleFormat::Int => reader
+                    .samples::<i16>()
+                    .map(|s| s.unwrap() as f32 / i16::MAX as f32)
+                    .collect(),
+            };
+            let audio = medical_core::types::AudioData {
+                samples: samples_f32,
+                sample_rate: spec.sample_rate,
+                channels: spec.channels,
+            };
+            let audio_16k = crate::audio_prep::to_16k_mono_f32(&audio);
+            let samples = crate::audio_prep::f32_to_i16(&audio_16k);
+
+            // Full production diarize path (max_speakers = 2, same as the app).
+            let diarizer = SpeakerDiarizer::new(segmentation.clone(), embedding.clone());
+            let turns = diarizer.diarize(&samples, 16000, Some(2)).expect("diarize");
+
+            let mut secs: HashMap<usize, f64> = HashMap::new();
+            for t in &turns {
+                *secs.entry(t.speaker_id).or_insert(0.0) += t.end - t.start;
+            }
+            let mut dist: Vec<(usize, f64)> = secs.into_iter().collect();
+            dist.sort_by_key(|a| a.0);
+            let total: f64 = dist.iter().map(|&(_, s)| s).sum();
+            let shares: Vec<String> = dist
+                .iter()
+                .map(|&(a, s)| format!("{}={:.1}% ({:.1}s)", a, s / total * 100.0, s))
+                .collect();
+            let alternations = turns
+                .windows(2)
+                .filter(|w| w[0].speaker_id != w[1].speaker_id)
+                .count();
+            eprintln!(
+                "FIXSWEEP {} turns={} speakers={} dist=[{}] alternations={}",
+                file,
+                turns.len(),
+                dist.len(),
+                shares.join(", "),
+                alternations
+            );
+        }
     }
 }

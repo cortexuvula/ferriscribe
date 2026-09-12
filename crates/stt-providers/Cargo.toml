@@ -29,6 +29,9 @@ rubato = "0.16"
 whisper-rs = { version = "0.16", features = ["metal"] }
 
 [dev-dependencies]
+# real-audio sweep probe only: decrypts FE1 recordings keychain-free
+medical-security = { path = "../security" }
+hex = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wiremock = { workspace = true }
 tempfile = { workspace = true }
