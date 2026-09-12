@@ -18,14 +18,185 @@
 //!
 //! # Testing
 //!
-//! For tests, call `keyring::set_default_credential_builder(...)` with the
-//! mock builder before invoking these functions to isolate test runs. Note
-//! the mock backend is `EntryOnly`: every `Entry::new()` returns a fresh
-//! empty credential, so cross-call persistence cannot be unit-tested —
-//! that is covered by integration tests and manual smoke testing.
+//! Tests use a thread-local mock backend that never touches the real OS
+//! keychain. Call `set_test_provider(provider)` at the start of a test to
+//! install a mock that returns fixed values or records calls. The provider
+//! is automatically cleaned up when the thread exits.
+//!
+//! Example:
+//! ```rust
+//! #[test]
+//! fn my_test() {
+//!     keychain::set_test_provider(keychain::TestProvider::fixed([42u8; 32]));
+//!     let key = keychain::get_db_key().unwrap();
+//!     assert_eq!(key, Some([42u8; 32]));
+//! }
+//! ```
+//!
+//! For production code, the real OS keychain is always used.
 
 use keyring::Entry;
 use rand::RngCore;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+/// Trait for secret storage backends. Production uses the OS keychain;
+/// tests inject a mock via `set_test_provider()`.
+pub trait SecretProvider: Send + Sync {
+    /// Retrieve a 32-byte secret by account name. Returns `Ok(None)` if
+    /// no entry exists, `Ok(Some(key))` if found, or an error on access failure.
+    fn get_secret(&self, account: &str) -> KeychainResult<Option<[u8; 32]>>;
+    
+    /// Store a 32-byte secret under the given account name.
+    fn set_secret(&self, account: &str, key: [u8; 32]) -> KeychainResult<()>;
+    
+    /// Delete the secret for the given account. Idempotent: returns `Ok(())`
+    /// if no entry exists.
+    fn delete_secret(&self, account: &str) -> KeychainResult<()>;
+}
+
+/// Thread-local test provider. When set, all keychain operations route
+/// through this instead of the OS keychain.
+thread_local! {
+    static TEST_PROVIDER: RefCell<Option<Box<dyn SecretProvider>>> = RefCell::new(None);
+}
+
+/// Install a test provider for the current thread. All subsequent keychain
+/// calls on this thread will use the mock until the thread exits or
+/// `clear_test_provider()` is called.
+pub fn set_test_provider(provider: impl SecretProvider + 'static) {
+    TEST_PROVIDER.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(provider));
+    });
+}
+
+/// Remove the test provider, reverting to the real OS keychain for
+/// subsequent calls on this thread.
+pub fn clear_test_provider() {
+    TEST_PROVIDER.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+/// Run a closure with the test provider active, then automatically clear it.
+pub fn with_test_provider<F, R>(provider: impl SecretProvider + 'static, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    set_test_provider(provider);
+    let result = f();
+    clear_test_provider();
+    result
+}
+
+/// In-memory mock provider for tests. Stores secrets in a HashMap.
+pub struct TestProvider {
+    secrets: std::sync::Mutex<HashMap<String, [u8; 32]>>,
+}
+
+impl TestProvider {
+    /// Create a provider that returns `None` for all lookups (empty keychain).
+    pub fn empty() -> Self {
+        Self {
+            secrets: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+    
+    /// Create a provider that returns `fixed_key` for the DB key account
+    /// and `None` for all others.
+    pub fn fixed_db_key(fixed_key: [u8; 32]) -> Self {
+        let mut secrets = HashMap::new();
+        secrets.insert(KEYCHAIN_DB_KEY_ACCOUNT.to_string(), fixed_key);
+        Self {
+            secrets: std::sync::Mutex::new(secrets),
+        }
+    }
+    
+    /// Create a provider pre-loaded with the given secrets.
+    pub fn with_secrets(secrets: HashMap<String, [u8; 32]>) -> Self {
+        Self {
+            secrets: std::sync::Mutex::new(secrets),
+        }
+    }
+}
+
+impl SecretProvider for TestProvider {
+    fn get_secret(&self, account: &str) -> KeychainResult<Option<[u8; 32]>> {
+        let guard = self.secrets.lock().unwrap();
+        Ok(guard.get(account).copied())
+    }
+    
+    fn set_secret(&self, account: &str, key: [u8; 32]) -> KeychainResult<()> {
+        let mut guard = self.secrets.lock().unwrap();
+        guard.insert(account.to_string(), key);
+        Ok(())
+    }
+    
+    fn delete_secret(&self, account: &str) -> KeychainResult<()> {
+        let mut guard = self.secrets.lock().unwrap();
+        guard.remove(account);
+        Ok(())
+    }
+}
+
+/// Internal helper: route to test provider if set, otherwise use OS keychain.
+fn with_provider<F, R>(f: F) -> R
+where
+    F: FnOnce(&dyn SecretProvider) -> R,
+{
+    TEST_PROVIDER.with(|cell| {
+        let borrow = cell.borrow();
+        if let Some(provider) = borrow.as_ref() {
+            f(provider.as_ref())
+        } else {
+            // Real OS keychain path
+            f(&OsKeychain)
+        }
+    })
+}
+
+/// Production backend: the real OS keychain via the `keyring` crate.
+struct OsKeychain;
+
+impl SecretProvider for OsKeychain {
+    fn get_secret(&self, account: &str) -> KeychainResult<Option<[u8; 32]>> {
+        let entry = Entry::new(KEYCHAIN_SERVICE, account)
+            .map_err(|e| KeychainError::Access(e.to_string()))?;
+        match entry.get_secret() {
+            Ok(bytes) => {
+                if bytes.len() != 32 {
+                    return Err(KeychainError::Malformed(format!(
+                        "expected 32 bytes, got {}",
+                        bytes.len()
+                    )));
+                }
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&bytes);
+                Ok(Some(key))
+            }
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(KeychainError::Access(e.to_string())),
+        }
+    }
+    
+    fn set_secret(&self, account: &str, key: [u8; 32]) -> KeychainResult<()> {
+        let entry = Entry::new(KEYCHAIN_SERVICE, account)
+            .map_err(|e| KeychainError::Access(e.to_string()))?;
+        entry
+            .set_secret(&key)
+            .map_err(|e| KeychainError::Access(e.to_string()))
+    }
+    
+    fn delete_secret(&self, account: &str) -> KeychainResult<()> {
+        let entry = Entry::new(KEYCHAIN_SERVICE, account)
+            .map_err(|e| KeychainError::Access(e.to_string()))?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(KeychainError::Access(e.to_string())),
+        }
+    }
+}
 
 /// Service name used in the OS keychain.
 ///
@@ -80,32 +251,12 @@ pub fn get_db_key() -> KeychainResult<Option<[u8; 32]>> {
 /// Returns `Ok(None)` if no entry exists. Shared implementation behind
 /// [`get_db_key`] and the backup wrapping-key lookup in `medical-backup`.
 pub fn get_secret(account: &str) -> KeychainResult<Option<[u8; 32]>> {
-    let entry =
-        Entry::new(KEYCHAIN_SERVICE, account).map_err(|e| KeychainError::Access(e.to_string()))?;
-    match entry.get_secret() {
-        Ok(bytes) => {
-            if bytes.len() != 32 {
-                return Err(KeychainError::Malformed(format!(
-                    "expected 32 bytes, got {}",
-                    bytes.len()
-                )));
-            }
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&bytes);
-            Ok(Some(key))
-        }
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(KeychainError::Access(e.to_string())),
-    }
+    with_provider(|p| p.get_secret(account))
 }
 
 /// Store a 32-byte secret under `account`, creating or replacing the entry.
 pub fn set_secret(account: &str, key: [u8; 32]) -> KeychainResult<()> {
-    let entry =
-        Entry::new(KEYCHAIN_SERVICE, account).map_err(|e| KeychainError::Access(e.to_string()))?;
-    entry
-        .set_secret(&key)
-        .map_err(|e| KeychainError::Access(e.to_string()))
+    with_provider(|p| p.set_secret(account, key))
 }
 
 /// Get the existing database key from the keychain, or generate and store
@@ -151,13 +302,7 @@ pub fn get_or_create_secret(account: &str) -> KeychainResult<[u8; 32]> {
 /// - [`KeychainError::Access`] on OS keychain failure (other than
 ///   "entry not found", which is treated as success).
 pub fn wipe_db_key() -> KeychainResult<()> {
-    let entry = Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_DB_KEY_ACCOUNT)
-        .map_err(|e| KeychainError::Access(e.to_string()))?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(KeychainError::Access(e.to_string())),
-    }
+    with_provider(|p| p.delete_secret(KEYCHAIN_DB_KEY_ACCOUNT))
 }
 
 /// Encode a 32-byte key as a 64-character lowercase hex string suitable
@@ -170,28 +315,50 @@ pub fn key_to_hex(key: &[u8; 32]) -> String {
 mod tests {
     use super::*;
 
-    /// Configure keyring to use the in-process mock backend so tests don't
-    /// touch the real OS keychain. Note that the mock is `EntryOnly`
-    /// persistence — every call to `Entry::new(SERVICE, ACCOUNT)` returns a
-    /// fresh empty credential rather than sharing state. That makes
-    /// cross-call persistence tests impossible to write at the unit level;
-    /// real persistence is verified by the integration tests in Task 4 and
-    /// by manual smoke testing on each platform.
-    fn use_mock_backend() {
-        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
-    }
-
     #[test]
     fn get_db_key_returns_none_when_absent() {
-        use_mock_backend();
-        // Each Entry::new() in the mock backend yields a fresh empty
-        // credential, so any first read sees NoEntry → our wrapper maps
-        // that to Ok(None).
+        set_test_provider(TestProvider::empty());
         let result = get_db_key().expect("read");
         assert!(
             result.is_none(),
             "expected None on empty keychain, got Some"
         );
+    }
+
+    #[test]
+    fn get_db_key_returns_fixed_key_when_set() {
+        let fixed = [42u8; 32];
+        set_test_provider(TestProvider::fixed_db_key(fixed));
+        let result = get_db_key().expect("read");
+        assert_eq!(result, Some(fixed));
+    }
+
+    #[test]
+    fn get_or_create_persists_across_calls() {
+        set_test_provider(TestProvider::empty());
+        let first = get_or_create_db_key().expect("first call");
+        let second = get_or_create_db_key().expect("second call");
+        assert_eq!(first, second, "should return the same key on subsequent calls");
+    }
+
+    #[test]
+    fn set_and_get_roundtrips() {
+        set_test_provider(TestProvider::empty());
+        let key = [99u8; 32];
+        set_secret("test-account", key).expect("set");
+        let retrieved = get_secret("test-account").expect("get");
+        assert_eq!(retrieved, Some(key));
+    }
+
+    #[test]
+    fn wipe_removes_secret() {
+        set_test_provider(TestProvider::empty());
+        let key = [77u8; 32];
+        set_secret(KEYCHAIN_DB_KEY_ACCOUNT, key).expect("set");
+        assert!(get_db_key().expect("get").is_some());
+        
+        wipe_db_key().expect("wipe");
+        assert!(get_db_key().expect("get after wipe").is_none());
     }
 
     #[test]
@@ -203,5 +370,17 @@ mod tests {
             hex_str,
             "abababababababababababababababababababababababababababababababab"
         );
+    }
+
+    #[test]
+    fn with_test_provider_scopes_correctly() {
+        let key = [55u8; 32];
+        let result = with_test_provider(TestProvider::fixed_db_key(key), || {
+            get_db_key().expect("inside scope")
+        });
+        assert_eq!(result, Some(key));
+        
+        // After the closure, the provider is cleared
+        // (would use real keychain if called here, but we don't in tests)
     }
 }
