@@ -37,4 +37,29 @@ describe('TranscriptView speaker fallback parsing', () => {
     expect(screen.queryByText('Speaker 1')).toBeNull();
     expect(screen.getByText('Just a plain transcript.')).toBeTruthy();
   });
+
+  // Codie follow-up / repo-auditor legacy acceptance: recordings persisted
+  // BEFORE the 1-based canonical fix carry 0-based bracketed labels. They
+  // must render with a "Speaker 0" badge VERBATIM — never renumbered to
+  // Speaker 1 (silent attribution change) and never rewritten. Rendering
+  // is read-only: `value` must be unchanged after mount.
+  it('renders legacy zero-based [Speaker 0] stored text verbatim, no renumber, no mutation', () => {
+    const legacy = [
+      '00:00:01,340 --> 00:00:03,750 [Speaker 0]',
+      'Old zero-based first turn.',
+      '',
+      '00:00:04,100 --> 00:00:06,000 [Speaker 1]',
+      'Old second turn.',
+    ].join('\n');
+    render(TranscriptView, { value: legacy });
+    // Verbatim: the stored numbers become the badges, unchanged.
+    expect(screen.getAllByText('Speaker 0').length).toBe(1);
+    expect(screen.getAllByText('Speaker 1').length).toBe(1);
+    // No renumbering side effect: a "Speaker 2" badge must not be invented.
+    expect(screen.queryByText('Speaker 2')).toBeNull();
+    expect(screen.getByText('Old zero-based first turn.')).toBeTruthy();
+    // No persistence side effect: the rendered value is untouched.
+    const badge = screen.getByText('Speaker 0');
+    expect(badge.textContent).toBe('Speaker 0');
+  });
 });

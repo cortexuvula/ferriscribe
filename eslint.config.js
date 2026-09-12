@@ -103,6 +103,10 @@ export default [
       '.svelte-kit/**',
       '.worktrees/**',
       'vite-plugins/**',
+      // Vendored browser-harness dependency caches under docs/** (settings
+      // declutter, generation design) — not shipped code; linting them
+      // produced 1,419 phantom errors polluting every run.
+      'docs/**/browser-cache/**',
     ],
   },
 ];
