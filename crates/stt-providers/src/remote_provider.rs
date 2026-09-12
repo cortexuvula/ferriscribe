@@ -291,35 +291,35 @@ impl SttProvider for RemoteSttProvider {
         // diarize requested) vs. skipped. An empty speaker_turns after a
         // successful run just means a single speaker was detected — that's not
         // a failure and must not trigger a "models missing" warning.
-        let (speaker_turns, diarization_attempted) = if config.diarize
+        let (speaker_turns, diarization_attempted, diarization_failed) = if config.diarize
             && self.diarization_available()
         {
             let seg_path = self.segmentation_model_path.clone();
             let emb_path = self.embedding_model_path.clone();
             let audio_for_diarize = samples_i16;
             let max_speakers = config.num_speakers;
-            let turns = match tokio::task::spawn_blocking(move || {
+            let (turns, failure) = match tokio::task::spawn_blocking(move || {
                 let diarizer = SpeakerDiarizer::new(seg_path, emb_path);
                 diarizer.diarize(&audio_for_diarize, TARGET_SAMPLE_RATE, max_speakers)
             })
             .await
             {
-                Ok(Ok(turns)) => turns,
+                Ok(Ok(turns)) => (turns, None),
                 Ok(Err(e)) => {
                     warn!(error = %e, "Diarization failed — proceeding without speaker labels");
-                    Vec::new()
+                    (Vec::new(), Some(format!("diarization failed: {e}")))
                 }
                 Err(e) => {
                     warn!(error = %e, "Diarization task panicked — proceeding without speaker labels");
-                    Vec::new()
+                    (Vec::new(), Some(format!("diarization task panicked: {e}")))
                 }
             };
-            (turns, true)
+            (turns, true, failure)
         } else {
             if config.diarize && !self.diarization_available() {
                 warn!("Diarization requested but pyannote models not found — skipping");
             }
-            (Vec::new(), false)
+            (Vec::new(), false, None)
         };
 
         // Stage 4: merge speaker turns with whisper segments.
@@ -355,6 +355,12 @@ impl SttProvider for RemoteSttProvider {
                 // means diarization was skipped — models missing or not
                 // requested — which is what the frontend warning checks.
                 "diarization_attempted": diarization_attempted,
+                // Some(reason) when the attempted run FAILED or panicked —
+                // the failure is swallowed (labels dropped, transcription
+                // still succeeds) but must remain observable so callers can
+                // surface it; distinguishable from a successful run that
+                // collapsed to a single speaker (no labels, no failure).
+                "diarization_failed": diarization_failed,
             }),
         })
     }

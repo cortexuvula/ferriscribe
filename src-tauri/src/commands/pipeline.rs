@@ -107,8 +107,12 @@ pub async fn process_recording(
         app.clone(),
         state.clone(),
         recording_id.clone(),
-        None,        // language — use default
-        Some(false), // diarize disabled — raw transcript is cleaner for clinical use
+        None, // language — use default
+        // diarize — forward no override: `transcribe_recording_inner`
+        // falls back to the persisted AppConfig `diarize` flag (Settings →
+        // Audio / STT), which defaults to OFF. The old hard-coded Some(false)
+        // made the setting unreachable from the pipeline path.
+        None,
         Some(cancel.clone()),
     )
     .await;

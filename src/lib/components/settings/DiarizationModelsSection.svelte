@@ -21,11 +21,11 @@
   }: Props = $props();
 </script>
 
-<p class="form-hint">Diarization runs on this machine regardless of STT mode — pyannote models below are required for speaker labels.</p>
+<p class="form-hint">Diarization runs on this machine regardless of STT mode, and only when “Identify speakers” is enabled (off by default) — the pyannote models below are required for speaker labels.</p>
 
 <div class="form-group">
   <span class="form-label">Diarization Models (Speaker Identification)</span>
-  <span class="form-hint">Both models are required for speaker diarization. Without them, transcripts will not have speaker labels.</span>
+  <span class="form-hint">Both models are required for speaker diarization. Without them — or with speaker identification off (the default) — transcripts will not have speaker labels.</span>
   <ModelList
     models={pyannoteModels}
     {downloadingModels}

@@ -209,7 +209,10 @@ pub async fn transcribe_recording_inner(
     }
 
     // Build STT config from caller parameters.
-    // Default diarize to true — medical recordings are typically conversations.
+    // Diarize: an explicit per-call override (the pipeline stage forwards
+    // `None`; a direct transcribe command may forward `Some(_)`) falls back
+    // to the persisted AppConfig `diarize` flag (Settings → Audio / STT),
+    // which defaults to OFF.
     // Default language to the app's configured language (e.g. "en-US") when
     // the caller doesn't specify one — whisper.cpp's auto-detect is unreliable
     // on short clips and frequently misdetects as Chinese.
@@ -218,7 +221,7 @@ pub async fn transcribe_recording_inner(
         .filter(|l| !l.is_empty());
     let config = SttConfig {
         language: effective_language,
-        diarize: diarize.unwrap_or(false),
+        diarize: diarize.unwrap_or(app_config.diarize),
         num_speakers: app_config.max_speakers,
         ..SttConfig::default()
     };
@@ -249,6 +252,10 @@ pub async fn transcribe_recording_inner(
         }
     };
     let token = cancel.clone().unwrap_or_default();
+    // Did the USER (per-call override or persisted config) ask for speaker
+    // labels? Distinct from `config.diarize` being effective: the provider
+    // may still skip the run when models are missing — that gap is what the
+    // outcome distinction below reports on.
     let diarize_requested = config.diarize;
     let transcript = match stt.transcribe(audio, config, token).await {
         Ok(t) => t,
@@ -282,20 +289,34 @@ pub async fn transcribe_recording_inner(
         "Transcription complete"
     );
 
-    // If diarization was requested but the provider didn't actually run it
-    // (models missing or not installed), emit a warning event so the frontend
-    // can alert the user that speaker labels are absent. We check
-    // `diarization_attempted` rather than `diarization` because the latter is
-    // false when diarization ran but found no speakers (single-speaker
-    // recording) — that's not a failure and must not trigger the warning.
-    if diarize_requested {
-        let attempted = transcript
-            .metadata
-            .get("diarization_attempted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if !attempted {
+    // Diarization outcome reporting (see `diarization_outcome` below for the
+    // state definitions). A user who explicitly turned the setting on must
+    // not silently get unlabeled text when something went wrong.
+    match diarization_outcome(&transcript, diarize_requested) {
+        DiarizationOutcome::NotRequested | DiarizationOutcome::Succeeded => {}
+        DiarizationOutcome::Skipped => {
+            tracing::warn!(
+                recording_id = %recording_id,
+                "Diarization requested but skipped (models missing) — emitting diarization-warning"
+            );
             let _ = app.emit("diarization-warning", &recording_id);
+        }
+        DiarizationOutcome::Failed(reason) => {
+            tracing::error!(
+                recording_id = %recording_id,
+                error = %reason,
+                "Diarization was requested and attempted but FAILED — emitting diarization-failed"
+            );
+            let _ = app.emit("diarization-failed", &recording_id);
+        }
+        DiarizationOutcome::SucceededNoSpeakers => {
+            // Attempted, did not fail, and every segment is unlabeled: the
+            // turns list came back empty. Log at info — this is the expected
+            // single-speaker collapse, not a failure.
+            tracing::info!(
+                recording_id = %recording_id,
+                "Diarization ran but produced no speaker turns (single-speaker collapse) — no labels"
+            );
         }
     }
 
@@ -605,7 +626,7 @@ pub async fn transcribe_recording_inner(
 /// timestamp and a bracketed speaker label:
 ///
 /// ```text
-/// 00:00:01,340 --> 00:00:03,750 [Speaker 0]
+/// 00:00:01,340 --> 00:00:03,750 [Speaker 1]
 /// Good, good. You need some refills today.
 /// ```
 ///
@@ -644,17 +665,19 @@ fn format_transcript_with_speakers(transcript: &medical_core::types::stt::Transc
         result.push_str(&format_srt_timestamp(seg.start, seg.end));
         result.push(' ');
 
-        // Bracketed speaker label: [Speaker 0]
+        // Bracketed speaker label: [Speaker 1]
+        //
+        // NUMBERING CONVENTION (B3): "Speaker N" is 1-based everywhere —
+        // merge.rs already emits `format!("Speaker {}", id + 1)`, the rich
+        // view badges render the metadata label verbatim, and this stored /
+        // copied text must match. The old `n - 1` here produced a 0-based
+        // off-by-one against every other surface.
+        // Labels are neutral speaker ordinals with NO clinical role
+        // inference — the diarizer cannot know who is the doctor and who
+        // is the patient, and must never label as such (see
+        // docs/design/speaker-labelling.md).
         if let Some(label) = speaker {
-            if let Some(n) = label.strip_prefix("Speaker ") {
-                if let Ok(n) = n.parse::<u32>() {
-                    result.push_str(&format!("[Speaker {}] ", n.saturating_sub(1)));
-                } else {
-                    result.push_str(&format!("[{}] ", label));
-                }
-            } else {
-                result.push_str(&format!("[{}] ", label));
-            }
+            result.push_str(&format!("[{label}] "));
         }
 
         result.push('\n');
@@ -679,6 +702,73 @@ fn format_srt_time(t: f64) -> String {
     let millis = total_ms % 1_000;
     format!("{hours:02}:{minutes:02}:{seconds:02},{millis:03}")
 }
+
+/// Outcome of the (optional) speaker-diarization stage, reconstructed from
+/// the provider's transcript metadata. Distinguishes the states a user who
+/// explicitly enabled diarization must not have silently conflated:
+///
+/// - `NotRequested` — diarize is off (default); nothing to report.
+/// - `Skipped` — requested, but the provider never attempted a run because
+///   the pyannote models are absent (`diarization_attempted == false`).
+///   Degrades to unlabeled text; surfaced as `diarization-warning`.
+/// - `Failed` — requested and attempted, but the run errored or panicked.
+///   The providers deliberately swallow the error so the transcription
+///   still completes, but report it via metadata `diarization_failed`
+///   (added in this change; previously it was only a provider-side `warn!`
+///   log invisible to this call-site). Surfaced as `diarization-failed`.
+/// - `SucceededNoSpeakers` — attempted, did NOT fail, and no segment got a
+///   speaker label: the diarizer found zero speaker turns, i.e. a
+///   single-speaker recording collapsed to no labels. NOT a failure.
+/// - `Succeeded` — at least one segment carries a speaker label.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DiarizationOutcome {
+    NotRequested,
+    Skipped,
+    Failed(String),
+    SucceededNoSpeakers,
+    Succeeded,
+}
+
+/// Classify the diarization outcome from the transcript the provider
+/// returned. Pure function over (metadata, segments) so it is directly
+/// unit-testable without a Tauri runtime.
+pub(crate) fn diarization_outcome(
+    transcript: &medical_core::types::stt::Transcript,
+    diarize_requested: bool,
+) -> DiarizationOutcome {
+    if !diarize_requested {
+        return DiarizationOutcome::NotRequested;
+    }
+    // Attempted: models were present and the provider invoked the diarizer.
+    let attempted = transcript
+        .metadata
+        .get("diarization_attempted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !attempted {
+        return DiarizationOutcome::Skipped;
+    }
+    // Failed: the run was attempted and errored/panicked; the provider
+    // swallowed the error to keep the transcription alive but reported it.
+    if let Some(reason) = transcript
+        .metadata
+        .get("diarization_failed")
+        .filter(|v| !v.is_null())
+    {
+        let reason = match reason.as_str() {
+            Some(s) => s.to_string(),
+            None => reason.to_string(),
+        };
+        return DiarizationOutcome::Failed(reason);
+    }
+    // Attempted and not failed — did any segment get a label?
+    if transcript.segments.iter().any(|s| s.speaker.is_some()) {
+        DiarizationOutcome::Succeeded
+    } else {
+        DiarizationOutcome::SucceededNoSpeakers
+    }
+}
+
 
 #[cfg(test)]
 mod format_tests {
@@ -725,14 +815,17 @@ mod format_tests {
         ]);
         let result = super::format_transcript_with_speakers(&t);
         // Each segment gets its own SRT-style block with timestamp + speaker.
+        // B3: labels are 1-based and pass through UNCHANGED from merge.rs
+        // ("Speaker 1"/"Speaker 2") — stored text must match the rich view.
         assert!(
-            result.contains("[Speaker 0]"),
+            result.contains("[Speaker 1]"),
             "first speaker; got: {result}"
         );
         assert!(
-            result.contains("[Speaker 1]"),
+            result.contains("[Speaker 2]"),
             "second speaker; got: {result}"
         );
+        assert!(!result.contains("[Speaker 0]"), "no 0-based labels; got: {result}");
         assert!(result.contains("Hi"), "first text; got: {result}");
         assert!(result.contains("Hello"), "third text; got: {result}");
         assert!(result.contains("-->"), "timestamps present; got: {result}");
@@ -750,8 +843,8 @@ mod format_tests {
             result.contains("mm-hmm"),
             "unlabeled segment must appear in output; got: {result}"
         );
-        assert!(result.contains("[Speaker 0]"));
         assert!(result.contains("[Speaker 1]"));
+        assert!(result.contains("[Speaker 2]"));
     }
 
     #[test]
@@ -766,7 +859,7 @@ mod format_tests {
             "unlabeled prefix must appear; got: {result}"
         );
         assert!(
-            result.contains("[Speaker 0]"),
+            result.contains("[Speaker 1]"),
             "labeled segment follows; got: {result}"
         );
     }
@@ -775,21 +868,21 @@ mod format_tests {
     fn unlabeled_after_speaker_folded_into_that_speaker() {
         let t = make_transcript(vec![
             seg("Take this", Some("Speaker 1")),
-            seg("okay", None), // should fold into Speaker 0
+            seg("okay", None), // should fold into Speaker 1
             seg("Thanks", Some("Speaker 2")),
         ]);
         let result = super::format_transcript_with_speakers(&t);
-        // "okay" appears and is attributed to [Speaker 0] (the last known).
+        // "okay" appears and is attributed to [Speaker 1] (the last known).
         assert!(
             result.contains("okay"),
             "folded text present; got: {result}"
         );
         assert!(
-            result.contains("[Speaker 0]"),
-            "folded into speaker 0; got: {result}"
+            result.contains("[Speaker 1]"),
+            "folded into Speaker 1; got: {result}"
         );
         assert!(
-            result.contains("[Speaker 1]"),
+            result.contains("[Speaker 2]"),
             "speaker change after fold; got: {result}"
         );
     }
@@ -798,6 +891,90 @@ mod format_tests {
     fn empty_segments_handled() {
         let t = make_transcript(vec![]);
         assert_eq!(super::format_transcript_with_speakers(&t), "");
+    }
+
+    /// B8 regression: a single-speaker collapse — diarization attempted,
+    /// succeeded, but produced ZERO speaker turns (empty turns merge into
+    /// unlabeled segments) — must produce NO speaker labels and NO brackets.
+    #[test]
+    fn single_speaker_collapse_yields_no_labels() {
+        let t = make_transcript(vec![seg("Solo monologue", None), seg("part two", None)]);
+        let result = super::format_transcript_with_speakers(&t);
+        assert_eq!(result, "Solo monologue part two");
+        assert!(!result.contains('['), "no labels expected; got: {result}");
+    }
+
+    /// B8 regression: an explicitly-requested diarization run that the
+    /// provider skipped (models missing) classifies as Skipped.
+    #[test]
+    fn diarization_outcome_skipped_when_models_missing() {
+        let t = make_transcript(vec![seg("Hi", None)]);
+        assert_eq!(
+            super::diarization_outcome(&t, true),
+            super::DiarizationOutcome::Skipped
+        );
+    }
+
+    /// B8 regression: an explicitly-requested run that errored mid-flight
+    /// (provider swallowed the error, reported it via metadata) classifies
+    /// as Failed and carries the reason.
+    #[test]
+    fn diarization_outcome_failed_when_provider_reports_failure() {
+        let mut t = make_transcript(vec![seg("Hi", None)]);
+        t.metadata = serde_json::json!({
+            "diarization_attempted": true,
+            "diarization_failed": "diarization failed: model corrupted",
+        });
+        assert_eq!(
+            super::diarization_outcome(&t, true),
+            super::DiarizationOutcome::Failed(
+                "diarization failed: model corrupted".to_string()
+            )
+        );
+    }
+
+    /// B8 regression: an explicitly-requested run that attempted, did not
+    /// fail, but found no speakers (single-speaker collapse) classifies as
+    /// SucceededNoSpeakers — NOT Failed, NOT Skipped.
+    #[test]
+    fn diarization_outcome_single_speaker_collapse_is_not_a_failure() {
+        let mut t = make_transcript(vec![seg("Solo", None)]);
+        t.metadata = serde_json::json!({
+            "diarization_attempted": true,
+            "diarization_failed": null,
+        });
+        assert_eq!(
+            super::diarization_outcome(&t, true),
+            super::DiarizationOutcome::SucceededNoSpeakers
+        );
+    }
+
+    /// B8 regression: diarize off (the default) never reports anything.
+    #[test]
+    fn diarization_outcome_not_requested_when_off() {
+        let mut t = make_transcript(vec![seg("Hi", Some("Speaker 1"))]);
+        t.metadata = serde_json::json!({
+            "diarization_attempted": false,
+            "diarization_failed": null,
+        });
+        assert_eq!(
+            super::diarization_outcome(&t, false),
+            super::DiarizationOutcome::NotRequested
+        );
+    }
+
+    /// Sanity: attempted + labeled segments = Succeeded.
+    #[test]
+    fn diarization_outcome_succeeded_with_labels() {
+        let mut t = make_transcript(vec![seg("Hi", Some("Speaker 1"))]);
+        t.metadata = serde_json::json!({
+            "diarization_attempted": true,
+            "diarization_failed": null,
+        });
+        assert_eq!(
+            super::diarization_outcome(&t, true),
+            super::DiarizationOutcome::Succeeded
+        );
     }
 }
 

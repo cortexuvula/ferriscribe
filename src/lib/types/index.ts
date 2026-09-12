@@ -163,6 +163,10 @@ export interface AppConfig {
   vocabulary_enabled: boolean;
   medical_dict_enabled: boolean;
   max_speakers: number | null;
+  /** Diarization master switch (default false). Mirrors `diarize: bool` in
+   *  crates/core/src/types/settings.rs. Off = no speaker labels ever,
+   *  regardless of downloaded models. */
+  diarize: boolean;
   custom_context_templates: ContextTemplate[];
   /** Selected specialty prompt-pack id; null = built-in family-medicine
    *  defaults. The pack's per-doc-type prompt artifacts override the

@@ -700,6 +700,12 @@ pub async fn translation_capture_stop(
     };
     let config = SttConfig {
         language: Some(speaker_language),
+        // INVARIANT (speaker-labelling B7): the translation feature is keyed
+        // by Provider/Patient session speakers, NOT by diarization output.
+        // Diarization "Speaker N" labels must never flow into this store —
+        // an unverified-attribution label must not be conflated with the
+        // known conversation roles. Hard-coded false; do NOT wire this to
+        // AppConfig.diarize. See docs/design/speaker-labelling.md.
         diarize: false,
         ..SttConfig::default()
     };

@@ -463,6 +463,18 @@ pub struct AppConfig {
     // is at or below this value. `None` means no limit (auto-detect).
     #[serde(default)]
     pub max_speakers: Option<u32>,
+    /// Diarization master switch — off by default. When false, transcription
+    /// never runs speaker diarization (regardless of the models on disk) and
+    /// transcripts carry no speaker labels. When true, the local/remote STT
+    /// providers run pyannote diarization alongside Whisper, subject to the
+    /// models being present (missing models degrade to unlabeled text with a
+    /// surfaced warning, never a hard failure).
+    ///
+    /// Labels are neutral ("Speaker 1", "Speaker 2", …) with NO clinical
+    /// role inference — the model cannot tell doctor from patient and must
+    /// never pretend to. See docs/design/speaker-labelling.md.
+    #[serde(default)]
+    pub diarize: bool,
     // RSVP speed-reader
     #[serde(default = "default_rsvp_wpm")]
     pub rsvp_wpm: u32,
@@ -668,6 +680,10 @@ impl AppConfig {
     /// longer valid (e.g. cloud provider names like `"openai"` or
     /// `"anthropic"` left over from older versions are migrated to
     /// `"lmstudio"`).
+    ///
+    /// Note: `diarize` needs no explicit migration case — it is new, has no
+    /// legacy predecessor flag, and `#[serde(default)]` yields `false`
+    /// (the intended default-off state) for every pre-existing config JSON.
     pub fn migrate(&mut self) {
         if !SUPPORTED_AI_PROVIDERS.contains(&self.ai_provider.as_str()) {
             tracing::warn!(
@@ -734,6 +750,7 @@ mod tests {
         assert_eq!(config.omlx_port, 8000);
         assert!(!config.omlx_disable_thinking);
         assert!(config.vocabulary_enabled);
+        assert!(!config.diarize, "diarize must default to off");
         assert_eq!(config.rsvp_wpm, 300);
         assert_eq!(config.rsvp_font_size, 48);
         assert_eq!(config.rsvp_chunk_size, 1);

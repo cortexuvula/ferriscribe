@@ -39,6 +39,7 @@ const defaults: AppConfig = {
   vocabulary_enabled: true,
   medical_dict_enabled: true,
   max_speakers: 3,
+  diarize: false,
   custom_context_templates: [],
   specialty: null,
   custom_soap_prompt: null,

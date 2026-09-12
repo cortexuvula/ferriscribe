@@ -33,6 +33,13 @@
   let downloadProgress = $state<Record<string, { downloaded: number; total: number }>>({});
   let sttMode = $state<'local' | 'remote'>((settings.state.stt_mode as 'local' | 'remote') ?? 'local');
   $effect(() => { sttMode = (settings.state.stt_mode as 'local' | 'remote') ?? 'local'; });
+  // Mirrors the backend's supports_diarization(): both pyannote models on
+  // disk. The diarize toggle and max-speakers control are disabled until
+  // this is true — flipping them without models would only ever produce
+  // the "models missing" warning.
+  const diarizationSupported = $derived(
+    pyannoteModels.length > 0 && pyannoteModels.every((model) => model.downloaded),
+  );
   let progressUnlisten: UnlistenFn | null = null;
 
   async function handleSttModeChange() {
@@ -107,7 +114,7 @@
     const isDiarization = pyannoteModels.some((m) => m.id === modelId) && !whisperModels.some((m) => m.id === modelId);
     const size = entry ? ` (${formatBytes(entry.size_bytes)})` : '';
     const diarizationNote = isDiarization
-      ? '\n\nBoth diarization models are required for speaker labels — transcripts will lose speaker labels until it is re-downloaded.'
+      ? '\n\nBoth diarization models are required for speaker labels. Speaker identification is off by default and only uses these models when enabled in Settings — until re-downloaded, transcripts fall back to unlabeled text.'
       : '';
     const ok = await confirmDialog({
       title: 'Delete model?',
@@ -202,6 +209,11 @@
     try { await settings.updateField('max_speakers', maxSpeakersDraft); }
     catch { maxSpeakersDraft = settings.state.max_speakers ?? 3; }
   }
+
+  async function handleDiarizeToggle(checked: boolean) {
+    try { await settings.updateField('diarize', checked); }
+    catch { /* store reverts on failed save; nothing to do */ }
+  }
 </script>
 
 <section class="settings-section">
@@ -272,6 +284,26 @@
   />
 
   <div class="form-group">
+    <label class="form-label checkbox-label">
+      <input
+        type="checkbox"
+        checked={settings.state.diarize}
+        disabled={!diarizationSupported}
+        onchange={(e: Event) => {
+          const checked = (e.target as HTMLInputElement).checked;
+          void handleDiarizeToggle(checked);
+        }}
+      />
+      <span>Identify speakers (diarization)</span>
+    </label>
+    {#if diarizationSupported}
+      <span class="form-hint">Off by default. Labels speakers as neutral &quot;Speaker 1 / Speaker 2&quot; — attribution is automatic and may be wrong; it never claims who is doctor or patient. Requires both diarization models above.</span>
+    {:else}
+      <span class="form-hint">Both diarization models above must be downloaded before speaker labels can be turned on.</span>
+    {/if}
+  </div>
+
+  <div class="form-group">
     <label for="max-speakers" class="form-label">
       Max speakers
       <span class="badge-value">{maxSpeakersDraft}</span>
@@ -282,12 +314,13 @@
       min={1}
       max={8}
       value={maxSpeakersDraft}
+      disabled={!diarizationSupported}
       oninput={(e: Event) => {
         maxSpeakersDraft = parseInt((e.target as HTMLInputElement).value, 10);
       }}
       onchange={handleMaxSpeakersCommit}
     />
-    <span class="form-hint">Limits the number of speaker clusters. Set to the expected number of people in the conversation (typically 2–3).</span>
+    <span class="form-hint">{#if diarizationSupported}Limits the number of speaker clusters. Set to the expected number of people in the conversation (typically 2–3). Only applies when speaker identification is enabled.{:else}Requires both diarization models above.{/if}</span>
   </div>
 
   <div class="form-group">

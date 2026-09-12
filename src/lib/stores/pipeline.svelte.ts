@@ -37,6 +37,7 @@ class PipelineStore {
 
   private progressUnlisten: UnlistenFn | null = null;
   private diarizationWarningUnlisten: UnlistenFn | null = null;
+  private diarizationFailedUnlisten: UnlistenFn | null = null;
 
   // Track pending 30s cleanup timers per recording-id so we can cancel them
   // if the pipeline is re-launched or removed before the timer fires. Without
@@ -151,6 +152,31 @@ class PipelineStore {
         };
       },
     );
+
+    // B1: diarization was requested AND attempted but errored/panicked
+    // mid-run. Distinct from the skipped warning above — the models were
+    // present and the run started; the backend logs the failure reason and
+    // the transcript degrades to unlabeled text. Surface it as an error,
+    // not a "download models" nudge.
+    this.diarizationFailedUnlisten = await listen<string>(
+      'diarization-failed',
+      (event) => {
+        const recordingId = event.payload;
+        const prior = this.state.active[recordingId];
+        if (!prior) return; // failure for an unknown recording — ignore
+        const failed: PipelineEntry = {
+          ...prior,
+          warning:
+            'Speaker identification failed during transcription — the transcript was saved without speaker labels. Check the app logs for the reason.',
+        };
+        const isCurrent = this.state.current?.recordingId === recordingId;
+        this.state = {
+          ...this.state,
+          current: isCurrent ? failed : this.state.current,
+          active: { ...this.state.active, [recordingId]: failed },
+        };
+      },
+    );
   }
 
   /** Launch the pipeline for a recording. Non-blocking — returns immediately. */
@@ -260,6 +286,7 @@ class PipelineStore {
   destroy() {
     this.progressUnlisten?.();
     this.diarizationWarningUnlisten?.();
+    this.diarizationFailedUnlisten?.();
     // Cancel any outstanding cleanup timers so they don't fire against a
     // torn-down store.
     for (const handle of this.pendingCleanups.values()) {

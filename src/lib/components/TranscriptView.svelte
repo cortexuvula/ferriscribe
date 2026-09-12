@@ -1,6 +1,9 @@
 <script lang="ts">
-  import { SvelteMap } from 'svelte/reactivity';
-
+  // Note: deliberately NOT SvelteMap — getSpeakerColor assigns palette
+  // entries lazily during template rendering, and mutating reactive state
+  // inside a template expression is a Svelte 5 runtime error
+  // (state_unsafe_mutation). The assignment is deterministic per label and
+  // never needs to trigger reactivity, so a plain Map is correct.
   interface SpeakerSection {
     speaker: string | null;
     text: string;
@@ -102,7 +105,12 @@
     const result: SpeakerSection[] = [];
 
     for (const para of paragraphs) {
-      const match = para.match(/^(Speaker \d+):\s*([\s\S]*)$/);
+      // B3: stored/copied text is `HH:MM:SS,mmm --> HH:MM:SS,mmm [Speaker N]\ntext`
+      // (format_transcript_with_speakers, 1-based labels). The optional
+      // timestamp prefix is skipped so the badge shows just "Speaker N".
+      const match = para.match(
+        /^(?:\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}\s*)?\[(Speaker \d+)\]\s*\n?([\s\S]*)$/,
+      );
       if (match) {
         result.push({ speaker: match[1], text: match[2] });
       } else if (para.trim()) {
@@ -115,7 +123,10 @@
   }
 
   // Deterministic color per speaker — hash the speaker label to a hue.
-  const speakerColors = new SvelteMap<string, string>();
+  // Plain Map is deliberate: mutating this cache during template rendering
+  // is exactly what we want, and SvelteMap would throw
+  // state_unsafe_mutation (see the note at the top of this file).
+  const speakerColors = new Map<string, string>(); // eslint-disable-line svelte/prefer-svelte-reactivity
   const palette = [
     { bg: 'rgba(59, 130, 246, 0.12)', border: '#3b82f6', text: '#3b82f6' },  // blue
     { bg: 'rgba(16, 185, 129, 0.12)', border: '#10b981', text: '#10b981' },  // emerald
