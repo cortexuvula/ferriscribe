@@ -254,6 +254,31 @@ mod tests {
         drop(v6_listener);
     }
 
+    /// Regression (review cc9b532): when BOTH LAN and Tailscale are refused,
+    /// the representative failure is the LAN address (primary), not Tailscale.
+    #[tokio::test]
+    async fn lan_and_tailscale_both_refused_reports_lan_reason() {
+        use std::net::TcpListener;
+        // Nothing is bound on either loopback address -> immediate refusal.
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let ep = RemoteEndpoint {
+            lan: Some("127.0.0.1".into()),    // refused
+            tailscale: Some("127.0.0.2".into()), // refused (loopback, nothing bound)
+            port,
+            bearer: None,
+        };
+        let err = ep.resolve_base_url().await.unwrap_err();
+        assert_eq!(
+            err.host.as_deref(),
+            Some("127.0.0.1"),
+            "LAN is the representative failure when both are refused"
+        );
+        assert_eq!(err.reason, OfflineReason::ConnectionRefused);
+    }
+
     #[tokio::test]
     async fn resolve_returns_none_when_nothing_reachable() {
         // Use TEST-NET addresses that are guaranteed not to be reachable.
