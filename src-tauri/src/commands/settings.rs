@@ -105,6 +105,20 @@ pub(super) fn validate_prompt_overrides(config: &AppConfig) -> AppResult<()> {
     Ok(())
 }
 
+/// Reject `max_speakers = Some(0)` — a zero cap would collapse all speaker
+/// clusters into one, destroying diarization output. Treat `None` as no-limit
+/// (auto-detect); reject zero with a clear message so the UI can surface it.
+pub(super) fn validate_max_speakers(config: &AppConfig) -> AppResult<()> {
+    if let Some(0) = config.max_speakers {
+        return Err(AppError::InvalidInput(
+            "max_speakers must be at least 1 (or unset for auto-detect). \
+             A value of 0 would collapse all speakers to one cluster."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Persist updated application settings to the database.
 ///
 /// Validates that configured AI/STT hosts are local (private/LAN addresses)
@@ -121,6 +135,7 @@ pub async fn save_settings(
     config: AppConfig,
 ) -> AppResult<()> {
     validate_prompt_overrides(&config)?;
+    validate_max_speakers(&config)?;
     super::screenshot_ocr::validate_hotkey(&config)?;
     let db = state.db.clone();
     let data_dir = state.data_dir.clone();

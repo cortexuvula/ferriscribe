@@ -590,8 +590,11 @@ fn cluster_speakers(
     // Post-clustering merge: merge centroids with cosine similarity above threshold
     merge_similar_centroids(&mut clusters, &mut assignments, CENTROID_MERGE_THRESHOLD);
 
-    // If max_speakers is set, merge the most-similar centroids until we're at or below the limit
-    if let Some(max) = max_speakers {
+    // If max_speakers is set, merge the most-similar centroids until we're at or below the limit.
+    // Guard: a zero cap would collapse everything into one cluster — treat 0 as
+    // no-limit (the save-time validator rejects it, but this is defense-in-depth
+    // for configs arriving via sync or migration).
+    if let Some(max) = max_speakers.filter(|&m| m > 0) {
         let max = max as usize;
         if clusters.len() > max {
             merge_to_limit(&mut clusters, &mut assignments, max);
@@ -1339,5 +1342,40 @@ mod tests {
         let samples = vec![0i16; 16000];
         push_segment_if_valid(&mut segments, 5000.0, 5000, &samples, 16000.0);
         assert_eq!(segments.len(), 0);
+    }
+
+    /// **D5 regression**: zero max_speakers should be treated as no-limit,
+    /// not collapse all clusters to one. Cluster two distinct embeddings with
+    /// max_speakers=Some(0) — should preserve both speakers, not merge to one.
+    #[test]
+    fn cluster_speakers_zero_max_speakers_treated_as_no_limit() {
+        // Two distinct embeddings (orthogonal vectors)
+        let embeddings = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let threshold = 0.5;
+
+        // With max_speakers=Some(0), should NOT collapse — treat as no-limit
+        let ids_zero = cluster_speakers(&embeddings, threshold, Some(0));
+        assert_eq!(
+            ids_zero.len(),
+            2,
+            "zero max_speakers should not collapse clusters"
+        );
+        assert_ne!(
+            ids_zero[0], ids_zero[1],
+            "distinct embeddings should be distinct speakers"
+        );
+
+        // With max_speakers=None (explicit no-limit), same behavior
+        let ids_none = cluster_speakers(&embeddings, threshold, None);
+        assert_eq!(ids_none.len(), 2);
+        assert_ne!(ids_none[0], ids_none[1]);
+
+        // With max_speakers=Some(1), SHOULD collapse to one speaker
+        let ids_one = cluster_speakers(&embeddings, threshold, Some(1));
+        assert_eq!(ids_one.len(), 2); // still 2 assignments
+        assert_eq!(
+            ids_one[0], ids_one[1],
+            "max_speakers=1 should collapse to one speaker"
+        );
     }
 }
