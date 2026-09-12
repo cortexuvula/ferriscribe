@@ -111,8 +111,16 @@
       const match = para.match(
         /^(?:\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}\s*)?\[(Speaker \d+)\]\s*\n?([\s\S]*)$/,
       );
+      // LEGACY colon form: `Speaker N: text` paragraphs (the pre-bracket
+      // convention AND hand-edited text). Both formats stay supported —
+      // the bracketed form must supplement, never replace, this parser
+      // (compatibility regression flagged in review: replacing it stripped
+      // badges from every stored colon-formatted transcript).
+      const colon = para.match(/^(Speaker \d+):\s*([\s\S]*)$/);
       if (match) {
         result.push({ speaker: match[1], text: match[2] });
+      } else if (colon) {
+        result.push({ speaker: colon[1], text: colon[2] });
       } else if (para.trim()) {
         // No speaker label — could be unlabeled text before first speaker
         // or text that was edited to remove labels.

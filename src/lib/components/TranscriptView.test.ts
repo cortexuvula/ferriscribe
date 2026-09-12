@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { render, screen, cleanup } from '@testing-library/svelte';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import TranscriptView from './TranscriptView.svelte';
 
 // B3 regression: the stored/copied transcript text format is
@@ -43,7 +43,7 @@ describe('TranscriptView speaker fallback parsing', () => {
   // must render with a "Speaker 0" badge VERBATIM — never renumbered to
   // Speaker 1 (silent attribution change) and never rewritten. Rendering
   // is read-only: `value` must be unchanged after mount.
-  it('renders legacy zero-based [Speaker 0] stored text verbatim, no renumber, no mutation', () => {
+  it('renders legacy zero-based [Speaker 0] stored text verbatim, no renumber, no mutation', async () => {
     const legacy = [
       '00:00:01,340 --> 00:00:03,750 [Speaker 0]',
       'Old zero-based first turn.',
@@ -51,15 +51,50 @@ describe('TranscriptView speaker fallback parsing', () => {
       '00:00:04,100 --> 00:00:06,000 [Speaker 1]',
       'Old second turn.',
     ].join('\n');
-    render(TranscriptView, { value: legacy });
+    // No persistence side effect: rendering must never fire onChange —
+    // asserted on the spy (badge-text equality alone doesn't prove it).
+    const onChange = vi.fn();
+    render(TranscriptView, { value: legacy, onChange });
     // Verbatim: the stored numbers become the badges, unchanged.
     expect(screen.getAllByText('Speaker 0').length).toBe(1);
     expect(screen.getAllByText('Speaker 1').length).toBe(1);
     // No renumbering side effect: a "Speaker 2" badge must not be invented.
     expect(screen.queryByText('Speaker 2')).toBeNull();
     expect(screen.getByText('Old zero-based first turn.')).toBeTruthy();
-    // No persistence side effect: the rendered value is untouched.
-    const badge = screen.getByText('Speaker 0');
-    expect(badge.textContent).toBe('Speaker 0');
+    // Flush the parse debounce, then assert onChange never fired.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  // Compatibility pin (review regression): the legacy COLON form
+  // (`Speaker N: text` paragraphs) must keep rendering badges alongside
+  // the bracketed canonical form — the bracketed parser supplements, it
+  // does not replace.
+  it('renders colon-formatted Speaker N: paragraphs with badges (both formats supported)', () => {
+    const colonForm = [
+      'Speaker 1: Hello, how are you today?',
+      '',
+      'Speaker 2: Fine, thanks.',
+    ].join('\n');
+    render(TranscriptView, { value: colonForm });
+    expect(screen.getAllByText('Speaker 1').length).toBe(1);
+    expect(screen.getAllByText('Speaker 2').length).toBe(1);
+    expect(screen.getByText('Hello, how are you today?')).toBeTruthy();
+  });
+
+  // Mixed content: one transcript carrying both conventions — every
+  // labeled paragraph must badge under its own format.
+  it('renders mixed bracketed and colon formats in the same transcript', () => {
+    const mixed = [
+      '00:00:01,340 --> 00:00:03,750 [Speaker 1]',
+      'Bracketed canonical turn.',
+      '',
+      'Speaker 2: Colon-formatted turn.',
+    ].join('\n');
+    render(TranscriptView, { value: mixed });
+    expect(screen.getAllByText('Speaker 1').length).toBe(1);
+    expect(screen.getAllByText('Speaker 2').length).toBe(1);
+    expect(screen.getByText('Bracketed canonical turn.')).toBeTruthy();
+    expect(screen.getByText('Colon-formatted turn.')).toBeTruthy();
   });
 });
