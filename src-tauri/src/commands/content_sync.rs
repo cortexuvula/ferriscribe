@@ -1282,6 +1282,21 @@ mod tests {
     /// of retrying forever.
     #[test]
     fn read_local_audio_classifies_gone_versus_bytes() {
+        // Install a test keychain provider so `encrypt_file` (which routes
+        // through `keychain::get_or_create_db_key`) never blocks on the
+        // real OS keychain. The synthetic key is deterministic so the
+        // round-trip decrypt below succeeds.
+        medical_security::keychain::set_test_provider(
+            medical_security::keychain::TestProvider::fixed_db_key([0xAAu8; 32]),
+        );
+        struct ProviderGuard;
+        impl Drop for ProviderGuard {
+            fn drop(&mut self) {
+                medical_security::keychain::clear_test_provider();
+            }
+        }
+        let _cleanup = ProviderGuard;
+
         let db = Arc::new(Database::open_in_memory().expect("db"));
 
         // The in-memory pool is max_size(1): all row setup happens in a
@@ -1290,22 +1305,13 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let plaintext_wav = tmp.path().join("tombstoned.wav");
         std::fs::write(&plaintext_wav, b"RIFF....WAVEfmt ").expect("write wav");
-        // Encrypted audio (the normal at-rest format). encrypt_file needs
-        // the OS keychain, which headless CI Linux lacks — when that setup
-        // fails the fixture becomes a keychain-FREE FE1 blob under a random
-        // key (wrong key by construction), which read_local_audio can never
-        // decrypt: keychain-capable machines pin the happy decrypted Bytes,
-        // headless CI pins the Failed classification (kept in the queue for
-        // retry — the exact behavior that matters there).
+        // Encrypted audio (the normal at-rest format). With the test
+        // provider installed, `encrypt_file` uses the synthetic key and
+        // succeeds deterministically — no OS keychain prompt, no fallback
+        // to the keychain-free blob path.
         let encrypted_wav = tmp.path().join("encrypted.wav");
-        let keychain_available =
-            medical_security::file_crypto::encrypt_file(&encrypted_wav, b"SECRET AUDIO").is_ok();
-        if !keychain_available {
-            let blob =
-                medical_security::file_crypto::encrypt_bytes_with_key(&[7u8; 32], b"SECRET AUDIO")
-                    .expect("keychain-free encrypt");
-            std::fs::write(&encrypted_wav, blob).expect("write blob");
-        }
+        medical_security::file_crypto::encrypt_file(&encrypted_wav, b"SECRET AUDIO")
+            .expect("encrypt with synthetic key");
 
         // Malformed id → Gone (can never resolve).
         assert!(matches!(
@@ -1362,16 +1368,12 @@ mod tests {
             RecordingsRepo::update(&conn, &rec).expect("update path");
         }
         match read_local_audio(&db, &tombstoned_id.to_string()) {
-            PendingAudioRead::Bytes(b) if keychain_available => {
+            PendingAudioRead::Bytes(b) => {
+                // With the synthetic test provider installed, the decrypt
+                // round-trip is deterministic — both sides use the same key.
                 assert_eq!(b, b"SECRET AUDIO");
             }
-            PendingAudioRead::Failed(_) if !keychain_available => {
-                // Headless CI: decrypt can never succeed — the id must stay
-                // queued for retry, not classify Gone.
-            }
-            other => panic!(
-                "unexpected classification (keychain available: {keychain_available}): {other:?}"
-            ),
+            other => panic!("expected Bytes from encrypted fixture, got {other:?}"),
         }
     }
 

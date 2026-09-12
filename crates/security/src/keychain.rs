@@ -159,39 +159,44 @@ impl SecretProvider for TestProvider {
 }
 
 /// Internal helper: route to the global test provider if installed,
-/// otherwise use `OsKeychain`.
+/// otherwise use `OsKeychain` (production) or `TestSentinel` (test builds).
 fn with_provider<F, R>(f: F) -> R
 where
     F: FnOnce(&dyn SecretProvider) -> R,
 {
-    let guard = GLOBAL_PROVIDER.read().unwrap();
-    if let Some(provider) = guard.as_ref() {
+    // Snapshot the Arc under the read-lock, then drop the lock before
+    // calling the closure. This prevents deadlocks if the closure
+    // spawns threads that call clear_test_provider() (which needs a
+    // write-lock).
+    let provider_arc: Option<Arc<dyn SecretProvider>> = {
+        let guard = GLOBAL_PROVIDER.read().unwrap();
+        guard.clone()
+    };
+
+    if let Some(provider) = provider_arc {
         f(provider.as_ref())
     } else {
-        // Drop the read-lock before calling into OsKeychain — it may
-        // block on a prompt and we must not hold the lock across that.
-        drop(guard);
-        f(&OsKeychain)
+        // In test builds, this routes to TestSentinel which panics.
+        // In production builds, this routes to OsKeychain which touches the real keychain.
+        #[cfg(test)]
+        {
+            f(&TestSentinel)
+        }
+        #[cfg(not(test))]
+        {
+            f(&OsKeychain)
+        }
     }
 }
 
 /// Production backend: the real OS keychain via the `keyring` crate.
+/// Gated behind `#[cfg(not(test))]` so test builds can never reach it.
+#[cfg(not(test))]
 struct OsKeychain;
 
+#[cfg(not(test))]
 impl SecretProvider for OsKeychain {
     fn get_secret(&self, account: &str) -> KeychainResult<Option<[u8; 32]>> {
-        // Fail-fast guard: if we're running in a test binary (detected by
-        // the presence of `cargo test` or `cargo nextest` in the process
-        // args) and no test provider is installed, panic instead of
-        // blocking on a keychain prompt. This catches cross-crate
-        // dependencies that compile `medical-security` without `#[cfg(test)]`.
-        if is_running_in_test_context() {
-            panic!(
-                "OsKeychain::get_secret called in test context without a test provider installed. \
-                 Call keychain::set_test_provider() before running code that touches the keychain."
-            );
-        }
-
         let entry = Entry::new(KEYCHAIN_SERVICE, account)
             .map_err(|e| KeychainError::Access(e.to_string()))?;
         match entry.get_secret() {
@@ -212,12 +217,6 @@ impl SecretProvider for OsKeychain {
     }
 
     fn set_secret(&self, account: &str, key: [u8; 32]) -> KeychainResult<()> {
-        if is_running_in_test_context() {
-            panic!(
-                "OsKeychain::set_secret called in test context without a test provider installed."
-            );
-        }
-
         let entry = Entry::new(KEYCHAIN_SERVICE, account)
             .map_err(|e| KeychainError::Access(e.to_string()))?;
         entry
@@ -226,12 +225,6 @@ impl SecretProvider for OsKeychain {
     }
 
     fn delete_secret(&self, account: &str) -> KeychainResult<()> {
-        if is_running_in_test_context() {
-            panic!(
-                "OsKeychain::delete_secret called in test context without a test provider installed."
-            );
-        }
-
         let entry = Entry::new(KEYCHAIN_SERVICE, account)
             .map_err(|e| KeychainError::Access(e.to_string()))?;
         match entry.delete_credential() {
@@ -242,16 +235,33 @@ impl SecretProvider for OsKeychain {
     }
 }
 
-/// Detect whether the current process is a test binary by inspecting
-/// environment variables set by `cargo test` / `cargo nextest` / `pytest`
-/// runners. This is not `#[cfg(test)]` — that only fires for the crate
-/// being tested, not its dependencies.
-fn is_running_in_test_context() -> bool {
-    // cargo test sets RUST_TEST_THREADS; cargo nextest sets NEXTEST
-    std::env::var("RUST_TEST_THREADS").is_ok()
-        || std::env::var("NEXTEST").is_ok()
-        // Integration test binaries often have `test` in argv[0]
-        || std::env::args().next().map_or(false, |arg0| arg0.contains("test"))
+// Test-build sentinel: when compiled as a test binary (unit tests in
+// medical-security), the default provider panics immediately instead of
+// touching the real keychain. For cross-crate integration tests, callers
+// MUST call set_test_provider() before any keychain operation.
+#[cfg(test)]
+struct TestSentinel;
+
+#[cfg(test)]
+impl SecretProvider for TestSentinel {
+    fn get_secret(&self, account: &str) -> KeychainResult<Option<[u8; 32]>> {
+        panic!(
+            "OsKeychain::get_secret({account:?}) called without a test provider. \
+             Call set_test_provider() before accessing the keychain in tests."
+        );
+    }
+    fn set_secret(&self, account: &str, _key: [u8; 32]) -> KeychainResult<()> {
+        panic!(
+            "OsKeychain::set_secret({account:?}) called without a test provider. \
+             Call set_test_provider() before accessing the keychain in tests."
+        );
+    }
+    fn delete_secret(&self, account: &str) -> KeychainResult<()> {
+        panic!(
+            "OsKeychain::delete_secret({account:?}) called without a test provider. \
+             Call set_test_provider() before accessing the keychain in tests."
+        );
+    }
 }
 
 /// Service name used in the OS keychain.
@@ -367,17 +377,24 @@ pub fn key_to_hex(key: &[u8; 32]) -> String {
     hex::encode(key)
 }
 
+// Serialize tests that mutate the global provider — cargo test runs
+// lib tests in parallel by default, which would cause races.
+// `into_inner()` recovers from poisoning when a previous test panicked
+// while holding the lock.
+#[cfg(test)]
+static TEST_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(super) fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
-
-    // Serialize tests that mutate the global provider — cargo test runs
-    // lib tests in parallel by default, which would cause races.
-    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
-        TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
 
     #[test]
     fn get_db_key_returns_none_when_absent() {
@@ -461,5 +478,171 @@ mod tests {
         assert!(is_test_provider_active());
         clear_test_provider();
         assert!(!is_test_provider_active());
+    }
+
+    #[test]
+    fn spawned_thread_sees_global_provider() {
+        // Negative-path coverage: a thread spawned during a test must
+        // still see the global provider, not fall through to OsKeychain.
+        let _guard = serial_lock();
+        let key = [88u8; 32];
+        set_test_provider(TestProvider::fixed_db_key(key));
+
+        let handle = std::thread::spawn(|| {
+            // This runs on a different thread — with thread-local this
+            // would have fallen through to OsKeychain and panicked.
+            assert!(
+                is_test_provider_active(),
+                "spawned thread must see the global test provider"
+            );
+            get_db_key().expect("spawned thread reads mock")
+        });
+
+        let result = handle.join().expect("spawned thread didn't panic");
+        assert_eq!(result, Some(key));
+        clear_test_provider();
+    }
+
+    #[test]
+    fn worker_outliving_provider_scope_is_isolated() {
+        // A worker that outlives the provider scope must not silently
+        // fall through to OsKeychain — it should panic via the fail-fast
+        // guard instead.
+        let _guard = serial_lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        set_test_provider(TestProvider::empty());
+
+        let handle = std::thread::spawn(move || {
+            // Wait until the provider is cleared
+            rx.recv().unwrap();
+            // Now the provider is gone — any keychain call should panic
+            let result = std::panic::catch_unwind(|| {
+                get_db_key()
+            });
+            result.is_err() // true = panicked as expected
+        });
+
+        clear_test_provider();
+        tx.send(()).unwrap();
+
+        let panicked = handle.join().expect("worker joined");
+        assert!(
+            panicked,
+            "worker must panic when reaching OsKeychain without a provider"
+        );
+    }
+
+    #[test]
+    fn concurrent_reads_do_not_race_on_provider() {
+        // Multiple threads reading through the global provider concurrently
+        // must all see the same mock — no torn reads or lock contention.
+        let _guard = serial_lock();
+        let key = [44u8; 32];
+        set_test_provider(TestProvider::fixed_db_key(key));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let thread_key = key;
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    let result = get_db_key().expect("concurrent read");
+                    assert_eq!(result, Some(thread_key), "all reads must see mock");
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("concurrent reader didn't panic");
+        }
+        clear_test_provider();
+    }
+
+    #[test]
+    fn test_sentinel_panics_without_provider() {
+        // Verify that the test-build sentinel fires when no provider is installed.
+        // This is the compile-time guarantee that tests can't accidentally
+        // reach the real OS keychain.
+        let _guard = serial_lock();
+        assert!(!is_test_provider_active(), "precondition: no provider");
+
+        let result = std::panic::catch_unwind(|| get_db_key());
+        assert!(
+            result.is_err(),
+            "get_db_key without a test provider must panic via TestSentinel"
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_harness {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Test harness that pairs a mock keychain provider with a temporary
+    /// database path. This prevents tests from accidentally touching the
+    /// real `medical.db` — the synthetic key only decrypts the temp DB.
+    ///
+    /// # Example
+    /// ```
+    /// with_test_db(|db_path, key| {
+    ///     let db = Database::open(db_path, Some(key))?;
+    ///     // test logic
+    ///     Ok(())
+    /// });
+    /// ```
+    pub fn with_test_db<F, R>(f: F) -> R
+    where
+        F: FnOnce(&PathBuf, [u8; 32]) -> R,
+    {
+        let _guard = super::serial_lock();
+
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let db_path = temp_dir.path().join("test_medical.db");
+        let synthetic_key = [0xABu8; 32]; // Deterministic for reproducibility
+
+        let provider = TestProvider::fixed_db_key(synthetic_key);
+        set_test_provider(provider);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            f(&db_path, synthetic_key)
+        }));
+
+        clear_test_provider();
+        drop(temp_dir); // Explicit cleanup before lock release
+
+        match result {
+            Ok(r) => r,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_harness_pairs_key_and_db_path() {
+            with_test_db(|db_path, key| {
+                assert!(db_path.to_string_lossy().contains("test_medical.db"));
+                assert_eq!(key, [0xABu8; 32]);
+                assert!(is_test_provider_active());
+            });
+            // Provider cleared after closure
+            assert!(!is_test_provider_active());
+        }
+
+        #[test]
+        fn test_harness_cleans_up_on_panic() {
+            let result = std::panic::catch_unwind(|| {
+                with_test_db(|_db_path, _key| {
+                    panic!("intentional panic");
+                });
+            });
+            assert!(result.is_err());
+            // Provider must be cleared even after panic
+            assert!(!is_test_provider_active());
+        }
     }
 }

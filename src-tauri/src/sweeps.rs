@@ -586,45 +586,33 @@ mod tests {
     // without panicking and didn't delete or corrupt the orphan.
     #[test]
     fn orphaned_wav_sweep_encrypts_rowless_wavs() {
+        // Install a test keychain provider so encrypt_file_in_place never
+        // blocks on the real OS keychain. The synthetic key is
+        // deterministic — the decrypt round-trip works the same way.
+        medical_security::keychain::set_test_provider(
+            medical_security::keychain::TestProvider::fixed_db_key([0xBBu8; 32]),
+        );
+        struct ProviderGuard;
+        impl Drop for ProviderGuard {
+            fn drop(&mut self) {
+                medical_security::keychain::clear_test_provider();
+            }
+        }
+        let _cleanup = ProviderGuard;
+
         let tmp = tempfile::tempdir().expect("tempdir");
         let orphan = write_aged_wav(tmp.path(), "crash-mid-recording.wav");
 
         let db = Database::open_in_memory().expect("db");
 
-        // Probe the keychain through the hang guard FIRST: the probe, the
-        // sweep, or both would otherwise sit forever on a securityd access
-        // prompt the harness can't dismiss (this exact test was one of the
-        // three that hung the workspace gate for ~35 min). When the probe
-        // times out, don't even run the sweep — its internal encrypt would
-        // block on the same call.
-        let probe = crate::testutil::with_keychain_guard(|| {
-            let probe_dir = tempfile::tempdir().expect("probe dir");
-            let scratch = probe_dir.path().join("probe.txt");
-            std::fs::write(&scratch, b"probe").expect("probe");
-            medical_security::file_crypto::encrypt_file_in_place(&scratch)
-        });
-        let Some(probe_result) = probe else {
-            assert!(
-                orphan.exists(),
-                "sweep must never delete the orphan, even when skipped"
-            );
-            return;
-        };
-        let crypto_available = probe_result.is_ok();
-
+        // Crypto is always available via the synthetic provider — no need
+        // for the probe-and-bail fallback.
         orphaned_wav_sweep(&db, tmp.path());
 
-        if crypto_available {
-            assert!(
-                medical_security::file_crypto::is_encrypted(&orphan),
-                "row-less WAV must be encrypted at rest when crypto is available"
-            );
-        } else {
-            assert!(
-                orphan.exists(),
-                "sweep must never delete the orphan, even when it can't encrypt"
-            );
-        }
+        assert!(
+            medical_security::file_crypto::is_encrypted(&orphan),
+            "row-less WAV must be encrypted at rest"
+        );
     }
 
     #[test]
