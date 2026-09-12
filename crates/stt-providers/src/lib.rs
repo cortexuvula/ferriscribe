@@ -21,7 +21,7 @@
 //! | [`remote_provider`] | HTTP client for remote Whisper server |
 //! | [`endpoint`] | LAN/Tailscale URL resolution with 30s cache |
 //! | [`client`] | Multipart HTTP POST + cancellation + error mapping |
-//! | [`whisper`] | whisper-rs wrapper: beam search, centisecond timestamps |
+//! | [`whisper`] | whisper-rs wrapper: greedy decoding, centisecond timestamps |
 //! | [`diarization`] | pyannote VAD + WeSpeaker embeddings + cosine clustering |
 //! | [`audio_prep`] | Resampling (rubato), f32↔i16, WAV encoding |
 //! | [`merge`] | Merge whisper segments with speaker turns by overlap |

@@ -5,7 +5,7 @@ A privacy-first medical transcription desktop application built with Rust and Sv
 ## Features
 
 ### Transcription
-- **Local Speech-to-Text** — Whisper (via whisper-rs / whisper.cpp) with Metal GPU acceleration on macOS. Runs on-device with beam-search decoding and temperature fallback for accuracy on long recordings; no audio leaves your machine in this mode.
+- **Local Speech-to-Text** — Whisper (via whisper-rs / whisper.cpp) with Metal GPU acceleration on macOS. Runs on-device with greedy decoding and temperature fallback for accuracy on long recordings; no audio leaves your machine in this mode.
 - **Remote Whisper (optional)** — Switch STT Mode to Remote to offload transcription to any OpenAI-compatible Whisper server (e.g. `whisper.cpp server`, `faster-whisper-server`, LocalAI) running on another machine over LAN or Tailscale. See [Running Across Machines](#running-across-machines-lan--tailscale).
 - **Speaker Diarization** — Pyannote + WeSpeaker (ONNX) pipeline labels who is speaking (e.g. Doctor vs. Patient). Runs locally in both STT modes.
 - **Custom Vocabulary** — User-defined find/replace rules applied after STT, with word-boundary matching, priority ordering, and import/export compatible with the Python Medical-Assistant `vocabulary.json` format.
