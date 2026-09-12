@@ -1542,7 +1542,7 @@ mod tests {
                 *secs.entry(t.speaker_id).or_insert(0.0) += t.end - t.start;
             }
             let mut dist: Vec<(usize, f64)> = secs.into_iter().collect();
-            dist.sort_by(|a, b| a.0.cmp(&b.0));
+            dist.sort_by_key(|a| a.0);
             let total: f64 = dist.iter().map(|&(_, s)| s).sum();
             let shares: Vec<String> = dist
                 .iter()
