@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use medical_core::error::{AppError, AppResult, OfflineReason, ServiceKind};
+use medical_core::error::{AppError, AppResult, ServiceKind};
 use medical_core::types::{RemoteEndpoint, http_url};
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
@@ -35,23 +35,36 @@ pub async fn current_base_url(
             return Ok(c.url.clone());
         }
 
-        // Resolve endpoint (probe LAN then Tailscale)
-        let url = ep.resolve_base_url().await.ok_or_else(|| {
-            // Both probes failed — pick LAN as representative endpoint
-            let endpoint = ep
-                .lan
-                .as_deref()
-                .map(|h| http_url(h, ep.port))
-                .or_else(|| ep.tailscale.as_deref().map(|h| http_url(h, ep.port)))
-                .unwrap_or_else(|| "(unresolved)".into());
+        // Resolve endpoint (probe LAN then Tailscale). The resolver now
+        // classifies WHY the probe failed (refused / DNS / timeout) —
+        // mirror of preflight::classify_reqwest_error on the HTTP side —
+        // so the offline dialog shows the correct message instead of
+        // claiming every failure was a timeout.
+        let url = match ep.resolve_base_url().await {
+            Ok(url) => url,
+            Err(probe) => {
+                // Prefer the host the failing probe actually targeted;
+                // fall back to LAN → Tailscale → "(unresolved)".
+                let endpoint = probe
+                    .host
+                    .as_deref()
+                    .map(|h| http_url(h, ep.port))
+                    .or_else(|| {
+                        ep.lan
+                            .as_deref()
+                            .map(|h| http_url(h, ep.port))
+                            .or_else(|| ep.tailscale.as_deref().map(|h| http_url(h, ep.port)))
+                    })
+                    .unwrap_or_else(|| "(unresolved)".into());
 
-            AppError::EndpointOffline {
-                service: ServiceKind::RemoteStt,
-                endpoint,
-                reason: OfflineReason::Timeout,
-                provider_name: "Whisper STT".into(),
+                return Err(AppError::EndpointOffline {
+                    service: ServiceKind::RemoteStt,
+                    endpoint,
+                    reason: probe.reason,
+                    provider_name: "Whisper STT".into(),
+                });
             }
-        })?;
+        };
 
         // Update cache
         *cache = Some(ResolvedCache {
@@ -167,5 +180,82 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(url1, url2, "cache should serve URL even after port closes");
+    }
+
+    /// B6: `current_base_url` must preserve the probe's classified
+    /// `OfflineReason` (refused / DNS failure / genuine timeout) into the
+    /// `EndpointOffline` error instead of flattening everything to
+    /// `Timeout`. The offline dialog renders a distinct sentence per reason.
+    mod offline_reasons {
+        use super::*;
+        use medical_core::error::OfflineReason;
+
+        fn dead_port() -> u16 {
+            // Bind then immediately drop: a free port that is guaranteed
+            // closed — connects are actively refused.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            port
+        }
+
+        fn expect_offline(result: AppResult<String>) -> (String, OfflineReason) {
+            match result {
+                Err(AppError::EndpointOffline {
+                    endpoint, reason, ..
+                }) => (endpoint, reason),
+                other => panic!("expected EndpointOffline, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn refused_connection_is_reported_as_refused() {
+            let port = dead_port();
+            let endpoint = Some(RemoteEndpoint {
+                lan: Some("127.0.0.1".to_string()),
+                tailscale: None,
+                port,
+                bearer: None,
+            });
+            let mut cache = None;
+            let (endpoint_str, reason) = expect_offline(
+                current_base_url(&endpoint, "http://fallback:8080", &mut cache).await,
+            );
+            assert_eq!(reason, OfflineReason::ConnectionRefused);
+            assert_eq!(endpoint_str, format!("http://127.0.0.1:{port}"));
+        }
+
+        #[tokio::test]
+        async fn unresolvable_host_is_reported_as_dns_failure() {
+            // `.invalid` is reserved by RFC 2606 to always fail DNS.
+            let endpoint = Some(RemoteEndpoint {
+                lan: Some("stt-host.invalid".to_string()),
+                tailscale: None,
+                port: 8080,
+                bearer: None,
+            });
+            let mut cache = None;
+            let (endpoint_str, reason) = expect_offline(
+                current_base_url(&endpoint, "http://fallback:8080", &mut cache).await,
+            );
+            assert_eq!(reason, OfflineReason::DnsFailure);
+            assert_eq!(endpoint_str, "http://stt-host.invalid:8080");
+        }
+
+        #[tokio::test]
+        async fn silent_host_is_reported_as_timeout() {
+            // TEST-NET-1 never answers; the probe deadline must elapse.
+            let endpoint = Some(RemoteEndpoint {
+                lan: Some("192.0.2.1".to_string()),
+                tailscale: None,
+                port: 19999,
+                bearer: None,
+            });
+            let mut cache = None;
+            let (_, reason) = expect_offline(
+                current_base_url(&endpoint, "http://fallback:8080", &mut cache).await,
+            );
+            assert_eq!(reason, OfflineReason::Timeout);
+        }
     }
 }

@@ -1,5 +1,7 @@
 //! `RemoteEndpoint` — LAN/Tailscale connection resolver with optional bearer auth.
 
+use crate::error::OfflineReason;
+
 /// Build an HTTP URL from a host and port, bracketing IPv6 literals as
 /// required by RFC 3986.
 ///
@@ -55,28 +57,107 @@ impl RemoteEndpoint {
     /// Probe the LAN address with a 500 ms connect timeout, then fall
     /// back to the Tailscale address (2 s timeout).
     ///
-    /// Returns the URL prefix (e.g. `"http://192.168.1.42:11435"`) for
-    /// the first reachable address, or `None` if neither is reachable.
-    pub async fn resolve_base_url(&self) -> Option<String> {
-        if let Some(lan) = &self.lan
-            && Self::can_connect(lan, self.port, std::time::Duration::from_millis(500)).await
-        {
-            return Some(http_url(lan, self.port));
+    /// Returns `Ok` with the URL prefix (e.g. `"http://192.168.1.42:11435"`)
+    /// for the first reachable address, or `Err` with the probe outcome
+    /// classified into the user-facing [`OfflineReason`]. The LAN probe is
+    /// the representative result; the Tailscale probe only decides the
+    /// fallback when no LAN address is configured — once LAN refused or
+    /// timed out, a Tailscale outcome of the same class adds nothing.
+    ///
+    /// The classification mirrors [`classify_probe_failure`], which is the
+    /// TCP-probe counterpart of the HTTP-probe classifier
+    /// `medical_core::preflight::classify_reqwest_error` — a refused
+    /// connection, a failed name resolution and a genuine timeout produce
+    /// distinct `OfflineReason`s that the offline dialog renders as
+    /// distinct messages.
+    pub async fn resolve_base_url(&self) -> Result<String, ProbeFailure> {
+        if let Some(lan) = self.lan.as_deref() {
+            return match Self::probe_host(lan, self.port, std::time::Duration::from_millis(500))
+                .await
+            {
+                Ok(()) => Ok(http_url(lan, self.port)),
+                Err(reason) => Err(ProbeFailure {
+                    host: Some(lan.to_string()),
+                    reason,
+                }),
+            };
         }
-        if let Some(ts) = &self.tailscale
-            && Self::can_connect(ts, self.port, std::time::Duration::from_secs(2)).await
-        {
-            return Some(http_url(ts, self.port));
+        if let Some(ts) = self.tailscale.as_deref() {
+            return match Self::probe_host(ts, self.port, std::time::Duration::from_secs(2)).await {
+                Ok(()) => Ok(http_url(ts, self.port)),
+                Err(reason) => Err(ProbeFailure {
+                    host: Some(ts.to_string()),
+                    reason,
+                }),
+            };
         }
-        None
+        Err(ProbeFailure {
+            host: None,
+            reason: OfflineReason::ConnectionRefused,
+        })
     }
 
-    async fn can_connect(host: &str, port: u16, timeout: std::time::Duration) -> bool {
-        tokio::time::timeout(timeout, tokio::net::TcpStream::connect((host, port)))
-            .await
-            .map(|r| r.is_ok())
-            .unwrap_or(false)
+    /// Probe one host/port, distinguishing the failure classes that a bare
+    /// `bool` collapsed: a connect error (refused / unreachable / DNS) is
+    /// inspected via [`classify_probe_failure`], while only a genuinely
+    /// elapsed deadline yields [`OfflineReason::Timeout`].
+    async fn probe_host(
+        host: &str,
+        port: u16,
+        timeout: std::time::Duration,
+    ) -> Result<(), OfflineReason> {
+        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect((host, port))).await {
+            // Outer Err: the deadline elapsed before the connect resolved.
+            Ok(connect) => match connect {
+                Ok(_stream) => Ok(()),
+                Err(e) => Err(classify_probe_failure(&e)),
+            },
+            Err(_elapsed) => Err(OfflineReason::Timeout),
+        }
     }
+}
+
+/// What a TCP probe failure means for the user, in the vocabulary the
+/// offline dialog already renders ([`OfflineReason`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbeFailure {
+    /// Host that the failed probe targeted (LAN first, else Tailscale;
+    /// `None` when no address was configured at all).
+    pub host: Option<String>,
+    /// Classified reason the probe failed.
+    pub reason: OfflineReason,
+}
+
+/// Classify a failed [`tokio::net::TcpStream::connect`] into an
+/// [`OfflineReason`].
+///
+/// This is the TCP-probe counterpart of
+/// `medical_core::preflight::classify_reqwest_error` (the HTTP classifier
+/// referenced by `stt-providers/src/client.rs`): DNS resolution failures
+/// are pulled out of the io error text so they stop masquerading as
+/// timeouts, and everything else — most importantly an actively refused
+/// connection — is a connection error, not a timeout. `is_timeout()` is
+/// only true for an actual elapsed deadline, which `probe_host` already
+/// reports directly, so a `Timeout` here means the io layer itself timed
+/// out internally.
+pub fn classify_probe_failure(err: &std::io::Error) -> OfflineReason {
+    if matches!(
+        err.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        return OfflineReason::Timeout;
+    }
+    let msg = err.to_string().to_lowercase();
+    if err.kind() == std::io::ErrorKind::NotConnected
+        || msg.contains("dns")
+        || msg.contains("failed to lookup")
+        || msg.contains("nodename nor servname")
+        || msg.contains("name or service not known")
+        || msg.contains("temporary failure in name resolution")
+    {
+        return OfflineReason::DnsFailure;
+    }
+    OfflineReason::ConnectionRefused
 }
 
 #[cfg(test)]
@@ -138,13 +219,143 @@ mod tests {
             bearer: None,
         };
         let result = ep.resolve_base_url().await;
-        assert!(result.is_none(), "expected None for unreachable addresses");
+        // Probes never complete against TEST-NET, so both deadlines elapse.
+        // The LAN probe is representative.
+        assert_eq!(
+            result,
+            Err(ProbeFailure {
+                host: Some("192.0.2.1".into()),
+                reason: OfflineReason::Timeout,
+            }),
+            "expected Timeout for addresses that never answer"
+        );
     }
 
     #[tokio::test]
     async fn resolve_returns_none_when_no_addresses_configured() {
         let ep = RemoteEndpoint::default();
         let result = ep.resolve_base_url().await;
-        assert!(result.is_none());
+        assert_eq!(
+            result,
+            Err(ProbeFailure {
+                host: None,
+                reason: OfflineReason::ConnectionRefused,
+            })
+        );
+    }
+
+    /// The B6 regression trio: a refused connection, a failed name
+    /// resolution and a genuinely timed-out probe must surface as three
+    /// DISTINCT `OfflineReason`s (the offline dialog renders a different
+    /// sentence for each) instead of all collapsing into `Timeout`.
+    mod classification {
+        use super::*;
+
+        fn dead_port() -> u16 {
+            // Bind then immediately drop to get a free port that is
+            // guaranteed closed — connects are actively refused.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            port
+        }
+
+        #[tokio::test]
+        async fn refused_connection_is_connection_refused_not_timeout() {
+            let port = dead_port();
+            let ep = RemoteEndpoint {
+                lan: Some("127.0.0.1".into()),
+                tailscale: None,
+                port,
+                bearer: None,
+            };
+            let result = ep.resolve_base_url().await;
+            assert_eq!(
+                result,
+                Err(ProbeFailure {
+                    host: Some("127.0.0.1".into()),
+                    reason: OfflineReason::ConnectionRefused,
+                }),
+                "an actively refused connect must not be reported as a timeout"
+            );
+        }
+
+        #[tokio::test]
+        async fn unresolvable_host_is_dns_failure_not_timeout() {
+            // `.invalid` is reserved by RFC 2606 to always fail DNS.
+            let ep = RemoteEndpoint {
+                lan: Some("nonexistent-host.invalid".into()),
+                tailscale: None,
+                port: 8080,
+                bearer: None,
+            };
+            let result = ep.resolve_base_url().await;
+            assert_eq!(
+                result,
+                Err(ProbeFailure {
+                    host: Some("nonexistent-host.invalid".into()),
+                    reason: OfflineReason::DnsFailure,
+                }),
+                "a failed name resolution must not be reported as a timeout"
+            );
+        }
+
+        #[tokio::test]
+        async fn silent_host_is_timeout() {
+            // TEST-NET-1 never answers; the probe deadline must elapse and
+            // surface as a genuine Timeout.
+            let ep = RemoteEndpoint {
+                lan: Some("192.0.2.1".into()),
+                tailscale: None,
+                port: 19999,
+                bearer: None,
+            };
+            let result = ep.resolve_base_url().await;
+            assert_eq!(
+                result,
+                Err(ProbeFailure {
+                    host: Some("192.0.2.1".into()),
+                    reason: OfflineReason::Timeout,
+                })
+            );
+        }
+    }
+
+    /// The classifier must agree with the vocabulary that the HTTP-side
+    /// classifier (`preflight::classify_reqwest_error`) established:
+    /// refused / DNS / timeout are distinct user-facing outcomes.
+    #[test]
+    fn classify_probe_failure_distinguishes_kinds() {
+        use std::io::{Error, ErrorKind};
+
+        let refused = Error::from_raw_os_error(61); // ECONNREFUSED (macOS)
+        assert_eq!(
+            classify_probe_failure(&refused),
+            OfflineReason::ConnectionRefused
+        );
+
+        let dns = Error::new(
+            ErrorKind::NotConnected,
+            "failed to lookup address information: nodename nor servname provided",
+        );
+        assert_eq!(classify_probe_failure(&dns), OfflineReason::DnsFailure);
+
+        let dns_windows = Error::new(
+            ErrorKind::NotConnected,
+            "failed to lookup address information: Name or service not known",
+        );
+        assert_eq!(
+            classify_probe_failure(&dns_windows),
+            OfflineReason::DnsFailure
+        );
+
+        let io_timeout = Error::new(ErrorKind::TimedOut, "connection timed out");
+        assert_eq!(classify_probe_failure(&io_timeout), OfflineReason::Timeout);
+
+        let unreachable = Error::from_raw_os_error(65); // EHOSTUNREACH
+        assert_eq!(
+            classify_probe_failure(&unreachable),
+            OfflineReason::ConnectionRefused
+        );
     }
 }

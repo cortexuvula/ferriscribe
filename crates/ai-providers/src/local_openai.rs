@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock};
 
 use medical_core::{
-    error::{AppError, AppResult},
+    error::{AppError, AppResult, ServiceKind},
     traits::AiProvider,
     types::endpoint::http_url,
     types::{
@@ -289,26 +289,36 @@ impl LocalOpenAiProvider {
                     return Ok(c.url.clone());
                 }
             }
-            // Slow path: probe the network with no locks held.
-            let resolved = ep.resolve_base_url().await.ok_or_else(|| {
-                use medical_core::error::{OfflineReason, ServiceKind};
-                // RemoteEndpoint probed LAN then Tailscale and both failed. Pick
-                // the LAN URL as the representative endpoint; if LAN isn't set,
-                // fall back to Tailscale; if neither is set, this is a config
-                // error and "(unresolved)" surfaces clearly in the dialog.
-                let endpoint = ep
-                    .lan
-                    .as_deref()
-                    .map(|h| http_url(h, ep.port))
-                    .or_else(|| ep.tailscale.as_deref().map(|h| http_url(h, ep.port)))
-                    .unwrap_or_else(|| "(unresolved)".into());
-                AppError::EndpointOffline {
-                    service: ServiceKind::AiProvider,
-                    endpoint,
-                    reason: OfflineReason::Timeout,
-                    provider_name: self.meta.display.into(),
+            // Slow path: probe the network with no locks held. The resolver
+            // classifies WHY the probe failed (refused / DNS / timeout) —
+            // the TCP-probe counterpart of
+            // preflight::classify_reqwest_error — so the offline dialog
+            // shows the correct message instead of claiming every failure
+            // was a timeout.
+            let resolved = match ep.resolve_base_url().await {
+                Ok(url) => url,
+                Err(probe) => {
+                    // Prefer the host the failing probe actually targeted;
+                    // fall back to LAN → Tailscale → "(unresolved)".
+                    let endpoint = probe
+                        .host
+                        .as_deref()
+                        .map(|h| http_url(h, ep.port))
+                        .or_else(|| {
+                            ep.lan
+                                .as_deref()
+                                .map(|h| http_url(h, ep.port))
+                                .or_else(|| ep.tailscale.as_deref().map(|h| http_url(h, ep.port)))
+                        })
+                        .unwrap_or_else(|| "(unresolved)".into());
+                    return Err(AppError::EndpointOffline {
+                        service: ServiceKind::AiProvider,
+                        endpoint,
+                        reason: probe.reason,
+                        provider_name: self.meta.display.into(),
+                    });
                 }
-            })?;
+            };
             let url = format!("{}/v1", resolved);
             *self.url_cache.lock().await = Some(ResolvedCache {
                 url: url.clone(),
@@ -1021,7 +1031,9 @@ mod offline_tests {
                     endpoint,
                 } => {
                     assert_eq!(service, ServiceKind::AiProvider);
-                    assert_eq!(reason, OfflineReason::Timeout);
+                    // A closed port on 127.0.0.1 is an active TCP refusal —
+                    // must be classified as refused, not flattened to Timeout.
+                    assert_eq!(reason, OfflineReason::ConnectionRefused);
                     assert_eq!(provider_name, m.display);
                     assert!(
                         endpoint.contains("127.0.0.1"),
