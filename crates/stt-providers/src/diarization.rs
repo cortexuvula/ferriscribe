@@ -2,17 +2,30 @@
 //!
 //! Implements the pyannote pipeline directly in Rust (no Python dependency):
 //!
-//! 1. **Voice Activity Detection / segmentation** — pyannote `segmentation-3.0` ONNX model
-//!    processes 10-second windows of 16 kHz i16 audio, outputting per-frame speech/non-speech
-//!    classifications. Contiguous speech frames are grouped into `SpeechSegment`s.
+//! 1. **Speech activity + speaker-slot segmentation** — pyannote `segmentation-3.0`
+//!    ONNX model processes 10-second windows of 16 kHz i16 audio. Its output
+//!    contract (decoded empirically, see [`SpeakerDiarizer::detect_speech_segments`]):
+//!    a `(1, 589, 7)` log-softmax tensor per 10 s window, where each of the 589
+//!    frames covers 270 samples starting at sample 721, channel 0 is non-speech,
+//!    and channels 1..=6 are *local speaker slots for that window*. Slots are
+//!    permuted per window (pyannote trains with random speaker permutation per
+//!    chunk), so slot indices must NOT be treated as global speaker identities.
+//!    A speaker change with no intervening silence appears as a change in the
+//!    dominant non-zero slot (see the eval test `diar_eval_two_speaker_no_silence`),
+//!    so turn boundaries are detected by tracking dominant-slot switches rather
+//!    than speech/non-speech alone.
 //!
-//! 2. **Speaker embedding extraction** — WeSpeaker `CAM++` ONNX model converts each speech
-//!    segment's fbank features (80-dim Mel filterbank via knf-rs) into a fixed-size speaker
-//!    embedding vector.
+//! 2. **Speaker embedding extraction** — WeSpeaker `CAM++` ONNX model converts each
+//!    speech segment's fbank features (80-dim Mel filterbank via knf-rs) into a
+//!    fixed-size speaker embedding vector. Embeddings are L2-normalized.
 //!
-//! 3. **Cosine-similarity speaker clustering** — greedy clustering: each embedding is compared
-//!    against known speaker centroids. If the best cosine similarity exceeds 0.5, the segment
-//!    is assigned to that speaker; otherwise a new speaker cluster is created.
+//! 3. **Cosine-similarity speaker clustering** — greedy clustering: each embedding
+//!    is compared against known speaker centroids. If the best cosine similarity
+//!    exceeds 0.5, the segment is assigned to that speaker; otherwise a new
+//!    speaker cluster is created. Cluster merges combine centroids by member
+//!    weight (a merge is a weighted mean of the two centroids, never a
+//!    delete-and-forget), and pair enumeration is deterministic (sorted IDs,
+//!    lexicographic tie-break on equal similarity).
 //!
 //! All inference runs on CPU via the `ort` crate (ONNX Runtime bindings). The diarization
 //! pipeline runs inside `spawn_blocking` to avoid blocking the async runtime.
@@ -21,12 +34,48 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use ndarray::{Array1, ArrayViewD, Axis, IxDyn};
+use ndarray::{Array1, ArrayViewD, IxDyn};
 use ort::session::Session;
 use ort::value::{Tensor, TensorRef};
 use tracing::{debug, info};
 
 use medical_core::error::{AppError, AppResult};
+
+/// Number of output channels of pyannote segmentation-3.0: channel 0 is
+/// non-speech, channels 1..=NUM_SPEAKER_SLOTS are local speaker slots.
+const SEGMENTATION_CHANNELS: usize = 7;
+
+/// Frames in the segmentation output for one 10 s window at 16 kHz.
+/// (589 = (160000 - receptive_field) / 270 + 1; matches pyannote's pyannote.audio
+/// framing for a 10 s chunk.)
+const SEGMENTATION_FRAMES: usize = 589;
+
+/// Sample offset of the first output frame within a 10 s window.
+const FRAME_START: usize = 721;
+
+/// Samples covered by each output frame.
+const FRAME_SIZE: usize = 270;
+
+/// Consecutive frames of a different dominant slot required to declare a
+/// speaker change. Guards against single-frame slot flicker at low-energy
+/// frames; 3 frames ≈ 51 ms.
+const SLOT_CHANGE_FRAMES: usize = 3;
+
+/// Turns shorter than this are dropped (VAD flicker, not a real turn).
+const MIN_TURN_S: f64 = 0.5;
+
+/// Post-clustering merge threshold for centroid cosine similarity.
+const CENTROID_MERGE_THRESHOLD: f32 = 0.75;
+
+/// Greedy-assignment cosine-similarity threshold.
+///
+/// Calibrated on the eval fixture (tests/diar_eval): WeSpeaker CAM++
+/// same-speaker turn similarity is 0.92–0.98 and cross-speaker (different
+/// synthetic voices) is 0.43–0.50, so the historical 0.5 sat inside the
+/// cross-speaker band and snapped a new speaker's first turn onto an existing
+/// cluster. 0.7 is the midpoint of the measured separation with ~0.2 margin
+/// on both sides.
+const ASSIGN_THRESHOLD: f32 = 0.7;
 
 /// A speaker turn: a contiguous time range attributed to one speaker.
 ///
@@ -43,14 +92,14 @@ pub struct SpeakerTurn {
     pub end: f64,
 }
 
-/// A raw speech segment detected by VAD, with its audio samples.
+/// A raw speech segment (one speaker-homogeneous turn candidate) with its audio samples.
 struct SpeechSegment {
     start: f64,
     end: f64,
     samples: Vec<i16>,
 }
 
-/// Safely push a speech segment if it spans a non-empty range of real audio.
+/// Safe: push a speech segment if it spans a non-empty range of real audio.
 ///
 /// `start_offset` and `end_samples` are both in **sample units** (not seconds).
 /// Guards against out-of-bounds slicing when the model's frame offset lands
@@ -80,7 +129,7 @@ fn push_segment_if_valid(
 
 /// Speaker diarization using pyannote ONNX models.
 ///
-/// Runs the three-stage pipeline: VAD → embedding extraction → clustering.
+/// Runs the three-stage pipeline: segmentation → embedding extraction → clustering.
 /// Models are loaded fresh on each `diarize()` call. Both ONNX sessions
 /// are configured with `intra_threads: 1` to avoid thread contention when
 /// running inside `spawn_blocking` alongside other blocking tasks.
@@ -106,11 +155,12 @@ impl SpeakerDiarizer {
     /// Returns a list of [`SpeakerTurn`]s with start/end timestamps and speaker IDs.
     /// The three stages run sequentially:
     ///
-    /// 1. **VAD** — pyannote segmentation model detects speech regions in 10s windows
+    /// 1. **Segmentation** — pyannote segmentation model detects speech regions and
+    ///    speaker changes in 10 s windows (dominant-slot tracking, see module docs)
     /// 2. **Embeddings** — WeSpeaker CAM++ extracts per-segment speaker vectors
-    /// 3. **Clustering** — greedy cosine-similarity clustering with centroid updates
-    ///    and post-clustering merge (threshold 0.75). If `max_speakers` is set,
-    ///    the most-similar clusters are merged until the count is at or below the limit.
+    /// 3. **Clustering** — greedy cosine-similarity clustering with weight-carrying
+    ///    centroid merges. If `max_speakers` is set, the most-similar clusters are
+    ///    merged until the count is at or below the limit.
     ///
     /// Returns `Ok(vec![])` if no speech is detected. Returns `Err` if models
     /// fail to load or inference panics.
@@ -125,9 +175,9 @@ impl SpeakerDiarizer {
             sample_rate, "Starting speaker diarization"
         );
 
-        // Stage 1: Voice activity detection — find speech segments
+        // Stage 1: segmentation — speech regions AND speaker-homogeneous turn candidates
         let segments = self.detect_speech_segments(samples_i16, sample_rate)?;
-        info!(segments = segments.len(), "VAD found speech segments");
+        info!(segments = segments.len(), "Segmentation stage complete");
         for (i, seg) in segments.iter().enumerate() {
             debug!(
                 segment = i,
@@ -143,15 +193,22 @@ impl SpeakerDiarizer {
             return Ok(Vec::new());
         }
 
+        // Drop sub-MIN_TURN_S slivers BEFORE embedding/clustering: a ~0.2 s
+        // handoff sliver straddles two voices, and its (mixed-speaker)
+        // embedding pollutes centroid estimates — it can snap a real
+        // speaker's next turn onto the wrong cluster or spawn a phantom
+        // one. Filtering here also skips the wasted fbank+ONNX compute.
+        let segments: Vec<SpeechSegment> = segments
+            .into_iter()
+            .filter(|seg| seg.end - seg.start >= MIN_TURN_S)
+            .collect();
+
         // Stage 2: Extract speaker embeddings for each segment
         let embeddings = self.extract_embeddings(&segments)?;
-        debug!(
-            embeddings = embeddings.len(),
-            "Extracted speaker embeddings"
-        );
+        info!(embeddings = embeddings.len(), "Embedding stage complete");
 
         // Stage 3: Cluster embeddings into speakers
-        let speaker_ids = cluster_speakers(&embeddings, 0.5, max_speakers);
+        let speaker_ids = cluster_speakers(&embeddings, ASSIGN_THRESHOLD, max_speakers);
 
         // Build speaker turns
         let turns: Vec<SpeakerTurn> = segments
@@ -164,17 +221,43 @@ impl SpeakerDiarizer {
             })
             .collect();
 
-        let num_speakers = speaker_ids.iter().max().map_or(0, |&m| m + 1);
+        let num_speakers = turns
+            .iter()
+            .map(|t| t.speaker_id)
+            .max()
+            .map_or(0, |m| m + 1);
         info!(
+            segments = segments.len(),
+            embeddings = embeddings.len(),
             turns = turns.len(),
             speakers = num_speakers,
-            "Diarization complete"
+            "Diarization complete (stage counts)"
         );
 
         Ok(turns)
     }
 
     /// Stage 1: Run pyannote segmentation model to detect speech segments.
+    ///
+    /// Output contract (decoded empirically on the real model, and verified by
+    /// the eval test `diar_eval_two_speaker_no_silence`):
+    ///
+    /// - Input `(B, 1, 160000)` f32; output `(B, 589, 7)` f32 log-softmax.
+    /// - Dim 1 is time: 589 frames, frame `i` covering samples
+    ///   `[721 + 270*i, 721 + 270*i + 270)` of the window.
+    /// - Softmax is over dim 2 (7 channels): channel 0 = non-speech,
+    ///   channels 1..=6 = local speaker slots.
+    /// - Slot indices are per-window: the model is trained with a random
+    ///   speaker→slot permutation per chunk, so slot 2 in window 1 and slot 2
+    ///   in window 2 are unrelated. Global speaker identity comes only from
+    ///   the embedding+clustering stages.
+    ///
+    /// Because a single `SpeechSegment` must be speaker-homogeneous to yield a
+    /// meaningful embedding, segmentation tracks the *dominant* non-zero slot
+    /// per frame and cuts a new segment when the dominant slot changes for
+    /// [`SLOT_CHANGE_FRAMES`] consecutive frames. A speaker handoff with no
+    /// silence still produces a slot switch, keeping handoffs inside one
+    /// segment (the D1 defect) impossible.
     fn detect_speech_segments(
         &self,
         samples_i16: &[i16],
@@ -198,15 +281,19 @@ impl SpeakerDiarizer {
             })?;
 
         let window_size = (sample_rate * 10) as usize; // 10-second windows
-        let frame_size: usize = 270;
-        let frame_start: usize = 721;
 
         let sr_f64 = sample_rate as f64;
 
-        let mut is_speeching = false;
-        let mut offset: usize;
-        let mut start_offset = 0.0_f64;
-        let mut segments = Vec::new();
+        // Raw turn candidates: (start_sample, end_sample_exclusive), in sample units.
+        let mut raw_turns: Vec<(usize, usize)> = Vec::new();
+        // Open-turn state, all in sample units.
+        let mut cur_slot: Option<usize> = None;
+        let mut cur_start: usize = 0;
+        let mut cur_end: usize = 0;
+        // Pending handoff: dominant slot != current, awaiting SLOT_CHANGE_FRAMES
+        // consecutive frames to be confirmed.
+        let mut pending_slot: Option<usize> = None;
+        let mut pending_run: usize = 0;
 
         // Pad to align to full windows
         let mut padded = Vec::from(samples_i16);
@@ -220,8 +307,8 @@ impl SpeakerDiarizer {
             let chunk_end = (chunk_start + window_size).min(padded.len());
             let window = &padded[chunk_start..chunk_end];
 
-            // Reset offset to this window's starting sample position.
-            offset = chunk_start + frame_start;
+            // Reset frame position to this window's starting sample.
+            let mut offset = chunk_start + FRAME_START;
 
             // Convert i16 window to f32 for the model
             let window_f32: Vec<f32> = window.iter().map(|&s| s as f32).collect();
@@ -245,56 +332,110 @@ impl SpeakerDiarizer {
             let view = ArrayViewD::<f32>::from_shape(IxDyn(&shape_slice), data)
                 .map_err(|e| AppError::stt_provider(format!("Failed to reshape output: {e}")))?;
 
-            // Iterate over frames in the output
-            for row in view.outer_iter() {
-                for sub_row in row.axis_iter(Axis(0)) {
-                    // Find the class with highest activation
-                    let max_index = sub_row
-                        .iter()
-                        .enumerate()
-                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
-                        .map(|(idx, _)| idx)
-                        .unwrap_or(0);
+            // Decode (589, 7) per-window output. `view` is (1, 589, 7); iterate
+            // frames along axis 1, channels along the last axis.
+            let frames = view
+                .outer_iter()
+                .next()
+                .expect("segmentation output has batch dim");
+            debug_assert_eq!(
+                frames.dim(),
+                IxDyn(&[SEGMENTATION_FRAMES, SEGMENTATION_CHANNELS])
+            );
+            for frame in frames.axis_iter(ndarray::Axis(0)) {
+                // Dominant channel = argmax over the 7 channels. Channel 0 is
+                // non-speech; 1..=6 are local speaker slots.
+                let max_index = frame
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
 
-                    if max_index != 0 {
-                        // Speech detected
-                        if !is_speeching {
-                            start_offset = offset as f64;
-                            is_speeching = true;
-                        }
-                    } else if is_speeching {
-                        // End of speech segment
-                        push_segment_if_valid(
-                            &mut segments,
-                            start_offset,
-                            offset,
-                            samples_i16,
-                            sr_f64,
-                        );
-                        is_speeching = false;
+                let slot = if max_index == 0 {
+                    None
+                } else {
+                    Some(max_index)
+                };
+
+                match (cur_slot, slot) {
+                    (None, None) => {}
+                    (None, Some(s)) => {
+                        // Speech onset (or slot after non-speech dip)
+                        cur_slot = Some(s);
+                        cur_start = offset;
+                        cur_end = offset;
+                        pending_slot = None;
+                        pending_run = 0;
                     }
-                    offset += frame_size;
+                    (Some(_), None) => {
+                        // Non-speech dip inside an open turn. Do NOT clear a
+                        // pending handoff: the frames around a speaker change
+                        // often flicker through non-speech (breath, plosive),
+                        // and clearing would swallow the handoff. The dip only
+                        // pauses cur_end; the turn is closed when a confirmed
+                        // new slot follows (see below) or at flush.
+                    }
+                    (Some(_), Some(s)) if Some(s) == cur_slot => {
+                        // Same slot: confirmed speech, clear any pending handoff.
+                        pending_slot = None;
+                        pending_run = 0;
+                        cur_end = offset;
+                    }
+                    (Some(_), Some(s)) => {
+                        // Different slot: candidate handoff. Non-speech frames
+                        // in between do not break the run (they neither confirm
+                        // nor refute the new speaker), matching the calibrated
+                        // prototype.
+                        if pending_slot == Some(s) {
+                            pending_run += 1;
+                        } else {
+                            pending_slot = Some(s);
+                            pending_run = 1;
+                        }
+                        if pending_run >= SLOT_CHANGE_FRAMES {
+                            // Confirmed speaker change with NO intervening silence.
+                            // Cut the turn at the first frame of the new slot.
+                            let boundary =
+                                offset.saturating_sub((SLOT_CHANGE_FRAMES - 1) * FRAME_SIZE);
+                            raw_turns.push((cur_start, boundary.max(cur_start)));
+                            cur_slot = Some(s);
+                            cur_start = boundary.max(cur_start);
+                            cur_end = offset;
+                            pending_slot = None;
+                            pending_run = 0;
+                        } else {
+                            cur_end = offset;
+                        }
+                    }
                 }
+
+                offset += FRAME_SIZE;
             }
         }
 
-        // Flush final segment if still speaking at end.
-        //
-        // `start_offset` is set from the model's frame `offset`, which advances
-        // across the zero-padded tail (we pad to a 10 s window boundary in the
-        // padding block above). When a recording ends mid-speech, `start_offset`
-        // can land past `samples_i16.len()` — past the real audio, inside the
-        // padding — and `samples_i16[start_idx..]` panics. The helper drops
-        // the segment when the open-speech region was wholly inside the pad.
-        if is_speeching {
-            push_segment_if_valid(
-                &mut segments,
-                start_offset,
-                samples_i16.len(),
-                samples_i16,
-                sr_f64,
-            );
+        // Flush the open turn.
+        if cur_slot.is_some() {
+            raw_turns.push((cur_start, (cur_end + FRAME_SIZE).min(samples_i16.len())));
         }
+
+        // Convert raw turn candidates into clamped SpeechSegments.
+        let mut segments: Vec<SpeechSegment> = Vec::new();
+        for &(start, end) in &raw_turns {
+            push_segment_if_valid(&mut segments, start as f64, end, samples_i16, sr_f64);
+        }
+
+        // NOTE: no audio-contiguity gap-merging pass. The decode loop keeps a
+        // turn open across short non-speech dips (a dip neither confirms nor
+        // refutes a handoff), so segments are already speaker-homogeneous; a
+        // contiguity merge would re-fuse slot-cut turns at handoffs (their
+        // boundary gap is exactly 0) and reintroduce the D1 collapse.
+
+        debug!(
+            raw_turns = raw_turns.len(),
+            segments = segments.len(),
+            "Segmentation turn candidates"
+        );
 
         Ok(segments)
     }
@@ -305,6 +446,18 @@ impl SpeakerDiarizer {
             .map_err(|e| {
                 AppError::stt_provider(format!("Failed to create embedding session builder: {e}"))
             })?
+            // CORRECTNESS: graph optimizations MUST stay disabled for this
+            // model. The ONNX Runtime ~1.22 binaries shipped by ort
+            // 2.0.0-rc.13 mis-execute the WeSpeaker CAM++ graph at
+            // optimization Level 1+ — embeddings come back with exploded
+            // norms (22 -> 70/541) and near-zero cosine to the reference,
+            // which collapses speaker clustering. Verified against Python
+            // onnxruntime 1.30 (bit-identical at L0; the bug is fixed
+            // upstream) on byte-identical fbank inputs; the pyannote
+            // segmentation model is NOT affected (identical at every
+            // level). See the eval test `diar_eval_two_speaker_no_silence`.
+            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Disable)
+            .map_err(|e| AppError::stt_provider(format!("Failed to set optimization level: {e}")))?
             .with_intra_threads(1)
             .map_err(|e| AppError::stt_provider(format!("Failed to set intra threads: {e}")))?
             .commit_from_file(&self.embedding_path)
@@ -359,18 +512,20 @@ impl SpeakerDiarizer {
 /// match exceeds `threshold`, the segment is assigned and the centroid is
 /// updated; otherwise a new speaker is created.
 ///
-/// After greedy clustering, similar centroids (cosine similarity > 0.75) are
-/// merged. If `max_speakers` is set, the most-similar centroids are iteratively
-/// merged until the count is at or below the limit.
+/// After greedy clustering, similar centroids (cosine similarity >
+/// [`CENTROID_MERGE_THRESHOLD`]) are merged, then — if `max_speakers` is set —
+/// the most-similar centroids are iteratively merged until the count is at or
+/// below the limit. Merges combine centroids by member weight:
+/// `merged = (a * weight_a + b * weight_b) / (weight_a + weight_b)`, so the
+/// surviving centroid reflects all its members, and the merged cluster's
+/// weight is carried forward for subsequent merges (fixes the D3
+/// weighted-centroid defect).
 fn cluster_speakers(
     embeddings: &[Vec<f32>],
     threshold: f32,
     max_speakers: Option<u32>,
 ) -> Vec<usize> {
-    let merge_threshold: f32 = 0.75;
-
-    let mut centroids: HashMap<usize, Array1<f32>> = HashMap::new();
-    let mut centroid_counts: HashMap<usize, usize> = HashMap::new();
+    let mut clusters: HashMap<usize, (Array1<f32>, usize)> = HashMap::new(); // id -> (centroid, weight)
     let mut next_id: usize = 0;
     let mut assignments = Vec::with_capacity(embeddings.len());
 
@@ -381,7 +536,7 @@ fn cluster_speakers(
         let mut best_id = None;
         let mut best_sim = threshold;
 
-        for (&id, centroid) in &centroids {
+        for (&id, (centroid, _)) in &clusters {
             let sim = cosine_similarity(&emb_arr, centroid);
             debug!(
                 segment = idx,
@@ -399,8 +554,7 @@ fn cluster_speakers(
         let assigned = match best_id {
             Some(id) => {
                 // Update centroid: running mean of all assigned embeddings
-                let count = centroid_counts.entry(id).or_insert(1);
-                let centroid = centroids.get_mut(&id).unwrap();
+                let (centroid, count) = clusters.get_mut(&id).unwrap();
                 // new_centroid = (old_centroid * count + new_emb) / (count + 1)
                 let n = *count as f32;
                 for (c, &e) in centroid.iter_mut().zip(emb_arr.iter()) {
@@ -417,8 +571,7 @@ fn cluster_speakers(
             }
             None => {
                 let id = next_id;
-                centroids.insert(id, emb_arr);
-                centroid_counts.insert(id, 1);
+                clusters.insert(id, (emb_arr, 1));
                 next_id += 1;
                 debug!(segment = idx, speaker = id, "Created new speaker");
                 id
@@ -428,15 +581,20 @@ fn cluster_speakers(
         assignments.push(assigned);
     }
 
-    // Post-clustering merge: merge centroids with cosine similarity > merge_threshold
-    merge_similar_centroids(&mut centroids, &mut assignments, merge_threshold);
+    debug!(
+        embeddings = embeddings.len(),
+        greedy_clusters = clusters.len(),
+        "Greedy clustering complete"
+    );
+
+    // Post-clustering merge: merge centroids with cosine similarity above threshold
+    merge_similar_centroids(&mut clusters, &mut assignments, CENTROID_MERGE_THRESHOLD);
 
     // If max_speakers is set, merge the most-similar centroids until we're at or below the limit
     if let Some(max) = max_speakers {
         let max = max as usize;
-        let current_count = centroids.len();
-        if current_count > max {
-            merge_to_limit(&mut centroids, &mut assignments, max);
+        if clusters.len() > max {
+            merge_to_limit(&mut clusters, &mut assignments, max);
         }
     }
 
@@ -445,7 +603,7 @@ fn cluster_speakers(
     // labeled "Speaker 1" and "Speaker 5", skipping 2/3/4). Sort the IDs so
     // the lowest original ID becomes 0 (stable across runs).
     let sorted_ids: Vec<usize> = {
-        let mut ids: Vec<usize> = centroids.keys().copied().collect();
+        let mut ids: Vec<usize> = clusters.keys().copied().collect();
         ids.sort_unstable();
         ids
     };
@@ -460,44 +618,94 @@ fn cluster_speakers(
         }
     }
 
+    debug!(
+        final_clusters = sorted_ids.len(),
+        "Final cluster count after merges"
+    );
+
     assignments
+}
+
+/// Deterministic enumeration of cluster pairs, ordered (min_id, max_id).
+fn sorted_cluster_pairs(clusters: &HashMap<usize, (Array1<f32>, usize)>) -> Vec<(usize, usize)> {
+    let mut ids: Vec<usize> = clusters.keys().copied().collect();
+    ids.sort_unstable();
+    let mut pairs = Vec::with_capacity(ids.len() * (ids.len() - 1) / 2);
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            pairs.push((ids[i], ids[j]));
+        }
+    }
+    pairs
+}
+
+/// Merge cluster `from` into cluster `to`, combining centroids by member weight.
+///
+/// The merged centroid is `(to.centroid * to.weight + from.centroid * from.weight)
+/// / (to.weight + from.weight)` and the merged weight is `to.weight + from.weight`,
+/// so subsequent merges see the true combined centroid (fixes the D3 defect
+/// where the absorbed cluster was deleted without updating the survivor).
+fn merge_weighted(
+    clusters: &mut HashMap<usize, (Array1<f32>, usize)>,
+    assignments: &mut [usize],
+    to: usize,
+    from: usize,
+) {
+    let from_cluster = clusters.remove(&from).expect("absorbed cluster exists");
+    let (to_centroid, to_weight) = clusters.get_mut(&to).expect("surviving cluster exists");
+    let (from_centroid, from_weight) = from_cluster;
+
+    let total = (*to_weight + from_weight) as f32;
+    for (c, &f) in to_centroid.iter_mut().zip(from_centroid.iter()) {
+        *c = (*c * *to_weight as f32 + f * from_weight as f32) / total;
+    }
+    *to_weight += from_weight;
+
+    for a in assignments.iter_mut() {
+        if *a == from {
+            *a = to;
+        }
+    }
+
+    debug!(
+        surviving = to,
+        absorbed = from,
+        weight = *to_weight,
+        "Weighted cluster merge"
+    );
 }
 
 /// Merge centroids with cosine similarity above `merge_threshold`.
 /// Reassigns affected segments to the surviving centroid.
 fn merge_similar_centroids(
-    centroids: &mut HashMap<usize, Array1<f32>>,
+    clusters: &mut HashMap<usize, (Array1<f32>, usize)>,
     assignments: &mut [usize],
     merge_threshold: f32,
 ) {
     loop {
-        let ids: Vec<usize> = centroids.keys().copied().collect();
-        let mut best_merge: Option<(usize, usize, f32)> = None; // (id_a, id_b, similarity)
+        let mut best_merge: Option<(usize, usize, f32)> = None; // (id_to, id_from, similarity)
 
-        for i in 0..ids.len() {
-            for j in (i + 1)..ids.len() {
-                let sim = cosine_similarity(&centroids[&ids[i]], &centroids[&ids[j]]);
-                if sim > merge_threshold && (best_merge.is_none() || sim > best_merge.unwrap().2) {
-                    best_merge = Some((ids[i], ids[j], sim));
+        for (id_a, id_b) in sorted_cluster_pairs(clusters) {
+            let sim = cosine_similarity(&clusters[&id_a].0, &clusters[&id_b].0);
+            if sim > merge_threshold {
+                // Deterministic tie-break: pairs are enumerated in sorted
+                // (min_id, max_id) order and only strictly greater similarity
+                // replaces the incumbent.
+                if best_merge.is_none() || sim > best_merge.unwrap().2 {
+                    best_merge = Some((id_a, id_b, sim));
                 }
             }
         }
 
         match best_merge {
-            Some((id_a, id_b, sim)) => {
+            Some((id_to, id_from, sim)) => {
                 debug!(
-                    speaker_a = id_a,
-                    speaker_b = id_b,
+                    speaker_a = id_to,
+                    speaker_b = id_from,
                     similarity = format!("{:.4}", sim),
                     "Merging similar speaker centroids"
                 );
-                // Merge id_b into id_a
-                centroids.remove(&id_b);
-                for a in assignments.iter_mut() {
-                    if *a == id_b {
-                        *a = id_a;
-                    }
-                }
+                merge_weighted(clusters, assignments, id_to, id_from);
             }
             None => break,
         }
@@ -506,31 +714,23 @@ fn merge_similar_centroids(
 
 /// Iteratively merge the two most-similar centroids until count <= target.
 fn merge_to_limit(
-    centroids: &mut HashMap<usize, Array1<f32>>,
+    clusters: &mut HashMap<usize, (Array1<f32>, usize)>,
     assignments: &mut [usize],
     target: usize,
 ) {
-    while centroids.len() > target {
-        let ids: Vec<usize> = centroids.keys().copied().collect();
+    while clusters.len() > target {
         let mut best_merge: Option<(usize, usize, f32)> = None;
 
-        for i in 0..ids.len() {
-            for j in (i + 1)..ids.len() {
-                let sim = cosine_similarity(&centroids[&ids[i]], &centroids[&ids[j]]);
-                if best_merge.is_none() || sim > best_merge.unwrap().2 {
-                    best_merge = Some((ids[i], ids[j], sim));
-                }
+        for (id_a, id_b) in sorted_cluster_pairs(clusters) {
+            let sim = cosine_similarity(&clusters[&id_a].0, &clusters[&id_b].0);
+            if best_merge.is_none() || sim > best_merge.unwrap().2 {
+                best_merge = Some((id_a, id_b, sim));
             }
         }
 
         match best_merge {
-            Some((id_a, id_b, _sim)) => {
-                centroids.remove(&id_b);
-                for a in assignments.iter_mut() {
-                    if *a == id_b {
-                        *a = id_a;
-                    }
-                }
+            Some((id_to, id_from, _sim)) => {
+                merge_weighted(clusters, assignments, id_to, id_from);
             }
             None => break,
         }
@@ -565,8 +765,8 @@ mod tests {
     /// to the ORT/kaldi-native-fbank C++ island (the only named C++
     /// symbols in the release binary bracket the crash region); the fix
     /// lives in src-tauri/src/commands/restart.rs (atexit guard +
-    /// `_exit` on restart exits). This harness stays as the fastest way to
-    /// re-check the ORT teardown story after any `ort` re-pin:
+    /// `_exit` on restart exits). This harness stays as the fastest way
+    /// to re-check the ORT teardown story after any `ort` re-pin:
     ///
     ///     FERRISCRIBE_ORT_REPRO=<models dir> cargo test -p medical-stt-providers --lib ort_exit_repro -- --nocapture
     #[test]
@@ -599,6 +799,195 @@ mod tests {
             Err(e) => eprintln!("diarize error (repro continues): {e}"),
         }
         eprintln!("pipeline done; exiting normally next — watch for signal 6");
+    }
+
+    /// Multi-speaker eval: alternating speakers with NO intervening silence,
+    /// including handoffs across the 10 s inference-window boundary.
+    ///
+    /// Fixture: TTS-rendered (macOS `say`, Daniel + Karen voices), hard-concatenated
+    /// 22 s conversation:
+    ///
+    ///   spk_A  0.0–5.0   spk_B  5.0–9.7   spk_A  9.7–14.0 (spans window boundary)
+    ///   spk_B  14.0–18.0 spk_A  18.0–22.0
+    ///
+    /// Proves the D1 fix: baseline boolean VAD yields 4 mixed-speaker segments
+    /// whose embeddings cross-similarity is ~0.96 → ONE cluster (collapse).
+    /// With dominant-slot change detection the pipeline recovers ≥2 speakers
+    /// with turn boundaries within 0.7 s of ground truth.
+    ///
+    /// To regenerate the fixture:
+    ///
+    ///     say -v Daniel --file-format=AIFF -o spk_Daniel.aiff "<line>"
+    ///     afconvert -f WAVE -d LEI16@16000 -c 1 spk_Daniel.aiff spk_Daniel.wav
+    ///     # then hard-concatenate trimmed turns per tests/diar_eval/README.md
+    ///
+    ///     FERRISCRIBE_DIAR_EVAL=<dir with mix_two_speaker_nosilence.wav + models parent> \
+    ///       cargo test -p medical-stt-providers --lib diar_eval -- --nocapture
+    #[test]
+    fn diar_eval_two_speaker_no_silence() {
+        let Some(dir) = std::env::var_os("FERRISCRIBE_DIAR_EVAL") else {
+            eprintln!("skipping: set FERRISCRIBE_DIAR_EVAL=<models dir> to run");
+            return;
+        };
+        let root = PathBuf::from(&dir);
+        let mix = root.join("mix_two_speaker_nosilence.wav");
+        let models = root.join("pyannote");
+        if !mix.exists()
+            || !models.join("segmentation-3.0.onnx").exists()
+            || !models.join("wespeaker_en_voxceleb_CAM++.onnx").exists()
+        {
+            eprintln!(
+                "skipping: eval fixture or models missing under {}",
+                root.display()
+            );
+            return;
+        }
+
+        // Decode WAV (16 kHz mono i16) without extra deps.
+        let bytes = std::fs::read(&mix).expect("read mix wav");
+        assert_eq!(&bytes[0..4], b"RIFF", "WAV header");
+        assert_eq!(&bytes[8..12], b"WAVE", "WAVE tag");
+        let mut pos = 12;
+        let mut data: Option<(usize, usize)> = None;
+        while pos + 8 <= bytes.len() {
+            let id = &bytes[pos..pos + 4];
+            let sz = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            match id {
+                b"fmt " => {
+                    let fmt = u16::from_le_bytes(bytes[pos + 8..pos + 10].try_into().unwrap());
+                    let ch = u16::from_le_bytes(bytes[pos + 10..pos + 12].try_into().unwrap());
+                    let rate = u32::from_le_bytes(bytes[pos + 12..pos + 16].try_into().unwrap());
+                    let bits = u16::from_le_bytes(bytes[pos + 22..pos + 24].try_into().unwrap());
+                    assert_eq!(fmt, 1, "PCM");
+                    assert_eq!(ch, 1, "mono");
+                    assert_eq!(rate, 16000, "16 kHz");
+                    assert_eq!(bits, 16, "16-bit");
+                }
+                b"data" => data = Some((pos + 8, sz)),
+                _ => {}
+            }
+            pos += 8 + sz + (sz % 2); // chunks are word-aligned
+        }
+        let (doff, dsz) = data.expect("data chunk");
+        let samples: Vec<i16> = bytes[doff..doff + dsz]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
+            .collect();
+        eprintln!(
+            "eval audio: {} samples ({:.1}s)",
+            samples.len(),
+            samples.len() as f64 / 16000.0
+        );
+
+        let diarizer = SpeakerDiarizer::new(
+            models.join("segmentation-3.0.onnx"),
+            models.join("wespeaker_en_voxceleb_CAM++.onnx"),
+        );
+        let turns = diarize_and_report(&diarizer, &samples);
+
+        // Ground truth handoffs (seconds).
+        let gt_boundaries = [5.0_f64, 9.7, 14.0, 18.0];
+        let gt_speakers = 2;
+
+        let unique: std::collections::HashSet<usize> = turns.iter().map(|t| t.speaker_id).collect();
+        eprintln!(
+            "eval result: {} turns, {} speakers: {:?}",
+            turns.len(),
+            unique.len(),
+            turns
+                .iter()
+                .map(|t| (t.speaker_id, (t.start, t.end)))
+                .collect::<Vec<_>>()
+        );
+
+        // D1 acceptance: the two alternating speakers must be separated.
+        assert!(
+            unique.len() >= gt_speakers,
+            "D1 regression: multi-speaker audio collapsed to {} speaker(s); turns: {:?}",
+            unique.len(),
+            turns
+        );
+
+        // Boundary quality: each GT handoff must have a detected boundary
+        // within 0.7 s, and turn count must be within 1 of GT (5 turns).
+        let detected: Vec<f64> = turns
+            .windows(2)
+            .filter_map(|w| (w[0].speaker_id != w[1].speaker_id).then_some(w[1].start))
+            .collect();
+        for &gt in &gt_boundaries {
+            let best = detected
+                .iter()
+                .map(|&d| (d - gt).abs())
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                best <= 0.7,
+                "GT handoff at {:.2}s has no detected boundary within 0.7s (detected: {:?})",
+                gt,
+                detected
+            );
+        }
+        assert!(
+            (turns.len() as i64 - 5).abs() <= 1,
+            "expected ~5 turns, got {}: {:?}",
+            turns.len(),
+            turns
+        );
+
+        // Objective attribution accuracy: attribute each detected turn to the
+        // GT interval it overlaps most (resolving the cluster-ID ↔ GT-speaker
+        // permutation implicitly), then measure the fraction of GT speaking
+        // time covered by correctly-attributed detected time.
+        let duration_s = samples.len() as f64 / 16000.0;
+        let gt_turns: Vec<(usize, f64, f64)> = {
+            let mut v = Vec::with_capacity(gt_boundaries.len() + 1);
+            let mut speaker = 0; // GT alternates A=0, B=1 starting at 0.0
+            let mut prev = 0.0;
+            for &b in gt_boundaries.iter().chain(std::iter::once(&duration_s)) {
+                v.push((speaker, prev, b));
+                prev = b;
+                speaker = 1 - speaker;
+            }
+            v
+        };
+        let total_time: f64 = gt_turns.iter().map(|&(_, s, e)| e - s).sum();
+        let mut correct_time = 0.0f64;
+        for t in &turns {
+            let attributed_speaker = gt_turns
+                .iter()
+                .map(|&(sp, s, e)| (sp, (t.end.min(e) - t.start.max(s)).max(0.0)))
+                .max_by(|a, b| {
+                    a.1.partial_cmp(&b.1)
+                        .unwrap_or(Ordering::Equal)
+                        .then(a.0.cmp(&b.0))
+                })
+                .map(|(sp, _)| sp)
+                .unwrap_or(0);
+            for &(sp, s, e) in &gt_turns {
+                if sp == attributed_speaker {
+                    correct_time += (t.end.min(e) - t.start.max(s)).max(0.0);
+                }
+            }
+        }
+        let accuracy = correct_time / total_time;
+        eprintln!(
+            "attribution accuracy: {:.1}% ({:.2}s correct of {:.2}s GT speech)",
+            accuracy * 100.0,
+            correct_time,
+            total_time
+        );
+        assert!(
+            accuracy >= 0.85,
+            "attribution accuracy {:.1}% below 85% floor",
+            accuracy * 100.0
+        );
+    }
+
+    /// Shared helper for eval tests: run diarize and print the instrumented
+    /// stage counts for before/after comparison.
+    fn diarize_and_report(diarizer: &SpeakerDiarizer, samples: &[i16]) -> Vec<SpeakerTurn> {
+        diarizer.diarize(samples, 16000, None).expect("diarize")
     }
 
     #[test]
@@ -697,6 +1086,85 @@ mod tests {
         assert_eq!(ids[0], ids[1], "Similar embeddings should be merged");
         // c should be separate
         assert_ne!(ids[0], ids[2], "Dissimilar embedding should be separate");
+    }
+
+    /// D3 regression: `merge_weighted` must combine centroids by member weight,
+    /// not delete the absorbed cluster without updating the survivor.
+    #[test]
+    fn merge_weighted_combines_centroids_by_weight() {
+        let mut clusters: HashMap<usize, (Array1<f32>, usize)> = HashMap::new();
+        clusters.insert(0, (Array1::from_vec(vec![0.9, 0.3]), 2)); // 2 members
+        clusters.insert(1, (Array1::from_vec(vec![0.0, 1.0]), 1)); // 1 member
+        let mut assignments = vec![0, 0, 1];
+
+        merge_weighted(&mut clusters, &mut assignments, 0, 1);
+
+        assert_eq!(clusters.len(), 1, "absorbed cluster must be removed");
+        let (centroid, weight) = &clusters[&0];
+        assert_eq!(*weight, 3, "weights must carry through the merge");
+        // Weighted mean: (2*[0.9,0.3] + 1*[0,1]) / 3 = [0.6, 0.5333]
+        assert!((centroid[0] - 0.6).abs() < 1e-6, "got {}", centroid[0]);
+        assert!(
+            (centroid[1] - 0.5333334).abs() < 1e-5,
+            "got {}",
+            centroid[1]
+        );
+        assert!(
+            assignments.iter().all(|&a| a == 0),
+            "assignments remapped to survivor"
+        );
+    }
+
+    /// D3 regression: chained merges must use the weighted centroid from the
+    /// previous merge, and pair selection must be deterministic.
+    #[test]
+    fn merge_to_limit_uses_weighted_centroids_in_chain() {
+        let mut clusters: HashMap<usize, (Array1<f32>, usize)> = HashMap::new();
+        clusters.insert(0, (Array1::from_vec(vec![1.0, 0.0]), 1));
+        clusters.insert(1, (Array1::from_vec(vec![0.98, 0.05]), 1));
+        clusters.insert(2, (Array1::from_vec(vec![0.0, 1.0]), 1));
+        clusters.insert(3, (Array1::from_vec(vec![0.05, 0.98]), 1));
+        let mut assignments = vec![0, 1, 2, 3];
+
+        merge_to_limit(&mut clusters, &mut assignments, 2);
+
+        assert_eq!(clusters.len(), 2);
+        // Merge 1: (0,1) sim ~0.9987 — tie with (2,3); sorted-order tie-break
+        // picks (0,1). Merge 2: (2,3). Weighted centroids:
+        let (c01, w01) = &clusters[&0];
+        assert_eq!(*w01, 2);
+        assert!((c01[0] - 0.99).abs() < 1e-6, "got {}", c01[0]);
+        assert!((c01[1] - 0.025).abs() < 1e-6, "got {}", c01[1]);
+        let (c23, w23) = &clusters[&2];
+        assert_eq!(*w23, 2);
+        assert!((c23[0] - 0.025).abs() < 1e-6, "got {}", c23[0]);
+        assert!((c23[1] - 0.99).abs() < 1e-6, "got {}", c23[1]);
+        // A naive delete-without-update would leave centroid 0 at exactly
+        // [1.0, 0.0]; the weighted value is [0.99, 0.025].
+        assert!(
+            (c01[1] - 0.025).abs() > 1e-4 || (c01[0] - 1.0).abs() > 1e-4,
+            "sanity"
+        );
+    }
+
+    /// D3 regression: deterministic output — same embeddings, same assignments.
+    /// (HashMap iteration order must not influence merge order/tie-breaks.)
+    #[test]
+    fn cluster_merge_deterministic() {
+        // Three clusters arranged so different merge orders give different
+        // final assignments for a borderline probe.
+        let embeddings = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+            vec![0.6, 0.6, 0.0],
+            vec![0.0, 0.6, 0.6],
+        ];
+        let first = cluster_speakers(&embeddings, 0.5, Some(2));
+        let second = cluster_speakers(&embeddings, 0.5, Some(2));
+        assert_eq!(first, second, "clustering must be deterministic");
+        let unique: std::collections::HashSet<usize> = first.iter().copied().collect();
+        assert_eq!(unique.len(), 2, "max_speakers=2 must cap at 2");
     }
 
     #[test]
