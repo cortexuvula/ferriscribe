@@ -59,10 +59,13 @@ impl RemoteEndpoint {
     ///
     /// Returns `Ok` with the URL prefix (e.g. `"http://192.168.1.42:11435"`)
     /// for the first reachable address, or `Err` with the probe outcome
-    /// classified into the user-facing [`OfflineReason`]. The LAN probe is
-    /// the representative result; the Tailscale probe only decides the
-    /// fallback when no LAN address is configured — once LAN refused or
-    /// timed out, a Tailscale outcome of the same class adds nothing.
+    /// classified into the user-facing [`OfflineReason`].
+    ///
+    /// Fallback semantics (regression fix, review cc9b532): a LAN failure
+    /// STILL probes Tailscale — a roaming user off the clinic network must
+    /// connect over Tailscale, not see a spurious offline dialog. The LAN
+    /// reason is reported only when Tailscale also fails (LAN is the
+    /// primary address; its failure mode is what the user should act on).
     ///
     /// The classification mirrors [`classify_probe_failure`], which is the
     /// TCP-probe counterpart of the HTTP-probe classifier
@@ -71,30 +74,37 @@ impl RemoteEndpoint {
     /// distinct `OfflineReason`s that the offline dialog renders as
     /// distinct messages.
     pub async fn resolve_base_url(&self) -> Result<String, ProbeFailure> {
+        let mut lan_failure: Option<ProbeFailure> = None;
         if let Some(lan) = self.lan.as_deref() {
-            return match Self::probe_host(lan, self.port, std::time::Duration::from_millis(500))
-                .await
-            {
-                Ok(()) => Ok(http_url(lan, self.port)),
-                Err(reason) => Err(ProbeFailure {
-                    host: Some(lan.to_string()),
-                    reason,
-                }),
-            };
+            match Self::probe_host(lan, self.port, std::time::Duration::from_millis(500)).await {
+                Ok(()) => return Ok(http_url(lan, self.port)),
+                Err(reason) => {
+                    lan_failure = Some(ProbeFailure {
+                        host: Some(lan.to_string()),
+                        reason,
+                    });
+                    // Fall through: Tailscale is still probed.
+                }
+            }
         }
         if let Some(ts) = self.tailscale.as_deref() {
-            return match Self::probe_host(ts, self.port, std::time::Duration::from_secs(2)).await {
-                Ok(()) => Ok(http_url(ts, self.port)),
-                Err(reason) => Err(ProbeFailure {
-                    host: Some(ts.to_string()),
-                    reason,
-                }),
-            };
+            match Self::probe_host(ts, self.port, std::time::Duration::from_secs(2)).await {
+                Ok(()) => return Ok(http_url(ts, self.port)),
+                Err(_ts_reason) => {
+                    // Both failed: report the LAN outcome when LAN was
+                    // configured (primary address); else the Tailscale one.
+                    return Err(lan_failure.unwrap_or(ProbeFailure {
+                        host: Some(ts.to_string()),
+                        reason: _ts_reason,
+                    }));
+                }
+            }
         }
-        Err(ProbeFailure {
+        // No Tailscale configured (or none probed): the LAN failure stands.
+        Err(lan_failure.unwrap_or(ProbeFailure {
             host: None,
             reason: OfflineReason::ConnectionRefused,
-        })
+        }))
     }
 
     /// Probe one host/port, distinguishing the failure classes that a bare
@@ -207,6 +217,41 @@ mod tests {
         assert_eq!(back.tailscale.as_deref(), Some("100.64.0.1"));
         assert_eq!(back.port, 11434);
         assert_eq!(back.bearer.as_deref(), Some("tok_abc"));
+    }
+
+    /// Regression (review cc9b532): LAN configured but dead MUST still
+    /// fall back to a listening Tailscale address — the broken version
+    /// returned the LAN error immediately and a roaming user saw a
+    /// spurious offline dialog.
+    ///
+    /// Setup uses the two loopback stacks to fake distinct hosts on one
+    /// port number: LAN probes IPv4 127.0.0.1 (nothing listening → the
+    /// port is closed), Tailscale probes IPv6 ::1 where a listener IS
+    /// bound. If the fallback is broken, the LAN refusal wins and this
+    /// test fails with ConnectionRefused.
+    #[tokio::test]
+    async fn lan_dead_tailscale_listening_resolves_to_tailscale() {
+        use std::net::TcpListener;
+        // Pick a port free on BOTH loopback stacks.
+        let probe = TcpListener::bind(("::1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let v6_listener = TcpListener::bind(("::1", port)).unwrap();
+
+        let ep = RemoteEndpoint {
+            lan: Some("127.0.0.1".into()), // IPv4 loopback: dead
+            tailscale: Some("::1".into()), // IPv6 loopback: listening
+            port,
+            bearer: None,
+        };
+        let result = ep.resolve_base_url().await.unwrap();
+        assert_eq!(
+            result,
+            format!("http://[::1]:{port}"),
+            "dead LAN must fall back to listening Tailscale"
+        );
+        drop(v6_listener);
     }
 
     #[tokio::test]
