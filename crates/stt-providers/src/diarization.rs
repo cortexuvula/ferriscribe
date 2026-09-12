@@ -536,7 +536,14 @@ fn cluster_speakers(
         let mut best_id = None;
         let mut best_sim = threshold;
 
-        for (&id, (centroid, _)) in &clusters {
+        // Deterministic candidate order: iterate cluster IDs ascending so a
+        // similarity TIE resolves to the lowest cluster ID. HashMap iteration
+        // order must never influence assignment (D3 determinism: probes
+        // equidistant from two centroids flipped labels run-to-run).
+        let mut candidate_ids: Vec<usize> = clusters.keys().copied().collect();
+        candidate_ids.sort_unstable();
+        for id in candidate_ids {
+            let (centroid, _) = &clusters[&id];
             let sim = cosine_similarity(&emb_arr, centroid);
             debug!(
                 segment = idx,
