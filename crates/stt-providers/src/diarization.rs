@@ -982,6 +982,118 @@ mod tests {
             "attribution accuracy {:.1}% below 85% floor",
             accuracy * 100.0
         );
+
+        // DER (250 ms collar, permutation-invariant matching, no-overlap
+        // policy — see der_with_collar docs) reported alongside attribution;
+        // ceiling chosen with headroom above the observed post-D1 value.
+        let der = der_with_collar(&turns, &gt_turns, duration_s, 0.25);
+        eprintln!("DER (250ms collar): {:.1}%", der * 100.0);
+        assert!(der <= 0.10, "DER {:.1}% above 10% ceiling", der * 100.0);
+    }
+
+    /// Optimal-map DER (diarization error rate) on a 10 ms time grid with a
+    /// collar around every GT turn boundary and permutation-invariant
+    /// speaker matching (exhaustive hyp→GT mapping search; the fixture's
+    /// speaker counts keep this trivially small).
+    ///
+    /// Overlap policy (declared): the fixture contains NO overlapping speech
+    /// — turns are hard-concatenated — and the pipeline never emits
+    /// overlapping turns; a grid point covered by more than one hypothesis
+    /// turn would be attributed to the earliest-starting turn. Points within
+    /// `collar_s` of a GT boundary are excluded from scoring entirely
+    /// (neither credit nor error), forgiving boundary jitter.
+    ///
+    /// DER = (speaker confusion + missed detection + false alarm) / GT speech,
+    /// each measured on the collared grid.
+    fn der_with_collar(
+        turns: &[SpeakerTurn],
+        gt_turns: &[(usize, f64, f64)],
+        duration_s: f64,
+        collar_s: f64,
+    ) -> f64 {
+        const STEP: f64 = 0.01;
+        let hyp_ids: Vec<usize> = {
+            let mut v: Vec<usize> = turns.iter().map(|t| t.speaker_id).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let gt_speakers: Vec<usize> = {
+            let mut v: Vec<usize> = gt_turns.iter().map(|&(s, _, _)| s).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        if hyp_ids.is_empty() {
+            // No detected speech at all: everything missed.
+            return 1.0;
+        }
+        let hyp_index = |id: usize| hyp_ids.iter().position(|&h| h == id).unwrap_or(0);
+
+        // Internal GT boundaries only (0.0 / duration edges get no collar).
+        let boundaries: Vec<f64> = gt_turns
+            .iter()
+            .flat_map(|&(_, s, e)| [s, e])
+            .filter(|&b| b > 0.0 && b < duration_s)
+            .collect();
+
+        // Odometer over all functions hyp_ids -> gt_speakers.
+        let mut choice = vec![0usize; hyp_ids.len()];
+        let mut best_der = f64::INFINITY;
+        loop {
+            let mut confusion = 0.0_f64;
+            let mut missed = 0.0_f64;
+            let mut false_alarm = 0.0_f64;
+            let mut total = 0.0_f64;
+            let mut t = 0.0_f64;
+            while t < duration_s {
+                let collared = boundaries.iter().any(|&b| (t - b).abs() <= collar_s);
+                if !collared {
+                    let gt = gt_turns
+                        .iter()
+                        .find(|&&(_, s, e)| t >= s && t < e)
+                        .map(|&(s, _, _)| s);
+                    let hyp = turns
+                        .iter()
+                        .find(|tr| t >= tr.start && t < tr.end)
+                        .map(|tr| tr.speaker_id);
+                    match (gt, hyp) {
+                        (Some(g), Some(h)) => {
+                            total += STEP;
+                            if gt_speakers[choice[hyp_index(h)]] != g {
+                                confusion += STEP;
+                            }
+                        }
+                        (Some(_), None) => {
+                            total += STEP;
+                            missed += STEP;
+                        }
+                        (None, Some(_)) => false_alarm += STEP,
+                        (None, None) => {}
+                    }
+                }
+                t += STEP;
+            }
+            if total > 0.0 {
+                let der = (confusion + missed + false_alarm) / total;
+                if der < best_der {
+                    best_der = der;
+                }
+            }
+            // Increment the odometer; terminate after the last mapping.
+            let mut i = choice.len();
+            loop {
+                if i == 0 {
+                    return best_der;
+                }
+                i -= 1;
+                choice[i] += 1;
+                if choice[i] < gt_speakers.len() {
+                    break;
+                }
+                choice[i] = 0;
+            }
+        }
     }
 
     /// Shared helper for eval tests: run diarize and print the instrumented

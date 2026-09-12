@@ -1,0 +1,30 @@
+{
+  "duration": 22.0,
+  "turns": [
+    {
+      "speaker": "spk_A",
+      "start": 0.0,
+      "end": 5.0
+    },
+    {
+      "speaker": "spk_B",
+      "start": 5.0,
+      "end": 9.7
+    },
+    {
+      "speaker": "spk_A",
+      "start": 9.7,
+      "end": 14.0
+    },
+    {
+      "speaker": "spk_B",
+      "start": 14.0,
+      "end": 18.0
+    },
+    {
+      "speaker": "spk_A",
+      "start": 18.0,
+      "end": 22.0
+    }
+  ]
+}
