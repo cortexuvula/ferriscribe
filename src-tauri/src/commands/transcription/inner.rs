@@ -769,7 +769,6 @@ pub(crate) fn diarization_outcome(
     }
 }
 
-
 #[cfg(test)]
 mod format_tests {
     use medical_core::types::stt::{Transcript, TranscriptSegment};
@@ -825,7 +824,10 @@ mod format_tests {
             result.contains("[Speaker 2]"),
             "second speaker; got: {result}"
         );
-        assert!(!result.contains("[Speaker 0]"), "no 0-based labels; got: {result}");
+        assert!(
+            !result.contains("[Speaker 0]"),
+            "no 0-based labels; got: {result}"
+        );
         assert!(result.contains("Hi"), "first text; got: {result}");
         assert!(result.contains("Hello"), "third text; got: {result}");
         assert!(result.contains("-->"), "timestamps present; got: {result}");
@@ -927,9 +929,7 @@ mod format_tests {
         });
         assert_eq!(
             super::diarization_outcome(&t, true),
-            super::DiarizationOutcome::Failed(
-                "diarization failed: model corrupted".to_string()
-            )
+            super::DiarizationOutcome::Failed("diarization failed: model corrupted".to_string())
         );
     }
 
