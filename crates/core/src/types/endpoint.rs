@@ -265,7 +265,7 @@ mod tests {
         drop(probe);
 
         let ep = RemoteEndpoint {
-            lan: Some("127.0.0.1".into()),    // refused
+            lan: Some("127.0.0.1".into()),       // refused
             tailscale: Some("127.0.0.2".into()), // refused (loopback, nothing bound)
             port,
             bearer: None,
