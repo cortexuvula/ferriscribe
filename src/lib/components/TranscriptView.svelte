@@ -11,16 +11,19 @@
 
   // Recording-level diarization outcome from the backend pipeline.
   // - 'off': diarization was not requested (labelling disabled).
-  // - 'failed': diarization was attempted but errored (models missing, inference crash).
+  // - 'skipped': diarization was requested but did not run (e.g. the
+  //   diarization models were unavailable at transcription time).
+  // - 'failed': diarization was attempted but errored (inference crash).
   // - 'completed': diarization ran and all segments have speaker labels.
   // - 'completed-with-unassigned': diarization ran but some segments have null speakers.
-  // - 'unknown': metadata does not carry an outcome yet (frontend default —
-  //   the backend must persist diarization_outcome at transcription time;
-  //   TODO/ticket: wire recording metadata to include diarization_outcome).
+  // - 'unknown': metadata does not carry an outcome yet (frontend-only
+  //   fallback — the outcome must come from persisted metadata, never be
+  //   re-derived from structural side-effects).
   // The frontend MUST receive this explicitly — inferring state from
   // speaker:null or section count causes silent fallthrough to plain text.
   export type DiarizationOutcome =
     | 'off'
+    | 'skipped'
     | 'failed'
     | 'completed'
     | 'completed-with-unassigned'
@@ -31,18 +34,30 @@
     /** Structured segment data from recording metadata — preferred over text parsing. */
     segments?: Array<{ speaker: string | null; text: string; start: number; end: number }>;
     /** Recording-level diarization outcome. Defaults to 'unknown' (metadata
-     *  not yet persisted — TODO: persist diarization_outcome in recording
-     *  metadata at transcription time).
+     *  not yet persisted).
      *  'off' = we KNOW labelling was not requested.
+     *  'skipped' = we KNOW labelling was requested but did not run.
      *  'failed' = we KNOW diarization errored.
      *  'completed' / 'completed-with-unassigned' = real persisted metadata.
      *  'unknown' = metadata missing; show explicit unavailability message. */
     diarizationOutcome?: DiarizationOutcome;
+    /** Persisted bounded reason code for the 'skipped' outcome, transported
+     *  verbatim from recording metadata (EditorTab validates it). Only
+     *  'models_unavailable' (REASON_MODELS_UNAVAILABLE in
+     *  src-tauri/src/commands/transcription/inner.rs) currently carries
+     *  confirming wording. Missing/unrecognised → generic wording; the view
+     *  must never invent a cause. Keyed off the SAVED code, never off
+     *  current settings or installed models. */
+    skipReason?: 'models_unavailable';
+    /** Affordance for the 'skipped' outcome: opens Audio settings. The parent
+     *  wires this to the shared settings navigation. Deliberately NOT an
+     *  automatic retry — the user decides whether to re-transcribe. */
+    onOpenAudioSettings?: () => void;
     placeholder?: string;
     onChange?: (v: string) => void;
   }
 
-  const { value = '', segments, diarizationOutcome = 'unknown', placeholder = '', onChange = () => {} }: Props = $props();
+  const { value = '', segments, diarizationOutcome = 'unknown', skipReason, onOpenAudioSettings, placeholder = '', onChange = () => {} }: Props = $props();
 
   let editing = $state(false);
   // svelte-ignore state_referenced_locally
@@ -100,10 +115,13 @@
   // Recording-level diarization outcome: did the backend attempt labelling?
   // 'completed', 'completed-with-unassigned', or 'failed' → diarization ran
   // (or tried); show structured view even when every segment is speaker:null.
-  // 'off' → no labelling attempted. 'unknown' → metadata missing, render
+  // 'skipped' and 'off' → labelling did not run: plain transcript, with the
+  // skipped banner (below) carrying the status for 'skipped'. Rendering
+  // skipped segments as "Speaker unassigned" would assert an attribution
+  // attempt that never happened. 'unknown' → metadata missing, render
   // explicit unavailability message (never infer from segment presence).
   const hasDiarizationResult = $derived(
-    diarizationOutcome !== 'off' && diarizationOutcome !== 'unknown',
+    diarizationOutcome !== 'off' && diarizationOutcome !== 'unknown' && diarizationOutcome !== 'skipped',
   );
   // Text-parsed structure: speaker labels or multi-section content parsed from
   // the stored transcript text. Preserves backward compatibility for transcripts
@@ -120,6 +138,20 @@
   const showUnknownStatus = $derived(
     diarizationOutcome === 'unknown' && !hasDiarizationResult && !hasTextStructure,
   );
+  // 'skipped' rendering: requested but did not run. Distinct from 'off'
+  // (not requested), 'failed' (attempted and errored), and 'unknown'
+  // (metadata absent). The supporting line confirms a cause ONLY when the
+  // persisted reason code says so — never from current settings/models.
+  const showSkippedStatus = $derived(diarizationOutcome === 'skipped');
+  // Wording keyed off the SAVED bounded reason code only. Anything missing
+  // or unrecognised → generic wording; we do not invent a cause.
+  const MODELS_UNAVAILABLE_REASON = 'models_unavailable';
+  const skippedReasonLine = $derived.by(() => {
+    if (skipReason === MODELS_UNAVAILABLE_REASON) {
+      return 'Required models weren\'t available for this transcription';
+    }
+    return 'Speaker labelling was not run for this recording';
+  });
 
   function groupSegmentsIntoSections(
     segs: Array<{ speaker: string | null; text: string }>,
@@ -222,6 +254,21 @@
     <p class="transcript-caveat">
       Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.
     </p>
+  {/if}
+  {#if showSkippedStatus}
+    <!-- 'skipped' rendering: requested but did not run. Distinct banner from
+         'unknown' (metadata absent), 'off' (plain), and 'failed' (errored —
+         renders via the structured/unassigned path). Supporting line and the
+         Audio-settings affordance key off the persisted reason code only. -->
+    <div class="skipped-status" data-testid="diarization-skipped">
+      <p class="skipped-heading">Speaker labelling wasn't run</p>
+      <p class="skipped-reason">{skippedReasonLine}</p>
+      {#if onOpenAudioSettings}
+        <button type="button" class="skipped-action" onclick={onOpenAudioSettings}>
+          Open Audio settings
+        </button>
+      {/if}
+    </div>
   {/if}
   {#if showUnknownStatus}
     <!-- Honest 'unknown' rendering: metadata missing, no explicit labels in text.
@@ -419,6 +466,54 @@
     color: var(--text-primary);
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  /* 'skipped' banner: requested but did not run. Visually and semantically
+     distinct from the 'unknown' unavailability box: amber left rail (vs the
+     unknown box's plain border), a heading + supporting line + affordance
+     stack. Explicit text + border carry the distinction (not color alone)
+     for forced-colors mode and grayscale. */
+  .skipped-status {
+    margin: 0;
+    padding: 10px 12px;
+    background-color: var(--bg-secondary);
+    border-left: 3px solid var(--accent, #f59e0b);
+    border-radius: var(--radius-sm);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .skipped-heading {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .skipped-reason {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .skipped-action {
+    margin-top: 4px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background-color: var(--bg-tertiary, #374151);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+
+  .skipped-action:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
   }
 
   .editor-area {

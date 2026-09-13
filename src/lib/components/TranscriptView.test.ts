@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { render, screen, cleanup } from '@testing-library/svelte';
+import { fireEvent } from '@testing-library/dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TranscriptView from './TranscriptView.svelte';
 
@@ -291,5 +292,97 @@ describe('TranscriptView uncertainty honesty', () => {
       ),
     ).toBeNull();
     expect(screen.getByText('Just plain text, no diarization attempted.')).toBeTruthy();
+  });
+});
+
+// ── Slice 2d: the 'skipped' outcome (requested but did not run) ─────────────
+
+describe('TranscriptView skipped outcome rendering', () => {
+  afterEach(cleanup);
+
+  // All six contract outcomes transported at the component boundary — the
+  // render must stay distinct per value (same enum the parent validates).
+  const outcomes = ['off', 'skipped', 'failed', 'completed', 'completed-with-unassigned', 'unknown'] as const;
+
+  it('accepts every contract outcome value without coercion', () => {
+    for (const outcome of outcomes) {
+      cleanup();
+      // All-null segments: the shape a skipped/not-run transcript has.
+      const segments = [{ speaker: null, text: `Synthetic text for ${outcome}.`, start: 0, end: 5 }];
+      render(TranscriptView, {
+        value: `Synthetic text for ${outcome}.`,
+        segments,
+        diarizationOutcome: outcome,
+      });
+      // Smoke: the transcript text always renders.
+      expect(screen.getByText(`Synthetic text for ${outcome}.`)).toBeTruthy();
+    }
+  });
+
+  it('renders the skipped banner with confirming reason wording', () => {
+    const onOpenAudioSettings = vi.fn();
+    render(TranscriptView, {
+      value: 'Synthetic transcript content for testing.',
+      diarizationOutcome: 'skipped',
+      skipReason: 'models_unavailable',
+      onOpenAudioSettings,
+    });
+    expect(screen.getByText("Speaker labelling wasn't run")).toBeTruthy();
+    expect(
+      screen.getByText("Required models weren't available for this transcription"),
+    ).toBeTruthy();
+    // Distinct from the unknown message.
+    expect(
+      screen.queryByText('Speaker-labelling status unavailable'),
+    ).toBeNull();
+    // Affordance present and wired.
+    const button = screen.getByRole('button', { name: 'Open Audio settings' });
+    expect(button).toBeTruthy();
+    expect(onOpenAudioSettings).not.toHaveBeenCalled();
+    fireEvent.click(button);
+    expect(onOpenAudioSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the skipped banner with generic wording when reason is missing', () => {
+    render(TranscriptView, {
+      value: 'Synthetic transcript content for testing.',
+      diarizationOutcome: 'skipped',
+    });
+    expect(screen.getByText("Speaker labelling wasn't run")).toBeTruthy();
+    expect(
+      screen.getByText('Speaker labelling was not run for this recording'),
+    ).toBeTruthy();
+    // Never invents the models cause.
+    expect(
+      screen.queryByText("Required models weren't available for this transcription"),
+    ).toBeNull();
+  });
+
+  it('skipped renders the transcript as plain text with no unassigned headings', () => {
+    // Labelling never ran: rendering all-null segments as "Speaker
+    // unassigned" would assert an attribution attempt that never happened.
+    const segments = [
+      { speaker: null, text: 'First synthetic paragraph.', start: 0, end: 5 },
+    ];
+    render(TranscriptView, {
+      value: 'First synthetic paragraph.',
+      segments,
+      diarizationOutcome: 'skipped',
+    });
+    expect(screen.getByText('First synthetic paragraph.')).toBeTruthy();
+    expect(screen.queryByText('Speaker unassigned')).toBeNull();
+    expect(screen.getByText("Speaker labelling wasn't run")).toBeTruthy();
+  });
+
+  it('does not render the skipped banner for any other outcome', () => {
+    for (const outcome of outcomes.filter((o) => o !== 'skipped')) {
+      cleanup();
+      render(TranscriptView, {
+        value: `Synthetic text for ${outcome}.`,
+        diarizationOutcome: outcome,
+      });
+      expect(screen.queryByText("Speaker labelling wasn't run")).toBeNull();
+      expect(screen.getByText(`Synthetic text for ${outcome}.`)).toBeTruthy();
+    }
   });
 });
