@@ -877,63 +877,68 @@ pub(super) fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
+    // Provider-scope discipline (KI-01 class): every test below holds ONE
+    // serialization guard (`serial_lock`) for its whole body and routes the
+    // global provider install/clear through `with_test_provider`, which
+    // clears on BOTH return and unwind — a hand-rolled set-at-top /
+    // clear-at-bottom leaks the mock past any failing assertion.
+
     #[test]
     fn get_db_key_returns_none_when_absent() {
         let _guard = serial_lock();
-        set_test_provider(TestProvider::empty());
-        let result = get_db_key().expect("read");
+        let result = with_test_provider(TestProvider::empty(), || get_db_key().expect("read"));
         assert!(
             result.is_none(),
             "expected None on empty keychain, got Some"
         );
-        clear_test_provider();
     }
 
     #[test]
     fn get_db_key_returns_fixed_key_when_set() {
         let _guard = serial_lock();
         let fixed = [42u8; 32];
-        set_test_provider(TestProvider::fixed_db_key(fixed));
-        let result = get_db_key().expect("read");
+        let result = with_test_provider(TestProvider::fixed_db_key(fixed), || {
+            get_db_key().expect("read")
+        });
         assert_eq!(result, Some(fixed));
-        clear_test_provider();
     }
 
     #[test]
     fn get_or_create_persists_across_calls() {
         let _guard = serial_lock();
-        set_test_provider(TestProvider::empty());
-        let first = get_or_create_db_key().expect("first call");
-        let second = get_or_create_db_key().expect("second call");
+        let (first, second) = with_test_provider(TestProvider::empty(), || {
+            let first = get_or_create_db_key().expect("first call");
+            let second = get_or_create_db_key().expect("second call");
+            (first, second)
+        });
         assert_eq!(
             first, second,
             "should return the same key on subsequent calls"
         );
-        clear_test_provider();
     }
 
     #[test]
     fn set_and_get_roundtrips() {
         let _guard = serial_lock();
-        set_test_provider(TestProvider::empty());
         let key = [99u8; 32];
-        set_secret("test-account", key).expect("set");
-        let retrieved = get_secret("test-account").expect("get");
+        let retrieved = with_test_provider(TestProvider::empty(), || {
+            set_secret("test-account", key).expect("set");
+            get_secret("test-account").expect("get")
+        });
         assert_eq!(retrieved, Some(key));
-        clear_test_provider();
     }
 
     #[test]
     fn wipe_removes_secret() {
         let _guard = serial_lock();
-        set_test_provider(TestProvider::empty());
         let key = [77u8; 32];
-        set_secret(KEYCHAIN_DB_KEY_ACCOUNT, key).expect("set");
-        assert!(get_db_key().expect("get").is_some());
+        with_test_provider(TestProvider::empty(), || {
+            set_secret(KEYCHAIN_DB_KEY_ACCOUNT, key).expect("set");
+            assert!(get_db_key().expect("get").is_some());
 
-        wipe_db_key().expect("wipe");
-        assert!(get_db_key().expect("get after wipe").is_none());
-        clear_test_provider();
+            wipe_db_key().expect("wipe");
+            assert!(get_db_key().expect("get after wipe").is_none());
+        });
     }
 
     #[test]
@@ -960,10 +965,14 @@ mod tests {
     #[test]
     fn is_test_provider_active_reflects_state() {
         let _guard = serial_lock();
+        // before/after assertions must run OUTSIDE the provider scope so
+        // they observe the slot after the helper's cleanup, not during it.
         assert!(!is_test_provider_active());
-        set_test_provider(TestProvider::empty());
-        assert!(is_test_provider_active());
-        clear_test_provider();
+        let active_inside = with_test_provider(TestProvider::empty(), || {
+            assert!(is_test_provider_active());
+            is_test_provider_active()
+        });
+        assert!(active_inside);
         assert!(!is_test_provider_active());
     }
 
@@ -973,21 +982,20 @@ mod tests {
         // still see the global provider, not fall through to OsKeychain.
         let _guard = serial_lock();
         let key = [88u8; 32];
-        set_test_provider(TestProvider::fixed_db_key(key));
 
-        let handle = std::thread::spawn(|| {
-            // This runs on a different thread — with thread-local this
-            // would have fallen through to OsKeychain and panicked.
-            assert!(
-                is_test_provider_active(),
-                "spawned thread must see the global test provider"
-            );
-            get_db_key().expect("spawned thread reads mock")
+        let result = with_test_provider(TestProvider::fixed_db_key(key), || {
+            let handle = std::thread::spawn(|| {
+                // This runs on a different thread — with thread-local this
+                // would have fallen through to OsKeychain and panicked.
+                assert!(
+                    is_test_provider_active(),
+                    "spawned thread must see the global test provider"
+                );
+                get_db_key().expect("spawned thread reads mock")
+            });
+            handle.join().expect("spawned thread didn't panic")
         });
-
-        let result = handle.join().expect("spawned thread didn't panic");
         assert_eq!(result, Some(key));
-        clear_test_provider();
     }
 
     #[test]
@@ -998,17 +1006,20 @@ mod tests {
         let _guard = serial_lock();
         let (tx, rx) = std::sync::mpsc::channel();
 
-        set_test_provider(TestProvider::empty());
+        let handle = with_test_provider(TestProvider::empty(), || {
+            let handle = std::thread::spawn(move || {
+                // Wait until the provider is cleared
+                rx.recv().unwrap();
+                // Now the provider is gone — any keychain call should panic
+                let result = std::panic::catch_unwind(get_db_key);
+                result.is_err() // true = panicked as expected
+            });
 
-        let handle = std::thread::spawn(move || {
-            // Wait until the provider is cleared
-            rx.recv().unwrap();
-            // Now the provider is gone — any keychain call should panic
-            let result = std::panic::catch_unwind(get_db_key);
-            result.is_err() // true = panicked as expected
+            // The clear happens INSIDE with_test_provider, before it
+            // returns this handle — exactly the ordering under test.
+            handle
         });
 
-        clear_test_provider();
         tx.send(()).unwrap();
 
         let panicked = handle.join().expect("worker joined");
@@ -1024,23 +1035,23 @@ mod tests {
         // must all see the same mock — no torn reads or lock contention.
         let _guard = serial_lock();
         let key = [44u8; 32];
-        set_test_provider(TestProvider::fixed_db_key(key));
 
-        let mut handles = Vec::new();
-        for _ in 0..8 {
-            let thread_key = key;
-            handles.push(std::thread::spawn(move || {
-                for _ in 0..100 {
-                    let result = get_db_key().expect("concurrent read");
-                    assert_eq!(result, Some(thread_key), "all reads must see mock");
-                }
-            }));
-        }
+        with_test_provider(TestProvider::fixed_db_key(key), || {
+            let mut handles = Vec::new();
+            for _ in 0..8 {
+                let thread_key = key;
+                handles.push(std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        let result = get_db_key().expect("concurrent read");
+                        assert_eq!(result, Some(thread_key), "all reads must see mock");
+                    }
+                }));
+            }
 
-        for h in handles {
-            h.join().expect("concurrent reader didn't panic");
-        }
-        clear_test_provider();
+            for h in handles {
+                h.join().expect("concurrent reader didn't panic");
+            }
+        });
     }
 
     #[test]
@@ -1055,6 +1066,32 @@ mod tests {
         assert!(
             result.is_err(),
             "get_db_key without a test provider must panic via TestSentinel"
+        );
+    }
+
+    #[test]
+    fn panicking_test_body_leaves_no_provider_installed() {
+        // Regression for the KI-01 isolation-gap class, in this crate: a
+        // failing assertion inside a provider-scoped test body must unwind
+        // WITHOUT leaving the global mock installed (the no-provider
+        // sentinel re-arms for later accesses in the same process).
+        let _guard = serial_lock();
+        assert!(
+            !is_test_provider_active(),
+            "precondition: no provider installed"
+        );
+
+        let payload = std::panic::catch_unwind(|| {
+            // Same discipline as every migrated test above: serialization
+            // guard outside, provider scoping via the panic-safe helper.
+            with_test_provider(TestProvider::empty(), || {
+                panic!("intentional: failing assertion mid-test");
+            })
+        });
+        assert!(payload.is_err(), "closure must have panicked");
+        assert!(
+            !is_test_provider_active(),
+            "provider leaked past a panicking test body"
         );
     }
 }
