@@ -14,6 +14,8 @@
 //! - Stage C: displayed/copied text (after speaker formatting)
 
 use medical_core::types::stt::Transcript;
+#[cfg(test)]
+use medical_core::types::stt::TranscriptSegment;
 
 /// Detect the repeated-short-phrase pattern Whisper produces when fed silence
 /// (classic: "Thank you. Thank you. Thank you. ...").
