@@ -1281,10 +1281,17 @@ pub(crate) mod tests {
     #[test]
     fn restore_installs_recovered_key_when_keychain_absent() {
         // Restore on a machine with no db-key entry installs the snapshot's
-        // key (R6). Uses the EntryOnly keyring mock — cross-call persistence
-        // is not observable, so we assert the decision outcome + the
-        // returned key, per the keychain module's documented test limits.
-        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+        // key (R6). The old EntryOnly keyring mock is dead wiring here: the
+        // runtime harness detector routes cargo test binaries to the
+        // TestSentinel BEFORE the keyring mock is reachable, so the bare
+        // get_secret in restore_snapshot would panic. The global
+        // TestProvider IS reachable (with_provider consults it first), so
+        // install it for the whole test — unlike the keyring mock, it also
+        // observes the store, so we can assert the recovered fixture key
+        // actually lands in the mock keychain.
+        let _guard = medical_security::keychain::serial_test_lock();
+        let provider = medical_security::keychain::TestProvider::empty();
+        medical_security::keychain::set_test_provider(provider);
 
         let src = tempfile::tempdir().expect("src");
         let db_key = [0x71u8; 32];
@@ -1301,6 +1308,16 @@ pub(crate) mod tests {
         )
         .expect("restore");
         assert_eq!(report.key_install, KeyInstallOutcome::Installed);
+        // The restore actually STORED the recovered fixture key in the
+        // mock keychain (synthetic fixture bytes, not real material).
+        assert_eq!(
+            medical_security::keychain::get_secret(
+                medical_security::keychain::KEYCHAIN_DB_KEY_ACCOUNT
+            )
+            .expect("read back from mock"),
+            Some(db_key),
+            "restore must persist the recovered key under the db-key account"
+        );
         // And the key in the report opens the restored DB.
         assert!(
             medical_db::Database::open(
@@ -1309,6 +1326,7 @@ pub(crate) mod tests {
             )
             .is_ok()
         );
+        medical_security::keychain::clear_test_provider();
     }
 
     impl RestoreReport {

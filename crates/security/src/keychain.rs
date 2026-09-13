@@ -847,15 +847,30 @@ pub fn key_to_hex(key: &[u8; 32]) -> String {
 // lib tests in parallel by default, which would cause races.
 // `into_inner()` recovers from poisoning when a previous test panicked
 // while holding the lock.
-#[cfg(test)]
 static TEST_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
 
-#[cfg(test)]
-pub(super) fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
+/// Acquire the process-wide provider-serialization lock.
+///
+/// Unconditional (not `#[cfg(test)]`): when this crate is compiled as a
+/// dependency of another crate's test binary, `cfg(test)` is false here,
+/// and dependent tests still need to serialize their
+/// `set_test_provider`/`clear_test_provider` brackets against each other.
+/// Production code never calls this; it exists so cross-crate tests share
+/// ONE mutex with this crate's own tests (a second, cfg(test)-only lock
+/// would be a different mutex in dependent binaries and serialize
+/// nothing).
+///
+/// Non-reentrant (std Mutex): never hold two guards on the same thread.
+pub fn serial_test_lock() -> std::sync::MutexGuard<'static, ()> {
     TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+pub(super) fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
+    serial_test_lock()
 }
 
 #[cfg(test)]
@@ -1098,8 +1113,21 @@ mod test_harness {
                 assert_eq!(key, [0xABu8; 32]);
                 assert!(is_test_provider_active());
             });
-            // Provider cleared after closure
-            assert!(!is_test_provider_active());
+            // Provider cleared after closure. The check is serialized
+            // against provider installation: with_test_db releases
+            // serial_lock when it returns, and a sibling test may then
+            // legitimately install its provider BEFORE this assertion
+            // runs, making an unlocked `!is_active` check flaky under
+            // default-parallel execution. Scoped block — with_test_db's
+            // guard is already dropped, so this is a fresh acquisition,
+            // not a nested one (the lock is non-reentrant).
+            {
+                let _guard = serial_lock();
+                assert!(
+                    !is_test_provider_active(),
+                    "provider must be cleared after with_test_db returns"
+                );
+            }
         }
 
         #[test]
@@ -1110,8 +1138,17 @@ mod test_harness {
                 });
             });
             assert!(result.is_err());
-            // Provider must be cleared even after panic
-            assert!(!is_test_provider_active());
+            // Provider must be cleared even after panic. Same serialized
+            // post-cleanup check as above: with_test_db drops its lock
+            // during unwind, so reacquire (scoped, not nested) before
+            // asserting the global provider slot is empty.
+            {
+                let _guard = serial_lock();
+                assert!(
+                    !is_test_provider_active(),
+                    "provider must be cleared even when the closure panics"
+                );
+            }
         }
     }
 }
