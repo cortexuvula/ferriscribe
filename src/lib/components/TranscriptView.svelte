@@ -9,15 +9,40 @@
     text: string;
   }
 
+  // Recording-level diarization outcome from the backend pipeline.
+  // - 'off': diarization was not requested (labelling disabled).
+  // - 'failed': diarization was attempted but errored (models missing, inference crash).
+  // - 'completed': diarization ran and all segments have speaker labels.
+  // - 'completed-with-unassigned': diarization ran but some segments have null speakers.
+  // - 'unknown': metadata does not carry an outcome yet (frontend default —
+  //   the backend must persist diarization_outcome at transcription time;
+  //   TODO/ticket: wire recording metadata to include diarization_outcome).
+  // The frontend MUST receive this explicitly — inferring state from
+  // speaker:null or section count causes silent fallthrough to plain text.
+  export type DiarizationOutcome =
+    | 'off'
+    | 'failed'
+    | 'completed'
+    | 'completed-with-unassigned'
+    | 'unknown';
+
   interface Props {
     value?: string;
     /** Structured segment data from recording metadata — preferred over text parsing. */
     segments?: Array<{ speaker: string | null; text: string; start: number; end: number }>;
+    /** Recording-level diarization outcome. Defaults to 'unknown' (metadata
+     *  not yet persisted — TODO: persist diarization_outcome in recording
+     *  metadata at transcription time).
+     *  'off' = we KNOW labelling was not requested.
+     *  'failed' = we KNOW diarization errored.
+     *  'completed' / 'completed-with-unassigned' = real persisted metadata.
+     *  'unknown' = metadata missing; show explicit unavailability message. */
+    diarizationOutcome?: DiarizationOutcome;
     placeholder?: string;
     onChange?: (v: string) => void;
   }
 
-  const { value = '', segments, placeholder = '', onChange = () => {} }: Props = $props();
+  const { value = '', segments, diarizationOutcome = 'unknown', placeholder = '', onChange = () => {} }: Props = $props();
 
   let editing = $state(false);
   // svelte-ignore state_referenced_locally
@@ -72,11 +97,29 @@
     }
     return parseTextSections(parseCache);
   });  const hasSpeakers = $derived(sections.some((s) => s.speaker !== null));
-  // Uncertainty-honesty: a transcript has "structure" when it was parsed
-  // into speaker-attributed sections OR contains unlabeled blocks (which
-  // indicate diarization ran but produced no attribution for those spans).
-  // A single-paragraph plain text falls through to the plain-text branch.
-  const hasStructuredContent = $derived(hasSpeakers || sections.length > 1);
+  // Recording-level diarization outcome: did the backend attempt labelling?
+  // 'completed', 'completed-with-unassigned', or 'failed' → diarization ran
+  // (or tried); show structured view even when every segment is speaker:null.
+  // 'off' → no labelling attempted. 'unknown' → metadata missing, render
+  // explicit unavailability message (never infer from segment presence).
+  const hasDiarizationResult = $derived(
+    diarizationOutcome !== 'off' && diarizationOutcome !== 'unknown',
+  );
+  // Text-parsed structure: speaker labels or multi-section content parsed from
+  // the stored transcript text. Preserves backward compatibility for transcripts
+  // rendered without explicit outcome (e.g. from copy/export paths).
+  const hasTextStructure = $derived(hasSpeakers || sections.length > 1);
+  // Combined gate: structured view renders when diarization ran OR text has
+  // clear speaker labels / multiple sections. 'unknown' with explicit labels
+  // in the text still renders those labels (structured view); 'unknown'
+  // without explicit labels shows the honest unavailability message.
+  const useStructuredView = $derived(hasDiarizationResult || hasTextStructure);
+  // Honest 'unknown' rendering: when outcome is 'unknown' AND the text has
+  // no explicit speaker labels AND no multi-section structure, show
+  // "Speaker-labelling status unavailable" instead of silent plain text.
+  const showUnknownStatus = $derived(
+    diarizationOutcome === 'unknown' && !hasDiarizationResult && !hasTextStructure,
+  );
 
   function groupSegmentsIntoSections(
     segs: Array<{ speaker: string | null; text: string }>,
@@ -175,12 +218,19 @@
 <div class="transcript-view">
   <!-- Uncertainty-honesty caveat: persistent, above the transcript, visible during editing too.
        Descriptive content — NOT role=alert, no modal, no repeated warning icons. -->
-  {#if hasStructuredContent || (sections.length === 1 && sections[0].speaker !== null)}
+  {#if useStructuredView || (sections.length === 1 && sections[0].speaker !== null)}
     <p class="transcript-caveat">
       Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.
     </p>
   {/if}
-  {#if editing}
+  {#if showUnknownStatus}
+    <!-- Honest 'unknown' rendering: metadata missing, no explicit labels in text.
+         Shows unavailability message instead of silent plain text or false "Speaker unassigned". -->
+    <div class="unknown-status">
+      <p class="unknown-message">Speaker-labelling status unavailable</p>
+      <p class="unknown-value">{value || placeholder}</p>
+    </div>
+  {:else if editing}
     <div class="edit-toolbar">
       <button class="btn-done" onclick={doneEdit}>Done</button>
     </div>
@@ -189,7 +239,7 @@
       {placeholder}
       class="editor-area"
     ></textarea>
-  {:else if hasStructuredContent}
+  {:else if useStructuredView}
     <div class="view-toolbar">
       <button class="btn-edit" onclick={startEdit}>Edit</button>
     </div>
@@ -205,7 +255,7 @@
           </div>
         {:else}
           <div class="speaker-section unlabeled" aria-labelledby="unlabeled-{i}">
-            <h4 id="unlabeled-{i}" class="unlabeled-heading">Speaker not identified</h4>
+            <h4 id="unlabeled-{i}" class="unlabeled-heading">Speaker unassigned</h4>
             <p class="speaker-text">{section.text}</p>
           </div>
         {/if}
@@ -294,7 +344,7 @@
     border-left-color: var(--border);
   }
 
-  /* Unlabeled heading: "Speaker not identified" — normal body text weight,
+  /* Unlabeled heading: "Speaker unassigned" — normal body text weight,
      NOT faded/italic/hidden. Neutral styling (no speaker color).
      Relies on explicit text + dashed boundary (not color alone) for
      forced-colors mode and grayscale distinguishability. */
@@ -331,6 +381,39 @@
     flex: 1;
     overflow-y: auto;
     padding: 16px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* Honest 'unknown' rendering: metadata missing, no explicit labels in text.
+     Shows unavailability message above the transcript content instead of
+     silent plain text or false "Speaker unassigned". Neutral styling (no
+     color-only indicator) for forced-colors mode and grayscale. */
+  .unknown-status {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .unknown-message {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    padding: 8px 12px;
+    background-color: var(--bg-secondary);
+    border-left: 3px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+
+  .unknown-value {
+    margin: 0;
     font-size: 14px;
     line-height: 1.6;
     color: var(--text-primary);

@@ -82,6 +82,26 @@
     return isTranscriptSegments(raw) ? raw : undefined;
   });
 
+  // Recording-level diarization outcome for TranscriptView.
+  // TRANSPORT, not inference: read verbatim from recording metadata.
+  // The backend must persist diarization_outcome at transcription time;
+  // until then, absent metadata falls back to 'unknown' (NOT 'off' —
+  // we must not assert knowledge we don't have).
+  // Valid values: 'off' | 'failed' | 'completed' | 'completed-with-unassigned' | 'unknown'.
+  const diarizationOutcome = $derived.by(() => {
+    const raw = recordings.selectedRecording?.metadata?.diarization_outcome;
+    if (
+      raw === 'off' ||
+      raw === 'failed' ||
+      raw === 'completed' ||
+      raw === 'completed-with-unassigned' ||
+      raw === 'unknown'
+    ) {
+      return raw;
+    }
+    return 'unknown' as const;
+  });
+
   let copyStatus = $state<'idle' | 'copying' | 'copied'>('idle');
   let saveStatus = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
   let saveError: string | null = $state(null);
@@ -479,7 +499,7 @@
     </div>
   {:else}
     {#if tabId === 'transcript'}
-      <TranscriptView value={content} segments={transcriptSegments} placeholder="No content…" onChange={onEditorChange} />
+      <TranscriptView value={content} segments={transcriptSegments} diarizationOutcome={diarizationOutcome} placeholder="No content…" onChange={onEditorChange} />
     {:else}
       <RichEditor value={content} placeholder="No content…" onChange={onEditorChange} />
     {/if}
