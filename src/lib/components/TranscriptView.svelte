@@ -72,6 +72,11 @@
     }
     return parseTextSections(parseCache);
   });  const hasSpeakers = $derived(sections.some((s) => s.speaker !== null));
+  // Uncertainty-honesty: a transcript has "structure" when it was parsed
+  // into speaker-attributed sections OR contains unlabeled blocks (which
+  // indicate diarization ran but produced no attribution for those spans).
+  // A single-paragraph plain text falls through to the plain-text branch.
+  const hasStructuredContent = $derived(hasSpeakers || sections.length > 1);
 
   function groupSegmentsIntoSections(
     segs: Array<{ speaker: string | null; text: string }>,
@@ -168,6 +173,13 @@
 </script>
 
 <div class="transcript-view">
+  <!-- Uncertainty-honesty caveat: persistent, above the transcript, visible during editing too.
+       Descriptive content — NOT role=alert, no modal, no repeated warning icons. -->
+  {#if hasStructuredContent || (sections.length === 1 && sections[0].speaker !== null)}
+    <p class="transcript-caveat">
+      Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.
+    </p>
+  {/if}
   {#if editing}
     <div class="edit-toolbar">
       <button class="btn-done" onclick={doneEdit}>Done</button>
@@ -177,7 +189,7 @@
       {placeholder}
       class="editor-area"
     ></textarea>
-  {:else if hasSpeakers}
+  {:else if hasStructuredContent}
     <div class="view-toolbar">
       <button class="btn-edit" onclick={startEdit}>Edit</button>
     </div>
@@ -185,14 +197,15 @@
       {#each sections as section, i (i)}
         {#if section.speaker}
           {@const colors = getSpeakerColor(section.speaker)}
-          <div class="speaker-section" style="border-left-color: {colors.border}">
-            <span class="speaker-badge" style="background-color: {colors.bg}; color: {colors.text}; border-color: {colors.border}">
+          <div class="speaker-section" style="border-left-color: {colors.border}" aria-labelledby="speaker-{i}">
+            <span id="speaker-{i}" class="speaker-badge" style="background-color: {colors.bg}; color: {colors.text}; border-color: {colors.border}">
               {section.speaker}
             </span>
             <p class="speaker-text">{section.text}</p>
           </div>
         {:else}
-          <div class="speaker-section unlabeled">
+          <div class="speaker-section unlabeled" aria-labelledby="unlabeled-{i}">
+            <h4 id="unlabeled-{i}" class="unlabeled-heading">Speaker not identified</h4>
             <p class="speaker-text">{section.text}</p>
           </div>
         {/if}
@@ -212,6 +225,21 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  /* Uncertainty-honesty caveat: persistent, compact, above the scrolling
+     transcript. Descriptive — not role=alert, no modal, no warning icons.
+     Relies on explicit text + border styling (not color alone) for
+     forced-colors mode and grayscale distinguishability. */
+  .transcript-caveat {
+    margin: 0;
+    padding: 6px 16px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-light);
+    font-style: italic;
   }
 
   .view-toolbar,
@@ -262,7 +290,21 @@
   }
 
   .speaker-section.unlabeled {
-    border-left-color: var(--border-light);
+    border-left: 3px dashed var(--border);
+    border-left-color: var(--border);
+  }
+
+  /* Unlabeled heading: "Speaker not identified" — normal body text weight,
+     NOT faded/italic/hidden. Neutral styling (no speaker color).
+     Relies on explicit text + dashed boundary (not color alone) for
+     forced-colors mode and grayscale distinguishability. */
+  .unlabeled-heading {
+    margin: 0 0 4px 0;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+    text-transform: none;
   }
 
   .speaker-badge {
