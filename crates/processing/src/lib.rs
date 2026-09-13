@@ -48,6 +48,7 @@ pub mod sanitize;
 pub mod soap_generator;
 pub mod specialty;
 pub mod transcript_markers;
+pub mod transcript_post;
 pub mod vocabulary_corrector;
 
 use thiserror::Error;

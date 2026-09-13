@@ -3806,6 +3806,7 @@ dependencies = [
  "hound",
  "knf-rs",
  "medical-core",
+ "medical-processing",
  "medical-security",
  "ndarray 0.17.2",
  "ort",
@@ -5647,7 +5648,7 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.77.8"
+version = "0.77.10"
 dependencies = [
  "async-stream",
  "async-trait",
