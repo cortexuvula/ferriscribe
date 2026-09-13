@@ -931,12 +931,27 @@ struct RefSpan {
 /// A span with empty corrected text and empty speaker = deleted
 /// (hallucination). Unfilled lines (both columns empty AND no speaker) are
 /// treated as "not corrected yet" and STOP scoring with a clear error.
+/// Content-free placeholder for panic messages: the leading span-ID token
+/// only (never transcript text — privacy: PHI must not reach the console).
+fn id_placeholder(line: &str) -> String {
+    line.split('\t')
+        .next()
+        .unwrap_or("<no-id>")
+        .trim()
+        .to_string()
+}
+
 fn parse_template(path: &Path) -> Vec<RefSpan> {
     let raw = std::fs::read_to_string(path).expect("read filled template");
     let mut out = Vec::new();
     let mut lines = raw.lines().peekable();
     while let Some(line) = lines.next() {
-        let line = line.trim_end();
+        // Strip ONLY line endings. trim_end() here would eat the trailing
+        // TAB of an unfilled row (6 TSV fields -> 5), so the "not fully
+        // filled" panic below was unreachable and unfilled spans were
+        // silently skipped — scoring against an EMPTY reference (found
+        // 2026-09-13: filled==template byte-identical, wer=NaN output).
+        let line = line.trim_end_matches(['\r', '\n']);
         if line.starts_with('#') || line.trim().is_empty() {
             continue;
         }
@@ -947,7 +962,16 @@ fn parse_template(path: &Path) -> Vec<RefSpan> {
         let parts: Vec<&str> = line.split('\t').collect();
         // parts: [id, "[spk]", "||", corr, "||", spk] (corr may be empty)
         if parts.len() < 6 {
-            continue;
+            // A ||-row with fewer than 6 TSV fields is malformed (trailing
+            // tab stripped by an editor, or hand-mangled). Silently
+            // skipping it silently drops a reference span — hard error
+            // instead (regression: 2026-09-13 empty-reference incident).
+            panic!(
+                "malformed reference line ({} tab fields, expected 6): {:?}\
+                 — keep the span-ID prefix and both || separators",
+                parts.len(),
+                id_placeholder(&line)
+            );
         }
         let id = parts[0].trim().to_string();
         let corr = parts[3].trim().to_string();
@@ -1085,6 +1109,14 @@ fn score(artifacts: &Path, samples_dir: &Path) {
 
     let ref_tokens: Vec<String> = reference.iter().flat_map(|r| tokens(&r.text)).collect();
     let ref_words = ref_tokens.len();
+    // A hand reference with ZERO tokens is never scoreable. Before the fix
+    // above this could happen silently (unfilled rows skipped), producing
+    // wer=NaN / all-insertion output that looked like a real score line.
+    assert!(
+        ref_words > 0,
+        "reference has 0 tokens — the filled template is empty or was not \
+         parsed; refusing to score"
+    );
 
     // EL transcript for the same clip (secondary disagreement).
     let clips = collect_clips(samples_dir);
@@ -1255,5 +1287,90 @@ fn report(artifacts: &Path) {
         }
     } else {
         println!("(no scores.jsonl — fill the template, then FS_EVAL_MODE=score)");
+    }
+}
+
+// ───────────────────────── tests (parse_template + sid kernel) ─────────────────────────
+// Regression tests for the 2026-09-13 incident: an unfilled template
+// (byte-identical to template.txt, all correction/speaker columns empty)
+// scored silently as an EMPTY reference (wer=NaN, all-insertion output).
+// Root cause: trim_end() ate the trailing TAB of unfilled rows (6 TSV
+// fields -> 5), making the "not fully filled" panic unreachable.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_tmp(name: &str, contents: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("fs_local_eval_tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, contents).unwrap();
+        p
+    }
+
+    #[test]
+    fn unfilled_template_must_panic_not_score_silently() {
+        // Exact shape of an unfilled row as emitted by template mode:
+        // trailing TAB present; both fill columns empty.
+        let raw = "# header\n\nspan-A\t[Speaker 1]\t||\t\t||\t\n    hypothesis text\n";
+        let p = write_tmp("unfilled.txt", raw);
+        let result = std::panic::catch_unwind(move || parse_template(&p));
+        assert!(
+            result.is_err(),
+            "unfilled template must panic, not return spans"
+        );
+    }
+
+    #[test]
+    fn unfilled_row_without_trailing_tab_also_panics() {
+        // Editor-saved variant: trailing whitespace stripped by the editor.
+        let raw = "span-A\t[Speaker 1]\t||\t\t||\n    hypothesis text\n";
+        let p = write_tmp("unfilled_notab.txt", raw);
+        let result = std::panic::catch_unwind(move || parse_template(&p));
+        assert!(result.is_err(), "unfilled row (no trailing tab) must panic");
+    }
+
+    #[test]
+    fn filled_row_parses_correction_and_speaker() {
+        let raw = "span-A\t[Speaker 1]\t||\tCORRECTED WORDS HERE\t||\tS2\n    hypothesis text\n";
+        let p = write_tmp("filled.txt", raw);
+        let spans = parse_template(&p);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].id, "span-A");
+        assert_eq!(spans[0].speaker, Some(1)); // S2 -> 0-based 1
+        // Tokenization happens later; text preserved verbatim.
+        assert_eq!(spans[0].text, "CORRECTED WORDS HERE");
+    }
+
+    #[test]
+    fn deleted_span_empty_text_with_dash_speaker() {
+        let raw = "span-A\t[Speaker 1]\t||\t\t||\t-\n    hypothesis text\n";
+        let p = write_tmp("deleted.txt", raw);
+        let spans = parse_template(&p);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].speaker, None);
+        assert!(spans[0].text.is_empty(), "deleted span has empty text");
+    }
+
+    #[test]
+    fn sid_counts_sub_ins_del_separately() {
+        let r: Vec<String> = ["the", "cat", "sat", "here"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let h: Vec<String> = ["the", "bat", "sat"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (s, i, d) = sid(&r, &h);
+        assert_eq!((s, i, d), (1, 0, 1), "cat->bat sub; 'here' deleted");
+    }
+
+    #[test]
+    fn sid_identical_texts_zero_error() {
+        let r: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
+        let (s, i, d) = sid(&r, &r.clone());
+        assert_eq!((s, i, d), (0, 0, 0));
     }
 }
