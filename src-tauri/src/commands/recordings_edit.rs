@@ -193,7 +193,25 @@ pub fn save_recording_field_inner(
     };
 
     match field {
-        "transcript" => recording.transcript = owned_value,
+        // TRANSCRIPT SEGMENT INVALIDATION (review contract line C,
+        // docs/reviews/transcript-render-2026-09-13, finding 2): saving an
+        // edited transcript must drop the stale `transcript_segments`
+        // metadata in the SAME transaction as the text save. Segments take
+        // precedence over text parsing in the rich view, so retaining them
+        // hid saved corrections behind the pre-edit words (a corrected dose
+        // or negation appeared to revert despite a successful save). The
+        // text (with its `[Speaker unassigned]` markers / speaker labels)
+        // becomes the single source of truth until the next
+        // retranscription re-persists fresh segments. Cleared by KEY
+        // REMOVAL, not null-write: the frontend's shape validator treats a
+        // null value the same as an absent key, but removal is the honest
+        // state — there ARE no segments for this text.
+        "transcript" => {
+            recording.transcript = owned_value;
+            if let Some(obj) = recording.metadata.as_object_mut() {
+                obj.remove("transcript_segments");
+            }
+        }
         "soap_note" => recording.soap_note = owned_value,
         "referral" => recording.referral = owned_value,
         "letter" => recording.letter = owned_value,
@@ -303,6 +321,115 @@ mod tests {
         )
         .unwrap();
         g.id
+    }
+
+    /// Review contract line C (finding 2): saving an edited transcript must
+    /// clear `transcript_segments` in the SAME transaction — stale segments
+    /// take precedence in the rich view and hid saved corrections.
+    #[test]
+    fn saving_transcript_clears_stale_segments_in_same_save() {
+        let conn = in_memory_db();
+        let rec_id = insert_recording(&conn);
+        // Give the recording the producer-shaped metadata: segments the
+        // diarizer emitted for the ORIGINAL text, plus the outcome keys.
+        {
+            let mut rec = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
+            rec.metadata = serde_json::json!({
+                "transcript_segments": [
+                    {"speaker": "Speaker 1", "text": "Original wording.", "start": 0.0, "end": 1.0}
+                ],
+                "diarization_outcome": "completed",
+                "diarization_reason": null,
+            });
+            rec.transcript =
+                Some("00:00:00,000 --> 00:00:01,000 [Speaker 1] \nOriginal wording.".into());
+            RecordingsRepo::update(&conn, &rec).unwrap();
+        }
+        let db = std::sync::Arc::new(medical_db::Database::open_in_memory().unwrap());
+        save_recording_field_inner(
+            db,
+            &conn,
+            &rec_id.to_string(),
+            "transcript",
+            "00:00:00,000 --> 00:00:01,000 [Speaker 1] \nCorrected wording.",
+            false,
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
+        assert_eq!(
+            after.transcript.as_deref(),
+            Some("00:00:00,000 --> 00:00:01,000 [Speaker 1] \nCorrected wording."),
+            "edited text saved"
+        );
+        // The stale segments are GONE (key removed, not null) — the saved
+        // text is now the single source of truth for rendering.
+        assert!(
+            after.metadata.get("transcript_segments").is_none(),
+            "stale transcript_segments must not survive a transcript edit; metadata: {}",
+            after.metadata
+        );
+        // Other metadata keys are untouched — the save is surgical.
+        assert_eq!(after.metadata["diarization_outcome"], "completed");
+    }
+
+    /// Clearing the transcript (empty value) also drops the segments — an
+    /// empty transcript with live segments is the same stale-precedence
+    /// hazard in reverse.
+    #[test]
+    fn clearing_transcript_also_clears_segments() {
+        let conn = in_memory_db();
+        let rec_id = insert_recording(&conn);
+        {
+            let mut rec = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
+            rec.metadata = serde_json::json!({
+                "transcript_segments": [
+                    {"speaker": "Speaker 1", "text": "Original wording.", "start": 0.0, "end": 1.0}
+                ]
+            });
+            rec.transcript = Some("Original wording.".into());
+            RecordingsRepo::update(&conn, &rec).unwrap();
+        }
+        let db = std::sync::Arc::new(medical_db::Database::open_in_memory().unwrap());
+        save_recording_field_inner(db, &conn, &rec_id.to_string(), "transcript", "", false)
+            .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
+        assert_eq!(after.transcript, None);
+        assert!(after.metadata.get("transcript_segments").is_none());
+    }
+
+    /// Editing a NON-transcript field must not touch transcript segments —
+    /// a SOAP edit invalidates nothing about the transcript's metadata.
+    #[test]
+    fn saving_other_field_leaves_transcript_segments_alone() {
+        let conn = in_memory_db();
+        let rec_id = insert_recording(&conn);
+        {
+            let mut rec = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
+            rec.metadata = serde_json::json!({
+                "transcript_segments": [
+                    {"speaker": "Speaker 1", "text": "Original wording.", "start": 0.0, "end": 1.0}
+                ]
+            });
+            RecordingsRepo::update(&conn, &rec).unwrap();
+        }
+        let db = std::sync::Arc::new(medical_db::Database::open_in_memory().unwrap());
+        save_recording_field_inner(
+            db,
+            &conn,
+            &rec_id.to_string(),
+            "soap_note",
+            "Amended assessment.",
+            false,
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
+        assert!(
+            after.metadata.get("transcript_segments").is_some(),
+            "a non-transcript edit must not invalidate transcript segments"
+        );
     }
 
     #[test]
