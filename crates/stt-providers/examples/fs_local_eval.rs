@@ -1637,6 +1637,11 @@ fn score(artifacts: &Path, samples_dir: &Path) {
             .filter(|s| !s.text.trim().is_empty())
             .map(|s| (s.start, s.end))
             .collect();
+        // Deliberate asymmetry (Codie review faf018b, informational):
+        // cue_ivs (deletion coverage) keeps only NONEMPTY-text cues — a
+        // wordless span decodes no words, so it cannot cover speech. The
+        // speaker pass below uses ALL spans: attribution is about cue/speaker
+        // alignment, and an empty-text span still carries a speaker label.
         let ins_on_confirmed_silence: usize = cue_ivs
             .iter()
             .filter(|&&(cs, ce)| cue_is_insertion_class(cs, ce, &reference.rows))
