@@ -191,6 +191,16 @@
       const match = para.match(
         /^(?:\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}\s*)?\[(Speaker \d+)\]\s*\n?([\s\S]*)$/,
       );
+      // UNASSIGNED MARKER: `[Speaker unassigned]` (written by
+      // format_transcript_with_speakers via
+      // medical_processing::transcript_markers::SPEAKER_UNASSIGNED_MARKER —
+      // same bytes, single source). An unattributable span must render as
+      // its own unassigned section, never inherit the previous speaker.
+      // The marker cannot be mis-parsed as a real speaker: it matches
+      // neither this bracket arm (digits only) nor the colon arm below.
+      const unassigned = para.match(
+        /^(?:\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}\s*)?\[Speaker unassigned\]\s*\n?([\s\S]*)$/,
+      );
       // LEGACY colon form: `Speaker N: text` paragraphs (the pre-bracket
       // convention AND hand-edited text). Both formats stay supported —
       // the bracketed form must supplement, never replace, this parser
@@ -199,6 +209,8 @@
       const colon = para.match(/^(Speaker \d+):\s*([\s\S]*)$/);
       if (match) {
         result.push({ speaker: match[1], text: match[2] });
+      } else if (unassigned) {
+        result.push({ speaker: null, text: unassigned[1] });
       } else if (colon) {
         result.push({ speaker: colon[1], text: colon[2] });
       } else if (para.trim()) {

@@ -11,7 +11,6 @@
 //! prompt-injection patterns, null bytes, and normalises line endings — but
 //! does NOT truncate.
 
-use chrono::Local;
 use tracing::debug;
 
 use crate::document_generator::inject_context;
@@ -61,10 +60,13 @@ pub fn build_user_prompt(
         "build_user_prompt: peer discussion transcript prepared"
     );
 
-    // Prepend date/time
-    let now = Local::now();
-    let time_date = now.format("Time %H:%M Date %d %b %Y").to_string();
-    let transcript_with_dt = format!("{time_date}\n\n{clean_transcript}");
+    // Attribution legend (writer/reader symmetry, review contract line B):
+    // same marker, same meaning as the SOAP builder — an unattributable
+    // span must stay unattributed in the generated document, not be
+    // "resolved" to the nearest speaker. Assembly single-sourced in
+    // transcript_markers so the two builders cannot drift.
+    let transcript_with_dt =
+        crate::transcript_markers::datetime_prefix_and_legend(&clean_transcript);
 
     let mut parts: Vec<String> = Vec::new();
 
@@ -87,6 +89,35 @@ pub fn build_user_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review contract line B: the peer-discussion prompt input must make
+    /// the unassigned state legible to the model — same marker, same legend
+    /// as the SOAP builder (single-sourced in transcript_markers).
+    #[test]
+    fn user_prompt_carries_attribution_legend_only_for_marked_transcripts() {
+        let marked = format!(
+            "00:00:01,000 --> 00:00:02,000 [Speaker 1] \nSynthetic case discussion.\n\n\
+             00:00:03,000 --> 00:00:04,000 {} \nSynthetic unattributable span.",
+            crate::transcript_markers::SPEAKER_UNASSIGNED_MARKER
+        );
+        let prompt = build_user_prompt(&marked, "Smith", "Cardiology", "chest pain", None);
+        assert!(
+            prompt.contains(crate::transcript_markers::ATTRIBUTION_LEGEND),
+            "marked transcript must explain the marker to the model"
+        );
+
+        let plain = build_user_prompt(
+            "Synthetic peer discussion transcript.",
+            "Smith",
+            "Cardiology",
+            "chest pain",
+            None,
+        );
+        assert!(
+            !plain.contains(crate::transcript_markers::ATTRIBUTION_LEGEND),
+            "no marker, no legend"
+        );
+    }
 
     #[test]
     fn user_prompt_includes_datetime() {

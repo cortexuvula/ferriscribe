@@ -670,19 +670,26 @@ fn format_transcript_with_speakers(transcript: &medical_core::types::stt::Transc
     }
 
     let mut result = String::new();
-    let mut last_speaker: Option<&str> = None;
 
     for seg in &transcript.segments {
         let text = seg.text.trim();
         if text.is_empty() {
             continue;
         }
-        // Fold unlabeled segments into the last known speaker so no text
-        // is dropped (diarization may not cover every whisper segment).
-        let speaker = seg.speaker.as_deref().or(last_speaker);
-        if speaker.is_some() {
-            last_speaker = speaker;
-        }
+        // DATA INTEGRITY: an unlabeled segment must NEVER inherit the
+        // previous speaker's label. The old fold
+        // (`seg.speaker.or(last_speaker)`) manufactured attribution in the
+        // persisted record: the rich view honestly showed "Speaker
+        // unassigned" while the stored/copied text claimed the previous
+        // speaker — and that text is pasted into clinical notes and fed to
+        // the SOAP/peer prompt verbatim. The original don't-drop-text
+        // concern stays legitimate: the span is retained, but marked with
+        // the shared `[Speaker unassigned]` marker
+        // (medical_processing::transcript_markers) instead of a fabricated
+        // label, so the stored text and the render tell the same story.
+        // The marker cannot collide with a real label: parsers accept only
+        // `[Speaker N]` with decimal digits.
+        let speaker = seg.speaker.as_deref();
 
         if !result.is_empty() {
             result.push_str("\n\n");
@@ -703,8 +710,14 @@ fn format_transcript_with_speakers(transcript: &medical_core::types::stt::Transc
         // inference — the diarizer cannot know who is the doctor and who
         // is the patient, and must never label as such (see
         // docs/design/speaker-labelling.md).
-        if let Some(label) = speaker {
-            result.push_str(&format!("[{label}] "));
+        match speaker {
+            Some(label) => result.push_str(&format!("[{label}] ")),
+            // Unattributable span: explicit shared marker, never an
+            // inherited speaker (see the DATA INTEGRITY note above).
+            None => {
+                result.push_str(medical_processing::transcript_markers::SPEAKER_UNASSIGNED_MARKER);
+                result.push(' ');
+            }
         }
 
         result.push('\n');
@@ -1092,10 +1105,14 @@ mod format_tests {
         );
         assert!(result.contains("[Speaker 1]"));
         assert!(result.contains("[Speaker 2]"));
+        assert!(
+            result.contains(medical_processing::transcript_markers::SPEAKER_UNASSIGNED_MARKER),
+            "unlabeled segment must carry the unassigned marker; got: {result}"
+        );
     }
 
     #[test]
-    fn unlabeled_before_first_speaker_emitted_without_label() {
+    fn unlabeled_before_first_speaker_marked_unassigned() {
         let t = make_transcript(vec![
             seg("Background noise", None),
             seg("Hello", Some("Speaker 1")),
@@ -1103,34 +1120,127 @@ mod format_tests {
         let result = super::format_transcript_with_speakers(&t);
         assert!(
             result.contains("Background noise"),
-            "unlabeled prefix must appear; got: {result}"
+            "unlabeled prefix must appear in output; got: {result}"
         );
         assert!(
             result.contains("[Speaker 1]"),
             "labeled segment follows; got: {result}"
         );
+        assert!(
+            result.contains(medical_processing::transcript_markers::SPEAKER_UNASSIGNED_MARKER),
+            "unlabeled prefix must carry the unassigned marker; got: {result}"
+        );
     }
 
+    /// Review contract line A (transcript-render-2026-09-13): given
+    /// Speaker 1 → null → Speaker 2, every representation must retain a
+    /// separate unassigned middle span — no last-speaker inheritance, no
+    /// dropped words. This pins the formatter's EXACT output bytes so the
+    /// persisted format cannot drift from what TranscriptView parses and
+    /// what the prompt legend describes.
     #[test]
-    fn unlabeled_after_speaker_folded_into_that_speaker() {
+    fn unassigned_middle_span_marked_not_inherited_exact_output() {
         let t = make_transcript(vec![
-            seg("Take this", Some("Speaker 1")),
-            seg("okay", None), // should fold into Speaker 1
-            seg("Thanks", Some("Speaker 2")),
+            seg("Alpha", Some("Speaker 1")),
+            seg("Gap", None),
+            seg("Beta", Some("Speaker 2")),
         ]);
         let result = super::format_transcript_with_speakers(&t);
-        // "okay" appears and is attributed to [Speaker 1] (the last known).
-        assert!(
-            result.contains("okay"),
-            "folded text present; got: {result}"
+        let expected = format!(
+            "00:00:00,000 --> 00:00:01,000 [Speaker 1] \nAlpha\n\n\
+             00:00:00,000 --> 00:00:01,000 {} \nGap\n\n\
+             00:00:00,000 --> 00:00:01,000 [Speaker 2] \nBeta",
+            medical_processing::transcript_markers::SPEAKER_UNASSIGNED_MARKER
         );
+        assert_eq!(result, expected);
+    }
+
+    /// The stored format must keep the three spans as separate blocks in
+    /// reading order — the marker block must never merge into a neighbor.
+    #[test]
+    fn unassigned_middle_span_stays_a_separate_block_in_reading_order() {
+        let t = make_transcript(vec![
+            seg("Alpha", Some("Speaker 1")),
+            seg("Gap", None),
+            seg("Beta", Some("Speaker 2")),
+        ]);
+        let result = super::format_transcript_with_speakers(&t);
+        let blocks: Vec<&str> = result.split("\n\n").collect();
+        assert_eq!(blocks.len(), 3, "three spans, three blocks; got: {result}");
+        assert!(blocks[0].contains("[Speaker 1]"));
         assert!(
-            result.contains("[Speaker 1]"),
-            "folded into Speaker 1; got: {result}"
+            blocks[1].contains(medical_processing::transcript_markers::SPEAKER_UNASSIGNED_MARKER)
         );
+        assert!(blocks[2].contains("[Speaker 2]"));
         assert!(
-            result.contains("[Speaker 2]"),
-            "speaker change after fold; got: {result}"
+            !blocks[1].contains("[Speaker 1]") && !blocks[1].contains("[Speaker 2]"),
+            "marker block must not carry a real speaker label; got: {}",
+            blocks[1]
+        );
+    }
+
+    /// LEGACY RESIDUAL, deliberately NOT re-derived: recordings persisted
+    /// before this change keep their stored text verbatim (hand edits must
+    /// not be clobbered). This test documents that the formatter is not
+    /// applied retroactively — re-derivation is a separate opt-in tool
+    /// (ticketed, not built here).
+    #[test]
+    fn formatter_is_not_a_migration_stored_text_is_written_once() {
+        // The formatter runs only at transcription time; nothing in this
+        // module rewrites stored transcripts. What it writes is what lands:
+        let t = make_transcript(vec![seg("Solo", None), seg("Two", None)]);
+        assert_eq!(
+            super::format_transcript_with_speakers(&t),
+            "Solo Two",
+            "all-null transcripts still take the raw-text path (no markers)"
+        );
+    }
+
+    /// Fixture generator: writes the EXACT formatter output for a fixed
+    /// synthetic segment set to the checked-in fixture consumed by the
+    /// TranscriptView Vitest round-trip test (writer/reader symmetry,
+    /// review contract line I). Run via
+    /// `cargo test -p rust-medical-assistant regenerate_formatter_fixture -- --ignored`
+    /// whenever the stored format changes intentionally; the equality
+    /// test below fails first if the bytes drifted.
+    #[test]
+    #[ignore = "fixture generator — run explicitly to regenerate"]
+    fn regenerate_formatter_fixture() {
+        let t = make_transcript(vec![
+            seg("Alpha turn.", Some("Speaker 1")),
+            seg("Unattributable gap.", None),
+            seg("Beta turn.", Some("Speaker 2")),
+        ]);
+        let out = super::format_transcript_with_speakers(&t);
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/lib/components/__fixtures__/formatter-speaker-unassigned.txt"
+        );
+        std::fs::write(path, out).expect("write fixture");
+    }
+
+    /// Writer/reader symmetry half 1: the checked-in fixture must equal the
+    /// formatter's actual output byte-for-byte. If the stored format
+    /// changes without regenerating the fixture, this fails BEFORE the
+    /// frontend test can green-light a parser that never matches real
+    /// formatter output.
+    #[test]
+    fn checked_in_fixture_equals_formatter_output() {
+        let t = make_transcript(vec![
+            seg("Alpha turn.", Some("Speaker 1")),
+            seg("Unattributable gap.", None),
+            seg("Beta turn.", Some("Speaker 2")),
+        ]);
+        let expected = super::format_transcript_with_speakers(&t);
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/lib/components/__fixtures__/formatter-speaker-unassigned.txt"
+        );
+        let fixture = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("fixture missing ({e}) — run regenerate_formatter_fixture"));
+        assert_eq!(
+            fixture, expected,
+            "fixture drifted from formatter output — regenerate intentionally, never by hand"
         );
     }
 

@@ -17,7 +17,6 @@
 //! strips prompt-injection patterns, null bytes, and normalises line
 //! endings — but does NOT truncate.
 
-use chrono::Local;
 use medical_core::types::PatientContext;
 use tracing::{debug, info};
 
@@ -80,10 +79,14 @@ pub fn build_user_prompt(
         "build_user_prompt: transcript prepared (no truncation applied)"
     );
 
-    // Prepend date/time
-    let now = Local::now();
-    let time_date = now.format("Time %H:%M Date %d %b %Y").to_string();
-    let transcript_with_dt = format!("{time_date}\n\n{clean_transcript}");
+    // Attribution legend (writer/reader symmetry, review contract line B):
+    // the stored transcript format marks spans the diarizer could not
+    // attribute with `[Speaker unassigned]` instead of silently inheriting
+    // the previous speaker. The datetime prefix + conditional legend are
+    // single-sourced in transcript_markers (shared with the peer-discussion
+    // builder — this exact assembly drifted once before, 2026-09-04).
+    let transcript_with_dt =
+        crate::transcript_markers::datetime_prefix_and_legend(&clean_transcript);
 
     let mut parts: Vec<String> = Vec::new();
 
@@ -183,6 +186,32 @@ mod tests {
         assert!(prompt.contains("Time"));
         assert!(prompt.contains("Date"));
         assert!(prompt.contains("patient says hello"));
+    }
+
+    /// Review contract line B: the SOAP prompt input must make the
+    /// unassigned state legible to the model — no silent inheriting there
+    /// either. A transcript carrying `[Speaker unassigned]` gets the
+    /// attribution legend; a marker-free transcript gets none.
+    #[test]
+    fn user_prompt_carries_attribution_legend_only_for_marked_transcripts() {
+        let marked = format!(
+            "00:00:01,000 --> 00:00:02,000 [Speaker 1] \nSynthetic history.\n\n\
+             00:00:03,000 --> 00:00:04,000 {} \nSynthetic unattributable span.",
+            crate::transcript_markers::SPEAKER_UNASSIGNED_MARKER
+        );
+        let prompt = build_user_prompt(&marked, None, None);
+        assert!(
+            prompt.contains(crate::transcript_markers::ATTRIBUTION_LEGEND),
+            "marked transcript must explain the marker to the model"
+        );
+        // The legend's core rule is present verbatim.
+        assert!(prompt.contains("Do NOT assign these passages to a nearby speaker"));
+
+        let plain = build_user_prompt("Synthetic two-speaker transcript.", None, None);
+        assert!(
+            !plain.contains(crate::transcript_markers::ATTRIBUTION_LEGEND),
+            "no marker, no legend"
+        );
     }
 
     #[test]
