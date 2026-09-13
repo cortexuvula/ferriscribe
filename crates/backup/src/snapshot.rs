@@ -1289,44 +1289,82 @@ pub(crate) mod tests {
         // install it for the whole test — unlike the keyring mock, it also
         // observes the store, so we can assert the recovered fixture key
         // actually lands in the mock keychain.
+        //
+        // Panic-safe scoping (KI-01 residual): the serialization guard is
+        // held for the whole test, but the global provider is installed
+        // and cleared via with_test_provider, which clears on BOTH return
+        // and unwind. A hand-rolled set-at-top/clear-at-bottom leaks the
+        // provider past any failing assertion — the guard is scoped, but
+        // dropping it releases the mutex without clearing GLOBAL_PROVIDER.
         let _guard = medical_security::keychain::serial_test_lock();
-        let provider = medical_security::keychain::TestProvider::empty();
-        medical_security::keychain::set_test_provider(provider);
+        medical_security::keychain::with_test_provider(
+            medical_security::keychain::TestProvider::empty(),
+            || {
+                let src = tempfile::tempdir().expect("src");
+                let db_key = [0x71u8; 32];
+                let wrapping = [0x82u8; 32];
+                let (dest, opts) = fixture_opts(src.path(), db_key, wrapping);
+                let receipt = build_snapshot(&opts).expect("build");
+                let restore_dest = tempfile::tempdir().expect("restore");
+                let report = restore_snapshot(
+                    &snapshot_dir(dest.path(), &receipt),
+                    &wrapping,
+                    restore_dest.path(),
+                    KeyInstall::IfAbsentOrEqual,
+                    false,
+                )
+                .expect("restore");
+                assert_eq!(report.key_install, KeyInstallOutcome::Installed);
+                // The restore actually STORED the recovered fixture key in the
+                // mock keychain (synthetic fixture bytes, not real material).
+                assert_eq!(
+                    medical_security::keychain::get_secret(
+                        medical_security::keychain::KEYCHAIN_DB_KEY_ACCOUNT
+                    )
+                    .expect("read back from mock"),
+                    Some(db_key),
+                    "restore must persist the recovered key under the db-key account"
+                );
+                // And the key in the report opens the restored DB.
+                assert!(
+                    medical_db::Database::open(
+                        &restore_dest.path().join("medical.db"),
+                        Some(report.db_key)
+                    )
+                    .is_ok()
+                );
+            },
+        );
+    }
 
-        let src = tempfile::tempdir().expect("src");
-        let db_key = [0x71u8; 32];
-        let wrapping = [0x82u8; 32];
-        let (dest, opts) = fixture_opts(src.path(), db_key, wrapping);
-        let receipt = build_snapshot(&opts).expect("build");
-        let restore_dest = tempfile::tempdir().expect("restore");
-        let report = restore_snapshot(
-            &snapshot_dir(dest.path(), &receipt),
-            &wrapping,
-            restore_dest.path(),
-            KeyInstall::IfAbsentOrEqual,
-            false,
-        )
-        .expect("restore");
-        assert_eq!(report.key_install, KeyInstallOutcome::Installed);
-        // The restore actually STORED the recovered fixture key in the
-        // mock keychain (synthetic fixture bytes, not real material).
-        assert_eq!(
-            medical_security::keychain::get_secret(
-                medical_security::keychain::KEYCHAIN_DB_KEY_ACCOUNT
+    /// KI-01 residual regression: a panic inside the provider-scoped
+    /// restore test body must NOT leave the global provider installed.
+    /// Reproduces the original defect's failure mode (assertion unwinds
+    /// past a hand-rolled clear) and proves the panic-safe path clears
+    /// GLOBAL_PROVIDER on unwind, under the serialization discipline.
+    #[test]
+    fn panicking_restore_test_body_leaves_no_provider_installed() {
+        let _guard = medical_security::keychain::serial_test_lock();
+        // Fail-fast sentinel must be armed before the panic.
+        assert!(!medical_security::keychain::is_test_provider_active());
+        let payload = std::panic::catch_unwind(|| {
+            // Hold the SAME discipline as the real test: serialization
+            // guard outside, provider scoping via the panic-safe helper.
+            medical_security::keychain::with_test_provider(
+                medical_security::keychain::TestProvider::empty(),
+                || {
+                    // Simulate any failing expect/assertion mid-test.
+                    panic!("intentional: failing assertion mid-test");
+                },
             )
-            .expect("read back from mock"),
-            Some(db_key),
-            "restore must persist the recovered key under the db-key account"
-        );
-        // And the key in the report opens the restored DB.
+        });
+        assert!(payload.is_err(), "closure must have panicked");
+        // THE contract: after unwind, no provider remains installed and
+        // the no-provider sentinel is re-armed for later accesses.
         assert!(
-            medical_db::Database::open(
-                &restore_dest.path().join("medical.db"),
-                Some(report.db_key)
-            )
-            .is_ok()
+            !medical_security::keychain::is_test_provider_active(),
+            "provider leaked past a panicking test body"
         );
-        medical_security::keychain::clear_test_provider();
     }
 
     impl RestoreReport {
