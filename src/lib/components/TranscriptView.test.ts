@@ -110,7 +110,7 @@ describe('TranscriptView speaker fallback parsing', () => {
 describe('TranscriptView uncertainty honesty', () => {
   afterEach(cleanup);
 
-  it('shows a "Speaker not identified" heading for unlabeled sections between speakers', () => {
+  it('shows a "Speaker unassigned" heading for unlabeled sections between speakers', () => {
     const transcript = [
       'Speaker 1: Hello, how are you?',
       '',
@@ -119,7 +119,7 @@ describe('TranscriptView uncertainty honesty', () => {
       'Speaker 2: I am fine, thanks.',
     ].join('\n');
     render(TranscriptView, { value: transcript });
-    const headings = screen.getAllByText('Speaker not identified');
+    const headings = screen.getAllByText('Speaker unassigned');
     expect(headings.length).toBe(1);
     expect(screen.getByText('Some background noise or unattributable speech.')).toBeTruthy();
     // Must NOT say "Unknown speaker" (implies an extra identified person).
@@ -140,7 +140,7 @@ describe('TranscriptView uncertainty honesty', () => {
       'Speaker 1: Final turn.',
     ].join('\n');
     render(TranscriptView, { value: transcript });
-    const headings = screen.getAllByText('Speaker not identified');
+    const headings = screen.getAllByText('Speaker unassigned');
     expect(headings.length).toBe(2);
   });
 
@@ -156,7 +156,7 @@ describe('TranscriptView uncertainty honesty', () => {
       'Third paragraph of unattributed speech.',
     ].join('\n');
     render(TranscriptView, { value: transcript });
-    const headings = screen.getAllByText('Speaker not identified');
+    const headings = screen.getAllByText('Speaker unassigned');
     expect(headings.length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('First paragraph of unattributed speech.')).toBeTruthy();
     expect(screen.getByText('Second paragraph of unattributed speech.')).toBeTruthy();
@@ -193,14 +193,103 @@ describe('TranscriptView uncertainty honesty', () => {
 
   it('preserves single-paragraph plain text rendering (no headings, no caveat)', () => {
     // Single paragraph, no speaker labels — diarization-disabled state.
-    // Must remain plain text, not show "Speaker not identified".
+    // Must remain plain text, not show "Speaker unassigned".
     render(TranscriptView, { value: 'Just a plain transcript.' });
-    expect(screen.queryByText('Speaker not identified')).toBeNull();
+    expect(screen.queryByText('Speaker unassigned')).toBeNull();
     expect(
       screen.queryByText(
         'Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.',
       ),
     ).toBeNull();
     expect(screen.getByText('Just a plain transcript.')).toBeTruthy();
+  });
+
+  // Codie test gap: rail-colour non-inheritance — an unassigned block must
+  // never inherit the preceding speaker's accent colour. The dashed border
+  // uses var(--border), not the previous speaker's palette entry.
+  it('unassigned block rail uses neutral border, never inherits preceding speaker colour', () => {
+    const transcript = [
+      'Speaker 1: First attributed turn.',
+      '',
+      'Unattributable passage here.',
+      '',
+      'Speaker 2: Second attributed turn.',
+    ].join('\n');
+    render(TranscriptView, { value: transcript });
+    // Find the unlabeled section by its heading.
+    const unlabeledHeading = screen.getByText('Speaker unassigned');
+    const unlabeledSection = unlabeledHeading.closest('.speaker-section.unlabeled');
+    expect(unlabeledSection).toBeTruthy();
+    // The unlabeled section must have the 'unlabeled' class, which applies
+    // the dashed border style (verified in CSS: border-left: 3px dashed).
+    expect(unlabeledSection!.classList.contains('unlabeled')).toBe(true);
+    // Speaker sections must NOT have the unlabeled class (they get solid borders
+    // with speaker-specific colors via inline style).
+    const speaker1Section = screen.getByText('First attributed turn.').closest('.speaker-section');
+    expect(speaker1Section).toBeTruthy();
+    expect(speaker1Section!.classList.contains('unlabeled')).toBe(false);
+  });
+
+  // Codie Warning 1 fix: single-paragraph all-null diarized result must show
+  // unassigned status via the outcome prop, never silently fall through to
+  // plain text. This is the exact case the contract forbids.
+  it('single-paragraph all-null diarized result shows unassigned status (outcome=completed)', () => {
+    // Diarization ran but produced no speaker labels — segments exist but all
+    // speaker fields are null. Must render structured view with "Speaker
+    // unassigned" heading, not silent plain text.
+    const segments = [
+      { speaker: null, text: 'Single paragraph of unattributed speech.', start: 0, end: 5 },
+    ];
+    render(TranscriptView, {
+      value: 'Single paragraph of unattributed speech.',
+      segments,
+      diarizationOutcome: 'completed',
+    });
+    // Must show the unassigned heading, not silent plain text.
+    expect(screen.getByText('Speaker unassigned')).toBeTruthy();
+    expect(screen.getByText('Single paragraph of unattributed speech.')).toBeTruthy();
+    // Caveat must be visible (diarization ran).
+    expect(
+      screen.getByText(
+        'Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.',
+      ),
+    ).toBeTruthy();
+  });
+
+  it('diarization failed outcome shows unassigned status for all-null segments', () => {
+    // Diarization was attempted but errored — distinct from 'off' and from
+    // 'completed with unassigned passages'.
+    const segments = [
+      { speaker: null, text: 'Diarization failed, no labels available.', start: 0, end: 5 },
+    ];
+    render(TranscriptView, {
+      value: 'Diarization failed, no labels available.',
+      segments,
+      diarizationOutcome: 'failed',
+    });
+    // Must show structured view with unassigned heading.
+    expect(screen.getByText('Speaker unassigned')).toBeTruthy();
+    expect(screen.getByText('Diarization failed, no labels available.')).toBeTruthy();
+  });
+
+  it('diarization off with single-paragraph plain text remains plain (no headings)', () => {
+    // Diarization disabled, single paragraph — must remain plain text even
+    // when passed as segments with all-null speakers.
+    const segments = [
+      { speaker: null, text: 'Just plain text, no diarization attempted.', start: 0, end: 5 },
+    ];
+    render(TranscriptView, {
+      value: 'Just plain text, no diarization attempted.',
+      segments,
+      diarizationOutcome: 'off',
+    });
+    // Must NOT show unassigned heading or caveat.
+    expect(screen.queryByText('Speaker unassigned')).toBeNull();
+    expect(
+      screen.queryByText(
+        'Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.',
+      ),
+    ).toBeNull();
+    expect(screen.getByText('Just plain text, no diarization attempted.')).toBeTruthy();
   });
 });
