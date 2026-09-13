@@ -41,3 +41,9 @@ coverage/
 
 # Vite dev-cache from the settings-declutter browser harness
 docs/settings-declutter/browser-cache/
+
+# Local-only clinical sample data (real patient audio/transcripts).
+# NEVER commit: this is PHI. Present in the working tree for local evaluation only.
+local-eval/
+local-eval/clinical-samples/
+**/clinical-samples/
