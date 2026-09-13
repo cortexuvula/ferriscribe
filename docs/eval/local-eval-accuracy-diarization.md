@@ -64,8 +64,10 @@ matching the app's decode route for these files).
 
 - substitutions / insertions / deletions SEPARATELY (substitutions are the
   clinical-risk class — always on their own row).
-- speaker-attribution errors (spans matched >50% time-overlap to a
-  reference span whose label differs; counted under BOTH attribution rules).
+- speaker-attribution errors (hyp cues assigned to reference rows by
+  plurality time-overlap; cues landing on confirmed-silence (insertion
+  class) or UNINTEL rows are excluded from both numerator and
+  denominator; counted under BOTH attribution rules).
 - repetition/hallucination regressions: in-segment loop collapses and
   cross-segment runs dropped per variant.
 - runtime (decode ms, warm context, Metal).
@@ -123,9 +125,21 @@ establish coverage. A dropped utterance was invisible by construction.
      there scores as the INSERTION class).
    - `OK` + text = the true words (a row with text and no ASR cue scores
      as the DELETION class — dropped utterances are representable).
+   - `UNINTEL` + empty text = listened but unresolvable by ear. Reviewed
+     (does NOT block scoring), contributes no reference tokens, and is
+     excluded from speaker-error denominators. Distinct from ??? so a row
+     the reviewer tried and could not resolve is never confused with one
+     he never reached; mapping it later is a one-row edit. Text next to
+     UNINTEL is refused at parse (it would be silently dropped).
    - `???` or a deleted row = NOT REVIEWED; scoring refuses until every
-     row is OK. The scorer audits the filled copy against the emitted
-     review file (row-set diff), so deleting rows cannot skip review.
+     row is OK or UNINTEL. The scorer audits the filled copy against the
+     emitted review file (row-set diff), so deleting rows cannot skip
+     review. Duplicate row IDs are refused at load (a duplicated ID would
+     silently double-count its words and shift the WER denominator).
+   - Status-field tolerance is explicit: plain ASCII spaces around the
+     token (editor save) are accepted; any other trailing junk —
+     including invisible Unicode whitespace such as NBSP — is refused
+     with an actionable error, never silently trimmed.
    - Missed utterance inside a long row = add `row-90+` with its interval
      and text. Human rows never collide with template rows.
    - Legacy v1 files are refused outright (format header check).
@@ -140,8 +154,14 @@ establish coverage. A dropped utterance was invisible by construction.
    `cue_count_difference_is_visible_only_in_seg_error_not_wer`), as are
    the format round trip (`round_trip_template_fill_and_editor_save_
    survives`, `editor_whitespace_mangling_cannot_change_field_count`),
-   the v1 refusal, the not-reviewed audit, and the silence/speech
-   insertion/deletion classes.
+   the v1 refusal, the not-reviewed audit, the silence/speech
+   insertion/deletion classes with their boundary semantics
+   (`exact_fifty_fifty_straddle_resolves_toward_speech`,
+   `deletion_threshold_is_half_the_row_duration`,
+   `insertion_vs_deletion_classes_use_row_coverage_not_cue_fraction`,
+   `cue_straddling_with_majority_silence_is_insertion_only`,
+   `hallucination_over_silence_is_not_a_speaker_error`), the UNINTEL
+   token, the duplicate-row-ID refusal, and the status-junk refusal.
 
 ## Unverified / out of scope (stated plainly)
 
@@ -149,10 +169,18 @@ establish coverage. A dropped utterance was invisible by construction.
   it is measured (inventory) but not A/B-able here.
 - Overlapping speech remains the cascade's known limitation; this harness
   measures attribution deltas, it does not fix overlap.
-- Speaker-error matching uses reference row windows derived from the
-  diarization turns (whisper-independent since the v2 revision); if Andre's
-  added rows shift a boundary, the >50% overlap match may mis-bin a span.
-  Counted matches are reported (speaker_matches) so the denominator is
-  always visible.
+- Cue→row binning (all localized classes) uses plurality time-overlap
+  against the whisper-independent reference rows, with the ROW duration
+  as denominator for the deletion class. Two mis-bins found in review
+  (2026-09-13) and fixed before any scored run: (a) the old
+  >50%-of-the-CUE rule let a cue straddling a speech/silence boundary
+  land in both the insertion and deletion classes; (b) a cue longer than
+  the row it fully contained scored as a partial overlap. Exact ties:
+  silence must STRICTLY exceed speech for the insertion class; deletion
+  requires coverage < 50% of the row's own duration (>= 50% = covered).
+  If Andre's added rows shift a boundary, a straddling cue can still
+  split its overlap across classes; counted inputs are reported
+  (speaker_matches, ins/del localized rows) so the denominators stay
+  visible.
 - Runtime measured on one machine (this Mac, Metal); relative ordering is
   the claim, not absolute ms.

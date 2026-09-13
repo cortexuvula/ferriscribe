@@ -990,7 +990,11 @@ fn emit_reference(rows: &[ReviewRow], dur_s: f64, el_cues: &[(f64, f64, String)]
     out.push_str("# Fill by ear, then change ONLY the last ??? of each row to OK:\n");
     out.push_str("#   OK + EMPTY text = you confirm this interval is SILENCE.\n");
     out.push_str("#   OK + text       = the true words spoken in this interval.\n");
-    out.push_str("#   ??? (or a deleted row) = not reviewed — scoring refuses until 100% OK.\n");
+    out.push_str("#   UNINTEL + EMPTY text = you LISTENED but could not resolve it by ear.\n");
+    out.push_str("#     (Reviewed — does not block scoring; leave ??? only if never reached.)\n");
+    out.push_str("#   ??? (or a deleted row) = not reviewed — scoring refuses until every\n");
+    out.push_str("#     row is OK or UNINTEL. A row you tried and could not resolve is\n");
+    out.push_str("#     UNINTEL, never ??? — the two are counted differently.\n");
     out.push_str(
         "# Speaker: S1/S2 = who spoke it ('-' = leave unassigned; suggestion prefilled).\n",
     );
@@ -1096,6 +1100,11 @@ enum RowStatus {
     /// `???` (or the row is missing entirely) — not reviewed. Scoring
     /// REFUSES while any row is in this state.
     NotReviewed,
+    /// `UNINTEL` — the reviewer reached this row and could not resolve it
+    /// by ear. Reviewed (does not block scoring) but contributes no
+    /// reference tokens; distinct from ??? so "tried and failed" can never
+    /// be confused with "never reached".
+    Unintelligible,
     /// `OK` with empty text: the human confirms the interval is SILENCE.
     /// Nonempty ASR output mapped here is an INSERTION.
     ConfirmedSilence,
@@ -1197,8 +1206,16 @@ fn parse_reference(path: &Path) -> Vec<RefRow> {
             other => panic!("row {id}: speaker must be S1, S2, or '-', got {other:?}"),
         };
         let text = parts[4].trim().to_string();
-        let status = match parts[5].trim() {
+        let has_text = !text.is_empty();
+        // Status-token tolerance is EXPLICIT: plain ASCII spaces around the
+        // token (a plain-text-editor save) are accepted; anything else is
+        // junk and refused — a blanket .trim() here silently accepted
+        // invisible Unicode whitespace (e.g. NBSP), undocumented.
+        let status_field = parts[5];
+        let status_tok = status_field.trim_matches(' ');
+        let status = match status_tok {
             "???" => RowStatus::NotReviewed,
+            "UNINTEL" => RowStatus::Unintelligible,
             "OK" => {
                 if text.is_empty() {
                     RowStatus::ConfirmedSilence
@@ -1206,8 +1223,19 @@ fn parse_reference(path: &Path) -> Vec<RefRow> {
                     RowStatus::Speech(text)
                 }
             }
-            other => panic!("row {id}: status must be ??? or OK, got {other:?}"),
+            other => panic!(
+                "row {id}: status must be ???, OK, or UNINTEL, got {other:?} — trailing \
+                 junk after the status token is refused; the last field must be \
+                 exactly one token"
+            ),
         };
+        if matches!(status, RowStatus::Unintelligible) && has_text {
+            panic!(
+                "row {id}: UNINTEL rows must have an EMPTY text field — text next to \
+                 UNINTEL would be silently dropped; either transcribe it (OK) or \
+                 clear the text (UNINTEL)"
+            );
+        }
         out.push(RefRow {
             id,
             start,
@@ -1226,6 +1254,20 @@ fn load_reviewed(ref_dir: &Path, clip_id: &str) -> ReviewedRef {
     let filled_path = ref_dir.join(format!("{clip_id}.filled.txt"));
     let template_path = ref_dir.join(format!("{clip_id}.review.txt"));
     let filled = parse_reference(&filled_path);
+
+    // Duplicate row IDs would silently double-count that row's words in
+    // ref_tokens (shifting the WER denominator) — refuse instead.
+    let mut seen_ids = std::collections::BTreeSet::new();
+    for r in &filled {
+        assert!(
+            seen_ids.insert(r.id.clone()),
+            "duplicate row id {:?} in {} — a duplicated row silently double-counts \
+             its words and shifts the WER denominator; each row ID must appear \
+             exactly once",
+            r.id,
+            filled_path.display()
+        );
+    }
 
     // Expected row IDs from the emitted review file; every filled ID must be
     // either one of these or a human-added row (numeric ID >= HUMAN_ROW_MIN).
@@ -1295,6 +1337,120 @@ fn load_reviewed(ref_dir: &Path, clip_id: &str) -> ReviewedRef {
         not_reviewed,
         first_not_reviewed,
     }
+}
+
+/// Overlap of [cs,ce) with [rs,re) in seconds (0 when disjoint).
+fn overlap_s(cs: f64, ce: f64, rs: f64, re: f64) -> f64 {
+    (ce.min(re) - cs.max(rs)).max(0.0)
+}
+
+/// Assign a cue to the reference row it overlaps MOST (plurality, not the
+/// old >50%-of-the-CUE rule). Exact ties go to the earliest row in `rows`;
+/// callers pass time-sorted rows so this is deterministic. Rows are a
+/// partition of [0,dur], so every in-range cue lands somewhere.
+fn assign_cue_to_row<'a>(cs: f64, ce: f64, rows: &'a [RefRow]) -> Option<&'a RefRow> {
+    let mut best: Option<(&'a RefRow, f64)> = None;
+    for r in rows {
+        let ov = overlap_s(cs, ce, r.start, r.end);
+        if ov <= 0.0 {
+            continue;
+        }
+        // strict > : an exact tie keeps the EARLIER row (rows are
+        // time-sorted, so this is deterministic).
+        let better = best.map(|(_, b)| ov > b).unwrap_or(true);
+        if better {
+            best = Some((r, ov));
+        }
+    }
+    best.map(|(r, _)| r)
+}
+
+/// INSERTION class: a nonempty cue whose overlap with CONFIRMED-SILENCE
+/// rows STRICTLY exceeds its overlap with Speech rows. An exact tie
+/// resolves toward speech (not an insertion) — hallucination is the
+/// graver claim, so it needs the strict majority. UNINTEL/NotReviewed
+/// overlap counts toward neither side.
+fn cue_is_insertion_class(cs: f64, ce: f64, rows: &[RefRow]) -> bool {
+    let mut sil = 0.0f64;
+    let mut sp = 0.0f64;
+    for r in rows {
+        let ov = overlap_s(cs, ce, r.start, r.end);
+        if ov <= 0.0 {
+            continue;
+        }
+        match r.status {
+            RowStatus::ConfirmedSilence => sil += ov,
+            RowStatus::Speech(_) => sp += ov,
+            RowStatus::Unintelligible | RowStatus::NotReviewed => {}
+        }
+    }
+    sil > sp
+}
+
+/// Fraction of the ROW's duration covered by any cue (row-denominator —
+/// a long cue fully covering a short row is 1.0 coverage, which the old
+/// cue-denominator rule wrongly called a partial overlap).
+fn row_covered_fraction(row: &RefRow, cues: &[(f64, f64)]) -> f64 {
+    let dur = row.end - row.start;
+    if dur <= 0.0 {
+        return 0.0;
+    }
+    let mut cover = 0.0f64;
+    for &(cs, ce) in cues {
+        cover += overlap_s(cs, ce, row.start, row.end);
+    }
+    (cover / dur).min(1.0)
+}
+
+/// DELETION class: a Speech row covered by cue time strictly less than
+/// half its own duration (>= 50% counts as covered; the exact boundary
+/// is pinned by test).
+fn row_uncovered_is_deletion(row: &RefRow, cues: &[(f64, f64)]) -> bool {
+    row_covered_fraction(row, cues) < 0.5
+}
+
+/// Speaker errors under both attribution rules, using the same plurality
+/// cue→row assignment as the insertion/deletion classes. Cues whose
+/// plurality row is not a confirmed Speech row (silence = insertion class,
+/// UNINTEL = speaker unconfirmed) are excluded from BOTH numerator and
+/// denominator — the old rule counted hallucinations over silence as
+/// speaker errors.
+fn count_speaker_errors(
+    spans: &[Span],
+    seg_rule: &[Option<String>],
+    wordwin_rule: &[Option<String>],
+    rows: &[RefRow],
+) -> (usize, usize) {
+    let hyp_speaker_of = |sp: &Span, rule: &[Option<String>]| -> Option<usize> {
+        let idx = spans.iter().position(|s| s.id == sp.id)?;
+        rule.get(idx)?.as_ref().and_then(|l| {
+            l.strip_prefix("Speaker ")
+                .and_then(|n| n.parse::<usize>().ok())
+                .map(|n| n - 1)
+        })
+    };
+    let mut matches = 0usize;
+    let mut errors = 0usize;
+    for sp in spans {
+        let span_dur = sp.end - sp.start;
+        if span_dur <= 0.0 {
+            continue;
+        }
+        if let Some(r) = assign_cue_to_row(sp.start, sp.end, rows) {
+            if matches!(r.status, RowStatus::Speech(_)) {
+                matches += 1;
+                for rule in [seg_rule, wordwin_rule] {
+                    let hyp = hyp_speaker_of(sp, rule);
+                    match (hyp, r.speaker) {
+                        (Some(h), Some(rr)) if h == rr => {}
+                        (None, None) => {}
+                        _ => errors += 1,
+                    }
+                }
+            }
+        }
+    }
+    (matches, errors)
 }
 
 /// Word-level S/I/D via Levenshtein backtrace (reference -> hypothesis).
@@ -1469,30 +1625,27 @@ fn score(artifacts: &Path, samples_dir: &Path) {
         };
 
         // Per-row localized counts (diagnostics with explicit semantics):
-        // INSERTION class — nonempty hypothesis inside a confirmed-silence
-        // interval; DELETION class — reference speech row with no hyp cue.
-        let ins_on_confirmed_silence: usize = art
+        // INSERTION class — nonempty hypothesis whose plurality row is a
+        // confirmed-silence interval; DELETION class — reference speech
+        // row covered by cue time < 50% of its own duration. Both use the
+        // same plurality cue→row assignment (assign_cue_to_row); the old
+        // >50%-of-the-CUE rule mis-binned cues straddling a speech/silence
+        // boundary and cues longer than the row they fully contained.
+        let cue_ivs: Vec<(f64, f64)> = art
             .b_spans
             .iter()
-            .filter(|s| {
-                !s.text.trim().is_empty()
-                    && reference.rows.iter().any(|r| {
-                        r.status == RowStatus::ConfirmedSilence
-                            && (s.end.min(r.end) - s.start.max(r.start)).max(0.0)
-                                / (s.end - s.start)
-                                > 0.5
-                    })
-            })
+            .filter(|s| !s.text.trim().is_empty())
+            .map(|s| (s.start, s.end))
+            .collect();
+        let ins_on_confirmed_silence: usize = cue_ivs
+            .iter()
+            .filter(|&&(cs, ce)| cue_is_insertion_class(cs, ce, &reference.rows))
             .count();
         let del_in_speech_rows: usize = reference
             .rows
             .iter()
-            .filter(|r| {
-                matches!(r.status, RowStatus::Speech(_))
-                    && !art.b_spans.iter().any(|s| {
-                        (s.end.min(r.end) - s.start.max(r.start)).max(0.0) / (s.end - s.start) > 0.5
-                    })
-            })
+            .filter(|r| matches!(r.status, RowStatus::Speech(_)))
+            .filter(|r| row_uncovered_is_deletion(r, &cue_ivs))
             .count();
 
         // Segmentation quality, SEPARATE row: per speech row, |mapped hyp
@@ -1529,45 +1682,16 @@ fn score(artifacts: &Path, samples_dir: &Path) {
             }
         };
 
-        // Speaker errors: each hyp cue matched to the reference row covering
-        // >50% of it; compare speaker labels under BOTH attribution rules.
-        let hyp_speaker_of = |sp: &Span, rule: &[Option<String>]| -> Option<usize> {
-            let idx = art.b_spans.iter().position(|s| s.id == sp.id)?;
-            rule.get(idx)?.as_ref().and_then(|l| {
-                l.strip_prefix("Speaker ")
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .map(|n| n - 1)
-            })
-        };
-        let mut speaker_matches = 0usize;
-        let mut speaker_errors = 0usize;
-        for sp in &art.b_spans {
-            let span_dur = sp.end - sp.start;
-            if span_dur <= 0.0 {
-                continue;
-            }
-            let best: Option<(&RefRow, f64)> = reference
-                .rows
-                .iter()
-                .map(|r| {
-                    let ov = (sp.end.min(r.end) - sp.start.max(r.start)).max(0.0);
-                    (r, ov)
-                })
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            if let Some((r, ov)) = best {
-                if ov / span_dur > 0.5 {
-                    speaker_matches += 1;
-                    for rule in [&art.speakers_segment_rule, &art.speakers_wordwin_rule] {
-                        let hyp = hyp_speaker_of(sp, rule);
-                        match (hyp, r.speaker) {
-                            (Some(h), Some(rr)) if h == rr => {}
-                            (None, None) => {}
-                            _ => speaker_errors += 1,
-                        }
-                    }
-                }
-            }
-        }
+        // Speaker errors: same plurality cue→row assignment as the
+        // insertion/deletion classes; cues landing on silence (insertion
+        // class) or UNINTEL rows are excluded from both numerator and
+        // denominator. Compare speaker labels under BOTH attribution rules.
+        let (speaker_matches, speaker_errors) = count_speaker_errors(
+            &art.b_spans,
+            &art.speakers_segment_rule,
+            &art.speakers_wordwin_rule,
+            &reference.rows,
+        );
 
         // EL secondary disagreement (whole clip, stage-B text vs EL text).
         let (el_sub, el_ins, el_del) = sid(&el_tokens, &hyp_tokens);
@@ -1783,6 +1907,325 @@ mod tests {
         assert_eq!(rows[1].status, RowStatus::ConfirmedSilence);
     }
 
+    // ── unintelligible token: reviewed-but-unresolvable ≠ not-reviewed ──
+
+    #[test]
+    fn unintelligible_token_is_distinct_from_not_reviewed() {
+        // Three states must never collapse into two: ??? = never reached,
+        // OK = resolved, UNINTEL = reached but unresolvable by ear.
+        let raw = "# format: review-v2\n\
+            row-01\t0.00\t4.00\tS1\ttrue words\tOK\n\
+            row-02\t4.00\t6.00\tS2\t\tUNINTEL\n\
+            row-03\t6.00\t8.00\t-\t\t???\n\
+            row-04\t8.00\t9.00\t-\t\tUNINTEL  \r\n";
+        let p = write_tmp("unintel.txt", raw);
+        let rows = parse_reference(&p);
+        assert_eq!(rows[0].status, RowStatus::Speech("true words".into()));
+        assert_eq!(rows[1].status, RowStatus::Unintelligible);
+        assert_eq!(rows[2].status, RowStatus::NotReviewed);
+        // Trailing spaces + CR after the token still parse (editor save).
+        assert_eq!(rows[3].status, RowStatus::Unintelligible);
+    }
+
+    #[test]
+    fn unintelligible_rows_do_not_block_scoring_and_yield_no_tokens() {
+        // The reason UNINTEL exists: a row the reviewer TRIED and could not
+        // resolve must be distinguishable from one he never reached — and
+        // must not wedge the whole reference unreviewable.
+        let dir = std::env::temp_dir().join("fs_local_eval_tests/unintel");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("clip-03.review.txt"),
+            v2_ref(&[
+                ("row-01", "0.00", "4.00", "S1", "", "???"),
+                ("row-02", "4.00", "8.00", "S2", "", "???"),
+            ]),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("clip-03.filled.txt"),
+            v2_ref(&[
+                ("row-01", "0.00", "4.00", "S1", "true words here", "OK"),
+                ("row-02", "4.00", "8.00", "S2", "", "UNINTEL"),
+            ]),
+        )
+        .unwrap();
+        let r = load_reviewed(&dir, "clip-03");
+        assert_eq!(r.not_reviewed, 0, "UNINTEL is reviewed; nothing blocks");
+        assert_eq!(r.ref_tokens, tokens("true words here"));
+    }
+
+    #[test]
+    fn template_header_documents_unintelligible_token() {
+        // Andre fills against the header text alone: the token must be
+        // explained where he will read it.
+        let rows = vec![ReviewRow {
+            id: "row-01".into(),
+            start: 0.0,
+            end: 4.0,
+            speaker: Some(0),
+            speech: true,
+        }];
+        let text = emit_reference(&rows, 4.0, &[]);
+        assert!(text.contains("UNINTEL"), "header must explain the token");
+    }
+
+    // ── cue→row binning: proportional overlap, exact boundaries ──
+    // (Codie review 2026-09-13: the >50%-of-cue rule used everywhere
+    // mis-bins cues that straddle a speech/silence boundary AND cues
+    // longer than the row they fully contain — the ratio's denominator
+    // was the CUE, so a 2x-long cue fully covering a short speech row
+    // counted as BOTH an insertion and a deletion.)
+
+    #[test]
+    fn insertion_vs_deletion_classes_use_row_coverage_not_cue_fraction() {
+        // Speech row [10,11) fully inside a mostly-silence cue [8,16):
+        // silence overlap 7s vs speech 1s → INSERTION; but the row is
+        // 100% covered → NOT a deletion. The old cue-denominator rule
+        // binned it as both.
+        let rows = vec![
+            RefRow {
+                id: "row-01".into(),
+                start: 8.0,
+                end: 10.0,
+                speaker: None,
+                status: RowStatus::ConfirmedSilence,
+            },
+            RefRow {
+                id: "row-02".into(),
+                start: 10.0,
+                end: 11.0,
+                speaker: Some(0),
+                status: RowStatus::Speech("hi".into()),
+            },
+            RefRow {
+                id: "row-03".into(),
+                start: 11.0,
+                end: 16.0,
+                speaker: None,
+                status: RowStatus::ConfirmedSilence,
+            },
+        ];
+        let cue = (8.0f64, 16.0f64);
+        assert!(
+            cue_is_insertion_class(cue.0, cue.1, &rows),
+            "7s silence vs 1s speech"
+        );
+        assert_eq!(
+            row_covered_fraction(&rows[1], &[cue]),
+            1.0,
+            "row fully covered"
+        );
+        assert!(!row_uncovered_is_deletion(&rows[1], &[cue]));
+    }
+
+    #[test]
+    fn exact_fifty_fifty_straddle_resolves_toward_speech() {
+        // Cue exactly half over silence, half over speech: NOT an
+        // insertion (exact tie resolves toward speech), and the speech
+        // row is fully covered on its half.
+        let rows = vec![
+            RefRow {
+                id: "row-01".into(),
+                start: 0.0,
+                end: 5.0,
+                speaker: None,
+                status: RowStatus::ConfirmedSilence,
+            },
+            RefRow {
+                id: "row-02".into(),
+                start: 5.0,
+                end: 10.0,
+                speaker: Some(1),
+                status: RowStatus::Speech("words".into()),
+            },
+        ];
+        let cue = (0.0f64, 10.0f64);
+        assert!(
+            !cue_is_insertion_class(cue.0, cue.1, &rows),
+            "5s vs 5s tie → not insertion"
+        );
+        assert_eq!(row_covered_fraction(&rows[1], &[cue]), 1.0);
+    }
+
+    #[test]
+    fn cue_straddling_with_majority_silence_is_insertion_only() {
+        // 4s over silence vs 2s over speech → insertion; the speech row
+        // is still 100% covered on its own interval → NOT a deletion.
+        let rows = vec![
+            RefRow {
+                id: "row-01".into(),
+                start: 0.0,
+                end: 8.0,
+                speaker: None,
+                status: RowStatus::ConfirmedSilence,
+            },
+            RefRow {
+                id: "row-02".into(),
+                start: 8.0,
+                end: 10.0,
+                speaker: Some(0),
+                status: RowStatus::Speech("ok".into()),
+            },
+        ];
+        let cue = (4.0f64, 10.0f64);
+        assert!(cue_is_insertion_class(cue.0, cue.1, &rows));
+        assert!(!row_uncovered_is_deletion(&rows[1], &[cue]));
+    }
+
+    #[test]
+    fn deletion_threshold_is_half_the_row_duration() {
+        // Speech row [0,4): 2.0s of cue time = exactly 50% → covered;
+        // 1.99s → below half → deletion.
+        let row = RefRow {
+            id: "row-01".into(),
+            start: 0.0,
+            end: 4.0,
+            speaker: Some(0),
+            status: RowStatus::Speech("x".into()),
+        };
+        assert!(
+            !row_uncovered_is_deletion(&row, &[(0.0, 2.0)]),
+            "exactly 50% = covered"
+        );
+        assert!(
+            row_uncovered_is_deletion(&row, &[(0.0, 1.99)]),
+            "49.75% = deletion"
+        );
+    }
+
+    #[test]
+    fn plurality_assignment_breaks_ties_toward_the_earlier_row() {
+        // Rows partition time; a cue split across several rows belongs to
+        // the one it overlaps most; an exact tie goes to the EARLIEST row
+        // (rows are time-sorted, so this is deterministic).
+        let rows = vec![
+            RefRow {
+                id: "row-01".into(),
+                start: 0.0,
+                end: 2.0,
+                speaker: Some(0),
+                status: RowStatus::Speech("a".into()),
+            },
+            RefRow {
+                id: "row-02".into(),
+                start: 2.0,
+                end: 4.0,
+                speaker: Some(1),
+                status: RowStatus::Speech("b".into()),
+            },
+            RefRow {
+                id: "row-03".into(),
+                start: 4.0,
+                end: 8.0,
+                speaker: None,
+                status: RowStatus::ConfirmedSilence,
+            },
+        ];
+        // Plurality row by overlap; an EXACT tie goes to the earliest row
+        // (rows are time-sorted, so this is deterministic).
+        assert_eq!(assign_cue_to_row(0.0, 4.0, &rows).unwrap().id, "row-01"); // 2s vs 2s tie → row-01
+        assert_eq!(assign_cue_to_row(1.0, 7.0, &rows).unwrap().id, "row-03"); // 1s/2s/3s
+        assert_eq!(assign_cue_to_row(0.0, 10.0, &rows).unwrap().id, "row-03"); // 2s/2s/4s
+    }
+
+    #[test]
+    fn hallucination_over_silence_is_not_a_speaker_error() {
+        // A cue whose maximum-overlap row is CONFIRMED SILENCE is the
+        // insertion class, not a speaker error — counting it as both was
+        // the mis-bin. Same for UNINTEL rows (speaker there is an
+        // unconfirmed suggestion).
+        let rows = vec![
+            RefRow {
+                id: "row-01".into(),
+                start: 0.0,
+                end: 6.0,
+                speaker: None,
+                status: RowStatus::ConfirmedSilence,
+            },
+            RefRow {
+                id: "row-02".into(),
+                start: 6.0,
+                end: 12.0,
+                speaker: Some(0),
+                status: RowStatus::Speech("real words".into()),
+            },
+        ];
+        let spans = vec![
+            Span {
+                id: "span-A".into(),
+                start: 0.5,
+                end: 5.5,
+                text: "HALLUCINATION".into(),
+                words: vec![],
+            },
+            Span {
+                id: "span-B".into(),
+                start: 6.5,
+                end: 11.5,
+                text: "real words".into(),
+                words: vec![],
+            },
+        ];
+        let rule = vec![Some("Speaker 1".into()), Some("Speaker 1".into())];
+        let (matches, errors) = count_speaker_errors(&spans, &rule, &rule, &rows);
+        assert_eq!(matches, 1, "only the speech-row cue is in the denominator");
+        assert_eq!(errors, 0, "cue over silence must not be a speaker error");
+    }
+
+    // ── duplicate row IDs and status-token junk (Codie probes 2+3) ──
+
+    #[test]
+    fn duplicate_row_ids_are_refused_not_scored() {
+        // A duplicated ID would silently double-count its words and shift
+        // the WER denominator; load_reviewed must refuse the file.
+        let dir = std::env::temp_dir().join("fs_local_eval_tests/dupes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("clip-03.review.txt"),
+            v2_ref(&[("row-01", "0.00", "4.00", "S1", "", "???")]),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("clip-03.filled.txt"),
+            v2_ref(&[
+                ("row-01", "0.00", "4.00", "S1", "some words", "OK"),
+                ("row-01", "0.00", "4.00", "S1", "some words", "OK"),
+            ]),
+        )
+        .unwrap();
+        let dir = dir.clone();
+        let result = std::panic::catch_unwind(move || load_reviewed(&dir, "clip-03"));
+        assert!(result.is_err(), "duplicate row IDs must refuse, not score");
+    }
+
+    #[test]
+    fn status_trailing_junk_is_rejected_not_trimmed() {
+        // Documented tolerance: ASCII spaces around the token (editor
+        // save) are fine. Anything else — including INVISIBLE non-ASCII
+        // whitespace like NBSP, which today's blanket .trim() silently
+        // accepts — is junk and must be refused with an actionable error.
+        let bad = ["OKX", "OK\u{a0}", "\u{a0}OK", "O K", "OK;", "UNINTEL?"];
+        for (i, status) in bad.iter().enumerate() {
+            let raw = format!(
+                "# format: review-v2\nrow-01\t0.00\t4.00\tS1\twords\t{}\n",
+                status
+            );
+            let p = write_tmp(&format!("junk{i}.txt"), &raw);
+            let result = std::panic::catch_unwind(move || parse_reference(&p));
+            assert!(result.is_err(), "{status:?} must be refused");
+        }
+        // Documented acceptance: surrounding ASCII spaces survive an
+        // editor save.
+        let raw = "# format: review-v2\nrow-01\t0.00\t4.00\tS1\twords\t OK \nrow-02\t4.00\t6.00\tS1\t\tUNINTEL  \n";
+        let p = write_tmp("junk_ok.txt", raw);
+        let rows = parse_reference(&p);
+        assert_eq!(rows[0].status, RowStatus::Speech("words".into()));
+        assert_eq!(rows[1].status, RowStatus::Unintelligible);
+    }
+
     #[test]
     fn legacy_v1_file_is_refused_not_misparsed() {
         // v1 shape (two lines per span, || separators). MUST hard-refuse:
@@ -1826,13 +2269,6 @@ mod tests {
     fn confirmed_silence_row_with_asr_output_is_insertion_class() {
         // Hypothesis cue sits inside a confirmed-silence interval: the
         // localized insertion count must see it.
-        let hyp = vec![Span {
-            id: "span-A".into(),
-            start: 0.5,
-            end: 3.5,
-            text: "HALLUCINATED WORDS".into(),
-            words: vec![],
-        }];
         let rows = vec![RefRow {
             id: "row-01".into(),
             start: 0.0,
@@ -1840,19 +2276,8 @@ mod tests {
             speaker: None,
             status: RowStatus::ConfirmedSilence,
         }];
-        let n = hyp
-            .iter()
-            .filter(|s| {
-                !s.text.trim().is_empty()
-                    && rows.iter().any(|r| {
-                        r.status == RowStatus::ConfirmedSilence
-                            && (s.end.min(r.end) - s.start.max(r.start)).max(0.0)
-                                / (s.end - s.start)
-                                > 0.5
-                    })
-            })
-            .count();
-        assert_eq!(n, 1, "ASR output on a confirmed-silence row = insertion");
+        let n = cue_is_insertion_class(0.5, 3.5, &rows);
+        assert!(n, "ASR output on a confirmed-silence row = insertion");
     }
 
     #[test]
@@ -1860,24 +2285,14 @@ mod tests {
         // Human transcribed speech; the decode emitted nothing there: the
         // localized deletion count must see it (invisible to a
         // decode-keyed reference).
-        let hyp: Vec<Span> = vec![];
-        let rows = vec![RefRow {
+        let row = RefRow {
             id: "row-01".into(),
             start: 10.0,
             end: 14.0,
             speaker: Some(0),
             status: RowStatus::Speech("DROPPED UTTERANCE WORDS".into()),
-        }];
-        let n = rows
-            .iter()
-            .filter(|r| {
-                matches!(r.status, RowStatus::Speech(_))
-                    && !hyp.iter().any(|s| {
-                        (s.end.min(r.end) - s.start.max(r.start)).max(0.0) / (s.end - s.start) > 0.5
-                    })
-            })
-            .count();
-        assert_eq!(n, 1, "speech row with no cue = deletion");
+        };
+        assert!(row_uncovered_is_deletion(&row, &[]), "no cue = deletion");
     }
 
     // ── segmentation invariance ──
