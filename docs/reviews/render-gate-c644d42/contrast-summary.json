@@ -1,0 +1,116 @@
+[
+  {
+    "theme": "light",
+    "mode": "normal",
+    "railPixel": [
+      224,
+      49,
+      49
+    ],
+    "bannerPixel": [
+      248,
+      249,
+      250
+    ],
+    "headingContrast": 14.634395071362922,
+    "reasonContrast": 7.756631072165828,
+    "railContrast": 4.281413321510873,
+    "unassignedLabelContrast": 8.17635452073249,
+    "unassignedRailContrast": 1.3021563367987066
+  },
+  {
+    "theme": "light",
+    "mode": "grayscale",
+    "railPixel": [
+      86,
+      86,
+      86
+    ],
+    "bannerPixel": [
+      249,
+      249,
+      249
+    ],
+    "headingContrast": 14.645139130434279,
+    "reasonContrast": 7.768498791463129,
+    "railContrast": 6.9405780083533966,
+    "unassignedLabelContrast": 8.188914540166305,
+    "unassignedRailContrast": 1.3023080778120426
+  },
+  {
+    "theme": "light",
+    "mode": "forced",
+    "railPixel": [
+      0,
+      0,
+      0
+    ],
+    "bannerPixel": [
+      255,
+      255,
+      255
+    ],
+    "headingContrast": 21.0,
+    "reasonContrast": 21.0,
+    "railContrast": 21.0,
+    "unassignedLabelContrast": 21.0,
+    "unassignedRailContrast": 21.0
+  },
+  {
+    "theme": "dark",
+    "mode": "normal",
+    "railPixel": [
+      255,
+      107,
+      107
+    ],
+    "bannerPixel": [
+      37,
+      38,
+      43
+    ],
+    "headingContrast": 8.47750827497022,
+    "reasonContrast": 4.844588239832686,
+    "railContrast": 5.441062515340214,
+    "unassignedLabelContrast": 5.525320437653795,
+    "unassignedRailContrast": 1.510279993539588
+  },
+  {
+    "theme": "dark",
+    "mode": "grayscale",
+    "railPixel": [
+      138,
+      138,
+      138
+    ],
+    "bannerPixel": [
+      38,
+      38,
+      38
+    ],
+    "headingContrast": 8.480208611636519,
+    "reasonContrast": 4.8457403854959695,
+    "railContrast": 4.402209538976052,
+    "unassignedLabelContrast": 5.5255656925081444,
+    "unassignedRailContrast": 1.5095063442499521
+  },
+  {
+    "theme": "dark",
+    "mode": "forced",
+    "railPixel": [
+      255,
+      255,
+      255
+    ],
+    "bannerPixel": [
+      0,
+      0,
+      0
+    ],
+    "headingContrast": 21.0,
+    "reasonContrast": 21.0,
+    "railContrast": 21.0,
+    "unassignedLabelContrast": 21.0,
+    "unassignedRailContrast": 21.0
+  }
+]
