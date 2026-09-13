@@ -790,37 +790,27 @@ mod tests {
         let id = Uuid::new_v4();
         let transcript = "patient says hello";
 
-        // The real keychain can sit on an access prompt the harness can't
-        // dismiss (which once hung the whole workspace gate) — run the
-        // keychain-touching persist under the guard and skip when it is
-        // unresponsive, same as the headless-CI no-keychain environment.
-        let dir = tmp.path().to_path_buf();
-        let Some(path) = crate::testutil::with_keychain_guard(move || {
-            persist_orphaned_transcript(&dir, &id, transcript).expect("persist")
-        }) else {
-            return;
-        };
+        // Keychain isolation: the mock provider (fixed synthetic key) makes
+        // the encrypt deterministic and keeps the test off the real OS
+        // keychain; the fixture dir is a tempdir, pairing the synthetic
+        // key with throwaway data.
+        let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xAAu8; 32]);
+        let path = persist_orphaned_transcript(tmp.path(), &id, transcript).expect("persist");
 
         assert!(path.starts_with(tmp.path().join("orphaned_transcripts")));
         let fname = path.file_name().unwrap().to_string_lossy().into_owned();
-        // The file is either encrypted (.enc) or plaintext (.txt fallback
-        // when the keychain is unavailable in this environment).
-        if let Some(stem) = fname.strip_suffix(".enc") {
-            assert_eq!(stem, id.to_string());
-            // Verify it's actually encrypted (magic prefix) and decrypts
-            // back to the original transcript.
-            let bytes = fs::read(&path).expect("read");
-            assert!(bytes.starts_with(medical_security::file_crypto::MAGIC));
-            let decrypted =
-                medical_security::file_crypto::decrypt_bytes(&bytes).expect("decryption roundtrip");
-            assert_eq!(String::from_utf8(decrypted).unwrap(), transcript);
-        } else if let Some(stem) = fname.strip_suffix(".txt") {
-            // Plaintext fallback (no keychain in this test env).
-            assert_eq!(stem, id.to_string());
-            assert_eq!(fs::read_to_string(&path).expect("read"), transcript);
-        } else {
-            panic!("unexpected filename: {fname}");
-        }
+        // With the mock provider installed encryption always succeeds, so
+        // the artifact is the .enc form — the plaintext .txt fallback is a
+        // production-only degradation path (no keychain available).
+        let stem = fname
+            .strip_suffix(".enc")
+            .unwrap_or_else(|| panic!("expected encrypted .enc artifact, got: {fname}"));
+        assert_eq!(stem, id.to_string());
+        let bytes = fs::read(&path).expect("read");
+        assert!(bytes.starts_with(medical_security::file_crypto::MAGIC));
+        let decrypted =
+            medical_security::file_crypto::decrypt_bytes(&bytes).expect("decryption roundtrip");
+        assert_eq!(String::from_utf8(decrypted).unwrap(), transcript);
     }
 
     #[test]
@@ -832,14 +822,8 @@ mod tests {
         // Subdir doesn't exist yet
         assert!(!tmp.path().join("orphaned_transcripts").exists());
 
-        // Same keychain guard as the roundtrip test above — the persist
-        // call encrypts, and a blocked keychain must skip, not hang.
-        let dir = tmp.path().to_path_buf();
-        let Some(()) = crate::testutil::with_keychain_guard(move || {
-            persist_orphaned_transcript(&dir, &id, "x").expect("persist");
-        }) else {
-            return;
-        };
+        let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xABu8; 32]);
+        persist_orphaned_transcript(tmp.path(), &id, "x").expect("persist");
 
         assert!(tmp.path().join("orphaned_transcripts").is_dir());
     }

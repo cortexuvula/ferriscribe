@@ -583,20 +583,16 @@ fn served_providers(ports: &PairPorts) -> Vec<&'static str> {
 
 /// Write the sharing bearer to the OS keychain slot that
 /// `state::load_sharing_bearer` reads at startup and re-init.
-#[cfg(not(test))]
+///
+/// Routed through the security crate's string-secret provider seam: in
+/// tests the write lands in the installed mock (or fails fast via the
+/// sentinel if a test forgot one), never in the developer's real keychain.
 fn store_sharing_bearer(token: &str) -> AppResult<()> {
-    keyring::Entry::new("rustMedicalAssistant", "sharing-bearer")
-        .map_err(|e| AppError::Other(format!("keychain open: {e}")))?
-        .set_password(token)
-        .map_err(|e| AppError::Other(format!("keychain write: {e}")))
-}
-
-/// Test double: never touches the developer's real keychain. The token's
-/// effect is asserted through the per-service `state.keys` mirror instead
-/// (same KeyStorage abstraction the production flow writes).
-#[cfg(test)]
-fn store_sharing_bearer(_token: &str) -> AppResult<()> {
-    Ok(())
+    medical_security::keychain::set_string_secret(
+        medical_security::keychain::KEYCHAIN_SHARING_BEARER_ACCOUNT,
+        token,
+    )
+    .map_err(|e| AppError::Other(format!("keychain write: {e}")))
 }
 
 /// The advertised proxy port for a provider id, or `None` when the server
@@ -684,10 +680,25 @@ pub async fn paired_endpoint() -> AppResult<Option<PairedConnection>> {
 /// the pair flow populated (Phase 3).
 #[tauri::command]
 pub async fn unpair(state: State<'_, AppState>) -> AppResult<()> {
-    // Remove the sharing-bearer keychain entry (ignore NoEntry).
-    if let Ok(entry) = keyring::Entry::new("rustMedicalAssistant", "sharing-bearer") {
-        let _ = entry.delete_credential();
-    }
+    unpair_inner(&state).await
+}
+
+/// Testable core of [`unpair`]: takes `&AppState` directly (same shape as
+/// `pair_with_server_inner`) so command tests can drive the full unpair
+/// flow — including the keychain delete, which routes through the
+/// string-secret provider seam and lands in the installed mock, never
+/// the real OS keychain.
+pub(crate) async fn unpair_inner(state: &AppState) -> AppResult<()> {
+    // Remove the sharing-bearer keychain entry. Error semantics are
+    // unchanged from the previous implementation: every keychain error
+    // (including NoEntry) is ignored — unpair stays best-effort and
+    // idempotent at this step. Routed through the string-secret provider
+    // seam so a test can never mutate the real OS keychain: without an
+    // installed mock the sentinel PANICS before any OS call (a panic is
+    // not an Err, so ignoring errors does not weaken the isolation).
+    let _ = medical_security::keychain::delete_string_secret(
+        medical_security::keychain::KEYCHAIN_SHARING_BEARER_ACCOUNT,
+    );
 
     // Remove the metadata file (ignore not-found).
     let path = paired_connection_path()?;
@@ -1026,8 +1037,9 @@ mod command_tests {
     //! Full-flow coverage for `pair_with_server_inner` against a wiremock
     //! office server: handshake, keychain mirror, provider availability
     //! switch, model refresh, and AppConfig persistence. Machine-global
-    //! side effects are contained — the OS-keychain bearer write is a
-    //! #[cfg(test)] no-op (`store_sharing_bearer`), and the
+    //! side effects are contained — the OS-keychain bearer write routes
+    //! through the string-secret provider seam (mock installed per test
+    //! via `StringSecretMockGuard`), and the
     //! paired-connection file lands in the per-process test tempdir
     //! (`super::super::test_app_data_dir`).
     use super::super::{paired_connection_path, test_app_data_guard};
@@ -1136,6 +1148,7 @@ mod command_tests {
     #[tokio::test]
     async fn pair_switches_to_the_only_answering_provider_and_picks_its_model() {
         let _guard = test_app_data_guard().await;
+        let _strings = crate::testutil::StringSecretMockGuard::empty();
         let (_server, srv_port) = office_server(&["Ornith-1.5-35B", "Qwen-4B"]).await;
         let state = client_state(srv_port, "lmstudio", "llama3:8b").await;
 
@@ -1177,6 +1190,7 @@ mod command_tests {
     #[tokio::test]
     async fn pair_keeps_answering_provider_and_replaces_stale_saved_model() {
         let _guard = test_app_data_guard().await;
+        let _strings = crate::testutil::StringSecretMockGuard::empty();
         let (_server, srv_port) = office_server(&["Ornith-1.5-35B", "Qwen-4B"]).await;
         // Saved model is the old placeholder id — not in the server's list.
         let state = client_state(srv_port, "omlx", "default").await;
@@ -1205,6 +1219,7 @@ mod command_tests {
         // Regression pin (2026-09-02): a REAL server model that happens to
         // share a name with the old placeholder ids must not be shadowed.
         let _guard = test_app_data_guard().await;
+        let _strings = crate::testutil::StringSecretMockGuard::empty();
         let (_server, srv_port) = office_server(&["default", "Ornith-1.5-35B"]).await;
         let state = client_state(srv_port, "omlx", "default").await;
 
@@ -1224,5 +1239,83 @@ mod command_tests {
             cfg.ai_model, "default",
             "an offered model is respected, even one named like the old placeholder"
         );
+    }
+
+    /// The bearer write lands in the installed string-secret mock, never
+    /// the real OS keychain — the pairing flow's keychain mutation is now
+    /// observable (and assertable) instead of a #[cfg(test)] no-op.
+    #[tokio::test]
+    async fn pair_stores_bearer_through_the_string_secret_mock() {
+        let _guard = test_app_data_guard().await;
+        let _strings = crate::testutil::StringSecretMockGuard::empty();
+        let (_server, srv_port) = office_server(&["Qwen-4B"]).await;
+        let state = client_state(srv_port, "omlx", "default").await;
+        pair_with_server_inner(
+            &state,
+            Some("127.0.0.1".into()),
+            None,
+            ports(srv_port, None, Some(srv_port)),
+            "123456".into(),
+            "Test Client".into(),
+        )
+        .await
+        .expect("pair succeeds");
+
+        assert_eq!(
+            crate::state::load_sharing_bearer(),
+            Some(FIXTURE_TOKEN.to_string()),
+            "bearer must round-trip through the string-secret mock, not the OS keychain"
+        );
+    }
+
+    /// Unpair deletes the bearer from the string-secret mock (never the
+    /// real keychain), removes the paired-connection file, and resets the
+    /// per-service slots. Idempotent second call.
+    #[tokio::test]
+    async fn unpair_deletes_bearer_via_mock_and_is_idempotent() {
+        let _guard = test_app_data_guard().await;
+        let (_server, srv_port) = office_server(&["Qwen-4B"]).await;
+        let state = client_state(srv_port, "omlx", "default").await;
+
+        let _strings = crate::testutil::StringSecretMockGuard::empty();
+        pair_with_server_inner(
+            &state,
+            Some("127.0.0.1".into()),
+            None,
+            ports(srv_port, None, Some(srv_port)),
+            "123456".into(),
+            "Test Client".into(),
+        )
+        .await
+        .expect("pair succeeds");
+        assert!(
+            paired_connection_path().expect("path").exists(),
+            "precondition: paired file exists"
+        );
+        assert_eq!(
+            crate::state::load_sharing_bearer(),
+            Some(FIXTURE_TOKEN.into())
+        );
+
+        unpair_inner(&state).await.expect("unpair succeeds");
+        assert_eq!(
+            crate::state::load_sharing_bearer(),
+            None,
+            "bearer must be deleted from the mock on unpair"
+        );
+        assert!(
+            !paired_connection_path().expect("path").exists(),
+            "paired-connection file must be removed"
+        );
+        assert_eq!(
+            state.keys.get_key("omlx_api_key").expect("key read"),
+            None,
+            "per-service slot must be cleared"
+        );
+
+        // Idempotent: unpairing an already-unpaired client succeeds.
+        unpair_inner(&state)
+            .await
+            .expect("second unpair is a no-op");
     }
 }

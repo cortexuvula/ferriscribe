@@ -424,13 +424,29 @@ pub struct AppState {
 /// Returns `None` if this machine has never paired with an office server or the
 /// file can't be read.
 pub fn load_paired_connection() -> Option<crate::commands::sharing::PairedConnection> {
+    // Test seam: under `cfg(test)` the sharing module's per-process
+    // tempdir replaces the real app-data dir (the same seam
+    // `commands::sharing::app_data_dir` uses), so tests never read the
+    // developer's real pairing metadata. Production path is unchanged.
+    #[cfg(test)]
+    if let Some(dir) = crate::commands::sharing::test_app_data_dir() {
+        return read_paired_connection_file(&dir.join("sharing-paired.json"));
+    }
     let path = dirs::data_dir()?
         .join("rust-medical-assistant")
         .join("sharing-paired.json");
+    read_paired_connection_file(&path)
+}
+
+/// Body of [`load_paired_connection`] against an explicit path, so the
+/// test seam and the production path share one implementation.
+fn read_paired_connection_file(
+    path: &std::path::Path,
+) -> Option<crate::commands::sharing::PairedConnection> {
     if !path.exists() {
         return None;
     }
-    let json = std::fs::read_to_string(&path).ok()?;
+    let json = std::fs::read_to_string(path).ok()?;
     match serde_json::from_str(&json) {
         Ok(conn) => Some(conn),
         Err(e) => {
@@ -463,10 +479,15 @@ pub fn load_server_config() -> Option<crate::commands::sharing::ServerConfig> {
 /// Load the bearer token stored in the OS keychain after pairing.
 /// Returns `None` if not paired or the keychain entry is absent.
 pub fn load_sharing_bearer() -> Option<String> {
-    keyring::Entry::new("rustMedicalAssistant", "sharing-bearer")
-        .ok()?
-        .get_password()
-        .ok()
+    // Routed through the security crate's provider seam (same routing as
+    // the DB key): tests install a string-secret mock, and a test-harness
+    // process with no provider fails fast via the sentinel instead of
+    // touching — or prompting — the real OS keychain.
+    medical_security::keychain::get_string_secret(
+        medical_security::keychain::KEYCHAIN_SHARING_BEARER_ACCOUNT,
+    )
+    .ok()
+    .flatten()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1089,5 +1110,72 @@ mod tests {
         let provider = handles.provider.expect("provider should be built");
         assert_eq!(provider.name(), "local");
         assert!(handles.remote.is_none(), "no remote handle for local mode");
+    }
+
+    /// The sharing-bearer read routes through the security crate's
+    /// string-secret provider seam: with a mock installed the token comes
+    /// from the mock, and after the mock clears the lenient read reports
+    /// "not paired" instead of touching the real OS keychain.
+    #[tokio::test]
+    async fn load_sharing_bearer_routes_through_the_provider_seam() {
+        // The string provider is process-global; this test must serialize
+        // against the sharing command tests that install their own mocks
+        // (same guard they hold), or a concurrent clear races a mid-flow
+        // pairing test's bearer write.
+        let _serial = crate::commands::sharing::test_app_data_guard().await;
+        {
+            let mut secrets = std::collections::HashMap::new();
+            secrets.insert(
+                medical_security::keychain::KEYCHAIN_SHARING_BEARER_ACCOUNT.to_string(),
+                "synthetic-bearer-fixture".to_string(), // fixture, never real
+            );
+            let _mock = crate::testutil::StringSecretMockGuard::with_secrets(secrets);
+            assert_eq!(
+                load_sharing_bearer(),
+                Some("synthetic-bearer-fixture".to_string())
+            );
+        }
+        // Guard dropped: lenient read → None ("not paired"), no OS prompt.
+        assert_eq!(
+            load_sharing_bearer(),
+            None,
+            "post-scope read must be a lenient None, never an OS keychain hit"
+        );
+    }
+
+    /// `load_paired_connection` honors the sharing module's test tempdir
+    /// seam: it reads `sharing-paired.json` from there (never the
+    /// developer's real app-data dir) while the file is present, and
+    /// reports unpaired once absent.
+    #[tokio::test]
+    async fn load_paired_connection_uses_the_test_data_dir_seam() {
+        let _guard = crate::commands::sharing::test_app_data_guard().await;
+        let dir = crate::commands::sharing::test_app_data_dir().expect("seam dir");
+        let path = dir.join("sharing-paired.json");
+
+        // Synthetic metadata only — endpoint hostnames/ports are fixtures.
+        let conn = crate::commands::sharing::PairedConnection {
+            lan: Some("127.0.0.1".into()),
+            tailscale: None,
+            ports: medical_sharing::qr::PairPorts {
+                ollama: 11500,
+                whisper: 8081,
+                pairing: 8090,
+                lmstudio: None,
+                omlx: None,
+                vocab: None,
+            },
+            label: "seam-test-server".into(),
+        };
+        std::fs::write(&path, serde_json::to_string(&conn).expect("serialize"))
+            .expect("write fixture");
+        let loaded = load_paired_connection().expect("paired while file present");
+        assert_eq!(loaded.label, "seam-test-server");
+
+        std::fs::remove_file(&path).expect("cleanup fixture");
+        assert!(
+            load_paired_connection().is_none(),
+            "absent file must read as unpaired"
+        );
     }
 }
