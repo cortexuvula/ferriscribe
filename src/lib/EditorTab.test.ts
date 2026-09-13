@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { render, screen, cleanup } from '@testing-library/svelte';
+import { fireEvent } from '@testing-library/dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Recording } from './types';
 
@@ -35,10 +36,14 @@ vi.mock('./icd', () => ({
   billingCodesLabel: () => 'ICD-9',
 }));
 
+// Current-settings state the presentation must IGNORE: mutated to simulate
+// installing models / enabling diarization after the fact.
 const mockSettings = {
   state: {
     icd_version: '9',
     sync_content: false,
+    diarization_enabled: false,
+    diarization_models_installed: false,
   },
 };
 vi.mock('./stores/settings.svelte', () => ({
@@ -70,6 +75,13 @@ const mockToasts = {
 };
 vi.mock('./stores/toasts.svelte', () => ({
   toasts: mockToasts,
+}));
+
+const mockSettingsNav = {
+  navigateTo: vi.fn(),
+};
+vi.mock('./stores/settingsNav.svelte', () => ({
+  settingsNav: mockSettingsNav,
 }));
 
 // ── Recordings store mock ──────────────────────────────────────────────────
@@ -158,6 +170,7 @@ describe('EditorTab — diarizationOutcome pass-through (Codie gate)', () => {
 
   const outcomes = [
     'off',
+    'skipped',
     'failed',
     'completed',
     'completed-with-unassigned',
@@ -326,5 +339,158 @@ describe('EditorTab — diarizationOutcome pass-through (Codie gate)', () => {
     expect(
       screen.getByText('Transcript produced with diarization disabled.'),
     ).toBeTruthy();
+  });
+
+  // ── Slice 2d: the 'skipped' outcome (requested but did not run) ─────────
+
+  it('skipped outcome renders the skipped banner, not the unknown message', async () => {
+    // The exact gap this slice closes: a persisted 'skipped' used to coerce
+    // to 'unknown' and render "Speaker-labelling status unavailable".
+    // It must render its own distinct status instead.
+    mockSelectedRecording = makeRecording({
+      transcript: 'Synthetic transcript whose labelling was skipped.',
+      metadata: {
+        diarization_outcome: 'skipped',
+        transcript_segments: [
+          { speaker: null, text: 'Synthetic segment without labels.', start: 0, end: 5 },
+        ],
+      },
+    });
+
+    const EditorTab = (await import('./pages/EditorTab.svelte')).default;
+    render(EditorTab, { tabId: 'transcript' as const });
+
+    // The skipped heading (verbatim contract wording).
+    expect(screen.getByText("Speaker labelling wasn't run")).toBeTruthy();
+    // Must NOT fall through to the unknown message (Slice 2a behavior).
+    expect(
+      screen.queryByText('Speaker-labelling status unavailable'),
+    ).toBeNull();
+    // Labelling never ran → no "Speaker unassigned" headings (that asserts
+    // an attribution attempt that never happened).
+    expect(screen.queryByText('Speaker unassigned')).toBeNull();
+    // The transcript text itself still renders.
+    expect(
+      screen.getByText('Synthetic transcript whose labelling was skipped.'),
+    ).toBeTruthy();
+  });
+
+  it('skipped reason line appears ONLY when the persisted reason code confirms it', async () => {
+    // With the bounded reason code 'models_unavailable' persisted by the
+    // backend (REASON_MODELS_UNAVAILABLE in transcription/inner.rs), the
+    // supporting line states the cause.
+    mockSelectedRecording = makeRecording({
+      transcript: 'Synthetic transcript, models were missing.',
+      metadata: {
+        diarization_outcome: 'skipped',
+        diarization_reason: 'models_unavailable',
+      },
+    });
+
+    const EditorTab = (await import('./pages/EditorTab.svelte')).default;
+    render(EditorTab, { tabId: 'transcript' as const });
+
+    expect(
+      screen.getByText("Required models weren't available for this transcription"),
+    ).toBeTruthy();
+  });
+
+  it('skipped with missing or unrecognised reason shows generic wording, never invents a cause', async () => {
+    // No diarization_reason key at all → generic wording, still the skipped
+    // heading. The view must not guess "models unavailable" from anything
+    // other than the persisted code.
+    mockSelectedRecording = makeRecording({
+      transcript: 'Synthetic transcript with no persisted reason.',
+      metadata: {
+        diarization_outcome: 'skipped',
+      },
+    });
+
+    const EditorTab = (await import('./pages/EditorTab.svelte')).default;
+    render(EditorTab, { tabId: 'transcript' as const });
+
+    expect(screen.getByText("Speaker labelling wasn't run")).toBeTruthy();
+    // Generic wording present, models wording absent.
+    expect(
+      screen.getByText('Speaker labelling was not run for this recording'),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("Required models weren't available for this transcription"),
+    ).toBeNull();
+
+    // Unrecognised reason code → same generic wording (no invented cause).
+    mockSelectedRecording = makeRecording({
+      transcript: 'Synthetic transcript with a bogus reason code.',
+      metadata: {
+        diarization_outcome: 'skipped',
+        diarization_reason: 'something_not_in_the_bounded_set',
+      },
+    });
+    cleanup();
+    render(EditorTab, { tabId: 'transcript' as const });
+    expect(
+      screen.getByText('Speaker labelling was not run for this recording'),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("Required models weren't available for this transcription"),
+    ).toBeNull();
+  });
+
+  it('skipped banner offers an affordance that opens Audio settings', async () => {
+    mockSelectedRecording = makeRecording({
+      transcript: 'Synthetic transcript for the affordance test.',
+      metadata: {
+        diarization_outcome: 'skipped',
+        diarization_reason: 'models_unavailable',
+      },
+    });
+
+    const EditorTab = (await import('./pages/EditorTab.svelte')).default;
+    render(EditorTab, { tabId: 'transcript' as const });
+
+    const button = screen.getByRole('button', { name: 'Open Audio settings' });
+    expect(button).toBeTruthy();
+    expect(mockSettingsNav.navigateTo).not.toHaveBeenCalled();
+    await fireEvent.click(button);
+    // The affordance navigates to the Audio pane via the shared settings
+    // nav store (App.svelte opens the dialog on any requestedSection).
+    expect(mockSettingsNav.navigateTo).toHaveBeenCalledWith('audio');
+    // No automatic retry: the affordance is the only offered action.
+    expect(mockSettingsNav.navigateTo).toHaveBeenCalledTimes(1);
+  });
+
+  it('persisted skipped outcome survives a settings/model change (historical-state pin)', async () => {
+    // The recording was transcribed when the models were unavailable —
+    // outcome 'skipped' persisted with it. The user has since "installed"
+    // the models and enabled diarization in current settings (mocked here
+    // as changed settings state). The saved transcript must STILL render
+    // skipped: presentation keys off persisted metadata only.
+    mockSettings.state.diarization_enabled = true;
+    mockSettings.state.diarization_models_installed = true;
+    try {
+      mockSelectedRecording = makeRecording({
+        transcript: 'Old synthetic transcript, models were missing back then.',
+        metadata: {
+          diarization_outcome: 'skipped',
+          diarization_reason: 'models_unavailable',
+        },
+      });
+
+      const EditorTab = (await import('./pages/EditorTab.svelte')).default;
+      render(EditorTab, { tabId: 'transcript' as const });
+
+      expect(screen.getByText("Speaker labelling wasn't run")).toBeTruthy();
+      expect(
+        screen.getByText("Required models weren't available for this transcription"),
+      ).toBeTruthy();
+      // Not relabelled, not presented as off/unknown/completed.
+      expect(screen.queryByText('Speaker unassigned')).toBeNull();
+      expect(
+        screen.queryByText('Speaker-labelling status unavailable'),
+      ).toBeNull();
+    } finally {
+      mockSettings.state.diarization_enabled = false;
+      mockSettings.state.diarization_models_installed = false;
+    }
   });
 });

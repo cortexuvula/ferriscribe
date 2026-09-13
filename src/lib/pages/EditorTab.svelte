@@ -18,6 +18,7 @@
   import { exportAudio } from '../api/export';
   import { fetchAudioFromServer } from '../api/contentSync';
   import { toasts } from '../stores/toasts.svelte';
+  import { settingsNav } from '../stores/settingsNav.svelte';
 
   const { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' | 'peer_discussion' } = $props();
 
@@ -84,23 +85,58 @@
 
   // Recording-level diarization outcome for TranscriptView.
   // TRANSPORT, not inference: read verbatim from recording metadata.
-  // The backend must persist diarization_outcome at transcription time;
-  // until then, absent metadata falls back to 'unknown' (NOT 'off' —
-  // we must not assert knowledge we don't have).
-  // Valid values: 'off' | 'failed' | 'completed' | 'completed-with-unassigned' | 'unknown'.
+  // The six-value contract (ui-consultant, signed off by Codie):
+  //   'off'                       = labelling not requested
+  //   'skipped'                   = requested but did not run (e.g. models unavailable)
+  //   'failed'                    = attempted and errored
+  //   'completed'                 = ran, all segments labelled
+  //   'completed-with-unassigned' = ran, some spans unattributed
+  //   'unknown'                   = frontend-only fallback, metadata absent
+  // Absent/unrecognised values fall back to 'unknown' — we must not assert
+  // knowledge we don't have (never 'off', never re-derived from segments).
+  const DIARIZATION_OUTCOMES = [
+    'off',
+    'skipped',
+    'failed',
+    'completed',
+    'completed-with-unassigned',
+    'unknown',
+  ] as const;
+  type DiarizationOutcomeValue = (typeof DIARIZATION_OUTCOMES)[number];
   const diarizationOutcome = $derived.by(() => {
     const raw = recordings.selectedRecording?.metadata?.diarization_outcome;
-    if (
-      raw === 'off' ||
-      raw === 'failed' ||
-      raw === 'completed' ||
-      raw === 'completed-with-unassigned' ||
-      raw === 'unknown'
-    ) {
-      return raw;
+    if ((DIARIZATION_OUTCOMES as readonly string[]).includes(raw as string)) {
+      return raw as DiarizationOutcomeValue;
     }
     return 'unknown' as const;
   });
+
+  // Persisted reason code for the skipped/failed outcome, transported
+  // verbatim from metadata. The backend writes bounded identifiers only
+  // (REASON_MODELS_UNAVAILABLE = 'models_unavailable', see
+  // src-tauri/src/commands/transcription/inner.rs). Anything else — missing,
+  // unrecognised, or a value that doesn't apply to the current outcome —
+  // yields undefined so TranscriptView shows generic wording and never
+  // invents a cause.
+  const DIARIZATION_SKIP_REASONS = ['models_unavailable'] as const;
+
+  function isKnownSkipReason(value: unknown): value is (typeof DIARIZATION_SKIP_REASONS)[number] {
+    return typeof value === 'string' && (DIARIZATION_SKIP_REASONS as readonly string[]).includes(value);
+  }
+
+  const diarizationSkipReason = $derived.by(() => {
+    if (diarizationOutcome !== 'skipped') return undefined;
+    const raw = recordings.selectedRecording?.metadata?.diarization_reason;
+    return isKnownSkipReason(raw) ? raw : undefined;
+  });
+
+  // Affordance for the skipped outcome: opens the Settings dialog on the
+  // Audio pane via the shared navigation store (App.svelte's effect opens
+  // the dialog on any requestedSection). Explicit user action only — no
+  // automatic retry, per the contract.
+  function openAudioSettings() {
+    settingsNav.navigateTo('audio');
+  }
 
   let copyStatus = $state<'idle' | 'copying' | 'copied'>('idle');
   let saveStatus = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -499,7 +535,7 @@
     </div>
   {:else}
     {#if tabId === 'transcript'}
-      <TranscriptView value={content} segments={transcriptSegments} diarizationOutcome={diarizationOutcome} placeholder="No content…" onChange={onEditorChange} />
+      <TranscriptView value={content} segments={transcriptSegments} diarizationOutcome={diarizationOutcome} skipReason={diarizationSkipReason} onOpenAudioSettings={openAudioSettings} placeholder="No content…" onChange={onEditorChange} />
     {:else}
       <RichEditor value={content} placeholder="No content…" onChange={onEditorChange} />
     {/if}
