@@ -62,9 +62,14 @@
     onOpenAudioSettings?: () => void;
     placeholder?: string;
     onChange?: (v: string) => void;
+    /** Fires on every keystroke while editing (not debounced, not save-triggered).
+     *  The parent uses this to track the current draft for Copy without waiting
+     *  for doneEdit/save. Does NOT replace onChange — that still fires only on
+     *  Done (save trigger). */
+    onDraftChange?: (v: string) => void;
   }
 
-  const { value = '', segments, diarizationOutcome = 'unknown', skipReason, failReason, onOpenAudioSettings, placeholder = '', onChange = () => {} }: Props = $props();
+  const { value = '', segments, diarizationOutcome = 'unknown', skipReason, failReason, onOpenAudioSettings, placeholder = '', onChange = () => {}, onDraftChange = () => {} }: Props = $props();
 
   let editing = $state(false);
   // svelte-ignore state_referenced_locally
@@ -280,6 +285,16 @@
     onChange(editText);
     editing = false;
   }
+
+  // Notify the parent of every keystroke while editing so Copy can export
+  // the current draft without waiting for Done/save. The effect only fires
+  // when `editText` changes AND we are in editing mode — programmatic value
+  // syncs (startEdit resetting editText) happen before `editing` is set, so
+  // they don't trigger a spurious notification.
+  $effect(() => {
+    if (!editing) return;
+    onDraftChange(editText);
+  });
 </script>
 
 <div class="transcript-view">

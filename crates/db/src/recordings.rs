@@ -20,6 +20,14 @@ pub struct RecordingsRepo;
 /// Column-scoped update payload for [`RecordingsRepo::persist_producer_update`].
 /// `None` fields are left untouched; the metadata patch is merged into the
 /// row's CURRENT metadata at persist time (see the method docs).
+///
+/// `metadata_remove` lists keys REMOVED from the row's current metadata in
+/// the same transaction as the patch — for evidence keys that must not
+/// outlive the transcript they described (a successful re-transcription
+/// replaces the transcript AND its evidence atomically). A sentinel JSON
+/// value cannot express this: the patch merge treats a `null` patch value
+/// as "write null", and the frontend's shape validator reads a null the
+/// same as absence only for keys it knows about.
 #[derive(Default)]
 pub struct ProducerPersist {
     pub transcript: Option<String>,
@@ -31,6 +39,8 @@ pub struct ProducerPersist {
     /// Pre-serialized `ProcessingStatus` JSON.
     pub processing_status: Option<String>,
     pub metadata_patch: Vec<(String, serde_json::Value)>,
+    /// Metadata keys to REMOVE (applied after the patch, same transaction).
+    pub metadata_remove: Vec<String>,
 }
 
 impl RecordingsRepo {
@@ -332,7 +342,7 @@ impl RecordingsRepo {
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut next_idx = 1usize;
 
-        if !update.metadata_patch.is_empty() {
+        if !update.metadata_patch.is_empty() || !update.metadata_remove.is_empty() {
             let current: Option<String> = tx.query_row(
                 "SELECT metadata FROM recordings WHERE id = ?1 AND deleted_at IS NULL",
                 [&id.to_string()],
@@ -359,6 +369,13 @@ impl RecordingsRepo {
                         obj.insert(key.clone(), value.clone());
                     }
                 }
+            }
+            // Key removal (same transaction, applied after the patch so a
+            // key listed in both disappears): for evidence keys that must
+            // not outlive the transcript they described. Removal of an
+            // absent key is a no-op, not an error.
+            for key in &update.metadata_remove {
+                obj.remove(key);
             }
             sets.push(format!("metadata = ?{next_idx}"));
             params.push(Box::new(metadata.to_string()));
@@ -1439,6 +1456,70 @@ mod tests {
             "sibling stats preserved (one-level merge)"
         );
         assert_eq!(meta["generation_stats"]["soap"]["model"], "m2");
+    }
+
+    /// `metadata_remove` (retranscription binding, 2026-09-13 contract):
+    /// evidence keys must be removable in the SAME transaction as the patch
+    /// — a successful re-transcription replaces the transcript and clears a
+    /// stale fold verdict from an earlier segment-clear atomically.
+    #[test]
+    fn persist_producer_update_removes_metadata_keys_atomically_with_patch() {
+        let conn = migrated_conn();
+        let mut rec = new_rec();
+        rec.metadata = serde_json::json!({
+        "context": "visit notes",
+        "diarization_fold_evidence": "fold_possible"
+        });
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                transcript: Some("[Speaker 1] fresh".into()),
+                metadata_patch: vec![("transcript_format_version".into(), serde_json::json!(2))],
+                metadata_remove: vec!["diarization_fold_evidence".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(after.transcript.as_deref(), Some("[Speaker 1] fresh"));
+        let meta = after.metadata;
+        assert_eq!(meta["context"], "visit notes", "unrelated keys preserved");
+        assert_eq!(meta["transcript_format_version"], 2, "patch applied");
+        assert!(
+            meta.get("diarization_fold_evidence").is_none(),
+            "stale fold evidence must not outlive the transcript it described"
+        );
+    }
+
+    /// Removal-only persist (no patch keys) still rewrites metadata, and
+    /// removing an absent key is a no-op, not an error.
+    #[test]
+    fn persist_producer_update_removal_only_persists_and_absent_key_is_noop() {
+        let conn = migrated_conn();
+        let mut rec = new_rec();
+        rec.metadata = serde_json::json!({ "context": "visit notes" });
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                metadata_remove: vec!["diarization_fold_evidence".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(
+            after.metadata["context"], "visit notes",
+            "removal leaves sibling keys intact"
+        );
+        assert!(after.metadata.get("diarization_fold_evidence").is_none());
     }
 
     #[test]

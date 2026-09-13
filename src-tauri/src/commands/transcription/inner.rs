@@ -575,11 +575,31 @@ pub async fn transcribe_recording_inner(
                     // the outcome is self-explanatory) so a retranscription
                     // that resolves an earlier skip/failure cannot leave the
                     // stale reason coexisting with the new outcome.
+                    //
+                    // TRANSCRIPT FORMAT VERSION (copy-gate contract,
+                    // 2026-09-13): the marker-emitting formatter above is
+                    // what renders this text, so this persist writes the
+                    // system-authored version stamp. The copy gate reads
+                    // ONLY system-written persisted fields — user-editable
+                    // text can never be evidence of safety — and >= 2 is
+                    // the only "proceed" signal that a typed marker cannot
+                    // forge.
+                    //
+                    // RETRANSCRIPTION BINDING: the evidence pair
+                    // (version + fold flag) is bound to THIS transcription
+                    // result. A prior segment-clear may have persisted
+                    // `diarization_fold_evidence`; this new result replaces
+                    // the transcript, so the stale flag is REMOVED in the
+                    // same transaction — it described segments that no
+                    // longer exist. If this persist fails, nothing is
+                    // written and the old pair survives intact.
                     metadata_patch: vec![
                         ("transcript_segments".into(), segments_json),
                         ("diarization_outcome".into(), diarization_outcome_json),
                         ("diarization_reason".into(), diarization_reason_json),
+                        ("transcript_format_version".into(), serde_json::json!(2)),
                     ],
+                    metadata_remove: vec!["diarization_fold_evidence".into()],
                     ..Default::default()
                 },
             )?;

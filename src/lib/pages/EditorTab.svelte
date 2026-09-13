@@ -14,6 +14,11 @@
   import { icd9 as icd9Store } from '../stores/icd9.svelte';
   import { settings } from '../stores/settings.svelte';
   import IcdCodeList from '../components/IcdCodeList.svelte';
+  import {
+    buildCopyText,
+    copyDecision,
+    type CopyAction,
+  } from '../utils/copyLogic';
   import { save as saveDialog } from '@tauri-apps/plugin-dialog';
   import { exportAudio } from '../api/export';
   import { fetchAudioFromServer } from '../api/contentSync';
@@ -155,15 +160,25 @@
     settingsNav.navigateTo('audio');
   }
 
-  let copyStatus = $state<'idle' | 'copying' | 'copied'>('idle');
+  let copyStatus = $state<'idle' | 'copying' | 'copied' | 'copy-blocked'>('idle');
   let saveStatus = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
   let saveError: string | null = $state(null);
+  // Current block message parts (from copyLogic's CopyAction), rendered
+  // inline beside the button so the remedy is visible without hovering.
+  let blockReason: string | null = $state(null);
+  let blockRemedy: string | null = $state(null);
 
   // Debounce timer
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let clearBadgeTimer: ReturnType<typeof setTimeout> | null = null;
   let copyBadgeTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingValue: string | null = null;
+
+  // Current unsaved draft from TranscriptView's editText, notified on every
+  // keystroke via onDraftChange (not debounced, not save-triggered). Copy
+  // exports this when set so the clipboard matches what is on screen.
+  // Cleared on key change (recording/tab switch) and when the edit is saved.
+  let draftValue: string | null = null;
 
   // Keep the recordings store's edit-protection in sync with this tab's
   // dirty state: while there is unsaved/in-flight/failed-save state for the
@@ -288,8 +303,20 @@
       lastSeenKey = currentKey;
       saveStatus = 'idle';
       saveError = null;
+      // The draft belonged to the previous recording/tab — never carry it
+      // across a key change (Copy would export the wrong recording's text).
+      draftValue = null;
+      blockReason = null;
+      blockRemedy = null;
     }
   });
+
+  // TranscriptView calls this on every keystroke while editing. Tracking the
+  // draft lets Copy export the on-screen text without waiting for Done/save.
+  // This does NOT trigger saves — only doneEdit (via onChange) does that.
+  function onDraftChange(newValue: string) {
+    draftValue = newValue;
+  }
 
   function onEditorChange(newValue: string) {
     if (!recordings.selectedRecording) return;
@@ -395,9 +422,52 @@
   async function handleCopy() {
     if (copyStatus !== 'idle') return;
     if (!content) return;
+
+    // Transcript tab: epistemic gate + caveat prepend. The decision comes
+    // from the pure copyLogic module — the same function the tests exercise.
+    if (tabId === 'transcript') {
+      // METADATA-ONLY gate: user-controlled text is never evidence of
+      // safety, so the decision reads only system-written persisted fields
+      // (transcript_format_version + diarization_fold_evidence). The draft
+      // is routed into the CLIPBOARD (Copy exports what is on screen) but
+      // cannot influence the block decision — a typed marker must not
+      // clear a block.
+      const decision: CopyAction = copyDecision(
+        recordings.selectedRecording?.metadata ?? null,
+      );
+      if (decision.action === 'block') {
+        // HARD block (André's decision on the record): clipboard untouched,
+        // no override. The reason + remedy render inline next to the button
+        // so a clinician who does not hover still sees the path forward;
+        // the button tooltip repeats them as an extra surface only.
+        blockReason = decision.reason;
+        blockRemedy = decision.remedy;
+        copyStatus = 'copy-blocked';
+        copyBadgeTimer = setTimeout(() => {
+          copyBadgeTimer = null;
+          copyStatus = 'idle';
+          blockReason = null;
+          blockRemedy = null;
+        }, 6000);
+        return;
+      }
+      copyStatus = 'copying';
+      try {
+        await copyToClipboard(buildCopyText(content, draftValue));
+        copyStatus = 'copied';
+        copyBadgeTimer = setTimeout(() => { copyBadgeTimer = null; copyStatus = 'idle'; }, 2000);
+      } catch (e) {
+        console.error('Failed to copy:', e);
+        copyStatus = 'idle';
+      }
+      return;
+    }
+
+    // All other tabs: verbatim, no caveat, same draft routing.
     copyStatus = 'copying';
+    const textToCopy = draftValue ?? content;
     try {
-      await copyToClipboard(content);
+      await copyToClipboard(textToCopy);
       copyStatus = 'copied';
       copyBadgeTimer = setTimeout(() => { copyBadgeTimer = null; copyStatus = 'idle'; }, 2000);
     } catch (e) {
@@ -489,17 +559,28 @@
         <button
           class="btn-copy"
           class:copied={copyStatus === 'copied'}
+          class:copy-blocked={copyStatus === 'copy-blocked'}
           onclick={handleCopy}
           disabled={copyStatus !== 'idle'}
+          title={copyStatus === 'copy-blocked' && blockReason && blockRemedy ? `${blockReason} ${blockRemedy}` : undefined}
+          aria-describedby={copyStatus === 'copy-blocked' ? 'copy-block-msg' : undefined}
         >
           {#if copyStatus === 'copying'}
             Copying…
           {:else if copyStatus === 'copied'}
             Copied!
+          {:else if copyStatus === 'copy-blocked'}
+            Copy blocked
           {:else}
             Copy
           {/if}
         </button>
+        {#if copyStatus === 'copy-blocked' && blockReason && blockRemedy}
+          <div id="copy-block-msg" class="copy-block-message" data-testid="copy-block-message" role="status">
+            <span class="copy-block-reason">{blockReason}</span>
+            <span class="copy-block-remedy">{blockRemedy}</span>
+          </div>
+        {/if}
         {#if tabId === 'transcript' && recordings.selectedRecording}
           <button
             class="btn-copy"
@@ -552,7 +633,7 @@
     </div>
   {:else}
     {#if tabId === 'transcript'}
-      <TranscriptView value={content} segments={transcriptSegments} diarizationOutcome={diarizationOutcome} skipReason={diarizationSkipReason} failReason={diarizationFailReason} onOpenAudioSettings={openAudioSettings} placeholder="No content…" onChange={onEditorChange} />
+      <TranscriptView value={content} segments={transcriptSegments} diarizationOutcome={diarizationOutcome} skipReason={diarizationSkipReason} failReason={diarizationFailReason} onOpenAudioSettings={openAudioSettings} placeholder="No content…" onChange={onEditorChange} onDraftChange={onDraftChange} />
     {:else}
       <RichEditor value={content} placeholder="No content…" onChange={onEditorChange} />
     {/if}
@@ -636,6 +717,33 @@
   .btn-copy:hover {
     background-color: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  /* Hard-block state: visible inline message beside the Copy button so the
+     remedy is readable without hovering (tooltip remains an extra surface). */
+  .btn-copy.copy-blocked {
+    border-color: var(--danger, #c0392b);
+    color: var(--danger, #c0392b);
+  }
+
+  .copy-block-message {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-width: 320px;
+    padding: 8px 10px;
+    border-left: 3px solid var(--danger, #c0392b);
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-primary);
+  }
+
+  .copy-block-reason {
+    font-weight: 600;
+  }
+
+  .copy-block-remedy {
+    color: var(--text-secondary, inherit);
   }
 
   .btn-copy.copied {

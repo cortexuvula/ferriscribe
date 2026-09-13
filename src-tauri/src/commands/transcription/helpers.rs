@@ -611,6 +611,52 @@ mod tests {
         assert!(matches!(loaded.status, ProcessingStatus::Failed { .. }));
     }
 
+    /// RETRANSCRIPTION BINDING, failure path (copy-gate contract
+    /// 2026-09-13): a FAILED re-transcription must preserve the old
+    /// evidence pair (transcript + transcript_format_version +
+    /// diarization_fold_evidence) untouched. The failure marker writes
+    /// ONLY the status column — so a recording that was blocked from Copy
+    /// by a fold_possible verdict stays honestly blocked (the old
+    /// transcript is still the saved one) and nothing about the failed
+    /// attempt can authorise a copy.
+    #[tokio::test]
+    async fn mark_recording_failed_preserves_transcript_evidence_pair() {
+        let db = Arc::new(Database::open_in_memory().expect("open in-memory db"));
+        let mut rec = mk_recording();
+        rec.id = uuid::Uuid::new_v4();
+        let id = rec.id;
+        rec.transcript = Some("Speaker 1: legacy folded text".to_string());
+        rec.metadata = serde_json::json!({
+            "diarization_outcome": "completed-with-unassigned",
+            "diarization_fold_evidence": "fold_possible"
+        });
+        {
+            let conn = db.conn().expect("conn");
+            RecordingsRepo::insert(&conn, &rec).expect("insert");
+        }
+
+        mark_recording_failed_db_only(&db, rec, "re-transcription failed".to_string()).await;
+
+        let conn = db.conn().expect("conn");
+        let loaded = RecordingsRepo::get_by_id(&conn, &id).expect("get");
+        assert!(matches!(loaded.status, ProcessingStatus::Failed { .. }));
+        assert_eq!(
+            loaded.transcript.as_deref(),
+            Some("Speaker 1: legacy folded text"),
+            "failed re-transcription must not replace the old transcript"
+        );
+        let meta = loaded.metadata;
+        assert_eq!(
+            meta.get("diarization_fold_evidence"),
+            Some(&serde_json::json!("fold_possible")),
+            "old fold verdict must survive a failed re-transcription"
+        );
+        assert!(
+            meta.get("transcript_format_version").is_none(),
+            "no version stamp may appear without a new transcript actually being saved"
+        );
+    }
+
     #[test]
     fn unwrap_app_error_message_strips_prefix() {
         // AppError::Processing has a "Processing error: " display prefix — the helper
