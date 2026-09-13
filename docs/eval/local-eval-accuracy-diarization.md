@@ -100,15 +100,48 @@ whole-set regressions. A no-go is reported exactly like a go.
   number is DISAGREEMENT vs EL or vs V0, and labelled as such. No number
   is called accuracy until Andre's hand reference lands.
 
-## Reference procedure
+## Reference procedure (v2 — whisper-independent rows, 2026-09-13 revision)
+
+The v1 procedure (rows = spans of the current baseline decode) is RETIRED.
+Round-trip finding: a fresh decode produced 3 spans where an earlier decode
+had 4 and ElevenLabs' own segmentation also says 4 — a reference keyed to a
+decode inherits that decode's blind spots, so its span count can never
+establish coverage. A dropped utterance was invisible by construction.
 
 1. `FS_EVAL_MODE=template` → `local-eval/harness-artifacts/reference/
-   clip-03.template.txt` (shortest clip; spans from V0 baseline with opaque
-   IDs and hypothesis speaker labels).
-2. Andre fills each span: corrected text (empty = hallucination, delete)
-   and S1/S2 (who spoke it). ~10 minutes for a 30 s clip.
-3. Save as `clip-03.filled.txt`; `FS_EVAL_MODE=score` re-scores ALL
-   variants against the true reference, re-runs the gates.
+   clip-03.review.txt`. Rows derive from the pyannote diarization turns
+   over the AUDIO (whisper-independent): speech regions (split at speaker
+   changes and gaps > 0.5 s, capped at 8 s per row) + silence-candidate
+   rows, together partitioning [0, duration]. For clip-03 that is 7 speech
+   rows + 3 silence rows; ElevenLabs independently suggests 4 cues (shown
+   as by-ear comments only, never as the row source, never gating).
+2. Format (`review-v2`, one line per row, 6 tab-separated fields — the
+   terminal status field is never empty, so an editor stripping trailing
+   whitespace cannot change the field count):
+     <row-id> TAB <start-s> TAB <end-s> TAB <speaker> TAB <text> TAB <status>
+   - `OK` + empty text = CONFIRMED SILENCE (nonempty ASR output mapped
+     there scores as the INSERTION class).
+   - `OK` + text = the true words (a row with text and no ASR cue scores
+     as the DELETION class — dropped utterances are representable).
+   - `???` or a deleted row = NOT REVIEWED; scoring refuses until every
+     row is OK. The scorer audits the filled copy against the emitted
+     review file (row-set diff), so deleting rows cannot skip review.
+   - Missed utterance inside a long row = add `row-90+` with its interval
+     and text. Human rows never collide with template rows.
+   - Legacy v1 files are refused outright (format header check).
+3. Save as `clip-03.filled.txt`; `FS_EVAL_MODE=score` re-scores all
+   variants against the complete human-reviewed interval.
+4. Segmentation invariance: WER is computed on concatenated tokens, so
+   identical words in identical order score identically whether the
+   decoder emitted one cue or ten. Cue-count/segmentation quality is a
+   SEPARATE score row (`seg_boundary_error`, plus `hyp_cues`/`ref_cues`),
+   and can never be gamed into a word-error win. Pinned by regression
+   tests (`identical_words_score_identically_at_one_or_ten_cues`,
+   `cue_count_difference_is_visible_only_in_seg_error_not_wer`), as are
+   the format round trip (`round_trip_template_fill_and_editor_save_
+   survives`, `editor_whitespace_mangling_cannot_change_field_count`),
+   the v1 refusal, the not-reviewed audit, and the silence/speech
+   insertion/deletion classes.
 
 ## Unverified / out of scope (stated plainly)
 
@@ -116,9 +149,10 @@ whole-set regressions. A no-go is reported exactly like a go.
   it is measured (inventory) but not A/B-able here.
 - Overlapping speech remains the cascade's known limitation; this harness
   measures attribution deltas, it does not fix overlap.
-- Speaker-error counting depends on reference span windows derived from
-  V0's decode; if Andre's corrections move a span's true boundary, the
-  >50% overlap match may mis-bin a span. Counted matches are reported
-  (speaker_matches) so the denominator is always visible.
+- Speaker-error matching uses reference row windows derived from the
+  diarization turns (whisper-independent since the v2 revision); if Andre's
+  added rows shift a boundary, the >50% overlap match may mis-bin a span.
+  Counted matches are reported (speaker_matches) so the denominator is
+  always visible.
 - Runtime measured on one machine (this Mac, Metal); relative ordering is
   the claim, not absolute ms.

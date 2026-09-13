@@ -844,15 +844,190 @@ fn metrics_line(art: &VariantArt) -> MetricsLine {
     }
 }
 
-// ───────────────────────── template (hand-correction) ─────────────────────────
+// ───────────────────────── template (hand-review reference, format v2) ─────────────────────────
 
-/// Generate the hand-correction template for the SHORTEST clip from the V0
-/// baseline artifacts. Output (PHI, local-only):
-///   local-eval/harness-artifacts/reference/<clip>.template.txt
-/// Format per span (one line each):
-///   <opaque-id> \t <hypothesis text> \t || \t <correction> \t || \t <speaker>
-/// Andre fills the last two columns by ear: corrected text (empty = span is
-/// a hallucination, delete it) and S1/S2 (who actually spoke it).
+/// Format tag every emitted reference carries. parse_reference REFUSES files
+/// without it (a v1 two-line-per-span file must not silently mis-parse).
+const REVIEW_FORMAT: &str = "review-v2";
+/// Max review-row duration: long speech intervals are split on this grid so
+/// no row asks a human to transcribe more than a few seconds by ear.
+const MAX_ROW_S: f64 = 8.0;
+/// Diarization-turn gaps up to this length are treated as the same speech
+/// region (pyannote often breaks voicemail-style continuous speech).
+const GAP_MERGE_S: f64 = 0.5;
+
+/// One whisper-independent review row. Rows are derived from the diarization
+/// turns (pyannote over the AUDIO — never from a decode), so a dropped
+/// whisper utterance is still representable: its audio interval has a row.
+#[derive(Debug, Clone, PartialEq)]
+struct ReviewRow {
+    id: String,
+    start: f64,
+    end: f64,
+    /// Suggested speaker (diarization majority overlap), 0-based.
+    speaker: Option<usize>,
+    /// True when the interval is speech per diarization (false = gap/silence
+    /// candidate emitted to guarantee full [0, dur] coverage).
+    speech: bool,
+}
+
+/// Build review rows from diarization turns (whisper-INDEPENDENT source).
+/// Turn sequence is grouped into speech regions: a new region starts on a
+/// gap > GAP_MERGE_S OR a speaker change (both from diarization over the
+/// audio, never from a decode). Regions longer than MAX_ROW_S are split on
+/// the time grid; gaps become silence-candidate rows. Rows partition [0,dur].
+fn review_rows_from_turns(turns: &[(usize, f64, f64)], dur_s: f64) -> Vec<ReviewRow> {
+    let mut ivs: Vec<(usize, f64, f64)> = turns
+        .iter()
+        .map(|&(spk, s, e)| (spk, s.min(e), s.max(e)))
+        .filter(|&(_, s, e)| e > s)
+        .collect();
+    ivs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+    // Group into speech regions: split on gap > GAP_MERGE_S or speaker change.
+    let mut regions: Vec<(usize, f64, f64)> = Vec::new();
+    for &(spk, s, e) in &ivs {
+        match regions.last_mut() {
+            Some(last) if last.0 == spk && s - last.2 <= GAP_MERGE_S => last.2 = last.2.max(e),
+            _ => regions.push((spk, s, e)),
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut cursor = 0.0f64;
+    let push =
+        |start: f64, end: f64, speech: bool, spk: Option<usize>, rows: &mut Vec<ReviewRow>| {
+            let mut s = start;
+            while end - s > 1e-9 {
+                let row_end = (s + MAX_ROW_S).min(end);
+                rows.push(ReviewRow {
+                    id: format!("row-{:02}", rows.len() + 1),
+                    start: s,
+                    end: row_end,
+                    speaker: if speech { spk } else { None },
+                    speech,
+                });
+                s = row_end;
+            }
+        };
+    for &(spk, s, e) in &regions {
+        if s - cursor > 1e-9 {
+            push(cursor, s, false, None, &mut rows); // silence candidate
+        }
+        push(s, e, true, Some(spk), &mut rows);
+        cursor = e;
+    }
+    if dur_s - cursor > 1e-9 {
+        push(cursor, dur_s, false, None, &mut rows); // trailing silence
+    }
+    rows
+}
+
+/// One EL cue parsed from the ElevenLabs SRT-ish transcript: (start, end, text).
+fn parse_el_cues(path: &Path) -> Vec<(f64, f64, String)> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let ts = |s: &str| -> Option<f64> {
+        let p: Vec<&str> = s.trim().split(':').collect();
+        match p.as_slice() {
+            [h, m, rest] => {
+                let (sec, ms) = rest.split_once(',')?;
+                Some(
+                    h.parse::<f64>().ok()? * 3600.0
+                        + m.parse::<f64>().ok()? * 60.0
+                        + sec.parse::<f64>().ok()?
+                        + ms.parse::<f64>().ok()? / 1000.0,
+                )
+            }
+            _ => None,
+        }
+    };
+    let mut cues = Vec::new();
+    let mut lines = raw.lines().peekable();
+    while let Some(line) = lines.next() {
+        if let Some((l, r)) = line.split_once("-->") {
+            // Each half may carry a trailing label ("00:00:04,460 [Speaker 0]").
+            fn clean(s: &str) -> &str {
+                s.trim().split_whitespace().next().unwrap_or("")
+            }
+            if let (Some(s), Some(e)) = (ts(clean(l)), ts(clean(r))) {
+                let mut text = String::new();
+                while let Some(t) = lines.peek() {
+                    if t.trim().is_empty() || t.contains("-->") {
+                        break;
+                    }
+                    text.push_str(lines.next().unwrap_or("").trim());
+                    text.push(' ');
+                }
+                cues.push((s, e, text.trim().to_string()));
+            }
+        }
+    }
+    cues
+}
+
+/// Emit the v2 reference file text (ONE line per row, 6 tab-separated
+/// fields, terminal field is the never-empty review status — a plain text
+/// editor stripping trailing whitespace cannot change the field count).
+fn emit_reference(rows: &[ReviewRow], dur_s: f64, el_cues: &[(f64, f64, String)]) -> String {
+    let speech_rows = rows.iter().filter(|r| r.speech).count();
+    let silence_rows = rows.len() - speech_rows;
+    let mut out = String::new();
+    out.push_str("# Hand-review reference (PHI — local only, never commit)\n");
+    out.push_str(&format!("# format: {REVIEW_FORMAT}\n"));
+    out.push_str(&format!(
+        "# Clip rows are whisper-INDEPENDENT (from diarization over the audio):\n\
+         # this clip has {speech_rows} speech rows + {silence_rows} silence rows.\n\
+         # ElevenLabs independently suggests {} cues (comments below, by-ear aid only).\n",
+        el_cues.len()
+    ));
+    out.push_str(&format!(
+        "# Duration: {dur_s:.1}s. ONE LINE PER ROW, 6 tab-separated fields:\n"
+    ));
+    out.push_str("#   <row-id> TAB <start-s> TAB <end-s> TAB <speaker> TAB <text> TAB <status>\n");
+    out.push_str("# Fill by ear, then change ONLY the last ??? of each row to OK:\n");
+    out.push_str("#   OK + EMPTY text = you confirm this interval is SILENCE.\n");
+    out.push_str("#   OK + text       = the true words spoken in this interval.\n");
+    out.push_str("#   ??? (or a deleted row) = not reviewed — scoring refuses until 100% OK.\n");
+    out.push_str(
+        "# Speaker: S1/S2 = who spoke it ('-' = leave unassigned; suggestion prefilled).\n",
+    );
+    out.push_str("# Do NOT edit columns 1-3. Do NOT delete rows. A missed utterance = add a\n");
+    out.push_str("# new row (row-90+) inside the interval it belongs to, with its text.\n");
+    out.push_str("# Save as <clip>.filled.txt when every row ends in OK.\n\n");
+    for r in rows {
+        let spk = match r.speaker {
+            Some(0) => "S1",
+            Some(1) => "S2",
+            Some(n) => {
+                // max_speakers=2 in production; keep the label honest anyway.
+                let _ = n;
+                "-"
+            }
+            None => "-",
+        };
+        out.push_str(&format!(
+            "{}\t{:.2}\t{:.2}\t{}\t\t???\n",
+            r.id, r.start, r.end, spk
+        ));
+        for &(cs, ce, ref ct) in el_cues {
+            let ov = (r.end.min(ce) - r.start.max(cs)).max(0.0);
+            if ov > 0.0 && !ct.is_empty() {
+                out.push_str(&format!("#   ElevenLabs cue {cs:.2}-{ce:.2}: {ct}\n"));
+            }
+        }
+    }
+    out
+}
+
+/// Generate the hand-review reference for the SHORTEST clip. Rows come from
+/// the diarization turns (whisper-INDEPENDENT — a reference keyed to a
+/// decode inherits that decode's blind spots, so its span count can never
+/// establish coverage). EL cues are included as SUGGESTIONS only; every row
+/// still requires human confirmation. Output (PHI, local-only):
+///   local-eval/harness-artifacts/reference/<clip>.review.txt
 fn make_template(samples_dir: &Path, artifacts: &Path) {
     let clips = collect_clips(samples_dir);
     let mut best: Option<(&Clip, f64)> = None;
@@ -864,6 +1039,8 @@ fn make_template(samples_dir: &Path, artifacts: &Path) {
     }
     let (shortest, dur_s) = best.expect("at least one clip");
 
+    // Duration cross-check + clip identity from the stored V0 artifacts (no
+    // decode happens here; the artifacts only supply duration metadata).
     let art_path = artifacts
         .join("run")
         .join(&shortest.id)
@@ -875,126 +1052,249 @@ fn make_template(samples_dir: &Path, artifacts: &Path) {
                 shortest.id
             )
         });
+    assert!(
+        (art.dur_s - dur_s).abs() < 0.5,
+        "duration mismatch artifacts vs audio"
+    );
+
+    // Whisper-independent row source: the stored diarization turns.
+    let diar_path = artifacts
+        .join("run")
+        .join(&shortest.id)
+        .join("diarization.json");
+    let diar: DiarizationArt =
+        serde_json::from_str(&std::fs::read_to_string(&diar_path).unwrap()).unwrap();
+    let rows = review_rows_from_turns(&diar.turns, dur_s);
+
+    // EL segmentation as a SUGGESTION (never the row source, never gating).
+    let el_path = samples_dir.join(format!("Elevenlabs Transcript {}.txt", shortest.stem));
+    let el_cues = parse_el_cues(&el_path);
 
     let ref_dir = artifacts.join("reference");
     std::fs::create_dir_all(&ref_dir).unwrap();
-    let tpl_path = ref_dir.join(format!("{}.template.txt", shortest.id));
-    let mut out = String::new();
-    out.push_str("# Hand-correction template (PHI — local only, never commit)\n");
-    out.push_str(&format!(
-        "# Clip: {} Duration: {dur_s:.1}s; spans from the current baseline decode.\n",
-        shortest.id
-    ));
-    out.push_str("# For each span: fix the text (empty correction = span is a hallucination,\n");
-    out.push_str("# delete it), and mark who spoke it: S1 or S2. Keep the span-ID prefix!\n");
-    out.push_str("# Per span TWO lines: (1) <span-id> TAB [hyp-speaker] TAB || TAB <corrected text> TAB || TAB <S1|S2|->\n");
-    out.push_str("#                    (2) an indented line showing what the app transcribed (do not edit).\n");
-    out.push_str("# Fill column <corrected text> with the app text if it was right (copy it).\n");
-    out.push_str(
-        "# Speaker '-' = leave unassigned. Save the filled file as <clip>.filled.txt.\n\n",
-    );
-    for (i, span) in art.b_spans.iter().enumerate() {
-        let hyp_speaker = art
-            .speakers_segment_rule
-            .get(i)
-            .cloned()
-            .flatten()
-            .unwrap_or_else(|| "unassigned".into());
-        out.push_str(&format!("{}\t[{}]\t||\t\t||\t\n", span.id, hyp_speaker));
-        // Text on its own indented line: tabs inside text would break TSV.
-        out.push_str(&format!("    {}\n", span.text));
-    }
-    std::fs::write(&tpl_path, out).unwrap();
+    let out_path = ref_dir.join(format!("{}.review.txt", shortest.id));
+    std::fs::write(&out_path, emit_reference(&rows, dur_s, &el_cues)).unwrap();
+
+    let speech_rows = rows.iter().filter(|r| r.speech).count();
     println!(
-        "TEMPLATE {} spans={} dur_s={:.1} path={}",
+        "TEMPLATE {} dur_s={:.1} speech_rows={} silence_rows={} total_rows={} el_cues={} path={}",
         shortest.id,
-        art.b_spans.len(),
         dur_s,
-        tpl_path.display()
+        speech_rows,
+        rows.len() - speech_rows,
+        rows.len(),
+        el_cues.len(),
+        out_path.display()
     );
 }
 
 // ───────────────────────── score ─────────────────────────
 
-/// One span of the hand-corrected reference.
-#[derive(Debug, Clone)]
-struct RefSpan {
+/// One row of the review reference after human review.
+#[derive(Debug, Clone, PartialEq)]
+enum RowStatus {
+    /// `???` (or the row is missing entirely) — not reviewed. Scoring
+    /// REFUSES while any row is in this state.
+    NotReviewed,
+    /// `OK` with empty text: the human confirms the interval is SILENCE.
+    /// Nonempty ASR output mapped here is an INSERTION.
+    ConfirmedSilence,
+    /// `OK` with text: the true words spoken in this interval.
+    Speech(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RefRow {
     id: String,
-    text: String,
-    speaker: Option<usize>, // 1-based S1/S2 -> 0/1
+    start: f64,
+    end: f64,
+    /// S1->Some(0), S2->Some(1), '-'->None.
+    speaker: Option<usize>,
+    status: RowStatus,
 }
 
-/// Parse the filled template. Accepted filled-line shape (two lines per
-/// span, as emitted by `template`):
-///   <span-id> \t [<hyp speaker>] \t || \t <corrected text> \t || \t <S1|S2>
-///   (the hypothesis text line that follows is ignored)
-/// A span with empty corrected text and empty speaker = deleted
-/// (hallucination). Unfilled lines (both columns empty AND no speaker) are
-/// treated as "not corrected yet" and STOP scoring with a clear error.
-/// Content-free placeholder for panic messages: the leading span-ID token
-/// only (never transcript text — privacy: PHI must not reach the console).
-fn id_placeholder(line: &str) -> String {
-    line.split('\t')
-        .next()
-        .unwrap_or("<no-id>")
-        .trim()
-        .to_string()
+/// A fully hand-reviewed reference (every row OK). `not_reviewed` counts
+/// ??? rows PLUS rows present in the emitted review file but deleted from
+/// the filled copy — both block scoring.
+#[allow(dead_code)] // clip/dur_s carried for score-mode reporting parity
+struct ReviewedRef {
+    clip: String,
+    dur_s: f64,
+    /// Rows sorted by start time (human-added rows interleave correctly).
+    rows: Vec<RefRow>,
+    /// Whole-clip reference tokens (Speech rows in time order).
+    ref_tokens: Vec<String>,
+    not_reviewed: usize,
+    first_not_reviewed: Option<String>,
 }
 
-fn parse_template(path: &Path) -> Vec<RefSpan> {
-    let raw = std::fs::read_to_string(path).expect("read filled template");
+/// Human-added rows use numeric IDs >= this (e.g. row-90, row-91) so they
+/// can never collide with template rows (row-01..row-NN, N < 90).
+const HUMAN_ROW_MIN: usize = 90;
+
+/// Content-free row identifier for panic messages (PHI never reaches the
+/// console: IDs and timings only, never text).
+fn row_placeholder(parts: &[&str]) -> String {
+    parts.first().unwrap_or(&"<no-id>").trim().to_string()
+}
+
+/// Parse ONE reference-format file (template or filled) into rows.
+/// Format (review-v2), one line per row, 6 tab-separated fields:
+///   <row-id> TAB <start-s> TAB <end-s> TAB <speaker> TAB <text> TAB <status>
+/// The terminal field is never empty (??? / OK), so an editor stripping
+/// trailing whitespace cannot change the field count.
+fn parse_reference(path: &Path) -> Vec<RefRow> {
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read reference file {:?}: {e} — (re)generate with FS_EVAL_MODE=template",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+        )
+    });
+    if !raw
+        .lines()
+        .any(|l| l.trim() == format!("# format: {REVIEW_FORMAT}"))
+    {
+        panic!(
+            "reference file {:?} is not {REVIEW_FORMAT} (missing '# format:' header) — \
+             regenerate with FS_EVAL_MODE=template; legacy two-line-per-span \
+             files are not parseable and must not be re-filled",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+        );
+    }
     let mut out = Vec::new();
-    let mut lines = raw.lines().peekable();
-    while let Some(line) = lines.next() {
-        // Strip ONLY line endings. trim_end() here would eat the trailing
-        // TAB of an unfilled row (6 TSV fields -> 5), so the "not fully
-        // filled" panic below was unreachable and unfilled spans were
-        // silently skipped — scoring against an EMPTY reference (found
-        // 2026-09-13: filled==template byte-identical, wer=NaN output).
+    for line in raw.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
         if line.starts_with('#') || line.trim().is_empty() {
             continue;
         }
-        if !line.contains("||") {
-            // hypothesis-text line (indented) — skip
-            continue;
-        }
         let parts: Vec<&str> = line.split('\t').collect();
-        // parts: [id, "[spk]", "||", corr, "||", spk] (corr may be empty)
-        if parts.len() < 6 {
-            // A ||-row with fewer than 6 TSV fields is malformed (trailing
-            // tab stripped by an editor, or hand-mangled). Silently
-            // skipping it silently drops a reference span — hard error
-            // instead (regression: 2026-09-13 empty-reference incident).
+        if parts.len() != 6 {
             panic!(
-                "malformed reference line ({} tab fields, expected 6): {:?}\
-                 — keep the span-ID prefix and both || separators",
-                parts.len(),
-                id_placeholder(&line)
+                "malformed reference row {:?}: {} tab fields, expected exactly 6 \
+                 (id/start/end/speaker/text/status) — keep the row-ID and do not \
+                 paste TABs into the text; use spaces",
+                row_placeholder(&parts),
+                parts.len()
             );
         }
         let id = parts[0].trim().to_string();
-        let corr = parts[3].trim().to_string();
-        let spk = parts[5].trim().to_string();
-        if corr.is_empty() && spk.is_empty() {
-            panic!(
-                "template not fully filled: span {id} has no correction and no speaker — \
-                 fill every span (use explicit '-' speaker for spans you want deleted)"
-            );
-        }
-        let speaker = match spk.as_str() {
+        let start: f64 = parts[1]
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("row {id}: bad start time {:?}: {e}", parts[1].trim()));
+        let end: f64 = parts[2]
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("row {id}: bad end time {:?}: {e}", parts[2].trim()));
+        assert!(
+            end > start,
+            "row {id}: end ({end}) must be > start ({start})"
+        );
+        let speaker = match parts[3].trim() {
             "S1" => Some(0),
             "S2" => Some(1),
             "-" => None,
-            other => panic!("span {id}: speaker must be S1, S2, or '-', got {other:?}"),
+            other => panic!("row {id}: speaker must be S1, S2, or '-', got {other:?}"),
         };
-        out.push(RefSpan {
+        let text = parts[4].trim().to_string();
+        let status = match parts[5].trim() {
+            "???" => RowStatus::NotReviewed,
+            "OK" => {
+                if text.is_empty() {
+                    RowStatus::ConfirmedSilence
+                } else {
+                    RowStatus::Speech(text)
+                }
+            }
+            other => panic!("row {id}: status must be ??? or OK, got {other:?}"),
+        };
+        out.push(RefRow {
             id,
-            text: corr,
+            start,
+            end,
             speaker,
+            status,
         });
     }
     out
+}
+
+/// Load the filled reference and complete the not-reviewed audit against the
+/// emitted review file (same directory, <clip>.review.txt): a row deleted
+/// from the filled copy counts as not reviewed, exactly like a ??? row.
+fn load_reviewed(ref_dir: &Path, clip_id: &str) -> ReviewedRef {
+    let filled_path = ref_dir.join(format!("{clip_id}.filled.txt"));
+    let template_path = ref_dir.join(format!("{clip_id}.review.txt"));
+    let filled = parse_reference(&filled_path);
+
+    // Expected row IDs from the emitted review file; every filled ID must be
+    // either one of these or a human-added row (numeric ID >= HUMAN_ROW_MIN).
+    let expected: std::collections::BTreeSet<String> = if template_path.exists() {
+        parse_reference(&template_path)
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    } else {
+        panic!(
+            "{clip_id}.review.txt missing under {} — regenerate with \
+             FS_EVAL_MODE=template (deterministic; row-set audit needs it)",
+            ref_dir.display()
+        );
+    };
+    let human = |id: &str| {
+        id.strip_prefix("row-")
+            .and_then(|n| n.parse::<usize>().ok())
+            .is_some_and(|n| n >= HUMAN_ROW_MIN)
+    };
+    for r in &filled {
+        assert!(
+            expected.contains(&r.id) || human(&r.id),
+            "unknown row id {:?} (not in the template and not a human row-{}+) — \
+             keep template IDs verbatim; add missed utterances as row-90+",
+            r.id,
+            HUMAN_ROW_MIN
+        );
+    }
+
+    let mut not_reviewed = filled
+        .iter()
+        .filter(|r| r.status == RowStatus::NotReviewed)
+        .count();
+    let mut first_not_reviewed = filled
+        .iter()
+        .find(|r| r.status == RowStatus::NotReviewed)
+        .map(|r| r.id.clone());
+    let present: std::collections::BTreeSet<&String> = filled.iter().map(|r| &r.id).collect();
+    let missing: Vec<&String> = expected
+        .iter()
+        .filter(|id| !present.contains(*id))
+        .collect();
+    if !missing.is_empty() {
+        not_reviewed += missing.len();
+        first_not_reviewed = first_not_reviewed.or_else(|| missing.first().map(|s| (*s).clone()));
+    }
+
+    let dur_s = filled.iter().map(|r| r.end).fold(0.0f64, f64::max);
+    let mut rows = filled;
+    rows.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+
+    let ref_tokens: Vec<String> = rows
+        .iter()
+        .filter_map(|r| match &r.status {
+            RowStatus::Speech(t) => Some(tokens(t)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    ReviewedRef {
+        clip: clip_id.to_string(),
+        dur_s,
+        rows,
+        ref_tokens,
+        not_reviewed,
+        first_not_reviewed,
+    }
 }
 
 /// Word-level S/I/D via Levenshtein backtrace (reference -> hypothesis).
@@ -1049,17 +1349,30 @@ struct ScoreLine {
     hyp_words: usize,
     /// Word error rate vs hand reference: (S+I+D)/ref_words.
     wer: f64,
-    /// Speaker errors: spans matched to reference spans by time overlap
-    /// (>50% of the variant span inside a reference span) whose speaker
-    /// label differs (incl. labeled vs unassigned). Count only.
+    /// Hypothesis cue words inside CONFIRMED-SILENCE intervals (whole-clip
+    /// insertions above already include them; this localizes them).
+    ins_on_confirmed_silence: usize,
+    /// Reference words (human rows with text) with NO hypothesis cue mapped:
+    /// the dropped-utterance class a decode-keyed reference hid.
+    del_in_speech_rows: usize,
+    /// SEPARATE metric — segmentation only, never folded into WER: hyp cues
+    /// per reference speech row vs the row set's cue count, as boundary
+    /// error. Gaming cue count cannot buy a word-error win.
+    seg_boundary_error: f64,
+    /// Hypothesis cue count (segmentation-invariance: identical words in
+    /// identical order score identically regardless of this number).
+    hyp_cues: usize,
+    /// Reference cue count (human rows with text; includes row-90+ adds).
+    ref_cues: usize,
+    /// Speaker errors: hyp cues matched to reference rows by time overlap
+    /// (>50% of the cue inside the row) whose speaker label differs.
     speaker_errors_matched: usize,
     speaker_matches: usize,
     /// Repetition regressions: cross-segment runs dropped (from run stage).
     crossseg_runs_dropped: usize,
     /// SECONDARY — labelled disagreement, NOT accuracy: ElevenLabs whole-
-    /// clip word disagreement (S+I+D)/max(ref,el) between the variant's
-    /// stage-B text and the EL transcript. EL is a proxy with its own
-    /// artifacts.
+    /// clip word disagreement between the variant's stage-B text and the EL
+    /// transcript. EL is a proxy with its own artifacts.
     el_disagreement_secondary: f64,
     /// Attribution-rule A/B on this clip/variant (from run stage).
     attribution_rule_flips: usize,
@@ -1069,7 +1382,7 @@ fn score(artifacts: &Path, samples_dir: &Path) {
     let run_dir = artifacts.join("run");
     let ref_dir = artifacts.join("reference");
 
-    // Locate the filled template (any *.filled.txt).
+    // Locate the filled reference (any *.filled.txt, review-v2 format).
     let filled: Vec<PathBuf> = std::fs::read_dir(&ref_dir)
         .expect("reference dir (run FS_EVAL_MODE=template first)")
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -1094,28 +1407,29 @@ fn score(artifacts: &Path, samples_dir: &Path) {
         .unwrap()
         .trim_end_matches(".filled.txt")
         .to_string();
-    let reference = parse_template(&filled[0]);
+    let reference = load_reviewed(&ref_dir, &clip_id);
 
-    // Reference tokens + per-span windows for speaker matching.
-    let art_v0: VariantArt = serde_json::from_str(
-        &std::fs::read_to_string(run_dir.join(&clip_id).join("v0-baseline.json")).unwrap(),
-    )
-    .expect("v0 artifacts");
-    let ref_window_of: HashMap<&str, (f64, f64)> = art_v0
-        .b_spans
-        .iter()
-        .map(|s| (s.id.as_str(), (s.start, s.end)))
-        .collect();
-
-    let ref_tokens: Vec<String> = reference.iter().flat_map(|r| tokens(&r.text)).collect();
+    // LOUD FAILURE (kept from the 2026-09-13 incident): a reference with
+    // unreviewed rows or zero tokens is never scoreable. Refusing is the
+    // correct behavior; this must not regress.
+    if reference.not_reviewed > 0 {
+        panic!(
+            "reference NOT fully reviewed: {} row(s) ??? or deleted (first: {:?}) — \
+             every row must end in OK (empty text + OK = confirmed silence)",
+            reference.not_reviewed, reference.first_not_reviewed
+        );
+    }
+    let ref_tokens = &reference.ref_tokens;
     let ref_words = ref_tokens.len();
-    // A hand reference with ZERO tokens is never scoreable. Before the fix
-    // above this could happen silently (unfilled rows skipped), producing
-    // wer=NaN / all-insertion output that looked like a real score line.
+    let ref_cues = reference
+        .rows
+        .iter()
+        .filter(|r| matches!(r.status, RowStatus::Speech(_)))
+        .count();
     assert!(
         ref_words > 0,
-        "reference has 0 tokens — the filled template is empty or was not \
-         parsed; refusing to score"
+        "reference has 0 tokens — the filled file is empty or was not parsed; \
+         refusing to score"
     );
 
     // EL transcript for the same clip (secondary disagreement).
@@ -1142,16 +1456,81 @@ fn score(artifacts: &Path, samples_dir: &Path) {
         .expect("variant artifacts");
 
         // Stage-B text vs hand reference (S/I/D on normalized tokens).
+        // SEGMENTATION-INVARIANT: tokens are concatenated across cues, so
+        // identical words in identical order score identically whether the
+        // decoder emitted one cue or ten. Cue-count deltas are reported on
+        // the SEPARATE seg_boundary_error row and can never touch WER.
         let hyp_tokens: Vec<String> = art.b_spans.iter().flat_map(|s| tokens(&s.text)).collect();
-        let (sub, ins, del) = sid(&ref_tokens, &hyp_tokens);
+        let (sub, ins, del) = sid(ref_tokens, &hyp_tokens);
         let wer = if ref_words == 0 {
             f64::NAN
         } else {
             (sub + ins + del) as f64 / ref_words as f64
         };
 
-        // Speaker errors: match each variant span to the reference span
-        // covering >50% of it; compare speaker labels.
+        // Per-row localized counts (diagnostics with explicit semantics):
+        // INSERTION class — nonempty hypothesis inside a confirmed-silence
+        // interval; DELETION class — reference speech row with no hyp cue.
+        let ins_on_confirmed_silence: usize = art
+            .b_spans
+            .iter()
+            .filter(|s| {
+                !s.text.trim().is_empty()
+                    && reference.rows.iter().any(|r| {
+                        r.status == RowStatus::ConfirmedSilence
+                            && (s.end.min(r.end) - s.start.max(r.start)).max(0.0)
+                                / (s.end - s.start)
+                                > 0.5
+                    })
+            })
+            .count();
+        let del_in_speech_rows: usize = reference
+            .rows
+            .iter()
+            .filter(|r| {
+                matches!(r.status, RowStatus::Speech(_))
+                    && !art.b_spans.iter().any(|s| {
+                        (s.end.min(r.end) - s.start.max(r.start)).max(0.0) / (s.end - s.start) > 0.5
+                    })
+            })
+            .count();
+
+        // Segmentation quality, SEPARATE row: per speech row, |mapped hyp
+        // cues − 1| (a row's speech should be covered by exactly one cue),
+        // averaged over speech rows. 0 = perfect cue alignment.
+        let hyp_cues = art.b_spans.len();
+        let seg_boundary_error = {
+            let speech_rows = reference
+                .rows
+                .iter()
+                .filter(|r| matches!(r.status, RowStatus::Speech(_)))
+                .count() as f64;
+            if speech_rows == 0.0 {
+                0.0
+            } else {
+                let tot: f64 = reference
+                    .rows
+                    .iter()
+                    .filter(|r| matches!(r.status, RowStatus::Speech(_)))
+                    .map(|r| {
+                        let n = art
+                            .b_spans
+                            .iter()
+                            .filter(|s| {
+                                (s.end.min(r.end) - s.start.max(r.start)).max(0.0)
+                                    / (s.end - s.start)
+                                    > 0.5
+                            })
+                            .count();
+                        (n as f64 - 1.0).abs()
+                    })
+                    .sum();
+                tot / speech_rows
+            }
+        };
+
+        // Speaker errors: each hyp cue matched to the reference row covering
+        // >50% of it; compare speaker labels under BOTH attribution rules.
         let hyp_speaker_of = |sp: &Span, rule: &[Option<String>]| -> Option<usize> {
             let idx = art.b_spans.iter().position(|s| s.id == sp.id)?;
             rule.get(idx)?.as_ref().and_then(|l| {
@@ -1163,23 +1542,25 @@ fn score(artifacts: &Path, samples_dir: &Path) {
         let mut speaker_matches = 0usize;
         let mut speaker_errors = 0usize;
         for sp in &art.b_spans {
-            let best: Option<(&RefSpan, f64)> = reference
+            let span_dur = sp.end - sp.start;
+            if span_dur <= 0.0 {
+                continue;
+            }
+            let best: Option<(&RefRow, f64)> = reference
+                .rows
                 .iter()
-                .filter_map(|r| {
-                    let (rs, re_) = ref_window_of.get(r.id.as_str()).copied()?;
-                    let ov = (sp.end.min(re_) - sp.start.max(rs)).max(0.0);
-                    Some((r, ov))
+                .map(|r| {
+                    let ov = (sp.end.min(r.end) - sp.start.max(r.start)).max(0.0);
+                    (r, ov)
                 })
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             if let Some((r, ov)) = best {
-                let span_dur = sp.end - sp.start;
-                if span_dur > 0.0 && ov / span_dur > 0.5 {
+                if ov / span_dur > 0.5 {
                     speaker_matches += 1;
-                    // Compare under BOTH attribution rules.
                     for rule in [&art.speakers_segment_rule, &art.speakers_wordwin_rule] {
                         let hyp = hyp_speaker_of(sp, rule);
                         match (hyp, r.speaker) {
-                            (Some(h), Some(r)) if h == r => {}
+                            (Some(h), Some(rr)) if h == rr => {}
                             (None, None) => {}
                             _ => speaker_errors += 1,
                         }
@@ -1212,6 +1593,11 @@ fn score(artifacts: &Path, samples_dir: &Path) {
             ref_words,
             hyp_words: hyp_tokens.len(),
             wer,
+            ins_on_confirmed_silence,
+            del_in_speech_rows,
+            seg_boundary_error,
+            hyp_cues,
+            ref_cues,
             speaker_errors_matched: speaker_errors,
             speaker_matches,
             crossseg_runs_dropped: art.b_crossseg_runs_dropped,
@@ -1223,13 +1609,18 @@ fn score(artifacts: &Path, samples_dir: &Path) {
         out.write_all(json.as_bytes()).unwrap();
 
         println!(
-            "SCORE {} {} sub={} ins={} del={} wer={:.3} spk_err={}/{} (x2 rules) el_disagree_sec={:.3} rule_flips={}",
+            "SCORE {} {} sub={} ins={} del={} wer={:.3} ins_sil={} del_rows={} seg_err={:.3} cues={}/{} spk_err={}/{} (x2 rules) el_disagree_sec={:.3} rule_flips={}",
             line.clip,
             line.variant,
             line.sub,
             line.ins,
             line.del,
             line.wer,
+            line.ins_on_confirmed_silence,
+            line.del_in_speech_rows,
+            line.seg_boundary_error,
+            line.hyp_cues,
+            line.ref_cues,
             line.speaker_errors_matched,
             line.speaker_matches,
             line.el_disagreement_secondary,
@@ -1271,13 +1662,18 @@ fn report(artifacts: &Path) {
         for line in raw.lines().filter(|l| !l.trim().is_empty()) {
             let s: serde_json::Value = serde_json::from_str(line).expect("score line");
             println!(
-                "{:<8} {:<11} sub={:>3} ins={:>3} del={:>3} wer={:.3} spk_err={:>3} (of {} matches) runs={:>2} EL-disagree={:.3} flips={:>3}",
+                "{:<8} {:<11} sub={:>3} ins={:>3} del={:>3} wer={:.3} ins_sil={:>2} del_rows={:>2} seg_err={:.3} cues={:>3}/{} spk_err={:>3} (of {} matches) runs={:>2} EL-disagree={:.3} flips={:>3}",
                 s["clip"].as_str().unwrap_or("?"),
                 s["variant"].as_str().unwrap_or("?"),
                 s["sub"].as_u64().unwrap_or(0),
                 s["ins"].as_u64().unwrap_or(0),
                 s["del"].as_u64().unwrap_or(0),
                 s["wer"].as_f64().unwrap_or(f64::NAN),
+                s["ins_on_confirmed_silence"].as_u64().unwrap_or(0),
+                s["del_in_speech_rows"].as_u64().unwrap_or(0),
+                s["seg_boundary_error"].as_f64().unwrap_or(f64::NAN),
+                s["hyp_cues"].as_u64().unwrap_or(0),
+                s["ref_cues"].as_u64().unwrap_or(0),
                 s["speaker_errors_matched"].as_u64().unwrap_or(0),
                 s["speaker_matches"].as_u64().unwrap_or(0),
                 s["crossseg_runs_dropped"].as_u64().unwrap_or(0),
@@ -1290,12 +1686,19 @@ fn report(artifacts: &Path) {
     }
 }
 
-// ───────────────────────── tests (parse_template + sid kernel) ─────────────────────────
-// Regression tests for the 2026-09-13 incident: an unfilled template
-// (byte-identical to template.txt, all correction/speaker columns empty)
-// scored silently as an EMPTY reference (wer=NaN, all-insertion output).
-// Root cause: trim_end() ate the trailing TAB of unfilled rows (6 TSV
-// fields -> 5), making the "not fully filled" panic unreachable.
+// ───────────────────────── tests ─────────────────────────
+// Regressions for both 2026-09-13 incidents:
+//   (1) FORMAT: the v1 two-line-per-span TSV with trailing-tab sensitivity
+//       cost Andre a filled-in file. v2 is one line per row with a
+//       never-empty terminal status field; these tests prove a plain text
+//       editor save (trailing whitespace stripped, CRLF) cannot change the
+//       parse.
+//   (2) SPAN SET: rows derive from diarization over the AUDIO, never from a
+//       decode; not-reviewed/missing rows block scoring; silence-vs-speech
+//       rows are scored distinctly (insertion vs deletion classes);
+//       segmentation invariance: identical words in identical order score
+//       identically at 1 cue or 10 cues, with segmentation quality on a
+//       SEPARATE row.
 
 #[cfg(test)]
 mod tests {
@@ -1309,49 +1712,303 @@ mod tests {
         p
     }
 
+    const V2_HEADER: &str = "# Hand-review reference (PHI — local only, never commit)\n\
+        # format: review-v2\n";
+
+    fn v2_ref(statuses: &[(&str, &str, &str, &str, &str, &str)]) -> String {
+        let mut s = String::from(V2_HEADER);
+        for &(id, st, en, spk, text, status) in statuses {
+            s.push_str(&format!("{id}\t{st}\t{en}\t{spk}\t{text}\t{status}\n"));
+        }
+        s
+    }
+
+    // ── format survival: save-and-reparse round trip ──
+
     #[test]
-    fn unfilled_template_must_panic_not_score_silently() {
-        // Exact shape of an unfilled row as emitted by template mode:
-        // trailing TAB present; both fill columns empty.
-        let raw = "# header\n\nspan-A\t[Speaker 1]\t||\t\t||\t\n    hypothesis text\n";
-        let p = write_tmp("unfilled.txt", raw);
-        let result = std::panic::catch_unwind(move || parse_template(&p));
-        assert!(
-            result.is_err(),
-            "unfilled template must panic, not return spans"
+    fn round_trip_template_fill_and_editor_save_survives() {
+        // The ACTUAL round trip that must never break: generate → human
+        // edits in a plain text editor → editor strips trailing whitespace
+        // → reparse.
+        let rows = vec![ReviewRow {
+            id: "row-01".into(),
+            start: 0.0,
+            end: 4.0,
+            speaker: Some(0),
+            speech: true,
+        }];
+        let reference_text = emit_reference(&rows, 4.0, &[]);
+        let p = write_tmp("rt_template.txt", &reference_text);
+        // Parser accepts its own unfilled output (template re-parse).
+        let parsed = parse_reference(&p);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].status, RowStatus::NotReviewed);
+
+        // Human fills the text field by hand; editor then strips trailing
+        // whitespace on every line (the v1 killer).
+        let edited = reference_text
+            .lines()
+            .map(|l| match l.strip_prefix("row-01\t") {
+                // rest = "0.00\t4.00\tS1\t\t???" — insert text, set OK.
+                Some(rest) => {
+                    let cut = rest.trim_end_matches('?').trim_end();
+                    format!("row-01\t{cut}\tTRUE WORDS HERE\tOK")
+                }
+                None => l.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let p2 = write_tmp("rt_filled.txt", &edited);
+        let filled = parse_reference(&p2);
+        assert_eq!(filled.len(), 1);
+        assert_eq!(
+            filled[0].status,
+            RowStatus::Speech("TRUE WORDS HERE".into())
         );
     }
 
     #[test]
-    fn unfilled_row_without_trailing_tab_also_panics() {
-        // Editor-saved variant: trailing whitespace stripped by the editor.
-        let raw = "span-A\t[Speaker 1]\t||\t\t||\n    hypothesis text\n";
-        let p = write_tmp("unfilled_notab.txt", raw);
-        let result = std::panic::catch_unwind(move || parse_template(&p));
-        assert!(result.is_err(), "unfilled row (no trailing tab) must panic");
+    fn editor_whitespace_mangling_cannot_change_field_count() {
+        // v1 failure mode: trailing TAB eaten → field count changed. v2:
+        // trailing whitespace stripped, CRLF line endings — all still parse
+        // to the same rows.
+        let raw = "# format: review-v2\r\n\
+            row-01\t0.00\t4.00\tS1\tHELLO WORLD\tOK  \r\n\
+            row-02\t4.00\t6.00\t-\t\tOK\r\n";
+        let p = write_tmp("mangled.txt", raw);
+        let rows = parse_reference(&p);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].status, RowStatus::Speech("HELLO WORLD".into()));
+        assert_eq!(rows[1].status, RowStatus::ConfirmedSilence);
     }
 
     #[test]
-    fn filled_row_parses_correction_and_speaker() {
-        let raw = "span-A\t[Speaker 1]\t||\tCORRECTED WORDS HERE\t||\tS2\n    hypothesis text\n";
-        let p = write_tmp("filled.txt", raw);
-        let spans = parse_template(&p);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].id, "span-A");
-        assert_eq!(spans[0].speaker, Some(1)); // S2 -> 0-based 1
-        // Tokenization happens later; text preserved verbatim.
-        assert_eq!(spans[0].text, "CORRECTED WORDS HERE");
+    fn legacy_v1_file_is_refused_not_misparsed() {
+        // v1 shape (two lines per span, || separators). MUST hard-refuse:
+        // re-filling a legacy file is how the first incident happened.
+        let raw = "# Hand-correction template (PHI — local only, never commit)\n\
+            span-A\t[Speaker 2]\t||\t\t||\t\n    You have reached the voicemail box of\n";
+        let p = write_tmp("v1.txt", raw);
+        let result = std::panic::catch_unwind(move || parse_reference(&p));
+        assert!(result.is_err(), "v1 file must be refused, not parsed");
     }
 
     #[test]
-    fn deleted_span_empty_text_with_dash_speaker() {
-        let raw = "span-A\t[Speaker 1]\t||\t\t||\t-\n    hypothesis text\n";
-        let p = write_tmp("deleted.txt", raw);
-        let spans = parse_template(&p);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].speaker, None);
-        assert!(spans[0].text.is_empty(), "deleted span has empty text");
+    fn unfilled_rows_and_missing_rows_block_scoring() {
+        // ??? row and a deleted row both count as not reviewed.
+        let dir = std::env::temp_dir().join("fs_local_eval_tests/refaudit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("clip-03.review.txt"),
+            v2_ref(&[
+                ("row-01", "0.00", "4.00", "S1", "", "???"),
+                ("row-02", "4.00", "8.00", "S2", "", "???"),
+            ]),
+        )
+        .unwrap();
+        // Filled copy: row-01 left ??? (not reviewed), row-02 deleted
+        // entirely — BOTH must count as not reviewed.
+        std::fs::write(
+            dir.join("clip-03.filled.txt"),
+            v2_ref(&[("row-01", "0.00", "4.00", "S1", "", "???")]),
+        )
+        .unwrap();
+        let r = load_reviewed(&dir, "clip-03");
+        assert_eq!(r.not_reviewed, 2, "1 ??? + 1 missing row");
+        assert_eq!(r.first_not_reviewed.as_deref(), Some("row-01"));
     }
+
+    // ── scoring semantics: silence vs speech, distinct classes ──
+
+    #[test]
+    fn confirmed_silence_row_with_asr_output_is_insertion_class() {
+        // Hypothesis cue sits inside a confirmed-silence interval: the
+        // localized insertion count must see it.
+        let hyp = vec![Span {
+            id: "span-A".into(),
+            start: 0.5,
+            end: 3.5,
+            text: "HALLUCINATED WORDS".into(),
+            words: vec![],
+        }];
+        let rows = vec![RefRow {
+            id: "row-01".into(),
+            start: 0.0,
+            end: 4.0,
+            speaker: None,
+            status: RowStatus::ConfirmedSilence,
+        }];
+        let n = hyp
+            .iter()
+            .filter(|s| {
+                !s.text.trim().is_empty()
+                    && rows.iter().any(|r| {
+                        r.status == RowStatus::ConfirmedSilence
+                            && (s.end.min(r.end) - s.start.max(r.start)).max(0.0)
+                                / (s.end - s.start)
+                                > 0.5
+                    })
+            })
+            .count();
+        assert_eq!(n, 1, "ASR output on a confirmed-silence row = insertion");
+    }
+
+    #[test]
+    fn speech_row_with_no_asr_cue_is_deletion_class() {
+        // Human transcribed speech; the decode emitted nothing there: the
+        // localized deletion count must see it (invisible to a
+        // decode-keyed reference).
+        let hyp: Vec<Span> = vec![];
+        let rows = vec![RefRow {
+            id: "row-01".into(),
+            start: 10.0,
+            end: 14.0,
+            speaker: Some(0),
+            status: RowStatus::Speech("DROPPED UTTERANCE WORDS".into()),
+        }];
+        let n = rows
+            .iter()
+            .filter(|r| {
+                matches!(r.status, RowStatus::Speech(_))
+                    && !hyp.iter().any(|s| {
+                        (s.end.min(r.end) - s.start.max(r.start)).max(0.0) / (s.end - s.start) > 0.5
+                    })
+            })
+            .count();
+        assert_eq!(n, 1, "speech row with no cue = deletion");
+    }
+
+    // ── segmentation invariance ──
+
+    #[test]
+    fn identical_words_score_identically_at_one_or_ten_cues() {
+        // Same words, same order: 1 cue vs 10 cues must give identical
+        // S/I/D (tokens are concatenated; cue count never enters WER).
+        let words = "the quick brown fox jumps over the lazy dog today";
+        let one = vec![Span {
+            id: "span-A".into(),
+            start: 0.0,
+            end: 10.0,
+            text: words.into(),
+            words: vec![],
+        }];
+        let ten: Vec<Span> = words
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, w)| Span {
+                id: format!("span-{}", char::from(b'A' + i as u8)),
+                start: i as f64,
+                end: i as f64 + 1.0,
+                text: w.into(),
+                words: vec![],
+            })
+            .collect();
+        assert_eq!(ten.len(), 10);
+        let ref_tokens: Vec<String> = tokens(words);
+        let h1: Vec<String> = one.iter().flat_map(|s| tokens(&s.text)).collect();
+        let h10: Vec<String> = ten.iter().flat_map(|s| tokens(&s.text)).collect();
+        let (s1, i1, d1) = sid(&ref_tokens, &h1);
+        let (s10, i10, d10) = sid(&ref_tokens, &h10);
+        assert_eq!((s1, i1, d1), (0, 0, 0));
+        assert_eq!((s10, i10, d10), (0, 0, 0));
+        assert_eq!(h1, h10, "token streams identical");
+    }
+
+    #[test]
+    fn cue_count_difference_is_visible_only_in_seg_error_not_wer() {
+        // 10 cues over 4 speech rows: WER stays 0 while the SEPARATE
+        // segmentation row exposes the cue-count delta.
+        let words_per_row = [
+            "alpha bravo charlie",
+            "delta echo foxtrot",
+            "golf hotel",
+            "india juliet",
+        ];
+        let rows: Vec<RefRow> = words_per_row
+            .iter()
+            .enumerate()
+            .map(|(i, t)| RefRow {
+                id: format!("row-{:02}", i + 1),
+                start: i as f64 * 4.0,
+                end: i as f64 * 4.0 + 4.0,
+                speaker: Some(0),
+                status: RowStatus::Speech((*t).into()),
+            })
+            .collect();
+        let all_words: Vec<&str> = words_per_row.iter().flat_map(|s| s.split(' ')).collect();
+        assert_eq!(all_words.len(), 10);
+        let ten: Vec<Span> = all_words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| Span {
+                id: format!("span-{}", char::from(b'A' + i as u8)),
+                start: i as f64 * 1.6,
+                end: i as f64 * 1.6 + 1.6,
+                text: (*w).into(),
+                words: vec![],
+            })
+            .collect();
+        let ref_tokens: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match &r.status {
+                RowStatus::Speech(t) => Some(tokens(t)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let hyp_tokens: Vec<String> = ten.iter().flat_map(|s| tokens(&s.text)).collect();
+        let (s, i, d) = sid(&ref_tokens, &hyp_tokens);
+        assert_eq!((s, i, d), (0, 0, 0), "WER must not see cue count");
+        let seg: f64 = rows
+            .iter()
+            .map(|r| {
+                let n = ten
+                    .iter()
+                    .filter(|sp| {
+                        (sp.end.min(r.end) - sp.start.max(r.start)).max(0.0) / (sp.end - sp.start)
+                            > 0.5
+                    })
+                    .count();
+                (n as f64 - 1.0).abs()
+            })
+            .sum::<f64>()
+            / rows.len() as f64;
+        assert!(seg > 0.0, "seg error must expose the cue-count delta");
+    }
+
+    // ── whisper-independent row derivation ──
+
+    #[test]
+    fn review_rows_cover_whole_clip_and_partition() {
+        let turns = vec![
+            (0usize, 2.3f64, 4.0f64),
+            (1, 4.3, 7.2),
+            (1, 7.2, 10.0),
+            (1, 10.0, 20.0),
+            (0, 20.0, 21.2),
+        ];
+        let rows = review_rows_from_turns(&turns, 30.1);
+        assert!((rows.first().unwrap().start - 0.0).abs() < 1e-9);
+        for w in rows.windows(2) {
+            assert!((w[0].end - w[1].start).abs() < 1e-9);
+        }
+        assert!((rows.last().unwrap().end - 30.1).abs() < 1e-9);
+        assert!(!rows[0].speech, "leading silence row");
+        assert!(rows[1].speech);
+        assert!(rows.iter().all(|r| r.end - r.start <= MAX_ROW_S + 1e-9));
+    }
+
+    #[test]
+    fn empty_diarization_still_yields_full_silence_coverage() {
+        let rows = review_rows_from_turns(&[], 30.0);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|r| !r.speech));
+        assert!((rows.last().unwrap().end - 30.0).abs() < 1e-9);
+    }
+
+    // ── sid kernel (kept from the v1 test set) ──
 
     #[test]
     fn sid_counts_sub_ins_del_separately() {
@@ -1372,5 +2029,17 @@ mod tests {
         let r: Vec<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
         let (s, i, d) = sid(&r, &r.clone());
         assert_eq!((s, i, d), (0, 0, 0));
+    }
+
+    #[test]
+    fn el_cue_parser_extracts_timestamps_and_text() {
+        let raw = "00:00:02,420 --> 00:00:04,460 [Speaker 0]\nYou have reached\n\n00:00:07,340 --> 00:00:08,860 [Speaker 1]\nSecond cue\n";
+        let p = write_tmp("el.txt", raw);
+        let cues = parse_el_cues(&p);
+        assert_eq!(cues.len(), 2);
+        assert!((cues[0].0 - 2.42).abs() < 1e-6);
+        assert!((cues[0].1 - 4.46).abs() < 1e-6);
+        assert_eq!(cues[0].2, "You have reached");
+        assert_eq!(cues[1].2, "Second cue");
     }
 }
