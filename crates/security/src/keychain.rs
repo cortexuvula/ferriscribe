@@ -31,13 +31,15 @@
 //!
 //! Example:
 //! ```rust
-//! #[test]
-//! fn my_test() {
-//!     keychain::set_test_provider(keychain::TestProvider::fixed([42u8; 32]));
-//!     let key = keychain::get_db_key().unwrap();
+//! fn scoped_mock() {
+//!     medical_security::keychain::set_test_provider(
+//!         medical_security::keychain::TestProvider::fixed_db_key([42u8; 32]),
+//!     );
+//!     let key = medical_security::keychain::get_db_key().unwrap();
 //!     assert_eq!(key, Some([42u8; 32]));
-//!     keychain::clear_test_provider();
+//!     medical_security::keychain::clear_test_provider();
 //! }
+//! scoped_mock();
 //! ```
 
 use keyring::Entry;
@@ -77,18 +79,30 @@ lazy_static::lazy_static! {
 /// tests — the `#[cfg(test)]` guard on `OsKeychain` does not fire in
 /// that case, but the global provider still routes correctly.
 pub fn set_test_provider(provider: impl SecretProvider + 'static) {
-    let mut guard = GLOBAL_PROVIDER.write().unwrap();
+    // Poison-tolerant: if a panic ever strikes while this RwLock is held
+    // (a sentinel firing mid-swap, a test aborting between install and
+    // clear), a poisoned lock must not convert every LATER set/clear into
+    // a panic cascade while other test locks are held. Recover the guard;
+    // the provider slot itself is still consistent (full-slot writes only).
+    let mut guard = GLOBAL_PROVIDER.write().unwrap_or_else(|e| e.into_inner());
     *guard = Some(Arc::new(provider));
 }
 
 /// Remove the test provider, reverting to the real OS keychain.
 pub fn clear_test_provider() {
-    let mut guard = GLOBAL_PROVIDER.write().unwrap();
+    // Poison-tolerant for the same reason as `set_test_provider`.
+    let mut guard = GLOBAL_PROVIDER.write().unwrap_or_else(|e| e.into_inner());
     *guard = None;
 }
 
 /// Run a closure with the test provider active, then automatically clear
 /// it (RAII). Panics in the closure still clear the provider.
+///
+/// Callers that touch a **file-backed** database must pair this with a
+/// temporary DB path (see the module docs on key/DB pairing): the mock's
+/// synthetic key only decrypts a DB that was created under it, so an
+/// accidental open of the real `medical.db` fails on open instead of
+/// silently succeeding.
 pub fn with_test_provider<F, R>(provider: impl SecretProvider + 'static, f: F) -> R
 where
     F: FnOnce() -> R,
@@ -160,6 +174,14 @@ impl SecretProvider for TestProvider {
 
 /// Internal helper: route to the global test provider if installed,
 /// otherwise use `OsKeychain` (production) or `TestSentinel` (test builds).
+///
+/// The test-detection is **belt and braces**: both a `#[cfg(test)]` compile
+/// gate and a runtime harness check. The compile gate covers unit tests in
+/// this crate; the runtime check covers the case where this crate is
+/// compiled as a *dependency* of another crate's test binary — there
+/// `cfg(test)` is false for this crate, `OsKeychain` is compiled in, and
+/// without the runtime check a missing provider would silently reach the
+/// real OS keychain (and on macOS block forever on a securityd prompt).
 fn with_provider<F, R>(f: F) -> R
 where
     F: FnOnce(&dyn SecretProvider) -> R,
@@ -175,26 +197,223 @@ where
 
     if let Some(provider) = provider_arc {
         f(provider.as_ref())
+    } else if cfg!(test) || running_under_test_harness() {
+        f(&TestSentinel)
     } else {
-        // In test builds, this routes to TestSentinel which panics.
-        // In production builds, this routes to OsKeychain which touches the real keychain.
-        #[cfg(test)]
-        {
-            f(&TestSentinel)
+        f(&OsKeychain)
+    }
+}
+
+/// True when the current process looks like a Rust test harness.
+///
+/// Detection signals (any one suffices):
+/// - `NEXTEST=1` — cargo-nextest sets this in every test process.
+/// - `RUST_TEST_THREADS` is set — `cargo test` and most harness wrappers
+///   set it; a production app has no reason to.
+/// - `argv[0]`'s file name matches cargo's test-binary layout
+///   (`deps/<name>-<16 hex chars>`) or ends with `.d`/`-<hash>` smoke-test
+///   names libtest uses when invoking a binary's `--list` self-check.
+///
+/// The result is cached in a `OnceLock`: argv and the environment are
+/// stable for the process lifetime, and this is on the hot path of every
+/// keychain call that has no provider installed (production startup).
+///
+/// False positives (a production process that happens to define
+/// `RUST_TEST_THREADS`) trade a panic for what would otherwise be a real
+/// keychain access — fail-closed is the intended direction. False
+/// negatives fall back to `OsKeychain`, exactly like production.
+fn running_under_test_harness() -> bool {
+    static DETECTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DETECTED.get_or_init(|| {
+        let argv0 = std::env::args()
+            .next()
+            .as_deref()
+            .and_then(|a| std::path::Path::new(a).file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_owned);
+        detect_harness_signals(
+            std::env::var_os("NEXTEST").as_deref(),
+            std::env::var_os("RUST_TEST_THREADS").as_deref(),
+            argv0.as_deref(),
+        )
+    })
+}
+
+/// Pure decision core of [`running_under_test_harness`] — separated so the
+/// detection logic (including the must-NOT-fire cases) is unit-testable
+/// without manipulating the real process environment.
+fn detect_harness_signals(
+    nextest: Option<&std::ffi::OsStr>,
+    rust_test_threads: Option<&std::ffi::OsStr>,
+    argv0: Option<&str>,
+) -> bool {
+    if nextest.is_some_and(|v| v == "1") {
+        return true;
+    }
+    if rust_test_threads.is_some() {
+        return true;
+    }
+    argv0.is_some_and(harness_binary_name)
+}
+
+/// Classify an `argv[0]` file name as a cargo-built test binary.
+fn harness_binary_name(name: &str) -> bool {
+    // Cargo's test artifacts are `deps/<crate-or-bin>-<16 hex chars>`
+    // (no extension on macOS/Linux, `.exe` on Windows). Match the suffix
+    // shape after stripping a platform extension.
+    let stem = name.strip_suffix(".exe").unwrap_or(name);
+    let Some((prefix, suffix)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    !prefix.is_empty() && suffix.len() == 16 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Fail-fast backend used when a test-context process reaches a keychain
+/// operation with no provider installed. Panics instead of touching the
+/// real OS keychain: in a test there is no legitimate reason to read the
+/// operator's keychain, and on macOS an access prompt would hang the
+/// whole harness (the original bug this module's isolation exists to
+/// prevent — `SecKeychainFindGenericPassword` blocking indefinitely).
+///
+/// Compiled unconditionally (not `#[cfg(test)]`): when this crate is a
+/// dependency of another crate's test binary, `cfg(test)` is false here
+/// and only the runtime harness check in [`with_provider`] routes here.
+struct TestSentinel;
+
+impl SecretProvider for TestSentinel {
+    fn get_secret(&self, account: &str) -> KeychainResult<Option<[u8; 32]>> {
+        panic!(
+            "OsKeychain::get_secret({account:?}) reached in a test harness without a test \
+             provider. Call set_test_provider() before accessing the keychain in tests."
+        );
+    }
+    fn set_secret(&self, account: &str, _key: [u8; 32]) -> KeychainResult<()> {
+        panic!(
+            "OsKeychain::set_secret({account:?}) reached in a test harness without a test \
+             provider. Call set_test_provider() before accessing the keychain in tests."
+        );
+    }
+    fn delete_secret(&self, account: &str) -> KeychainResult<()> {
+        panic!(
+            "OsKeychain::delete_secret({account:?}) reached in a test harness without a test \
+             provider. Call set_test_provider() before accessing the keychain in tests."
+        );
+    }
+}
+
+#[cfg(test)]
+mod harness_detection_tests {
+    use super::*;
+
+    #[test]
+    fn harness_binary_name_matches_cargo_test_layout() {
+        // Exact cargo layout: deps/<name>-<16 hex>
+        assert!(harness_binary_name(
+            "rust_medical_assistant_lib-9f1c2b3d4e5f6071"
+        ));
+        assert!(harness_binary_name("medical_security-abcdef0123456789"));
+        assert!(harness_binary_name("medical_security-ABCDEF0123456789.exe"));
+        // NOT harness binaries:
+        assert!(!harness_binary_name(
+            "ferriscribe-backup-aarch64-apple-darwin"
+        ));
+        assert!(!harness_binary_name("rust-medical-assistant")); // no hash suffix
+        assert!(!harness_binary_name("app-9f1c2b3")); // hash too short
+        assert!(!harness_binary_name("app-9f1c2b3d4e5f60718")); // 17 chars
+        assert!(!harness_binary_name(
+            "app-zzzzzzzzzzzzzzzz".replace('z', "g").as_str()
+        )); // non-hex
+        assert!(!harness_binary_name("-0123456789abcdef")); // empty prefix
+    }
+
+    #[test]
+    fn running_under_test_harness_is_true_in_this_binary() {
+        // This test IS running under a harness (cargo test sets
+        // RUST_TEST_THREADS, and argv[0] is a deps/<name>-<hash> binary),
+        // so the detection this test exists to verify must fire here.
+        assert!(
+            running_under_test_harness(),
+            "detection must recognise the current cargo test process"
+        );
+    }
+
+    #[test]
+    fn detection_fires_for_each_harness_signal() {
+        use std::ffi::OsStr;
+        let prod_name = "/Applications/FerriScribe.app/Contents/MacOS/rust-medical-assistant";
+        // NEXTEST=1 alone
+        assert!(detect_harness_signals(
+            Some(OsStr::new("1")),
+            None,
+            Some(prod_name)
+        ));
+        // RUST_TEST_THREADS set (any value) alone
+        assert!(detect_harness_signals(
+            None,
+            Some(OsStr::new("4")),
+            Some(prod_name)
+        ));
+        // cargo test-binary argv[0] alone
+        assert!(detect_harness_signals(
+            None,
+            None,
+            Some("/target/debug/deps/rust_medical_assistant_lib-9f1c2b3d4e5f6071")
+        ));
+        assert!(detect_harness_signals(
+            None,
+            None,
+            Some("C:\\ci\\deps\\app_lib-0123456789abcdef.exe")
+        ));
+    }
+
+    #[test]
+    fn detection_does_not_fire_for_production_processes() {
+        use std::ffi::OsStr;
+        // The MUST-NOT-FIRE cases: a production app launched normally, a
+        // bundled helper binary, a CLI run by hand — none of these may be
+        // misclassified as a test harness (they'd panic on keychain use).
+        let none: Option<&OsStr> = None;
+        for prod in [
+            "/Applications/FerriScribe.app/Contents/MacOS/rust-medical-assistant",
+            "/usr/local/bin/ferriscribe-backup-aarch64-apple-darwin",
+            "/home/andre/.cargo/bin/some-tool",
+            "rust-medical-assistant",
+            "./target/release/rust-medical-assistant",
+        ] {
+            assert!(
+                !detect_harness_signals(none, none, Some(prod)),
+                "production argv[0] must NOT be classified as a test harness: {prod}"
+            );
         }
-        #[cfg(not(test))]
-        {
-            f(&OsKeychain)
-        }
+        // NEXTEST set but not "1" (e.g. NEXTEST_PROFILE leaks into a
+        // spawned prod process env by prefix collision — value must be
+        // exactly "1")
+        assert!(!detect_harness_signals(
+            Some(OsStr::new("0")),
+            none,
+            Some("/Applications/App.app/Contents/MacOS/app")
+        ));
+        // No argv[0] at all (paranoia; args() is never empty in practice)
+        assert!(!detect_harness_signals(none, none, None));
+    }
+
+    #[test]
+    fn sentinel_panics_for_every_operation() {
+        // Positive path: with no provider installed, each operation must
+        // fail fast rather than reach the OS keychain.
+        assert!(std::panic::catch_unwind(|| TestSentinel.get_secret("db-key")).is_err());
+        assert!(std::panic::catch_unwind(|| TestSentinel.set_secret("db-key", [0u8; 32])).is_err());
+        assert!(std::panic::catch_unwind(|| TestSentinel.delete_secret("db-key")).is_err());
     }
 }
 
 /// Production backend: the real OS keychain via the `keyring` crate.
-/// Gated behind `#[cfg(not(test))]` so test builds can never reach it.
-#[cfg(not(test))]
+///
+/// Compiled unconditionally so `with_provider` can name it in both build
+/// modes; test contexts never reach it (provider installed, `cfg!(test)`,
+/// or the runtime harness check route elsewhere first).
 struct OsKeychain;
 
-#[cfg(not(test))]
 impl SecretProvider for OsKeychain {
     fn get_secret(&self, account: &str) -> KeychainResult<Option<[u8; 32]>> {
         let entry = Entry::new(KEYCHAIN_SERVICE, account)
@@ -232,35 +451,6 @@ impl SecretProvider for OsKeychain {
             Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(KeychainError::Access(e.to_string())),
         }
-    }
-}
-
-// Test-build sentinel: when compiled as a test binary (unit tests in
-// medical-security), the default provider panics immediately instead of
-// touching the real keychain. For cross-crate integration tests, callers
-// MUST call set_test_provider() before any keychain operation.
-#[cfg(test)]
-struct TestSentinel;
-
-#[cfg(test)]
-impl SecretProvider for TestSentinel {
-    fn get_secret(&self, account: &str) -> KeychainResult<Option<[u8; 32]>> {
-        panic!(
-            "OsKeychain::get_secret({account:?}) called without a test provider. \
-             Call set_test_provider() before accessing the keychain in tests."
-        );
-    }
-    fn set_secret(&self, account: &str, _key: [u8; 32]) -> KeychainResult<()> {
-        panic!(
-            "OsKeychain::set_secret({account:?}) called without a test provider. \
-             Call set_test_provider() before accessing the keychain in tests."
-        );
-    }
-    fn delete_secret(&self, account: &str) -> KeychainResult<()> {
-        panic!(
-            "OsKeychain::delete_secret({account:?}) called without a test provider. \
-             Call set_test_provider() before accessing the keychain in tests."
-        );
     }
 }
 
@@ -401,7 +591,10 @@ mod tests {
         let _guard = serial_lock();
         set_test_provider(TestProvider::empty());
         let result = get_db_key().expect("read");
-        assert!(result.is_none(), "expected None on empty keychain, got Some");
+        assert!(
+            result.is_none(),
+            "expected None on empty keychain, got Some"
+        );
         clear_test_provider();
     }
 
@@ -421,7 +614,10 @@ mod tests {
         set_test_provider(TestProvider::empty());
         let first = get_or_create_db_key().expect("first call");
         let second = get_or_create_db_key().expect("second call");
-        assert_eq!(first, second, "should return the same key on subsequent calls");
+        assert_eq!(
+            first, second,
+            "should return the same key on subsequent calls"
+        );
         clear_test_provider();
     }
 
@@ -517,9 +713,7 @@ mod tests {
             // Wait until the provider is cleared
             rx.recv().unwrap();
             // Now the provider is gone — any keychain call should panic
-            let result = std::panic::catch_unwind(|| {
-                get_db_key()
-            });
+            let result = std::panic::catch_unwind(get_db_key);
             result.is_err() // true = panicked as expected
         });
 
@@ -566,7 +760,7 @@ mod tests {
         let _guard = serial_lock();
         assert!(!is_test_provider_active(), "precondition: no provider");
 
-        let result = std::panic::catch_unwind(|| get_db_key());
+        let result = std::panic::catch_unwind(get_db_key);
         assert!(
             result.is_err(),
             "get_db_key without a test provider must panic via TestSentinel"
@@ -605,9 +799,8 @@ mod test_harness {
         let provider = TestProvider::fixed_db_key(synthetic_key);
         set_test_provider(provider);
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            f(&db_path, synthetic_key)
-        }));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&db_path, synthetic_key)));
 
         clear_test_provider();
         drop(temp_dir); // Explicit cleanup before lock release
