@@ -1594,4 +1594,282 @@ mod tests {
         let c = RecordingsRepo::get_by_id(&conn, &done.id).unwrap();
         assert!(matches!(c.status, ProcessingStatus::Completed { .. }));
     }
+
+    // ── Diarization outcome persistence (Slice 2c) ─────────────────────────
+    //
+    // These exercise the REAL persistence path (`persist_producer_update`
+    // against migrated in-memory SQLite), not enum-to-string mapping. The
+    // producer side (inner.rs) writes `diarization_outcome` and
+    // `diarization_reason` as metadata keys in the SAME persist call as the
+    // transcript; the failure path (`mark_recording_failed_db_only`) persists
+    // ONLY `processing_status` with an empty metadata patch, so a failed
+    // attempt can never overwrite the outcome describing the saved text.
+    //
+    // Contract values: off | skipped | failed | completed |
+    // completed-with-unassigned. The backend never writes "unknown" — that is
+    // a frontend-only sentinel for legacy rows with absent metadata.
+
+    /// (a) Transcript and diarization_outcome land together in ONE atomic
+    /// persist: a single `persist_producer_update` carrying both the
+    /// transcript column and the metadata keys.
+    #[test]
+    fn transcript_and_diarization_outcome_persist_atomically_together() {
+        let conn = migrated_conn();
+        let rec = new_rec();
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        // One persist call, exactly as inner.rs issues it: transcript +
+        // segments + outcome + reason in the same ProducerPersist.
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                transcript: Some("synthetic transcript alpha".into()),
+                stt_provider: Some("synthetic-provider".into()),
+                processing_status: Some(
+                    serde_json::to_string(&ProcessingStatus::Completed {
+                        completed_at: Utc::now(),
+                    })
+                    .unwrap(),
+                ),
+                metadata_patch: vec![
+                    (
+                        "transcript_segments".into(),
+                        serde_json::json!([
+                            {"speaker": "Speaker 1", "text": "synthetic alpha", "start": 0.0, "end": 1.0}
+                        ]),
+                    ),
+                    ("diarization_outcome".into(), serde_json::json!("completed")),
+                    ("diarization_reason".into(), serde_json::Value::Null),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(
+            after.transcript.as_deref(),
+            Some("synthetic transcript alpha")
+        );
+        assert_eq!(
+            after.metadata["diarization_outcome"], "completed",
+            "outcome must land in the same write as the transcript"
+        );
+        assert!(
+            after.metadata["diarization_reason"].is_null(),
+            "no reason for a self-explanatory outcome"
+        );
+        assert!(after.metadata["transcript_segments"].is_array());
+    }
+
+    /// (b) Retranscription REPLACES the prior outcome alongside the new
+    /// transcript — the old value must not coexist. Includes the reason-key
+    /// replacement: a skipped run's reason must not outlive the retranscript.
+    #[test]
+    fn retranscription_replaces_prior_diarization_outcome_and_reason() {
+        let conn = migrated_conn();
+        let rec = new_rec();
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        // First run: diarization requested but models absent → skipped.
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                transcript: Some("synthetic transcript beta".into()),
+                metadata_patch: vec![
+                    ("diarization_outcome".into(), serde_json::json!("skipped")),
+                    (
+                        "diarization_reason".into(),
+                        serde_json::json!("models_unavailable"),
+                    ),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let first = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(first.metadata["diarization_outcome"], "skipped");
+
+        // Retranscription (models now installed, diarization on): completed.
+        // The producer always writes diarization_reason — null here — so the
+        // stale models_unavailable cannot survive next to "completed".
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                transcript: Some("synthetic transcript beta v2".into()),
+                metadata_patch: vec![
+                    ("diarization_outcome".into(), serde_json::json!("completed")),
+                    ("diarization_reason".into(), serde_json::Value::Null),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let second = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(
+            second.transcript.as_deref(),
+            Some("synthetic transcript beta v2"),
+            "new transcript replaced the old"
+        );
+        assert_eq!(
+            second.metadata["diarization_outcome"], "completed",
+            "outcome replaced — 'skipped' must not coexist with 'completed'"
+        );
+        assert!(
+            second.metadata["diarization_reason"].is_null(),
+            "stale reason must not survive the retranscription that resolved it"
+        );
+    }
+
+    /// (c) A FAILED retranscription that retains the previous transcript does
+    /// NOT overwrite that saved transcript's outcome with the failed
+    /// attempt's status. Attempt-level errors stay separate from metadata
+    /// describing saved text: the failure path persists processing_status
+    /// ONLY, with an empty metadata patch.
+    #[test]
+    fn failed_retranscription_does_not_overwrite_saved_transcript_outcome() {
+        let conn = migrated_conn();
+        let rec = new_rec();
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        // Successful first run.
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                transcript: Some("synthetic transcript gamma".into()),
+                metadata_patch: vec![
+                    ("diarization_outcome".into(), serde_json::json!("completed")),
+                    ("diarization_reason".into(), serde_json::Value::Null),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Failed retranscription: mirrors mark_recording_failed_db_only —
+        // processing_status set, metadata_patch EMPTY. The synthetic error
+        // text lives in the status column, never in metadata.
+        let failed_status = serde_json::to_string(&ProcessingStatus::Failed {
+            error: "synthetic failure".into(),
+            retry_count: 0,
+        })
+        .unwrap();
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                processing_status: Some(failed_status),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(
+            after.transcript.as_deref(),
+            Some("synthetic transcript gamma"),
+            "failed attempt must not erase the saved transcript"
+        );
+        assert_eq!(
+            after.metadata["diarization_outcome"], "completed",
+            "failed attempt must not overwrite the saved transcript's outcome"
+        );
+        assert!(
+            !after.metadata.to_string().contains("synthetic failure"),
+            "attempt error text must stay out of metadata"
+        );
+    }
+
+    /// All five backend-writable values round-trip through the metadata patch
+    /// path. "unknown" is excluded — the backend never writes it.
+    #[test]
+    fn all_five_backend_outcome_values_round_trip_through_metadata() {
+        let conn = migrated_conn();
+        for value in [
+            "off",
+            "skipped",
+            "failed",
+            "completed",
+            "completed-with-unassigned",
+        ] {
+            let rec = new_rec();
+            RecordingsRepo::insert(&conn, &rec).unwrap();
+            RecordingsRepo::persist_producer_update(
+                &conn,
+                &rec.id,
+                &ProducerPersist {
+                    transcript: Some(format!("synthetic transcript for {value}")),
+                    metadata_patch: vec![("diarization_outcome".into(), serde_json::json!(value))],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+            assert_eq!(
+                after.metadata["diarization_outcome"].as_str(),
+                Some(value),
+                "value {value} must round-trip"
+            );
+        }
+    }
+
+    /// A historical outcome survives unrelated metadata writes: installing the
+    /// diarization models later (or any other producer patching other keys)
+    /// must not rewrite a past recording's saved outcome.
+    #[test]
+    fn historical_outcome_survives_unrelated_metadata_patches() {
+        let conn = migrated_conn();
+        let rec = new_rec();
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        // Historical run: skipped because models were absent at the time.
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                transcript: Some("synthetic transcript delta".into()),
+                metadata_patch: vec![
+                    ("diarization_outcome".into(), serde_json::json!("skipped")),
+                    (
+                        "diarization_reason".into(),
+                        serde_json::json!("models_unavailable"),
+                    ),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Later, an unrelated producer patches a different metadata key
+        // (models are installed; nothing rewrites the historical outcome).
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec.id,
+            &ProducerPersist {
+                metadata_patch: vec![(
+                    "generation_stats".into(),
+                    serde_json::json!({"note_count": 1}),
+                )],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+        assert_eq!(
+            after.metadata["diarization_outcome"], "skipped",
+            "historical outcome must survive unrelated metadata writes"
+        );
+        assert_eq!(
+            after.metadata["diarization_reason"], "models_unavailable",
+            "historical reason must survive too"
+        );
+        assert_eq!(after.metadata["generation_stats"]["note_count"], 1);
+    }
 }

@@ -292,7 +292,8 @@ pub async fn transcribe_recording_inner(
     // Diarization outcome reporting (see `diarization_outcome` below for the
     // state definitions). A user who explicitly turned the setting on must
     // not silently get unlabeled text when something went wrong.
-    match diarization_outcome(&transcript, diarize_requested) {
+    let outcome = diarization_outcome(&transcript, diarize_requested);
+    match &outcome {
         DiarizationOutcome::NotRequested | DiarizationOutcome::Succeeded => {}
         DiarizationOutcome::Skipped => {
             tracing::warn!(
@@ -528,6 +529,23 @@ pub async fn transcribe_recording_inner(
             .collect(),
     );
 
+    // Persist the diarization outcome (from THIS run's requested options) into
+    // the recordings.metadata JSON column, in the same atomic
+    // persist_producer_update write as the transcript. The frontend reads this
+    // key to render diarization state instead of inferring it from
+    // `speaker: null`. The backend NEVER writes "unknown" — that value exists
+    // only in the frontend for legacy rows with absent metadata.
+    // to_frontend_string is evaluated against the POST-filter transcript: the
+    // completed/completed-with-unassigned distinction must describe the
+    // segments actually being saved.
+    let diarization_outcome_json =
+        serde_json::Value::String(outcome.to_frontend_string(&transcript).to_string());
+    // Bounded reason code (short stable identifier only — NEVER raw provider
+    // error text, stderr, or file paths: they leak paths and can carry PHI).
+    // Missing/unrecognised codes fall back to generic UI wording; the outcome
+    // itself always stands.
+    let diarization_reason_json = outcome.reason_json();
+
     let recording_for_failure = recording.clone();
     let persist_id = recording.id;
     let persist_transcript = display_text.clone();
@@ -552,7 +570,16 @@ pub async fn transcribe_recording_inner(
                     transcript: Some(persist_transcript),
                     stt_provider: Some(persist_stt_provider),
                     processing_status: Some(persist_status_json),
-                    metadata_patch: vec![("transcript_segments".into(), segments_json)],
+                    // One atomic write: transcript + segments + diarization
+                    // outcome. diarization_reason is always written (null when
+                    // the outcome is self-explanatory) so a retranscription
+                    // that resolves an earlier skip/failure cannot leave the
+                    // stale reason coexisting with the new outcome.
+                    metadata_patch: vec![
+                        ("transcript_segments".into(), segments_json),
+                        ("diarization_outcome".into(), diarization_outcome_json),
+                        ("diarization_reason".into(), diarization_reason_json),
+                    ],
                     ..Default::default()
                 },
             )?;
@@ -769,6 +796,53 @@ pub(crate) fn diarization_outcome(
     }
 }
 
+pub(crate) const REASON_MODELS_UNAVAILABLE: &str = "models_unavailable";
+pub(crate) const REASON_PROVIDER_ERROR: &str = "provider_error";
+
+impl DiarizationOutcome {
+    /// Map to frontend string value. Backend MUST NEVER return "unknown".
+    pub(crate) fn to_frontend_string(
+        &self,
+        transcript: &medical_core::types::stt::Transcript,
+    ) -> &'static str {
+        match self {
+            DiarizationOutcome::NotRequested => "off",
+            DiarizationOutcome::Skipped => "skipped",
+            DiarizationOutcome::Failed(_) => "failed",
+            DiarizationOutcome::SucceededNoSpeakers => "completed-with-unassigned",
+            DiarizationOutcome::Succeeded => {
+                if transcript.segments.iter().all(|s| s.speaker.is_some()) {
+                    "completed"
+                } else {
+                    "completed-with-unassigned"
+                }
+            }
+        }
+    }
+
+    /// Bounded reason code for skipped/failed outcomes.
+    pub(crate) fn reason_code(&self) -> Option<&'static str> {
+        match self {
+            DiarizationOutcome::NotRequested => None,
+            DiarizationOutcome::Skipped => Some(REASON_MODELS_UNAVAILABLE),
+            DiarizationOutcome::Failed(_) => Some(REASON_PROVIDER_ERROR),
+            DiarizationOutcome::SucceededNoSpeakers => None,
+            DiarizationOutcome::Succeeded => None,
+        }
+    }
+
+    /// The exact JSON value persisted as `diarization_reason`: the bounded
+    /// code when one applies, JSON null otherwise. Always emitting the key
+    /// (never omitting it) is what stops a stale reason from surviving a
+    /// retranscription that resolved the earlier skip/failure.
+    pub(crate) fn reason_json(&self) -> serde_json::Value {
+        match self.reason_code() {
+            Some(code) => serde_json::Value::String(code.to_string()),
+            None => serde_json::Value::Null,
+        }
+    }
+}
+
 #[cfg(test)]
 mod format_tests {
     use medical_core::types::stt::{Transcript, TranscriptSegment};
@@ -803,6 +877,177 @@ mod format_tests {
     fn no_speakers_returns_raw_text() {
         let t = make_transcript(vec![seg("Hello", None), seg("World", None)]);
         assert_eq!(super::format_transcript_with_speakers(&t), "Hello World");
+    }
+
+    // ── Slice 2c: diarization outcome → metadata string mapping ──────────
+
+    #[test]
+    fn outcome_not_requested_maps_to_off() {
+        let t = make_transcript(vec![]);
+        let outcome = super::diarization_outcome(&t, false);
+        assert_eq!(outcome.to_frontend_string(&t), "off");
+    }
+
+    #[test]
+    fn outcome_skipped_maps_to_skipped_not_failed() {
+        // The exact defect this workstream eliminates: "requested but did
+        // not run" must never be conflated with "attempted and errored".
+        let mut t = make_transcript(vec![seg("Hi", None)]);
+        t.metadata = serde_json::json!({"diarization_attempted": false});
+        let outcome = super::diarization_outcome(&t, true);
+        assert_eq!(outcome, super::DiarizationOutcome::Skipped);
+        assert_eq!(outcome.to_frontend_string(&t), "skipped");
+        assert_ne!(outcome.to_frontend_string(&t), "failed");
+    }
+
+    #[test]
+    fn outcome_failed_maps_to_failed() {
+        let mut t = make_transcript(vec![seg("Hi", None)]);
+        t.metadata =
+            serde_json::json!({"diarization_attempted": true, "diarization_failed": "synthetic"});
+        let outcome = super::diarization_outcome(&t, true);
+        assert_eq!(outcome.to_frontend_string(&t), "failed");
+    }
+
+    #[test]
+    fn outcome_succeeded_no_speakers_maps_to_completed_with_unassigned() {
+        let mut t = make_transcript(vec![seg("Hi", None)]);
+        t.metadata = serde_json::json!({"diarization_attempted": true});
+        let outcome = super::diarization_outcome(&t, true);
+        assert_eq!(outcome.to_frontend_string(&t), "completed-with-unassigned");
+    }
+
+    #[test]
+    fn outcome_succeeded_all_labeled_maps_to_completed() {
+        let mut t = make_transcript(vec![
+            seg("Hello", Some("Speaker 1")),
+            seg("there", Some("Speaker 2")),
+        ]);
+        t.metadata = serde_json::json!({"diarization_attempted": true});
+        let outcome = super::diarization_outcome(&t, true);
+        assert_eq!(outcome.to_frontend_string(&t), "completed");
+    }
+
+    #[test]
+    fn outcome_succeeded_partial_labels_maps_to_completed_with_unassigned() {
+        let mut t = make_transcript(vec![seg("Hello", Some("Speaker 1")), seg("Hi", None)]);
+        t.metadata = serde_json::json!({"diarization_attempted": true});
+        let outcome = super::diarization_outcome(&t, true);
+        assert_eq!(outcome.to_frontend_string(&t), "completed-with-unassigned");
+    }
+
+    #[test]
+    fn outcome_diarize_off_ignores_stale_speaker_labels() {
+        // The outcome reflects THIS run's requested options: a diarize-off
+        // run classifies as "off" even if segments carry stale labels from a
+        // prior run — settings at read time never rewrite history.
+        let mut t = make_transcript(vec![seg("Hi", Some("Speaker 1"))]);
+        t.metadata = serde_json::json!({"diarization_attempted": true});
+        let outcome = super::diarization_outcome(&t, false);
+        assert_eq!(outcome, super::DiarizationOutcome::NotRequested);
+        assert_eq!(outcome.to_frontend_string(&t), "off");
+    }
+
+    #[test]
+    fn outcome_never_maps_to_unknown() {
+        // "unknown" is a frontend-only sentinel for legacy rows with absent
+        // metadata — the backend must never write it.
+        let cases: Vec<(super::DiarizationOutcome, Transcript)> = vec![
+            (
+                super::DiarizationOutcome::NotRequested,
+                make_transcript(vec![seg("a", None)]),
+            ),
+            (
+                super::DiarizationOutcome::Skipped,
+                make_transcript(vec![seg("a", None)]),
+            ),
+            (
+                super::DiarizationOutcome::Failed("synthetic".into()),
+                make_transcript(vec![seg("a", None)]),
+            ),
+            (
+                super::DiarizationOutcome::SucceededNoSpeakers,
+                make_transcript(vec![seg("a", None)]),
+            ),
+            (
+                super::DiarizationOutcome::Succeeded,
+                make_transcript(vec![seg("a", Some("Speaker 1"))]),
+            ),
+        ];
+        for (outcome, t) in cases {
+            assert_ne!(
+                outcome.to_frontend_string(&t),
+                "unknown",
+                "backend must never write 'unknown' (got {:?})",
+                outcome
+            );
+        }
+    }
+
+    #[test]
+    fn reason_codes_are_bounded_identifiers_only() {
+        // Skipped/failed carry a reason ONLY as a short stable identifier —
+        // never raw provider error text, stderr, or file paths (those leak
+        // paths and can carry PHI). Everything else has no reason.
+        let path_like_error = format!(
+            "/Users/{}/models/pyannote/segmentation-3.0.onnx: permission denied",
+            "synthetic_user"
+        );
+        let failed = super::DiarizationOutcome::Failed(path_like_error);
+        let code = failed.reason_code().expect("failed must carry a reason");
+        assert_eq!(code, "provider_error");
+        assert!(
+            !code.contains('/') && !code.contains(':'),
+            "reason code must not contain path fragments"
+        );
+
+        let skipped = super::DiarizationOutcome::Skipped;
+        assert_eq!(skipped.reason_code(), Some("models_unavailable"));
+
+        // The persisted JSON: a code when one applies, JSON null otherwise —
+        // never an empty string, so the key is always meaningfully present.
+        assert_eq!(
+            skipped.reason_json(),
+            serde_json::json!("models_unavailable")
+        );
+        assert_eq!(failed.reason_json(), serde_json::json!("provider_error"));
+        for outcome in [
+            super::DiarizationOutcome::NotRequested,
+            super::DiarizationOutcome::SucceededNoSpeakers,
+            super::DiarizationOutcome::Succeeded,
+        ] {
+            assert_eq!(
+                outcome.reason_json(),
+                serde_json::Value::Null,
+                "reason JSON must be null for {:?}",
+                outcome
+            );
+        }
+
+        for outcome in [
+            super::DiarizationOutcome::NotRequested,
+            super::DiarizationOutcome::SucceededNoSpeakers,
+            super::DiarizationOutcome::Succeeded,
+        ] {
+            assert_eq!(outcome.reason_code(), None, "no reason for {:?}", outcome);
+        }
+
+        // Bounded-set shape: every code the enum can emit is a short ASCII
+        // identifier. A raw message can never satisfy this.
+        for outcome in [
+            super::DiarizationOutcome::NotRequested,
+            super::DiarizationOutcome::Skipped,
+            super::DiarizationOutcome::Failed("any synthetic error".into()),
+            super::DiarizationOutcome::SucceededNoSpeakers,
+            super::DiarizationOutcome::Succeeded,
+        ] {
+            if let Some(code) = outcome.reason_code() {
+                assert!(
+                    code.len() <= 32 && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                    "reason code {code:?} must be a short identifier"
+                );
+            }
+        }
     }
 
     #[test]
