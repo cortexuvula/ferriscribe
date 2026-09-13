@@ -10,6 +10,7 @@
 // if the stored format changes without regenerating the fixture, THAT test
 // fails first. Never edit this file by hand — regenerate it with:
 //   cargo test -p rust-medical-assistant regenerate_formatter_fixture -- --ignored
+// @vitest-environment jsdom
 import { render, screen, cleanup } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // Vite ?raw import: the formatter's exact bytes, no transform.

@@ -3,6 +3,8 @@ import { render, screen, cleanup } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TranscriptView from './TranscriptView.svelte';
+// The component's own source, untransformed — used by the prominence pin.
+import componentSource from './TranscriptView.svelte?raw';
 
 // Uncertainty-honesty fix: unlabeled sections must be visually distinct from
 // labeled sections (never silently continue the previous speaker), and a
@@ -383,6 +385,106 @@ describe('TranscriptView skipped outcome rendering', () => {
       });
       expect(screen.queryByText("Speaker labelling wasn't run")).toBeNull();
       expect(screen.getByText(`Synthetic text for ${outcome}.`)).toBeTruthy();
+    }
+  });
+});
+
+// ── Review contract line F: persisted 'failed' stays distinguishable ────────
+// A failed labelling run must not render as "analysis completed but could
+// not identify speakers". The banner is symmetric to diarization-skipped:
+// same structure, at-least-equal prominence, reason from the PERSISTED
+// diarization_reason only.
+
+describe('TranscriptView failed outcome rendering', () => {
+  afterEach(cleanup);
+
+  it('renders the failed banner with data-testid, heading, and persisted reason', () => {
+    render(TranscriptView, {
+      value: 'Synthetic transcript of a failed-labelling run.',
+      diarizationOutcome: 'failed',
+      failReason: 'provider_error',
+    });
+    const banner = document.querySelector('[data-testid="diarization-failed"]');
+    expect(banner).toBeTruthy();
+    expect(screen.getByText('Speaker labelling failed')).toBeTruthy();
+    // Confirming wording ONLY from the persisted bounded reason code.
+    expect(
+      screen.getByText('Speaker labelling errored during this transcription'),
+    ).toBeTruthy();
+  });
+
+  it('failed with missing/unrecognised reason shows generic wording, never invents a cause', () => {
+    render(TranscriptView, {
+      value: 'Synthetic transcript with no persisted fail reason.',
+      diarizationOutcome: 'failed',
+    });
+    expect(screen.getByText('Speaker labelling failed')).toBeTruthy();
+    expect(
+      screen.getByText('Speaker labelling failed for this recording'),
+    ).toBeTruthy();
+    // Never the provider-cause wording without the persisted code.
+    expect(
+      screen.queryByText('Speaker labelling errored during this transcription'),
+    ).toBeNull();
+  });
+
+  it('failed is distinguishable from completed-with-unassigned for identical all-null bodies', () => {
+    // Contract line F: identical fixture bodies, different outcome → the
+    // visible text must differ (the exact reload indistinguishability
+    // defect the review reproduced).
+    const value = 'Synthetic body shared by both outcomes.';
+    const segments = [{ speaker: null, text: 'Synthetic body shared by both outcomes.', start: 0, end: 5 }];
+
+    cleanup();
+    render(TranscriptView, { value, segments, diarizationOutcome: 'failed' });
+    expect(document.querySelector('[data-testid="diarization-failed"]')).toBeTruthy();
+    const failedText = document.body.textContent;
+
+    cleanup();
+    render(TranscriptView, { value, segments, diarizationOutcome: 'completed-with-unassigned' });
+    expect(document.querySelector('[data-testid="diarization-failed"]')).toBeNull();
+    const unassignedText = document.body.textContent;
+
+    expect(failedText).not.toBe(unassignedText);
+  });
+
+  it('failed banner is at least as prominent as the skipped banner (symmetry pin)', () => {
+    // jsdom does not inject Svelte 5 component styles, so computed-style
+    // comparison is impossible in this environment. Pin the DECLARED rules
+    // instead, straight from the component source (Vite ?raw import): the
+    // failed banner's typography must match the skipped banner's exactly.
+    // If someone makes the failure state visually subordinate, this fails.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const source = componentSource;
+    const size = (cls: string) => source.match(new RegExp(`\\.${cls}\\s*\\{[^}]*font-size:\\s*([^;]+);`, 's'))?.[1]?.trim();
+    const weight = (cls: string) => source.match(new RegExp(`\\.${cls}\\s*\\{[^}]*font-weight:\\s*([^;]+);`, 's'))?.[1]?.trim();
+    const pad = (cls: string) => source.match(new RegExp(`\\.${cls}\\s*\\{[^}]*padding:\\s*([^;]+);`, 's'))?.[1]?.trim();
+    expect(size('failed-heading')).toBeTruthy();
+    expect(size('failed-heading')).toBe(size('skipped-heading'));
+    expect(weight('failed-heading')).toBe(weight('skipped-heading'));
+    expect(size('failed-reason')).toBe(size('skipped-reason'));
+    expect(pad('failed-status')).toBe(pad('skipped-status'));
+    // Structural symmetry of the rendered banner: div > heading p + reason p.
+    render(TranscriptView, {
+      value: 'Synthetic transcript for structural symmetry.',
+      diarizationOutcome: 'failed',
+      failReason: 'provider_error',
+    });
+    const failed = document.querySelector('[data-testid="diarization-failed"]')!;
+    const failedHeading = failed.querySelector('.failed-heading') as HTMLElement;
+    const failedReason = failed.querySelector('.failed-reason') as HTMLElement;
+    expect(failedHeading.tagName).toBe('P');
+    expect(failedReason.tagName).toBe('P');
+  });
+
+  it('does not render the failed banner for any other outcome', () => {
+    for (const outcome of ['off', 'skipped', 'completed', 'completed-with-unassigned', 'unknown'] as const) {
+      cleanup();
+      render(TranscriptView, {
+        value: `Synthetic text for ${outcome}.`,
+        diarizationOutcome: outcome,
+      });
+      expect(document.querySelector('[data-testid="diarization-failed"]')).toBeNull();
     }
   });
 });

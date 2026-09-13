@@ -130,6 +130,23 @@
     return isKnownSkipReason(raw) ? raw : undefined;
   });
 
+  // Persisted reason code for the FAILED outcome, transported verbatim —
+  // same discipline as diarizationSkipReason. The backend writes the
+  // bounded REASON_PROVIDER_ERROR = 'provider_error' (transcription
+  // inner.rs); anything else yields undefined so TranscriptView shows
+  // generic wording and never invents a cause.
+  const DIARIZATION_FAIL_REASONS = ['provider_error'] as const;
+
+  function isKnownFailReason(value: unknown): value is (typeof DIARIZATION_FAIL_REASONS)[number] {
+    return typeof value === 'string' && (DIARIZATION_FAIL_REASONS as readonly string[]).includes(value);
+  }
+
+  const diarizationFailReason = $derived.by(() => {
+    if (diarizationOutcome !== 'failed') return undefined;
+    const raw = recordings.selectedRecording?.metadata?.diarization_reason;
+    return isKnownFailReason(raw) ? raw : undefined;
+  });
+
   // Affordance for the skipped outcome: opens the Settings dialog on the
   // Audio pane via the shared navigation store (App.svelte's effect opens
   // the dialog on any requestedSection). Explicit user action only — no
@@ -535,7 +552,7 @@
     </div>
   {:else}
     {#if tabId === 'transcript'}
-      <TranscriptView value={content} segments={transcriptSegments} diarizationOutcome={diarizationOutcome} skipReason={diarizationSkipReason} onOpenAudioSettings={openAudioSettings} placeholder="No content…" onChange={onEditorChange} />
+      <TranscriptView value={content} segments={transcriptSegments} diarizationOutcome={diarizationOutcome} skipReason={diarizationSkipReason} failReason={diarizationFailReason} onOpenAudioSettings={openAudioSettings} placeholder="No content…" onChange={onEditorChange} />
     {:else}
       <RichEditor value={content} placeholder="No content…" onChange={onEditorChange} />
     {/if}

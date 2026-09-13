@@ -49,6 +49,13 @@
      *  must never invent a cause. Keyed off the SAVED code, never off
      *  current settings or installed models. */
     skipReason?: 'models_unavailable';
+    /** Persisted bounded reason code for the 'failed' outcome, transported
+     *  verbatim from recording metadata (EditorTab validates it). Only
+     *  'provider_error' (REASON_PROVIDER_ERROR in
+     *  src-tauri/src/commands/transcription/inner.rs) currently carries
+     *  confirming wording. Missing/unrecognised → generic wording; the view
+     *  must never invent a cause or surface raw provider error text. */
+    failReason?: 'provider_error';
     /** Affordance for the 'skipped' outcome: opens Audio settings. The parent
      *  wires this to the shared settings navigation. Deliberately NOT an
      *  automatic retry — the user decides whether to re-transcribe. */
@@ -57,7 +64,7 @@
     onChange?: (v: string) => void;
   }
 
-  const { value = '', segments, diarizationOutcome = 'unknown', skipReason, onOpenAudioSettings, placeholder = '', onChange = () => {} }: Props = $props();
+  const { value = '', segments, diarizationOutcome = 'unknown', skipReason, failReason, onOpenAudioSettings, placeholder = '', onChange = () => {} }: Props = $props();
 
   let editing = $state(false);
   // svelte-ignore state_referenced_locally
@@ -143,6 +150,22 @@
   // (metadata absent). The supporting line confirms a cause ONLY when the
   // persisted reason code says so — never from current settings/models.
   const showSkippedStatus = $derived(diarizationOutcome === 'skipped');
+  // 'failed' rendering: attempted and errored — the PERSISTED failure must
+  // stay distinguishable from completed-with-unassigned after reload
+  // (review contract line F). Without this banner, an identical all-null
+  // body renders identically for 'failed' and
+  // 'completed-with-unassigned', inviting a wrong judgment of model
+  // performance. Symmetric to the skipped banner: heading + reason from
+  // the PERSISTED bounded reason code only — never current settings, never
+  // an invented cause.
+  const showFailedStatus = $derived(diarizationOutcome === 'failed');
+  const PROVIDER_ERROR_REASON = 'provider_error';
+  const failedReasonLine = $derived.by(() => {
+    if (failReason === PROVIDER_ERROR_REASON) {
+      return 'Speaker labelling errored during this transcription';
+    }
+    return 'Speaker labelling failed for this recording';
+  });
   // Wording keyed off the SAVED bounded reason code only. Anything missing
   // or unrecognised → generic wording; we do not invent a cause.
   const MODELS_UNAVAILABLE_REASON = 'models_unavailable';
@@ -280,6 +303,16 @@
           Open Audio settings
         </button>
       {/if}
+    </div>
+  {/if}
+  {#if showFailedStatus}
+    <!-- 'failed' rendering: attempted and errored. Distinct banner from
+         'skipped' (never ran) and from the unassigned sections (ran,
+         couldn't attribute some spans). The persisted outcome must remain
+         visible after reload — see contract line F. -->
+    <div class="failed-status" data-testid="diarization-failed">
+      <p class="failed-heading">Speaker labelling failed</p>
+      <p class="failed-reason">{failedReasonLine}</p>
     </div>
   {/if}
   {#if showUnknownStatus}
@@ -526,6 +559,37 @@
   .skipped-action:hover {
     background-color: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  /* 'failed' banner: attempted and errored. DELIBERATELY symmetric to
+     .skipped-status / .skipped-heading / .skipped-reason — same padding,
+     same type sizes, same weight (at-least-equal prominence; a persisted
+     failure must not render subordinate to a skip notice). Only the rail
+     colour differs (danger vs accent), and the distinction never rests on
+     colour alone: the heading and reason text differ explicitly. */
+  .failed-status {
+    margin: 0;
+    padding: 10px 12px;
+    background-color: var(--bg-secondary);
+    border-left: 3px solid var(--danger, #dc2626);
+    border-radius: var(--radius-sm);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .failed-heading {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .failed-reason {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
 
   .editor-area {
