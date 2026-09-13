@@ -14,6 +14,25 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 use medical_core::error::{AppError, AppResult};
 
+/// Minimum width (seconds) for a token's DTW window to count as a valid
+/// attribution window — the same 10 ms floor the merge overlap rule uses.
+const MIN_WORD_WINDOW_S: f64 = 0.01;
+
+/// Word-level timing from whisper.cpp's token-level DTW.
+///
+/// Times are in seconds (converted from whisper.cpp's centisecond output).
+/// A word here is a decoded whisper token — the DTW timestep granularity,
+/// not a dictionary word: sub-word pieces and punctuation tokens are
+/// possible. The merge layer must therefore treat these as *attribution
+/// windows*, not as lexical words.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordTiming {
+    /// Window start in seconds (clamped to the segment start).
+    pub start: f64,
+    /// Window end in seconds (clamped to the segment end).
+    pub end: f64,
+}
+
 /// A timestamped text segment from local Whisper transcription.
 ///
 /// Timestamps are in seconds (converted from whisper.cpp's centisecond output).
@@ -25,6 +44,11 @@ pub struct WhisperSegment {
     pub start: f64,
     /// Segment end time in seconds.
     pub end: f64,
+    /// Per-token attribution windows from token-level timestamps
+    /// (`token_timestamps: true` + DTW). Empty when the decode produced no
+    /// usable token timings — callers must treat that as "segment-window
+    /// attribution only", never as evidence of a wordless segment.
+    pub words: Vec<WordTiming>,
 }
 
 /// How a cache loads a context — injectable so tests can pin the cache's
@@ -214,6 +238,12 @@ impl WhisperTranscriber {
         params.set_temperature(0.0);
         params.set_temperature_inc(0.2);
 
+        // Token-level timestamps (DTW over the cross-attention): the merge
+        // layer attributes speaker labels per word window instead of the
+        // whole segment window. Needs to be set BEFORE `full` — whisper.cpp
+        // populates token t0/t1 during decoding, not after.
+        params.set_token_timestamps(true);
+
         // Anti-hallucination parameters — these are critical for preventing
         // the repetition loops that plague medical transcripts ("I don't know
         // if I was going to go through it" × 30, "I see a counsellor once
@@ -266,12 +296,39 @@ impl WhisperTranscriber {
             let start = segment.start_timestamp() as f64 / 100.0;
             let end = segment.end_timestamp() as f64 / 100.0;
 
+            // Token-level timestamps (DTW). Not every token gets a usable
+            // DTW point: unset times surface as i64::MIN, and the sentinel
+            // zero has no meaning as a real time (whisper.cpp treats t0/t1
+            // < 0 as "no timing"). Collect only tokens whose window is
+            // positive-width and inside the segment window, then clamp to
+            // the segment bounds (DTW can drift a few ms past a boundary).
+            let mut words = Vec::new();
+            for ti in 0..segment.n_tokens() {
+                let Some(token) = segment.get_token(ti) else {
+                    continue;
+                };
+                let td = token.token_data();
+                let (t0, t1) = (td.t0, td.t1);
+                if t0 < 0 || t1 <= t0 {
+                    continue;
+                }
+                let w_start = (t0 as f64 / 100.0).clamp(start, end);
+                let w_end = (t1 as f64 / 100.0).clamp(start, end);
+                if w_end - w_start >= MIN_WORD_WINDOW_S {
+                    words.push(WordTiming {
+                        start: w_start,
+                        end: w_end,
+                    });
+                }
+            }
+
             let text_trimmed = text.trim().to_owned();
             if !text_trimmed.is_empty() {
                 segments.push(WhisperSegment {
                     text: text_trimmed,
                     start,
                     end,
+                    words,
                 });
             }
         }

@@ -282,6 +282,9 @@ impl SttProvider for RemoteSttProvider {
                     start: s.start as f64,
                     end: s.end as f64,
                     text,
+                    // Remote server segments carry no token-level DTW
+                    // timings — attribution falls back to the segment window.
+                    words: Vec::new(),
                 })
             })
             .collect();

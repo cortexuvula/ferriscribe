@@ -1,44 +1,42 @@
-//! D4 merge-path eval, option (b): SYNTHETIC WhisperSegments derived from the
-//! GT turns + the REAL diarizer output, scored through the REAL D4 merge
-//! (`merge::merge_segments_with_speakers`: per-speaker overlap aggregation,
-//! >=70% dominance assigns, else None/ambiguous).
+//! D4 merge-path eval: WhisperSegments + the REAL diarizer output, scored
+//! through the REAL D4 merge (`merge::merge_segments_with_speakers`),
+//! comparing WORD-WINDOW attribution (token-level DTW windows, the
+//! refinement under test) against SEGMENT-WINDOW attribution (the previous
+//! rule) on the SAME eval corpus and the SAME diarizer turns.
 //!
-//! Why synthetic segments (option b): the fixture is hard-concatenated with
-//! NO silence at handoffs, and on such audio whisper.cpp's segmenter can
-//! return ONE giant segment smeared over the whole clip — the merge then
-//! correctly returns None (ambiguity rule) and a 0% number measures the
-//! segmenter fixture artifact, not the merge. Deriving segments from the GT
-//! turns isolates the quantity the D-series tracks: given segmentable turns,
-//! how much speaking time does the diarize->merge path attribute correctly?
+//! Two segment sources:
 //!
-//! Method:
-//!   1. Synthetic segments = the 5 GT turns (start/end from ground truth).
-//!      Words per segment: the segment is divided into equal-duration
-//!      word slots (declared uniform assumption — synthetic segments carry
-//!      no token timings). 10 words per turn.
-//!   2. Real diarizer (pyannote segmentation + CAM++ embeddings, prod path)
-//!      runs on the fixture audio.
-//!   3. Real D4 merge labels each synthetic segment.
-//!   4. cluster-id -> GT speaker resolved by majority turn overlap
-//!      (permutation-safe).
-//!   5. Word granularity: a word slot is CORRECT iff its segment is labeled
-//!      and the label maps to the GT speaker that covers the majority of
-//!      the slot's interval. Attribution = correct word-time / total
-//!      word-time. Segment granularity: a segment is CORRECT iff labeled
-//!      and >50% of its word-time is in GT turns of the assigned speaker.
-//!   6. DER (250 ms collar, permutation-invariant, same algorithm as the
-//!      gated eval's der_with_collar) computed from the diarizer turns —
-//!      D4 does not touch the diarizer, so DER is unchanged by the merge.
+//! - `FERRISCRIBE_STT_MODEL=<ggml>` set → REAL whisper.cpp decode of the
+//!   fixture audio through the production transcriber (segments carry
+//!   token-level DTW word windows). Content-free: no transcript text is
+//!   printed; segments are consumed for timings/counts only.
+//! - unset → SYNTHETIC segments derived from the GT turns (option b, the
+//!   original method): the fixture is hard-concatenated with NO silence at
+//!   handoffs, so whisper.cpp's segmenter may return one giant smeared
+//!   segment; synthetic segments isolate the merge quantity the D-series
+//!   tracks. Synthetic segments carry uniform word slots (declared
+//!   assumption).
 //!
-//! Run: FERRISCRIBE_DIAR_EVAL=<dir with mix_two_speaker_nosilence.wav + pyannote/> \
-//!      cargo run -p medical-stt-providers --example d4_merge_eval --release
+//! Scoring (both attribution modes, identical procedure): a word window is
+//! CORRECT iff its segment is labeled and the label maps (cluster->GT) to
+//! the GT speaker covering the majority of the window. Attribution =
+//! correct word-time / total word-time. Segment granularity: correct iff
+//! labeled and >50% of its word-time is GT-correct.
+//!
+//! Run:
+//!   FERRISCRIBE_DIAR_EVAL=<dir with mix_two_speaker_nosilence.wav + pyannote/> \
+//!   [FERRISCRIBE_STT_MODEL=<ggml bin>] \
+//!   cargo run -p medical-stt-providers --example d4_merge_eval --release
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use medical_core::types::TranscriptSegment;
 use medical_stt_providers::diarization::SpeakerDiarizer;
 use medical_stt_providers::merge;
-use medical_stt_providers::whisper::WhisperSegment;
+use medical_stt_providers::whisper::WordTiming;
+use medical_stt_providers::whisper::{WhisperContextCache, WhisperSegment, WhisperTranscriber};
 
 /// Words per synthetic turn (uniform word slots — declared assumption).
 const WORDS_PER_TURN: usize = 10;
@@ -89,24 +87,55 @@ fn main() {
         speaker = 1 - speaker;
     }
 
-    // ---- (1) Synthetic WhisperSegments = GT turns (option b).
-    let synth: Vec<WhisperSegment> = gt_turns
+    // ---- (1) Segments: real whisper decode (with word windows) or synthetic.
+    let (segments, seg_source) = if let Some(model) = std::env::var_os("FERRISCRIBE_STT_MODEL") {
+        let cache = Arc::new(WhisperContextCache::new(Arc::new(
+            move |path: &std::path::Path| {
+                medical_stt_providers::whisper::load_whisper_context(path)
+            },
+        )));
+        let transcriber = WhisperTranscriber::new(PathBuf::from(&model), cache);
+        let f32_samples: Vec<f32> = samples.iter().map(|&s| s as f32 / 32768.0).collect();
+        let segs = transcriber
+            .transcribe(&f32_samples, Some("en"))
+            .expect("whisper decode");
+        eprintln!(
+            "whisper decode: {} segments, {} timed word windows (text not read)",
+            segs.len(),
+            segs.iter().map(|s| s.words.len()).sum::<usize>()
+        );
+        (segs, "real-whisper")
+    } else {
+        eprintln!("FERRISCRIBE_STT_MODEL unset — synthetic option-b segments");
+        let synth: Vec<WhisperSegment> = gt_turns
+            .iter()
+            .enumerate()
+            .map(|(i, &(_, s, e))| WhisperSegment {
+                text: format!("synthetic turn {i}"),
+                start: s,
+                end: e,
+                words: Vec::new(),
+            })
+            .collect();
+        (synth, "option-b-synthetic-segments")
+    };
+
+    // Word windows per segment: DTW windows when present, else uniform slots.
+    let seg_words: Vec<Vec<WordTiming>> = segments
         .iter()
-        .enumerate()
-        .map(|(i, &(_, s, e))| WhisperSegment {
-            text: format!("synthetic turn {i}"),
-            start: s,
-            end: e,
-        })
-        .collect();
-    // Uniform word slots per segment.
-    let seg_words: Vec<Vec<(f64, f64)>> = gt_turns
-        .iter()
-        .map(|&(_, s, e)| {
-            let dur = (e - s) / WORDS_PER_TURN as f64;
-            (0..WORDS_PER_TURN)
-                .map(|k| (s + k as f64 * dur, s + (k + 1) as f64 * dur))
-                .collect()
+        .map(|ws| {
+            if ws.words.is_empty() {
+                let n = WORDS_PER_TURN as f64;
+                let dur = (ws.end - ws.start) / n;
+                (0..WORDS_PER_TURN)
+                    .map(|k| WordTiming {
+                        start: ws.start + k as f64 * dur,
+                        end: ws.start + (k + 1) as f64 * dur,
+                    })
+                    .collect()
+            } else {
+                ws.words.clone()
+            }
         })
         .collect();
 
@@ -125,20 +154,21 @@ fn main() {
             .collect::<Vec<_>>()
     );
 
-    // ---- (3) THE MERGE UNDER TEST (real D4 code, unchanged).
-    let merged = merge::merge_segments_with_speakers(&synth, &turns);
-    let n_none = merged.iter().filter(|s| s.speaker.is_none()).count();
-    eprintln!(
-        "merge: {} segments, {} None-speaker (ambiguous)",
-        merged.len(),
-        n_none
-    );
-    for s in &merged {
-        eprintln!(
-            "  [ {:.3} .. {:.3} ] {:?} {}",
-            s.start, s.end, s.speaker, s.text
-        );
-    }
+    // ---- (3) THE MERGE UNDER TEST, both attribution modes.
+    // (3a) word-window: production merge with segments as decoded.
+    let merged_word = merge::merge_segments_with_speakers(&segments, &turns);
+    // (3b) segment-window: identical segments with word windows stripped,
+    // forcing the pre-refinement rule on the SAME corpus + turns.
+    let stripped: Vec<WhisperSegment> = segments
+        .iter()
+        .map(|ws| WhisperSegment {
+            text: ws.text.clone(),
+            start: ws.start,
+            end: ws.end,
+            words: Vec::new(),
+        })
+        .collect();
+    let merged_seg = merge::merge_segments_with_speakers(&stripped, &turns);
 
     // ---- (4) cluster-id -> GT speaker by majority turn overlap.
     let mut overlap: HashMap<usize, HashMap<usize, f64>> = HashMap::new();
@@ -163,85 +193,90 @@ fn main() {
     }
     eprintln!("cluster->GT speaker map: {:?}", cluster_to_gt);
 
-    // ---- (5) Score at word and segment granularity.
-    let mut total_word_time = 0.0f64;
-    let mut credited_word_time = 0.0f64;
-    let mut seg_correct = 0usize;
-    for (si, s) in merged.iter().enumerate() {
-        let words = seg_words.get(si).map(|w| w.as_slice()).unwrap_or(&[]);
-        let seg_total: f64 = words.iter().map(|&(t0, t1)| (t1 - t0).max(0.0)).sum();
-        total_word_time += seg_total;
-        let assigned_gt = s.speaker.as_ref().and_then(|lbl| {
-            lbl.rsplit(' ')
-                .next()
-                .and_then(|tok| tok.parse::<usize>().ok())
-                .and_then(|spk| cluster_to_gt.get(&(spk - 1)).copied())
-        });
-        let mut seg_credit = 0.0f64;
-        for &(t0, t1) in words {
-            // Word slot's GT speaker = majority overlap of the slot interval.
-            let mut best_gt: Option<(usize, f64)> = None;
-            for &(gsp, gs, ge) in &gt_turns {
-                let o = (t1.min(ge) - t0.max(gs)).max(0.0);
-                if best_gt.is_none() || o > best_gt.unwrap().1 {
-                    best_gt = Some((gsp, o));
+    // ---- (5) Score both merges at word and segment granularity.
+    let score = |merged: &[TranscriptSegment]| -> (f64, f64, usize, usize) {
+        let mut total_word_time = 0.0f64;
+        let mut credited_word_time = 0.0f64;
+        let mut seg_correct = 0usize;
+        let mut n_none = 0usize;
+        for (si, s) in merged.iter().enumerate() {
+            let words = seg_words.get(si).map(|w| w.as_slice()).unwrap_or(&[]);
+            let seg_total: f64 = words.iter().map(|w| (w.end - w.start).max(0.0)).sum();
+            total_word_time += seg_total;
+            let assigned_gt = s.speaker.as_ref().and_then(|lbl| {
+                lbl.rsplit(' ')
+                    .next()
+                    .and_then(|tok| tok.parse::<usize>().ok())
+                    .and_then(|spk| cluster_to_gt.get(&(spk - 1)).copied())
+            });
+            if assigned_gt.is_none() {
+                n_none += 1;
+            }
+            let mut seg_credit = 0.0f64;
+            for w in words {
+                // Word window's GT speaker = majority overlap of the window.
+                let mut best_gt: Option<(usize, f64)> = None;
+                for &(gsp, gs, ge) in &gt_turns {
+                    let o = (w.end.min(ge) - w.start.max(gs)).max(0.0);
+                    if best_gt.is_none() || o > best_gt.unwrap().1 {
+                        best_gt = Some((gsp, o));
+                    }
+                }
+                if let Some((_, o)) = best_gt.filter(|(g, _)| Some(*g) == assigned_gt) {
+                    seg_credit += o;
                 }
             }
-            if let Some((_, o)) = best_gt.filter(|(g, _)| Some(*g) == assigned_gt) {
-                seg_credit += o;
+            credited_word_time += seg_credit;
+            let frac = if seg_total > 0.0 {
+                seg_credit / seg_total
+            } else {
+                0.0
+            };
+            if assigned_gt.is_some() && frac > 0.5 {
+                seg_correct += 1;
             }
         }
-        credited_word_time += seg_credit;
-        let frac = if seg_total > 0.0 {
-            seg_credit / seg_total
-        } else {
-            0.0
-        };
-        let correct = assigned_gt.is_some() && frac > 0.5;
-        if correct {
-            seg_correct += 1;
-        }
-        eprintln!(
-            "score seg {si}: label={:?} word_time={:.2}s credit={:.2}s frac={:.1}% correct={}",
-            s.speaker,
-            seg_total,
-            seg_credit,
-            frac * 100.0,
-            correct
-        );
-    }
-
-    let accuracy = if total_word_time > 0.0 {
-        credited_word_time / total_word_time
-    } else {
-        0.0
+        (credited_word_time, total_word_time, seg_correct, n_none)
     };
 
-    // ---- (6) DER from the diarizer turns (same algorithm as gated eval).
+    let (cred_w, tot_w, segc_w, none_w) = score(&merged_word);
+    let (cred_s, tot_s, segc_s, none_s) = score(&merged_seg);
+    let acc_w = if tot_w > 0.0 { cred_w / tot_w } else { 0.0 };
+    let acc_s = if tot_s > 0.0 { cred_s / tot_s } else { 0.0 };
+
+    // ---- (6) DER from the diarizer turns (unchanged by the merge).
     let der = der_with_collar(&turns, &gt_turns, duration_s, 0.25);
 
     eprintln!(
-        "word-granularity attribution: {:.2}s / {:.2}s = {:.1}%",
-        credited_word_time,
-        total_word_time,
-        accuracy * 100.0
+        "word-window attribution:  {:.2}s / {:.2}s = {:.1}% ({} seg correct, {} none)",
+        cred_w,
+        tot_w,
+        acc_w * 100.0,
+        segc_w,
+        none_w
     );
     eprintln!(
-        "segment granularity: {}/{} correct, {} None-labeled",
-        seg_correct,
-        merged.len(),
-        n_none
+        "segment-window attribution:{:.2}s / {:.2}s = {:.1}% ({} seg correct, {} none)",
+        cred_s,
+        tot_s,
+        acc_s * 100.0,
+        segc_s,
+        none_s
     );
-    eprintln!("DER (250ms collar): {:.1}%", der * 100.0);
 
     println!(
-        "RESULT: method=option-b-synthetic-segments attribution_pct={:.1} word_time={:.2} credited={:.2} seg_correct={} seg_total={} none_segs={} der_pct={:.1}",
-        accuracy * 100.0,
-        total_word_time,
-        credited_word_time,
-        seg_correct,
-        merged.len(),
-        n_none,
+        "RESULT: method={} attribution_word_window_pct={:.1} attribution_segment_window_pct={:.1} word_time={:.2} credited_word={:.2} credited_seg={:.2} seg_correct_word={} seg_correct_seg={} seg_total={} none_word={} none_seg={} der_pct={:.1}",
+        seg_source,
+        acc_w * 100.0,
+        acc_s * 100.0,
+        tot_w,
+        cred_w,
+        cred_s,
+        segc_w,
+        segc_s,
+        merged_word.len(),
+        none_w,
+        none_s,
         der * 100.0
     );
 }
