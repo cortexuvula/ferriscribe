@@ -1,0 +1,2 @@
+import {build} from 'vite'; import {svelte} from '@sveltejs/vite-plugin-svelte';
+await build({root:import.meta.dirname, configFile:false, plugins:[svelte({configFile:false,compilerOptions:{runes:true}})],build:{outDir:'dist',emptyOutDir:true}});

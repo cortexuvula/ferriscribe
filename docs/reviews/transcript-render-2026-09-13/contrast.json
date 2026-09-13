@@ -1,0 +1,80 @@
+[
+  {
+    "theme": "light-normal",
+    "badges": [
+      {
+        "label": "Speaker 1",
+        "ratio": 3.206
+      },
+      {
+        "label": "Speaker 2",
+        "ratio": 2.266
+      },
+      {
+        "label": "Speaker 3",
+        "ratio": 3.417
+      },
+      {
+        "label": "Speaker 4",
+        "ratio": 1.96
+      },
+      {
+        "label": "Speaker 5",
+        "ratio": 3.043
+      },
+      {
+        "label": "Speaker 6",
+        "ratio": 2.173
+      },
+      {
+        "label": "Speaker 7",
+        "ratio": 1.821
+      },
+      {
+        "label": "Speaker 8",
+        "ratio": 3.138
+      }
+    ],
+    "railRatio": 1.302,
+    "fails4.5": 8
+  },
+  {
+    "theme": "dark-normal",
+    "badges": [
+      {
+        "label": "Speaker 1",
+        "ratio": 4.058
+      },
+      {
+        "label": "Speaker 2",
+        "ratio": 5.654
+      },
+      {
+        "label": "Speaker 3",
+        "ratio": 3.823
+      },
+      {
+        "label": "Speaker 4",
+        "ratio": 6.495
+      },
+      {
+        "label": "Speaker 5",
+        "ratio": 4.282
+      },
+      {
+        "label": "Speaker 6",
+        "ratio": 5.877
+      },
+      {
+        "label": "Speaker 7",
+        "ratio": 6.949
+      },
+      {
+        "label": "Speaker 8",
+        "ratio": 4.163
+      }
+    ],
+    "railRatio": 1.51,
+    "fails4.5": 4
+  }
+]

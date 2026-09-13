@@ -1,0 +1,82 @@
+TRANSCRIPT RENDER — INDEPENDENT READ-ONLY REVIEW
+
+Reviewed clean master bed8671ac1e09abe40ae5a1e7eef7b27e72c48ed (app package 0.77.8). Checkout unchanged at end. Source paths below are relative to /Users/cortexuvula/Development/rustMedicalAssistant. No patient data, live app database, actual clipboard, audio inference, or external export destinations were accessed. Harness artifacts only were written outside the repository.
+
+Verdict: do not sign off render fidelity. The rich view, saved text, edit buffer, and copied text can disagree about BOTH words and attribution. This is not primarily a cosmetic problem.
+
+PRIORITIZED FINDINGS
+
+1. P1 / high confidence — An unassigned span becomes the previous speaker in stored/copied text and fallback rendering.
+Sources: src-tauri/src/commands/transcription/inner.rs:680-707; src/lib/pages/EditorTab.svelte:36-40,378-385; src/lib/utils/clipboard.ts:3-5; src/lib/components/TranscriptView.svelte:110-113,191-207,253-256,294-306.
+The formatter uses seg.speaker.as_deref().or(last_speaker). The executed synthetic sequence Speaker 1/Alpha, null/Gap, Speaker 2/Beta stores Gap as [Speaker 1]. With metadata the production component shows Speaker unassigned; without metadata it shows Speaker 1 for Gap. Copy passes this raw stored string through unchanged, without the on-screen automatic/unverified caveat. The clinician sees uncertainty in the rich view, then pastes a positively attributed sentence into a note. The lead is confirmed and understated: later gaps are falsely attributed, not merely unmarked. Leading null spans/all-null text can instead remain unmarked. Edit also exposes the misleading stored labels.
+Recommendation: fix formatter attribution preservation AND define an uncertainty-preserving copy/quote/text-export representation. Appending a top-level caveat alone does not repair span-level false attribution. Text export/quote insertion implementations beyond this Copy button were not audited.
+
+2. P1 / high confidence — Saved corrections are hidden by stale metadata segments.
+Sources: src/lib/components/TranscriptView.svelte:106-113,239-246; src/lib/pages/EditorTab.svelte:81-84,277-288,318-322,538; src-tauri/src/commands/recordings_edit.rs:185-210; crates/db/src/recordings.rs:222-241.
+Done sends the edited raw string. The optimistic store changes only transcript, preserving metadata. The backend saves that string verbatim (empty becomes None), retains transcript_segments, and returns no refreshed representation. Any nonempty segment array remains preferred by the view. Browser reproduction: edit ORIGINAL to CORRECTED, click Done; parent value becomes CORRECTED but the view still shows ORIGINAL, including after remount with the same persisted-shaped inputs. Backend persistence/reopen outcome is source-traced, not a live DB test.
+Clinical symptom: a corrected dose, negation, or speaker label appears to revert despite save success; Copy can contain the correction while the clinician reads the old wording. This is NOT silent formatting on save: it is stale alternate content winning at render time.
+Recommendation: bind segment metadata to a transcript revision; update or invalidate it atomically with edits, including the optimistic local representation. Do not reuse stale attribution for changed words.
+
+3. P1 / high confidence — Visible transcript drafts are invisible to Copy, save protection, and tab-unmount flushing until Done.
+Sources: src/lib/components/TranscriptView.svelte:239-246,284-288; src/lib/pages/EditorTab.svelte:156-164,167-172,240-246,277-282,305-309,378-383; src/App.svelte:464-485.
+Textarea binding updates only local editText; onChange runs only on Done. Executed browser reproduction confirms zero callbacks and unchanged parent content while the textarea displays a correction. Therefore Copy exports old content while the new content is visible. Switching to another tab unmounts TranscriptView; the parent's flush cannot preserve a draft it never received. Pending-edit/restart and remote-update protection likewise start only after Done.
+Clinical symptom: Copy appears successful but omits the visible correction; leaving the tab silently loses it.
+Recommendation: make draft/dirty state an explicit parent-owned contract, protect it across navigation, and make Copy's source explicit. Keep any explicit Done policy, but require Save/Discard protection rather than invisible loss.
+
+4. P2 / high confidence — Paragraph count manufactures attempted-attribution presentation.
+Sources: src/lib/components/TranscriptView.svelte:123-140,181-207,253-256,304-306.
+sections.length > 1 overrides the explicit outcome gate. Executed text-only two-paragraph fixtures produce two Speaker unassigned headings and the automatic-label caveat for off, skipped, and unknown. For skipped this appears alongside Speaker labelling wasn't run; for unknown the status-unavailable message disappears.
+Clinical symptom: ordinary hand-written paragraphs appear to be failed speaker assignments, or the interface contradicts its own not-run status. Slice 2d narrowed but did not close this issue. Nonempty structured all-null segments may coalesce into one section, so the bug specifically includes the absent/empty/invalid-segment text fallback.
+Recommendation: render paragraph layout independently of attribution outcome. Paragraph count is not evidence of analysis.
+
+5. P2 / high confidence — Unknown single-paragraph transcripts lose the Edit action.
+Source: src/lib/components/TranscriptView.svelte:138-140,273-315.
+The showUnknownStatus branch precedes editing and contains no toolbar. The browser fixture renders the status and body with zero buttons. A legacy/missing-metadata transcript cannot be corrected from this tab; adding a paragraph in an upstream editor would accidentally change that capability.
+Recommendation: outcome messaging must not control access to editing; keep a shared toolbar independent of body state.
+
+6. P2 / high confidence — Persisted failure is indistinguishable from successful-but-unassigned output inside TranscriptView.
+Sources: src/lib/components/TranscriptView.svelte:123-145,253-306; src/lib/pages/EditorTab.svelte:106-111,127-130; src-tauri/src/commands/transcription/inner.rs:532-547,578-581.
+Failed is transported and persisted, but maps to the structured/unassigned path without a persistent failure heading. Identical all-null fixture bodies with failed versus completed-with-unassigned produce identical visible text. A transient pipeline warning elsewhere does not establish a distinct reopened transcript state.
+Clinical symptom: a failed labelling run looks like analysis completed but could not identify speakers, inviting the wrong judgment of model performance.
+Recommendation: keep recording-level outcome visible separately from span attribution; state failed without guessing a cause.
+
+7. P2 / high confidence — Speaker badge text has insufficient contrast; the unassigned boundary is visually subordinate.
+Sources: src/lib/components/TranscriptView.svelte:218-226,297-299,389-415; src/app.css:6-23,64-81.
+The 11px badges reuse a saturated palette color for text on a 12%-opacity tint in both themes. Computed browser colors, alpha-composited against production surfaces and evaluated with WCAG luminance: all eight palette entries are below 4.5:1 in light mode (1.82-3.42:1); four are below 4.5:1 in dark mode (Speaker 1/3/5/8: 4.06/3.82/4.28/4.16). The dashed unassigned rail is only 1.30:1 light / 1.51:1 dark. The rail measurement is a salience finding, not a claim that the text-based state distinction relies solely on a graphical indicator.
+Clinical symptom: body wording remains readable while speaker identity is harder to read; the status that deserves caution is easier to overlook than colorful attributed badges.
+Recommendation: use theme-aware high-contrast label text, retain color only as an adjunct, enlarge the unassigned heading to at least body-adjacent size, and strengthen the dashed boundary without fading the words.
+
+WHAT THE THREE ABSENCE STATES GET RIGHT
+
+With truthful single-section input, unassigned, skipped, and unknown have distinct visible wording. Unassigned is a sibling section with its own heading and dashed rail, NOT nested under the previous speaker (TranscriptView.svelte:294-306,384-405). Assigned labels are boxed with solid rails; forced colors preserves these non-color distinctions. The isolated component was exercised at 360px in both themes, with normal, grayscale, and forced-colors modes: 18 combinations, three distinct text states, no document horizontal overflow. This is not a whole-app responsive or assistive-technology certification. Wide mixed-attribution screenshots were captured in six theme/mode combinations; light grayscale, dark normal, and forced-colors renders were visually inspected. Native platform high-contrast settings were not tested; Chromium emulation used its default black-on-white forced palette for both app themes.
+
+The main absence-state defect is semantic classification, not proof that all three styles look identical. Improve salience, but do not replace the explicit headings with color-only warnings.
+
+IMPROVEMENTS RANKED BY CLINICAL VALUE
+
+1. One authoritative transcript revision across view/edit/copy/persistence. Retain null attribution at the affected span. Resolve findings 1-3 before visual polish.
+2. Independent dimensions: recording outcome (off/skipped/failed/completed/unknown) and span attribution (Speaker N/unassigned). Paragraph layout must never substitute for either. Sources: TranscriptView.svelte:123-145,294-306.
+3. An explicit, high-contrast unassigned heading and stronger dashed boundary, normal body text, and an uncertainty label that remains meaningful when quoted independently. Keep neutral Speaker N labels; never infer clinician/patient roles. Sources: TranscriptView.svelte:253-256,294-306,389-425.
+4. Preserve useful segment granularity and expose time references for checking audio. The backend deliberately emits timestamps and a paragraph per segment (inner.rs:660-663,675-711); groupSegmentsIntoSections instead merges consecutive same-speaker segments with spaces and drops times from its section model (TranscriptView.svelte:7-10,156-178). This makes long same-speaker passages harder to verify; adding a timestamp display should precede any promise of clickable audio seeking unless that transport is implemented.
+5. After classification is trustworthy, offer next-unassigned navigation and a count derived from actual unassigned runs—not a confidence percentage. This is an improvement proposal based on the section list (TranscriptView.svelte:293-309), not a claim about existing capability or a validated per-recording metric.
+
+TESTABLE RENDER CONTRACT / MUST NOT HAPPEN
+
+A. Given Speaker 1 → null → Speaker 2, every representation must retain a separate unassigned middle span. No last-speaker inheritance, implicit continuation, role inference, renumbering, or dropped words.
+B. Copy/quote/text export must carry automatic/unverified attribution and unassigned markers at the affected span; a caveat left in the UI, or only at a removable document header, is insufficient. Test whole transcript and excerpt boundaries.
+C. After an edit, the read view, explicitly committed text, copy payload, and reload must agree on words and attribution. Stale segment metadata must not override a newer transcript revision.
+D. A visible draft must not silently disappear on tab change, recording change, remote update, restart, or save failure. Copy during editing must copy the declared visible/committed source or require committing first; never silently copy old text.
+E. Two plain paragraphs with off/skipped/unknown and no authoritative attribution must not fabricate an assignment attempt. Unknown remains unknown; skipped remains not-run regardless of paragraph count.
+F. Failed and completed-with-unassigned must remain distinguishable after reload; changing current settings/models must not rewrite the historical outcome or invent a failure cause.
+G. Unknown/off/skipped must not disable ordinary correction controls. Outcome messaging and edit access are independent.
+H. Unassigned runs remain separate named sections in reading order, with normal-size readable body text. Meaning must survive grayscale, both themes, forced colors, narrow width, and enlarged text without relying on color alone. Badge text must meet 4.5:1 at current small sizes.
+I. Canonical and legacy text fallbacks preserve source labels and boundaries without mutation; formatting cannot manufacture attribution. Actual Rust formatter output must be exercised through the production Svelte fallback with metadata absent.
+J. Viewing, parsing, opening Edit, or completing a no-op edit must not silently rewrite stored content or speaker identity. Test callbacks AND persistence calls, not only appearance.
+
+VERIFICATION AND LIMITATIONS
+
+Executed: npx vitest run src/lib/components/TranscriptView.test.ts src/lib/EditorTab.test.ts — 2 files, 35 tests passed. Existing suite does not close the reproduced cases.
+Executed isolated build of unchanged TranscriptView.svelte + production app.css using installed Svelte/Vite; browser interactions used synthetic fixtures only.
+Executed original Rust formatter/time-format function bodies unchanged with minimal synthetic type definitions, then fed their actual output into the production component. This is not a full Rust/Tauri test suite.
+Artifacts: results.json (behavior and wide-render evidence), contrast.json (computed ratios), absence-results.json (18 narrow state/mode cases), screenshots, formatter.rs, check.py, absence.py, and isolated build under /tmp/transcript-review-bed8671.
+No full app build, live persistence, OS clipboard write, actual audio diarization, screen reader, full app viewport sweep, or external quote/export integration test was run. A component-only recording-prop switch also retained its local draft, but no production cross-recording trigger was established in this review; do not claim a verified cross-patient save from that harness alone.

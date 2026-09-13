@@ -1,0 +1,146 @@
+[
+  {
+    "theme": "light",
+    "mode": "normal",
+    "outcome": "completed-with-unassigned",
+    "text": "Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.\n\nEdit\nSpeaker unassigned\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-light-normal-completed-with-unassigned.png"
+  },
+  {
+    "theme": "light",
+    "mode": "normal",
+    "outcome": "skipped",
+    "text": "Speaker labelling wasn't run\n\nSpeaker labelling was not run for this recording\n\nEdit\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-light-normal-skipped.png"
+  },
+  {
+    "theme": "light",
+    "mode": "normal",
+    "outcome": "unknown",
+    "text": "Speaker-labelling status unavailable\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-light-normal-unknown.png"
+  },
+  {
+    "theme": "light",
+    "mode": "grayscale",
+    "outcome": "completed-with-unassigned",
+    "text": "Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.\n\nEdit\nSpeaker unassigned\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-light-grayscale-completed-with-unassigned.png"
+  },
+  {
+    "theme": "light",
+    "mode": "grayscale",
+    "outcome": "skipped",
+    "text": "Speaker labelling wasn't run\n\nSpeaker labelling was not run for this recording\n\nEdit\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-light-grayscale-skipped.png"
+  },
+  {
+    "theme": "light",
+    "mode": "grayscale",
+    "outcome": "unknown",
+    "text": "Speaker-labelling status unavailable\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-light-grayscale-unknown.png"
+  },
+  {
+    "theme": "light",
+    "mode": "forced",
+    "outcome": "completed-with-unassigned",
+    "text": "Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.\n\nEdit\nSpeaker unassigned\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-light-forced-completed-with-unassigned.png"
+  },
+  {
+    "theme": "light",
+    "mode": "forced",
+    "outcome": "skipped",
+    "text": "Speaker labelling wasn't run\n\nSpeaker labelling was not run for this recording\n\nEdit\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-light-forced-skipped.png"
+  },
+  {
+    "theme": "light",
+    "mode": "forced",
+    "outcome": "unknown",
+    "text": "Speaker-labelling status unavailable\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-light-forced-unknown.png"
+  },
+  {
+    "theme": "dark",
+    "mode": "normal",
+    "outcome": "completed-with-unassigned",
+    "text": "Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.\n\nEdit\nSpeaker unassigned\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-dark-normal-completed-with-unassigned.png"
+  },
+  {
+    "theme": "dark",
+    "mode": "normal",
+    "outcome": "skipped",
+    "text": "Speaker labelling wasn't run\n\nSpeaker labelling was not run for this recording\n\nEdit\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-dark-normal-skipped.png"
+  },
+  {
+    "theme": "dark",
+    "mode": "normal",
+    "outcome": "unknown",
+    "text": "Speaker-labelling status unavailable\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-dark-normal-unknown.png"
+  },
+  {
+    "theme": "dark",
+    "mode": "grayscale",
+    "outcome": "completed-with-unassigned",
+    "text": "Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.\n\nEdit\nSpeaker unassigned\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-dark-grayscale-completed-with-unassigned.png"
+  },
+  {
+    "theme": "dark",
+    "mode": "grayscale",
+    "outcome": "skipped",
+    "text": "Speaker labelling wasn't run\n\nSpeaker labelling was not run for this recording\n\nEdit\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-dark-grayscale-skipped.png"
+  },
+  {
+    "theme": "dark",
+    "mode": "grayscale",
+    "outcome": "unknown",
+    "text": "Speaker-labelling status unavailable\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-dark-grayscale-unknown.png"
+  },
+  {
+    "theme": "dark",
+    "mode": "forced",
+    "outcome": "completed-with-unassigned",
+    "text": "Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.\n\nEdit\nSpeaker unassigned\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-dark-forced-completed-with-unassigned.png"
+  },
+  {
+    "theme": "dark",
+    "mode": "forced",
+    "outcome": "skipped",
+    "text": "Speaker labelling wasn't run\n\nSpeaker labelling was not run for this recording\n\nEdit\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-dark-forced-skipped.png"
+  },
+  {
+    "theme": "dark",
+    "mode": "forced",
+    "outcome": "unknown",
+    "text": "Speaker-labelling status unavailable\n\nSynthetic transcript body.",
+    "overflow": false,
+    "screenshot": "/private/tmp/transcript-review-bed8671/absence-dark-forced-unknown.png"
+  }
+]
