@@ -28,6 +28,10 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 /// `into_inner()` recovers from poisoning when a previous test panicked
 /// while holding the lock — the provider is still cleared by the guard's
 /// Drop, so a poisoned lock must not wedge every subsequent test.
+/// NOTE: this is a SECOND provider lock, separate from medical-security's
+/// `serial_test_lock()` (crates/security/src/keychain.rs) — harmless today
+/// because the two never share a binary, but silently non-serializing if
+/// they ever do; medical-security's is the canonical cross-crate lock.
 static PROVIDER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn provider_lock() -> MutexGuard<'static, ()> {
