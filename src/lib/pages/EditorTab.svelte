@@ -575,12 +575,6 @@
             Copy
           {/if}
         </button>
-        {#if copyStatus === 'copy-blocked' && blockReason && blockRemedy}
-          <div id="copy-block-msg" class="copy-block-message" data-testid="copy-block-message" role="status">
-            <span class="copy-block-reason">{blockReason}</span>
-            <span class="copy-block-remedy">{blockRemedy}</span>
-          </div>
-        {/if}
         {#if tabId === 'transcript' && recordings.selectedRecording}
           <button
             class="btn-copy"
@@ -611,6 +605,12 @@
         {/if}
       {/if}
     </div>
+    {#if content && copyStatus === 'copy-blocked' && blockReason && blockRemedy}
+      <div id="copy-block-msg" class="copy-block-message" data-testid="copy-block-message" role="status">
+        <span class="copy-block-reason">{blockReason}</span>
+        <span class="copy-block-remedy">{blockRemedy}</span>
+      </div>
+    {/if}
   </div>
 
   {#if icdCodes.length > 0}
@@ -650,6 +650,8 @@
 
   .editor-header {
     display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
@@ -660,12 +662,17 @@
 
   .editor-header-left {
     display: flex;
+    flex-wrap: wrap;
+    min-width: 0;
+    overflow-wrap: anywhere;
     align-items: baseline;
     gap: 8px;
   }
 
   .editor-header-right {
     display: flex;
+    flex-wrap: wrap;
+    min-width: 0;
     align-items: center;
     gap: 8px;
   }
@@ -703,6 +710,7 @@
   }
 
   .btn-copy {
+    flex-shrink: 0;
     padding: 5px 12px;
     font-size: 12px;
     font-weight: 500;
@@ -719,8 +727,8 @@
     color: var(--text-primary);
   }
 
-  /* Hard-block state: visible inline message beside the Copy button so the
-     remedy is readable without hovering (tooltip remains an extra surface). */
+  /* Keep the complete explanation below the wrapping controls. Squeezing it
+     between buttons can clip Export Audio and consume the editing viewport. */
   .btn-copy.copy-blocked {
     border-color: var(--danger, #c0392b);
     color: var(--danger, #c0392b);
@@ -730,7 +738,9 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    max-width: 320px;
+    flex-basis: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
     padding: 8px 10px;
     border-left: 3px solid var(--danger, #c0392b);
     font-size: 12px;

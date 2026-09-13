@@ -1,0 +1,86 @@
+
+> rust-medical-assistant@0.77.9 lint
+> eslint .
+
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/docs/generation-design/browser-entry.ts
+  12:81  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  14:36  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/docs/generation-design/browser-tauri.ts
+  3:12  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  5:32  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  7:50  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/docs/settings-declutter/browser-entry.ts
+  16:70  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/docs/settings-declutter/browser-tauri.ts
+  3:14  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  5:53  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/src/lib/components/TranscriptView.test.ts
+  457:5  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-var-requires')
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/src/lib/components/settings/Audio.svelte
+   34:7  warning  Prefer using writable $derived instead of $state and $effect  svelte/prefer-writable-derived
+  205:7  warning  Prefer using writable $derived instead of $state and $effect  svelte/prefer-writable-derived
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/src/lib/components/settings/Models.svelte
+  152:7  warning  Prefer using writable $derived instead of $state and $effect  svelte/prefer-writable-derived
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/src/lib/pages/ChatTab.svelte
+  32:5  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/src/lib/pages/TranslateTab.svelte
+  62:5  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+  63:5  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/src/lib/rsvp/engine.ts
+   97:21  warning  Unnecessary escape character: \(  no-useless-escape
+   97:23  warning  Unnecessary escape character: \[  no-useless-escape
+   97:72  warning  Unnecessary escape character: \.  no-useless-escape
+   97:86  warning  Unnecessary escape character: \)  no-useless-escape
+  104:71  warning  Unnecessary escape character: \.  no-useless-escape
+  108:52  warning  Unnecessary escape character: \(  no-useless-escape
+  108:54  warning  Unnecessary escape character: \[  no-useless-escape
+  108:62  warning  Unnecessary escape character: \)  no-useless-escape
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/src/lib/stores/endpointHealth.test.ts
+   12:15  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   23:36  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   27:15  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   28:20  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   28:28  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   29:23  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   45:31  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+   72:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  107:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  133:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  142:55  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  170:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  192:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  217:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  238:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  258:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  286:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  311:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  324:25  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  351:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  386:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  388:56  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  418:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  451:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  488:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  523:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  543:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+  600:10  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/src/lib/stores/pipeline.test.ts
+  9:52  warning  Unexpected any. Specify a different type  @typescript-eslint/no-explicit-any
+
+/Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy/src/lib/stores/recordings.test.ts
+  169:5  warning  Expected an assignment or function call and instead saw an expression  @typescript-eslint/no-unused-expressions
+
+✖ 53 problems (0 errors, 53 warnings)
+  0 errors and 1 warning potentially fixable with the `--fix` option.

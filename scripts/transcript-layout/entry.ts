@@ -1,0 +1,1 @@
+import '../../src/app.css'; import {mount} from 'svelte'; import Harness from './Harness.svelte'; document.documentElement.dataset.theme=new URLSearchParams(location.search).get('theme')||'light'; mount(Harness,{target:document.getElementById('app')!});

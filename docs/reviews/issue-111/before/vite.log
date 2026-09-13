@@ -1,0 +1,12 @@
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - import "../../vite-plugins/dictionary-en" without a file extension (scripts/transcript-layout/vite.config.ts:3:43). Add the file extension
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+10:49:49 AM [vite] (client) Forced re-optimization of dependencies
+
+  VITE v8.2.2  ready in 413 ms
+
+  ➜  Local:   http://127.0.0.1:14873/
+10:49:49 AM [vite-plugin-svelte] scripts/transcript-layout/Harness.svelte:11:4 `transcript` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+10:49:49 AM [vite-plugin-svelte] scripts/transcript-layout/Harness.svelte:12:4 `metadata` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update

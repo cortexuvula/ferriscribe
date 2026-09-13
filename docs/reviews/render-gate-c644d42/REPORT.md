@@ -2,7 +2,9 @@
 
 ## Verdict and provenance
 
-PASS for the requested **visual failed-state distinction** and **UI marker-bypass closure**, within the isolated browser scope below. The original 18 absence-state/theme/mode combinations retain distinct wording and have no document overflow. Existing findings #4 and #5 remain unchanged under issue #108; this report does not reopen them as new defects.
+**Overall browser/layout verdict: REQUEST CHANGES — blocked-copy layout defect (#111), detailed in section 5 below. The two functional items passing is NOT an overall green gate.**
+
+PASS only for the requested **visual failed-state distinction** and **UI marker-bypass closure**, within the isolated browser scope below. The original 18 absence-state/theme/mode combinations retain distinct wording and have no document overflow. Existing findings #4 and #5 remain unchanged under issue #108; this report does not reopen them as new defects.
 
 Important qualification: the failure has a distinct **visual heading**, but not an HTML/ARIA heading. Do not interpret visual sign-off as a screen-reader-heading or full accessibility sign-off.
 
@@ -104,6 +106,18 @@ Re-ran the exact prior composition: **completed-with-unassigned / skipped / unkn
 Repeated all 18 through production EditorTab: also no document overflow. Expected transcript/scroll regions existed with nonzero geometry; collected regions had no horizontal inner overflow. Files: `absence-reader-*.png`, `absence-editor-*.png`; `results.json → absence/absenceEditor`.
 
 Do not broaden this into “all narrow layout is polished.” At 360px the header's Transcript title and control group have **zero horizontal gap** (both meet at x=89.296875) and button labels wrap. Vision flagged apparent crowding; targeted DOM measurements found no overlapping bounding boxes or document overflow. See `narrow-header.json` and `distinction-dark-forced-360-failed.png`. The failure and unassigned texts themselves remain visible and separate.
+
+## 5. Blocking layout finding — issue #111 (report correction)
+
+The original browser verdict omitted a separately reproduced blocked-state layout defect. At **390×800**, the full reason/remedy was squeezed between toolbar buttons: **Export Audio extended past the clipped right edge and Edit was below the viewport**. This is REQUEST CHANGES for layout, regardless of the two passing functional items above. The original 18 absence-state combinations did not exercise the blocked message; document scroll dimensions alone did not detect ancestor clipping.
+
+Evidence now pinned by a failing executable reproduction on master `177144e7a09eee853b6c6568baad283edc5e6a45`, whose `EditorTab.svelte` is byte-identical to `c644d42` (Git diff verified empty):
+
+- [../issue-111/before/blocked-light-normal-390-fold_possible-absent.png](../issue-111/before/blocked-light-normal-390-fold_possible-absent.png)
+- [../issue-111/before/results.json](../issue-111/before/results.json): Export Audio right **406.45px** in a **390px** viewport; Edit top **844.06px**, bottom **872.06px** in an **800px** viewport, with failed hit testing and ancestor-clipping assertions.
+- This is an added reproduction, not a claim that these geometry assertions ran in the original 18-state gate. The current issue-111 harness is `scripts/transcript-layout/verify.py` in the fix worktree/repository.
+
+Required repair: retain the exact visible reason/remedy and hard copy block; stop adjacent-control clipping/overlap; keep Edit visible and operable at 390×800 and narrower. Pin the blocked state as a mandatory matrix case. Subsequent repair evidence belongs to the issue-111 report and does not retroactively turn this historical candidate's layout gate green.
 
 ## Verification inventory and limits
 

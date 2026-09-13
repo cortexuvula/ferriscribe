@@ -1,0 +1,12 @@
+
+ RUN  v4.1.11 /Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy
+
+
+ Test Files  99 passed (99)
+      Tests  871 passed (871)
+   Start at  10:58:35
+   Duration  4.26s (transform 20.29s, setup 880ms, import 31.28s, tests 13.53s, environment 25.30s)
+
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - import "./vite-plugins/dictionary-en" without a file extension (vitest.config.ts:3:43). Add the file extension
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.

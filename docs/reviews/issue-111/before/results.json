@@ -1,0 +1,893 @@
+{
+  "commit": "177144e7a09eee853b6c6568baad283edc5e6a45",
+  "source_sha256": "488eb23edd96146399ce8008b6bc6db366852b5e3d892123760daaa443d2b999",
+  "blocked": [
+    {
+      "failures": [
+        "outside viewport: Export Audio",
+        "ancestor x clipping: Export Audio",
+        "ancestor x clipping: Export Audio",
+        "ancestor x clipping: Export Audio",
+        "ancestor x clipping: Export Audio",
+        "outside viewport: Edit",
+        "ancestor y clipping: Edit",
+        "ancestor y clipping: Edit",
+        "ancestor y clipping: Edit",
+        "ancestor y clipping: Edit",
+        "ancestor y clipping: Edit",
+        "not hit-testable: Edit"
+      ],
+      "boxes": [
+        {
+          "label": "Speed Read",
+          "rect": {
+            "left": 89.296875,
+            "top": 393.734375,
+            "right": 152.03125,
+            "bottom": 441.734375,
+            "width": 62.734375,
+            "height": 48
+          },
+          "lines": [
+            {
+              "left": 102.296875,
+              "top": 400.734375,
+              "right": 139.03125,
+              "bottom": 415.734375,
+              "width": 36.734375,
+              "height": 15
+            },
+            {
+              "left": 106.109375,
+              "top": 418.734375,
+              "right": 135.203125,
+              "bottom": 433.734375,
+              "width": 29.09375,
+              "height": 15
+            }
+          ]
+        },
+        {
+          "label": "Copy blocked",
+          "rect": {
+            "left": 160.03125,
+            "top": 393.734375,
+            "right": 231.703125,
+            "bottom": 441.734375,
+            "width": 71.671875,
+            "height": 48
+          },
+          "lines": [
+            {
+              "left": 180.9375,
+              "top": 400.734375,
+              "right": 210.796875,
+              "bottom": 415.734375,
+              "width": 29.859375,
+              "height": 15
+            },
+            {
+              "left": 173.03125,
+              "top": 418.734375,
+              "right": 218.71875,
+              "bottom": 433.734375,
+              "width": 45.6875,
+              "height": 15
+            }
+          ]
+        },
+        {
+          "label": "This transcript contains spans with no identified speaker, and the saved metadata shows unlabelled speech after a labelled span \u2014 speaker attribution cannot be verified. Re-transcribe this recording to get an honest copy. Re-transcription may replace manual corrections you have made, and it produces a new attribution attempt \u2014 speaker labels are not guaranteed correct.",
+          "rect": {
+            "left": 239.703125,
+            "top": 55,
+            "right": 334.53125,
+            "bottom": 780.46875,
+            "width": 94.828125,
+            "height": 725.46875
+          },
+          "lines": [
+            {
+              "left": 252.703125,
+              "top": 63,
+              "right": 324.53125,
+              "bottom": 398.9375,
+              "width": 71.828125,
+              "height": 335.9375
+            },
+            {
+              "left": 252.703125,
+              "top": 63,
+              "right": 277.859375,
+              "bottom": 78,
+              "width": 25.15625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 79.796875,
+              "right": 310.890625,
+              "bottom": 94.796875,
+              "width": 58.1875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 96.59375,
+              "right": 303.265625,
+              "bottom": 111.59375,
+              "width": 50.5625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 113.390625,
+              "right": 316.375,
+              "bottom": 128.390625,
+              "width": 63.671875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 130.1875,
+              "right": 267.375,
+              "bottom": 145.1875,
+              "width": 14.671875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 146.984375,
+              "right": 308.90625,
+              "bottom": 161.984375,
+              "width": 56.203125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 163.78125,
+              "right": 302.734375,
+              "bottom": 178.78125,
+              "width": 50.03125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 180.578125,
+              "right": 297.09375,
+              "bottom": 195.578125,
+              "width": 44.390625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 197.375,
+              "right": 287.40625,
+              "bottom": 212.375,
+              "width": 34.703125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 214.171875,
+              "right": 308.6875,
+              "bottom": 229.171875,
+              "width": 55.984375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 230.96875,
+              "right": 290.140625,
+              "bottom": 245.96875,
+              "width": 37.4375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 247.765625,
+              "right": 313.96875,
+              "bottom": 262.765625,
+              "width": 61.265625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 264.5625,
+              "right": 295.484375,
+              "bottom": 279.5625,
+              "width": 42.78125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 281.359375,
+              "right": 291.28125,
+              "bottom": 296.359375,
+              "width": 38.578125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 298.15625,
+              "right": 299.265625,
+              "bottom": 313.15625,
+              "width": 46.5625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 314.953125,
+              "right": 295.171875,
+              "bottom": 329.953125,
+              "width": 42.46875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 331.75,
+              "right": 299.703125,
+              "bottom": 346.75,
+              "width": 47,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 348.546875,
+              "right": 315.203125,
+              "bottom": 363.546875,
+              "width": 62.5,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 365.34375,
+              "right": 311.296875,
+              "bottom": 380.34375,
+              "width": 58.59375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 382.140625,
+              "right": 301.390625,
+              "bottom": 397.140625,
+              "width": 48.6875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 402.9375,
+              "right": 324.53125,
+              "bottom": 772.46875,
+              "width": 71.828125,
+              "height": 369.53125
+            },
+            {
+              "left": 252.703125,
+              "top": 402.9375,
+              "right": 272.890625,
+              "bottom": 417.9375,
+              "width": 20.1875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 419.734375,
+              "right": 310.015625,
+              "bottom": 434.734375,
+              "width": 57.3125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 436.53125,
+              "right": 273.375,
+              "bottom": 451.53125,
+              "width": 20.671875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 453.328125,
+              "right": 321.546875,
+              "bottom": 468.328125,
+              "width": 68.84375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 470.125,
+              "right": 288.234375,
+              "bottom": 485.125,
+              "width": 35.53125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 486.921875,
+              "right": 291.296875,
+              "bottom": 501.921875,
+              "width": 38.59375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 503.71875,
+              "right": 306.359375,
+              "bottom": 518.71875,
+              "width": 53.65625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 520.515625,
+              "right": 324.53125,
+              "bottom": 535.515625,
+              "width": 71.828125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 537.3125,
+              "right": 321.234375,
+              "bottom": 552.3125,
+              "width": 68.53125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 554.109375,
+              "right": 293.4375,
+              "bottom": 569.109375,
+              "width": 40.734375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 570.90625,
+              "right": 316.984375,
+              "bottom": 585.90625,
+              "width": 64.28125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 587.703125,
+              "right": 303.03125,
+              "bottom": 602.703125,
+              "width": 50.328125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 604.5,
+              "right": 322.625,
+              "bottom": 619.5,
+              "width": 69.921875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 621.296875,
+              "right": 315.734375,
+              "bottom": 636.296875,
+              "width": 63.03125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 638.09375,
+              "right": 275.859375,
+              "bottom": 653.09375,
+              "width": 23.15625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 654.890625,
+              "right": 311.375,
+              "bottom": 669.890625,
+              "width": 58.671875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 671.6875,
+              "right": 310.8125,
+              "bottom": 686.6875,
+              "width": 58.109375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 688.484375,
+              "right": 297.4375,
+              "bottom": 703.484375,
+              "width": 44.734375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 705.28125,
+              "right": 307.15625,
+              "bottom": 720.28125,
+              "width": 54.453125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 722.078125,
+              "right": 271.15625,
+              "bottom": 737.078125,
+              "width": 18.453125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 738.875,
+              "right": 317.1875,
+              "bottom": 753.875,
+              "width": 64.484375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 755.671875,
+              "right": 297.203125,
+              "bottom": 770.671875,
+              "width": 44.5,
+              "height": 15
+            }
+          ]
+        },
+        {
+          "label": "This transcript contains spans with no identified speaker, and the saved metadata shows unlabelled speech after a labelled span \u2014 speaker attribution cannot be verified.",
+          "rect": {
+            "left": 252.703125,
+            "top": 63,
+            "right": 324.53125,
+            "bottom": 398.9375,
+            "width": 71.828125,
+            "height": 335.9375
+          },
+          "lines": [
+            {
+              "left": 252.703125,
+              "top": 63,
+              "right": 277.859375,
+              "bottom": 78,
+              "width": 25.15625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 79.796875,
+              "right": 310.890625,
+              "bottom": 94.796875,
+              "width": 58.1875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 96.59375,
+              "right": 303.265625,
+              "bottom": 111.59375,
+              "width": 50.5625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 113.390625,
+              "right": 316.375,
+              "bottom": 128.390625,
+              "width": 63.671875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 130.1875,
+              "right": 267.375,
+              "bottom": 145.1875,
+              "width": 14.671875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 146.984375,
+              "right": 308.90625,
+              "bottom": 161.984375,
+              "width": 56.203125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 163.78125,
+              "right": 302.734375,
+              "bottom": 178.78125,
+              "width": 50.03125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 180.578125,
+              "right": 297.09375,
+              "bottom": 195.578125,
+              "width": 44.390625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 197.375,
+              "right": 287.40625,
+              "bottom": 212.375,
+              "width": 34.703125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 214.171875,
+              "right": 308.6875,
+              "bottom": 229.171875,
+              "width": 55.984375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 230.96875,
+              "right": 290.140625,
+              "bottom": 245.96875,
+              "width": 37.4375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 247.765625,
+              "right": 313.96875,
+              "bottom": 262.765625,
+              "width": 61.265625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 264.5625,
+              "right": 295.484375,
+              "bottom": 279.5625,
+              "width": 42.78125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 281.359375,
+              "right": 291.28125,
+              "bottom": 296.359375,
+              "width": 38.578125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 298.15625,
+              "right": 299.265625,
+              "bottom": 313.15625,
+              "width": 46.5625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 314.953125,
+              "right": 295.171875,
+              "bottom": 329.953125,
+              "width": 42.46875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 331.75,
+              "right": 299.703125,
+              "bottom": 346.75,
+              "width": 47,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 348.546875,
+              "right": 315.203125,
+              "bottom": 363.546875,
+              "width": 62.5,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 365.34375,
+              "right": 311.296875,
+              "bottom": 380.34375,
+              "width": 58.59375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 382.140625,
+              "right": 301.390625,
+              "bottom": 397.140625,
+              "width": 48.6875,
+              "height": 15
+            }
+          ]
+        },
+        {
+          "label": "Re-transcribe this recording to get an honest copy. Re-transcription may replace manual corrections you have made, and it produces a new attribution attempt \u2014 speaker labels are not guaranteed correct.",
+          "rect": {
+            "left": 252.703125,
+            "top": 402.9375,
+            "right": 324.53125,
+            "bottom": 772.46875,
+            "width": 71.828125,
+            "height": 369.53125
+          },
+          "lines": [
+            {
+              "left": 252.703125,
+              "top": 402.9375,
+              "right": 272.890625,
+              "bottom": 417.9375,
+              "width": 20.1875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 419.734375,
+              "right": 310.015625,
+              "bottom": 434.734375,
+              "width": 57.3125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 436.53125,
+              "right": 273.375,
+              "bottom": 451.53125,
+              "width": 20.671875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 453.328125,
+              "right": 321.546875,
+              "bottom": 468.328125,
+              "width": 68.84375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 470.125,
+              "right": 288.234375,
+              "bottom": 485.125,
+              "width": 35.53125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 486.921875,
+              "right": 291.296875,
+              "bottom": 501.921875,
+              "width": 38.59375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 503.71875,
+              "right": 306.359375,
+              "bottom": 518.71875,
+              "width": 53.65625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 520.515625,
+              "right": 324.53125,
+              "bottom": 535.515625,
+              "width": 71.828125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 537.3125,
+              "right": 321.234375,
+              "bottom": 552.3125,
+              "width": 68.53125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 554.109375,
+              "right": 293.4375,
+              "bottom": 569.109375,
+              "width": 40.734375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 570.90625,
+              "right": 316.984375,
+              "bottom": 585.90625,
+              "width": 64.28125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 587.703125,
+              "right": 303.03125,
+              "bottom": 602.703125,
+              "width": 50.328125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 604.5,
+              "right": 322.625,
+              "bottom": 619.5,
+              "width": 69.921875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 621.296875,
+              "right": 315.734375,
+              "bottom": 636.296875,
+              "width": 63.03125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 638.09375,
+              "right": 275.859375,
+              "bottom": 653.09375,
+              "width": 23.15625,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 654.890625,
+              "right": 311.375,
+              "bottom": 669.890625,
+              "width": 58.671875,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 671.6875,
+              "right": 310.8125,
+              "bottom": 686.6875,
+              "width": 58.109375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 688.484375,
+              "right": 297.4375,
+              "bottom": 703.484375,
+              "width": 44.734375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 705.28125,
+              "right": 307.15625,
+              "bottom": 720.28125,
+              "width": 54.453125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 722.078125,
+              "right": 271.15625,
+              "bottom": 737.078125,
+              "width": 18.453125,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 738.875,
+              "right": 317.1875,
+              "bottom": 753.875,
+              "width": 64.484375,
+              "height": 15
+            },
+            {
+              "left": 252.703125,
+              "top": 755.671875,
+              "right": 297.203125,
+              "bottom": 770.671875,
+              "width": 44.5,
+              "height": 15
+            }
+          ]
+        },
+        {
+          "label": "Export Audio",
+          "rect": {
+            "left": 342.53125,
+            "top": 393.734375,
+            "right": 406.453125,
+            "bottom": 441.734375,
+            "width": 63.921875,
+            "height": 48
+          },
+          "lines": [
+            {
+              "left": 355.53125,
+              "top": 400.734375,
+              "right": 393.453125,
+              "bottom": 415.734375,
+              "width": 37.921875,
+              "height": 15
+            },
+            {
+              "left": 357.96875,
+              "top": 418.734375,
+              "right": 391.015625,
+              "bottom": 433.734375,
+              "width": 33.046875,
+              "height": 15
+            }
+          ]
+        },
+        {
+          "label": "Edit",
+          "rect": {
+            "left": 325.546875,
+            "top": 844.0625,
+            "right": 374,
+            "bottom": 872.0625,
+            "width": 48.453125,
+            "height": 28
+          },
+          "lines": [
+            {
+              "left": 338.546875,
+              "top": 850.0625,
+              "right": 361,
+              "bottom": 865.0625,
+              "width": 22.453125,
+              "height": 15
+            }
+          ]
+        }
+      ],
+      "theme": "light",
+      "surface": "rgb(255, 255, 255)",
+      "forced": false,
+      "filter": "none",
+      "viewport": {
+        "width": 390,
+        "height": 800
+      },
+      "audit": {
+        "calls": [
+          {
+            "command": "listen",
+            "event": "recording-updated"
+          }
+        ],
+        "copied": [],
+        "unknown": []
+      },
+      "screenshot": "blocked-light-normal-390-fold_possible-absent.png",
+      "sha256": "028fccfb2407553b3826aedf2bf027928a22f72791f9bbc3469b94f9ae53669d",
+      "mode": "normal",
+      "evidence": "fold_possible",
+      "version": "absent"
+    }
+  ],
+  "absence": [],
+  "positive": [],
+  "errors": [],
+  "external": [],
+  "browser": "153.0.8010.36",
+  "counts": {
+    "blocked": 1,
+    "absence": 0,
+    "positive": 0
+  },
+  "layoutFailures": 1
+}

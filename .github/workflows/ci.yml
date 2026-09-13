@@ -43,6 +43,15 @@ jobs:
         run: npm run lint
       - name: Frontend tests (vitest)
         run: npx vitest run
+      - name: Install synthetic browser gate
+        run: |
+          python3 -m venv /tmp/ferriscribe-layout-venv
+          /tmp/ferriscribe-layout-venv/bin/pip install playwright==1.58.0
+          /tmp/ferriscribe-layout-venv/bin/python -m playwright install --with-deps chromium
+      - name: Transcript absence and blocked-copy layout matrix
+        # Actual production components/CSS, synthetic data, no native bridge.
+        # Fails on clipped text/controls or Edit outside the initial viewport.
+        run: /tmp/ferriscribe-layout-venv/bin/python scripts/transcript-layout/verify.py
       - name: Coverage floors (vitest --coverage)
         # Thresholds live in vitest.config.ts — floors calibrated to the
         # 2026-08-25 baseline, ratcheted up as known gaps close. Fails the

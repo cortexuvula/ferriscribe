@@ -1,0 +1,8 @@
+
+> rust-medical-assistant@0.77.9 check
+> svelte-check --tsconfig ./tsconfig.json
+
+Loading svelte-check in workspace: /Users/cortexuvula/Development/rustMedicalAssistant/.worktrees/ui-111-blocked-copy
+Getting Svelte diagnostics...
+
+svelte-check found 0 errors and 0 warnings
