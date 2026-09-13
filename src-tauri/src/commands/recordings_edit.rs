@@ -206,10 +206,39 @@ pub fn save_recording_field_inner(
         // REMOVAL, not null-write: the frontend's shape validator treats a
         // null value the same as an absent key, but removal is the honest
         // state — there ARE no segments for this text.
+        // DIARIZATION FOLD EVIDENCE (hard-block design, legacy folded
+        // transcripts): whether the cleared segments COULD have been folded
+        // by the old `seg.speaker.or(last_speaker)` formatter is only
+        // observable here — once the segments are removed, a folded span is
+        // indistinguishable from the speaker's own speech in stored text.
+        // Record it BEFORE the removal, in the same pass, as a closed
+        // vocabulary value (content-free by construction: no span text, no
+        // speaker labels, no counts). Three states, and unknown must stay
+        // distinguishable from "no":
+        //   "fold_possible"  — an unlabelled segment FOLLOWED a labelled one
+        //                      (the only ordering the inheritance could
+        //                      corrupt).
+        //   "none_observed"  — segments were present and parseable, and
+        //                      showed no such ordering.
+        //   key ABSENT       — segments missing/unparseable at clear time:
+        //                      UNKNOWN. Never guessed, never defaulted to
+        //                      "none_observed" (stale/pre-flag recordings
+        //                      must not silently read as clean). An existing
+        //                      historical value is likewise left untouched —
+        //                      the evidence was recorded when it existed.
         "transcript" => {
             recording.transcript = owned_value;
             if let Some(obj) = recording.metadata.as_object_mut() {
+                let fold_evidence = obj
+                    .get("transcript_segments")
+                    .and_then(diarization_fold_evidence);
                 obj.remove("transcript_segments");
+                if let Some(value) = fold_evidence {
+                    obj.insert(
+                        "diarization_fold_evidence".into(),
+                        serde_json::Value::String(value.as_str().to_owned()),
+                    );
+                }
             }
         }
         "soap_note" => recording.soap_note = owned_value,
@@ -274,6 +303,56 @@ pub fn save_recording_field_inner(
     }
 
     Ok(())
+}
+
+/// Closed vocabulary for the persisted `diarization_fold_evidence` metadata
+/// key. Written ONLY at transcript-segment clear time (see the transcript
+/// arm above); never a third value — absence of the key is the unknown
+/// state and is meaningful on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiarizationFoldEvidence {
+    /// An unlabelled segment followed a labelled one — the ordering the old
+    /// formatter's `last_speaker` inheritance could fold into the wrong
+    /// speaker.
+    FoldPossible,
+    /// Segments were present and parseable, but never showed a labelled →
+    /// unlabelled ordering.
+    NoneObserved,
+}
+
+impl DiarizationFoldEvidence {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FoldPossible => "fold_possible",
+            Self::NoneObserved => "none_observed",
+        }
+    }
+}
+
+/// Classify a `transcript_segments` metadata value for fold evidence.
+///
+/// Returns `Some` only when the value is a parseable segment array — the
+/// caller then persists exactly that verdict and REMOVES the segments. Any
+/// other shape (missing key, non-array, elements that aren't objects with
+/// an inspectable `speaker` field) returns `None`: the evidence is UNKNOWN
+/// and the key must be left absent rather than guessed (a malformed store
+/// or a pre-flag recording is not "no fold").
+pub(crate) fn diarization_fold_evidence(
+    segments: &serde_json::Value,
+) -> Option<DiarizationFoldEvidence> {
+    let arr = segments.as_array()?;
+    let mut saw_labelled = false;
+    for seg in arr {
+        let speaker = seg.as_object()?.get("speaker")?;
+        if speaker.is_string() {
+            saw_labelled = true;
+        } else if saw_labelled {
+            // Unlabelled (or null) after a labelled span — the exact
+            // ordering the old formatter's inheritance corrupted.
+            return Some(DiarizationFoldEvidence::FoldPossible);
+        }
+    }
+    Some(DiarizationFoldEvidence::NoneObserved)
 }
 
 #[cfg(test)]
@@ -397,6 +476,180 @@ mod tests {
         let after = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
         assert_eq!(after.transcript, None);
         assert!(after.metadata.get("transcript_segments").is_none());
+    }
+
+    /// Helper: seed a recording with the given metadata + transcript, then
+    /// save an edited transcript through the full inner path.
+    fn save_transcript_edit_with_metadata(
+        conn: &Connection,
+        metadata: serde_json::Value,
+    ) -> medical_core::types::recording::Recording {
+        let rec_id = insert_recording(conn);
+        {
+            let mut rec = RecordingsRepo::get_by_id(conn, &rec_id).unwrap();
+            rec.metadata = metadata;
+            rec.transcript = Some("Original wording.".into());
+            RecordingsRepo::update(conn, &rec).unwrap();
+        }
+        let db = std::sync::Arc::new(medical_db::Database::open_in_memory().unwrap());
+        save_recording_field_inner(
+            db,
+            conn,
+            &rec_id.to_string(),
+            "transcript",
+            "Edited wording.",
+            false,
+        )
+        .unwrap();
+        RecordingsRepo::get_by_id(conn, &rec_id).unwrap()
+    }
+
+    /// Fold evidence, labelled → unlabelled: a null-speaker segment FOLLOWING
+    /// a labelled one is the only ordering the old formatter's
+    /// `last_speaker` inheritance could corrupt — must record
+    /// `fold_possible`.
+    #[test]
+    fn fold_evidence_labelled_then_unlabelled_yields_fold_possible() {
+        let conn = in_memory_db();
+        let after = save_transcript_edit_with_metadata(
+            &conn,
+            serde_json::json!({
+                "transcript_segments": [
+                    {"speaker": "Speaker 1", "text": "Labelled.", "start": 0.0, "end": 1.0},
+                    {"speaker": null, "text": "Unlabelled after.", "start": 1.0, "end": 2.0}
+                ],
+                "diarization_outcome": "completed"
+            }),
+        );
+        assert_eq!(
+            after.metadata.get("diarization_fold_evidence"),
+            Some(&serde_json::json!("fold_possible")),
+            "labelled→unlabelled ordering must record fold_possible; metadata: {}",
+            after.metadata
+        );
+    }
+
+    /// Fold evidence, leading-unlabelled only: unlabelled spans with no
+    /// labelled span before them were never inheritable — `none_observed`.
+    #[test]
+    fn fold_evidence_leading_unlabelled_only_yields_none_observed() {
+        let conn = in_memory_db();
+        let after = save_transcript_edit_with_metadata(
+            &conn,
+            serde_json::json!({
+                "transcript_segments": [
+                    {"speaker": null, "text": "Unlabelled first.", "start": 0.0, "end": 1.0},
+                    {"speaker": null, "text": "Still unlabelled.", "start": 1.0, "end": 2.0}
+                ]
+            }),
+        );
+        assert_eq!(
+            after.metadata.get("diarization_fold_evidence"),
+            Some(&serde_json::json!("none_observed")),
+            "leading-unlabelled-only must record none_observed; metadata: {}",
+            after.metadata
+        );
+    }
+
+    /// Fold evidence, no segments at clear time: the key must be ABSENT —
+    /// unknown is a distinct third state and must never be silently written
+    /// as `none_observed`.
+    #[test]
+    fn fold_evidence_absent_segments_leaves_key_absent() {
+        let conn = in_memory_db();
+        let after = save_transcript_edit_with_metadata(
+            &conn,
+            serde_json::json!({"diarization_outcome": "completed"}),
+        );
+        assert!(
+            after.metadata.get("diarization_fold_evidence").is_none(),
+            "no segments at clear time means UNKNOWN — key must be absent, not none_observed; metadata: {}",
+            after.metadata
+        );
+    }
+
+    /// Fold evidence survives the segment clear alongside the outcome keys:
+    /// the flag, `diarization_outcome`, and `diarization_reason` all
+    /// outlive the removal of `transcript_segments` in the same save.
+    #[test]
+    fn fold_evidence_survives_segment_clear_alongside_outcome_keys() {
+        let conn = in_memory_db();
+        let after = save_transcript_edit_with_metadata(
+            &conn,
+            serde_json::json!({
+                "transcript_segments": [
+                    {"speaker": "Speaker 2", "text": "Labelled.", "start": 0.0, "end": 1.0},
+                    {"speaker": null, "text": "Folded candidate.", "start": 1.0, "end": 2.0}
+                ],
+                "diarization_outcome": "completed",
+                "diarization_reason": null
+            }),
+        );
+        assert!(after.metadata.get("transcript_segments").is_none());
+        assert_eq!(
+            after.metadata.get("diarization_fold_evidence"),
+            Some(&serde_json::json!("fold_possible"))
+        );
+        assert_eq!(after.metadata["diarization_outcome"], "completed");
+        assert!(after.metadata.get("diarization_reason").is_some());
+    }
+
+    /// Fold evidence is historical: a SECOND transcript edit that has no
+    /// segments to inspect (they were cleared by the first) must not
+    /// overwrite the recorded verdict — `fold_possible` stays even though
+    /// this clear observed nothing.
+    #[test]
+    fn fold_evidence_not_overwritten_by_later_edit_without_segments() {
+        let conn = in_memory_db();
+        let rec_id = insert_recording(&conn);
+        {
+            let mut rec = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
+            rec.metadata = serde_json::json!({
+                "transcript_segments": [
+                    {"speaker": "Speaker 1", "text": "Labelled.", "start": 0.0, "end": 1.0},
+                    {"speaker": null, "text": "Unlabelled.", "start": 1.0, "end": 2.0}
+                ]
+            });
+            rec.transcript = Some("Original wording.".into());
+            RecordingsRepo::update(&conn, &rec).unwrap();
+        }
+        let db = std::sync::Arc::new(medical_db::Database::open_in_memory().unwrap());
+        // First edit: segments present → fold_possible recorded, segments
+        // cleared.
+        save_recording_field_inner(
+            std::sync::Arc::clone(&db),
+            &conn,
+            &rec_id.to_string(),
+            "transcript",
+            "First edit.",
+            false,
+        )
+        .unwrap();
+        let first = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
+        assert_eq!(
+            first.metadata.get("diarization_fold_evidence"),
+            Some(&serde_json::json!("fold_possible"))
+        );
+
+        // Second edit: no segments left to inspect — the historical verdict
+        // must survive untouched.
+        save_recording_field_inner(
+            db,
+            &conn,
+            &rec_id.to_string(),
+            "transcript",
+            "Second edit.",
+            false,
+        )
+        .unwrap();
+        let second = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
+        assert_eq!(
+            second.metadata.get("diarization_fold_evidence"),
+            Some(&serde_json::json!("fold_possible")),
+            "a later segment-free edit must not rewrite historical fold evidence; metadata: {}",
+            second.metadata
+        );
+        assert_eq!(second.transcript.as_deref(), Some("Second edit."));
     }
 
     /// Editing a NON-transcript field must not touch transcript segments —
