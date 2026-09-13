@@ -586,19 +586,11 @@ mod tests {
     // without panicking and didn't delete or corrupt the orphan.
     #[test]
     fn orphaned_wav_sweep_encrypts_rowless_wavs() {
-        // Install a test keychain provider so encrypt_file_in_place never
-        // blocks on the real OS keychain. The synthetic key is
-        // deterministic — the decrypt round-trip works the same way.
-        medical_security::keychain::set_test_provider(
-            medical_security::keychain::TestProvider::fixed_db_key([0xBBu8; 32]),
-        );
-        struct ProviderGuard;
-        impl Drop for ProviderGuard {
-            fn drop(&mut self) {
-                medical_security::keychain::clear_test_provider();
-            }
-        }
-        let _cleanup = ProviderGuard;
+        // Keychain isolation: RAII guard with a synthetic key —
+        // `encrypt_file_in_place` inside the sweep resolves through the
+        // global mock on any thread, never the OS keychain. Pairing: the
+        // DB is in-memory, the orphan WAV is a tempdir fixture.
+        let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xBBu8; 32]);
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let orphan = write_aged_wav(tmp.path(), "crash-mid-recording.wav");

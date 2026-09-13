@@ -7,9 +7,10 @@
 //! dir, and tauri's `MockRuntime` app handle.
 //!
 //! Deliberately NOT covered here: SSE streams (`/events` endpoints need a
-//! long-lived connection shape that oneshot can't express) and the audio
-//! byte round-trip (encrypted-file plumbing) — both are covered end-to-end
-//! by the medical-sharing integration tests from the client side.
+//! long-lived connection shape that oneshot can't express). The audio
+//! byte round-trip IS covered here (`audio_roundtrip_tests`): encrypted
+//! through the global mock keychain provider on the handler's
+//! spawn_blocking threads.
 
 use std::sync::Arc;
 
@@ -1645,5 +1646,185 @@ mod registry_internals_tests {
             "live mark streamed: {second}"
         );
         assert!(!second.contains("error"), "SSE never carries error text");
+    }
+}
+
+/// Audio byte round-trip through the real router — the cross-crate
+/// keychain-isolation proof. `medical_security` is compiled here as a
+/// plain DEPENDENCY of this test binary (`cfg(test)` is false inside it),
+/// and all keychain work happens on `spawn_blocking` threads inside the
+/// handlers. If the global mock provider failed to cover cross-thread or
+/// dependency-compiled paths, the keychain sentinel would panic (or, on a
+/// machine with a real keychain, an access prompt would appear) and this
+/// test would fail instead of silently passing.
+mod audio_roundtrip_tests {
+    use super::*;
+    use axum::body::Body;
+    use uuid::Uuid;
+
+    /// Issue a raw-bytes request (the audio endpoints are not JSON).
+    async fn req_raw(
+        app: &TestApp,
+        method: &str,
+        uri: &str,
+        bearer: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {bearer}"));
+        if !body.is_empty() {
+            builder = builder.header("content-type", "application/octet-stream");
+        }
+        let response = app
+            .router
+            .clone()
+            .oneshot(builder.body(Body::from(body)).expect("request"))
+            .await
+            .expect("router responds");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 256 * 1024 * 1024)
+            .await
+            .expect("body");
+        (status, bytes.to_vec())
+    }
+
+    fn seed_recording_with_empty_audio_path(app: &TestApp) -> String {
+        let id = Uuid::new_v4();
+        let conn = app.db.conn().expect("conn");
+        conn.execute(
+            "INSERT INTO recordings (id, filename, audio_path, created_at, metadata)
+             VALUES (?1, ?2, '', ?3, '{}')",
+            rusqlite::params![
+                id.to_string(),
+                format!("{id}.wav"),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .expect("seed recording");
+        id.to_string()
+    }
+
+    #[tokio::test]
+    async fn content_audio_put_get_roundtrip_via_mock_keychain() {
+        // Lock discipline: the provider lock is a std::sync mutex. The mock
+        // is installed synchronously and released before the (synchronous)
+        // on-disk assertions; the request futures inside the block suspend
+        // with the guard held, which is safe here ONLY because nothing on
+        // the await path acquires PROVIDER_LOCK (the handlers take the
+        // GLOBAL_PROVIDER RwLock read at most — no test lock). If a future
+        // change routes the audio handlers through KeychainMockGuard, this
+        // bracketing must be revisited: holding this guard across an await
+        // that nests a second provider-lock acquisition would deadlock the
+        // suite.
+
+        // Phase A (no provider installed): build the app and seed the row.
+        let app = test_app().await;
+        let id = seed_recording_with_empty_audio_path(&app);
+
+        let plaintext: Vec<u8> = b"RIFF....WAVEfmt fixture-bytes".to_vec();
+        let uri = format!("/v1/content/audio/{id}");
+
+        // Phase B (provider installed): PUT plaintext WAV-shaped bytes; the
+        // handler encrypts them at rest via the global mock provider
+        // (spawn_blocking thread).
+        {
+            let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xCCu8; 32]);
+            let (status, _) = req_raw(&app, "PUT", &uri, &app.token, plaintext.clone()).await;
+            assert_eq!(status, StatusCode::CREATED, "first PUT must create");
+
+            // Second PUT is first-write-wins 409.
+            let (status, _) = req_raw(&app, "PUT", &uri, &app.token, plaintext.clone()).await;
+            assert_eq!(status, StatusCode::CONFLICT, "second PUT must 409");
+
+            // GET returns the original plaintext: decrypt on another
+            // spawn_blocking thread under the same global mock.
+            let (status, body) = req_raw(&app, "GET", &uri, &app.token, Vec::new()).await;
+            assert_eq!(status, StatusCode::OK, "GET must return the audio");
+            assert_eq!(body, plaintext, "round-trip must return original bytes");
+        }
+
+        // Phase C (no provider installed): the stored artifact is still
+        // encrypted at rest (FE1 magic) — a pure filesystem assertion.
+        let stored = app._tmp.path().join("recordings").join(format!("{id}.enc"));
+        let on_disk = std::fs::read(&stored).expect("stored artifact");
+        assert!(
+            on_disk.starts_with(medical_security::file_crypto::MAGIC),
+            "stored audio must be encrypted at rest"
+        );
+        assert_ne!(on_disk, plaintext, "ciphertext must differ from plaintext");
+    }
+
+    #[tokio::test]
+    async fn content_audio_get_after_provider_scope_ends_panics_not_real_keychain() {
+        // Negative concurrency scope (repo-auditor condition 5): a worker
+        // that runs AFTER the provider scope ends must fail fast via the
+        // sentinel — never silently fall through to the real OS keychain.
+        //
+        // The panic is asserted in a DEDICATED SPAWNED PROCESS, not
+        // in-process while any test lock is held: this test binary runs
+        // 300+ tests in parallel that freely install/clear the global
+        // provider, so an in-process "no provider" assertion could race a
+        // sibling test's install and flake (or, if guarded with the
+        // provider lock, recreate the lock-ordering hazard this suite just
+        // eliminated). The child is this same test executable invoked with
+        // a marker env var; argv[0] and RUST_TEST_THREADS keep the harness
+        // detection active, so with no provider installed in the fresh
+        // child process its keychain call must panic via the sentinel.
+        let blob = {
+            let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xCDu8; 32]);
+            medical_security::file_crypto::encrypt_bytes_in_memory(b"RIFF").expect("encrypt")
+        };
+        super::post_scope_probe::assert_decrypt_panics_in_child(&blob);
+    }
+}
+
+/// Child-process leg of
+/// [`super::audio_roundtrip_tests::content_audio_get_after_provider_scope_ends_panics_not_real_keychain`].
+///
+/// The parent spawns this binary with `FERRISCRIBE_POST_SCOPE_PROBE=<hex>`
+/// and `--exact post_scope_decrypt_child`. The child decrypts the blob with
+/// NO provider installed (fresh process, none ever set) inside
+/// catch_unwind: exit 0 proves the sentinel panicked the call; any other
+/// outcome (no panic → OS keychain reachable, or decrypt error) fails the
+/// child and thus the parent. The blob is synthetic fixture bytes ("RIFF"
+/// plaintext), passed as hex so no secret-bearing file is ever written.
+mod post_scope_probe {
+    use std::process::Command;
+
+    pub(super) fn assert_decrypt_panics_in_child(blob: &[u8]) {
+        let exe = std::env::current_exe().expect("current exe");
+        let out = Command::new(exe)
+            .arg("--exact")
+            .arg("sharing_vocab_api::route_tests::post_scope_probe::post_scope_decrypt_child")
+            .env("FERRISCRIBE_POST_SCOPE_PROBE", hex::encode(blob))
+            .env("RUST_TEST_THREADS", "1")
+            .output()
+            .expect("spawn probe child");
+        assert!(
+            out.status.success(),
+            "probe child must exit 0 (sentinel panic caught, not OS keychain): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn post_scope_decrypt_child() {
+        let Some(hex_blob) = std::env::var_os("FERRISCRIBE_POST_SCOPE_PROBE") else {
+            // Direct/normal invocation (no marker): nothing to probe.
+            return;
+        };
+        let blob = hex::decode(hex_blob.to_string_lossy().as_bytes()).expect("probe blob hex");
+        let panicked = std::panic::catch_unwind(|| {
+            // No provider was ever installed in this fresh process; the
+            // harness detection must route this to the fail-fast sentinel.
+            let _ = medical_security::file_crypto::decrypt_bytes(&blob);
+        })
+        .is_err();
+        assert!(
+            panicked,
+            "post-scope decrypt must panic via the sentinel, not the OS keychain"
+        );
     }
 }

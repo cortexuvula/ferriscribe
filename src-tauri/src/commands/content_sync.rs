@@ -1282,20 +1282,14 @@ mod tests {
     /// of retrying forever.
     #[test]
     fn read_local_audio_classifies_gone_versus_bytes() {
-        // Install a test keychain provider so `encrypt_file` (which routes
-        // through `keychain::get_or_create_db_key`) never blocks on the
-        // real OS keychain. The synthetic key is deterministic so the
-        // round-trip decrypt below succeeds.
-        medical_security::keychain::set_test_provider(
-            medical_security::keychain::TestProvider::fixed_db_key([0xAAu8; 32]),
-        );
-        struct ProviderGuard;
-        impl Drop for ProviderGuard {
-            fn drop(&mut self) {
-                medical_security::keychain::clear_test_provider();
-            }
-        }
-        let _cleanup = ProviderGuard;
+        // Keychain isolation: the RAII guard installs the global mock
+        // provider (synthetic key), serialises against other
+        // mock-installing tests, and clears it on drop — including on
+        // panic. `encrypt_file`/`decrypt_bytes` route through
+        // `keychain::get_or_create_db_key` and never reach the real OS
+        // keychain. Pairing: the DB is in-memory and the fixtures live in
+        // a tempdir, so the synthetic key only ever sees throwaway data.
+        let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xAAu8; 32]);
 
         let db = Arc::new(Database::open_in_memory().expect("db"));
 
