@@ -145,7 +145,26 @@ establish coverage. A dropped utterance was invisible by construction.
    - Legacy v1 files are refused outright (format header check).
 3. Save as `clip-03.filled.txt`; `FS_EVAL_MODE=score` re-scores all
    variants against the complete human-reviewed interval.
-4. Segmentation invariance: WER is computed on concatenated tokens, so
+4. COMPLETION vs SCORABLE COVERAGE (2026-09-13, pre-scoring; ui-consultant
+   + repo-auditor): the completion gate accounts for the ENTIRE declared
+   audio interval `# Duration:` of the review file — seconds covered by NO
+   row (possible when a columns-2-3 edit moves a boundary without touching
+   any row ID) are unreviewed seconds: the scorer refuses and names the
+   first gap; close it with a `row-90+` row (OK + empty text if silence).
+   This closes the one-level-up gaming vector: a pyannote-derived row set
+   is whisper-independent but NOT omission-proof (speech missed by BOTH
+   systems has no proposed row), so 100%-reviewed rows alone prove only
+   that the PROPOSED rows were reviewed. The score run then reports REVIEW
+   COMPLETION separately from SCORABLE COVERAGE: one `REVIEW <clip>
+   COMPLETE rows=… unintel_rows=… unintel_s=… scorable_s=… (…% of
+   declared)` line before any SCORE line, and `unintel_excl_s` +
+   `ref_scorable_w` on every per-variant row. The UNINTEL exclusion is
+   FIXED BY THE REVIEW (one reference, computed once, identical for every
+   variant) — a variant can never earn a better word error by being scored
+   over a smaller interval. Reference speech outside every detected turn
+   stays in the WER denominator as deletions
+   (`reference_speech_outside_every_detected_turn_stays_in_the_denominator`).
+5. Segmentation invariance: WER is computed on concatenated tokens, so
    identical words in identical order score identically whether the
    decoder emitted one cue or ten. Cue-count/segmentation quality is a
    SEPARATE score row (`seg_boundary_error`, plus `hyp_cues`/`ref_cues`),
@@ -161,7 +180,12 @@ establish coverage. A dropped utterance was invisible by construction.
    `insertion_vs_deletion_classes_use_row_coverage_not_cue_fraction`,
    `cue_straddling_with_majority_silence_is_insertion_only`,
    `hallucination_over_silence_is_not_a_speaker_error`), the UNINTEL
-   token, the duplicate-row-ID refusal, and the status-junk refusal.
+   token, the duplicate-row-ID refusal, and the status-junk refusal, the
+   whole-declared-interval completion gate
+   (`declared_interval_gap_blocks_scoring_as_unreviewed`,
+   `added_row_over_a_gap_completes_the_review`), and the
+   gap-speech-in-the-denominator regression
+   (`reference_speech_outside_every_detected_turn_stays_in_the_denominator`).
 
 ## Unverified / out of scope (stated plainly)
 

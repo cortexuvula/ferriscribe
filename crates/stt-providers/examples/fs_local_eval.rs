@@ -1128,6 +1128,10 @@ struct RefRow {
 #[allow(dead_code)] // clip/dur_s carried for score-mode reporting parity
 struct ReviewedRef {
     clip: String,
+    /// DECLARED audio interval end: the '# Duration:' header of the emitted
+    /// review file (the template partitioned [0, dur] when generated). The
+    /// completion gate accounts for this ENTIRE interval — not just the
+    /// union of the proposed rows (repo-auditor, 2026-09-13).
     dur_s: f64,
     /// Rows sorted by start time (human-added rows interleave correctly).
     rows: Vec<RefRow>,
@@ -1135,6 +1139,11 @@ struct ReviewedRef {
     ref_tokens: Vec<String>,
     not_reviewed: usize,
     first_not_reviewed: Option<String>,
+    /// Seconds of the declared interval [0, dur] covered by NO row. Row-ID
+    /// audits alone cannot see this (a columns-2-3 edit moves a boundary
+    /// without touching any ID); uncovered audio is unreviewed audio.
+    uncovered_s: f64,
+    first_uncovered: Option<(f64, f64)>,
 }
 
 /// Human-added rows use numeric IDs >= this (e.g. row-90, row-91) so they
@@ -1247,6 +1256,33 @@ fn parse_reference(path: &Path) -> Vec<RefRow> {
     out
 }
 
+/// DECLARED duration from the review file's '# Duration: 30.1s.' header.
+/// This is the interval the template was generated to partition; the
+/// completion gate holds the FILLED copy against it, so audio that falls
+/// outside every row (possible only if columns 2-3 were edited) cannot
+/// silently leave the review.
+fn declared_dur_s(path: &Path) -> Option<f64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        if let Some(rest) = line.trim().strip_prefix("# Duration:") {
+            let tok = rest
+                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                // "30.1s." — strip trailing unit + sentence punctuation in
+                // any order/combination.
+                .trim_end_matches(|c: char| c == 's' || c == '.');
+            if !tok.is_empty() {
+                if let Ok(v) = tok.parse::<f64>() {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Load the filled reference and complete the not-reviewed audit against the
 /// emitted review file (same directory, <clip>.review.txt): a row deleted
 /// from the filled copy counts as not reviewed, exactly like a ??? row.
@@ -1316,6 +1352,31 @@ fn load_reviewed(ref_dir: &Path, clip_id: &str) -> ReviewedRef {
         first_not_reviewed = first_not_reviewed.or_else(|| missing.first().map(|s| (*s).clone()));
     }
 
+    // WHOLE-DECLARED-INTERVAL gate (repo-auditor 2026-09-13): a pyannote-
+    // derived row set is NOT omission-proof — speech missed by both systems
+    // has no proposed row, and an edited columns-2-3 row moves a boundary
+    // without touching any row ID. So completion is measured over the
+    // ENTIRE declared interval [0, dur]: seconds covered by no row are
+    // unreviewed seconds, reported exactly like a ??? row.
+    let declared_dur = declared_dur_s(&template_path)
+        .unwrap_or_else(|| panic!("{clip_id}.review.txt: no '# Duration:' header"));
+    let mut uncovered_s = 0.0f64;
+    let mut first_uncovered: Option<(f64, f64)> = None;
+    {
+        let mut cursor = 0.0f64;
+        for r in &filled {
+            if r.start > cursor + 1e-9 {
+                uncovered_s += r.start - cursor;
+                first_uncovered = first_uncovered.or(Some((cursor, r.start)));
+            }
+            cursor = cursor.max(r.end);
+        }
+        if declared_dur > cursor + 1e-9 {
+            uncovered_s += declared_dur - cursor;
+            first_uncovered = first_uncovered.or(Some((cursor, declared_dur)));
+        }
+    }
+
     let dur_s = filled.iter().map(|r| r.end).fold(0.0f64, f64::max);
     let mut rows = filled;
     rows.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
@@ -1336,6 +1397,8 @@ fn load_reviewed(ref_dir: &Path, clip_id: &str) -> ReviewedRef {
         ref_tokens,
         not_reviewed,
         first_not_reviewed,
+        uncovered_s,
+        first_uncovered,
     }
 }
 
@@ -1511,6 +1574,24 @@ struct ScoreLine {
     /// Reference words (human rows with text) with NO hypothesis cue mapped:
     /// the dropped-utterance class a decode-keyed reference hid.
     del_in_speech_rows: usize,
+    /// Ref words the WER denominator actually covers (Speech rows only).
+    /// UNINTEL seconds are excluded from scoring BY DESIGN and are reported
+    /// on the separate REVIEW COMPLETION line — never here, so the two can
+    /// never be confused.
+    ref_scorable_words: usize,
+    /// Seconds excluded from scoring because the reviewer marked them
+    /// UNINTEL. FIXED ACROSS VARIANTS (one reference, computed once): the
+    /// same exclusion applies to every variant, so no variant can earn a
+    /// better word error by being scored over a smaller interval.
+    unintel_excluded_s: f64,
+    /// REVIEW COMPLETION fields (review-level, identical on every variant
+    /// line; carried so `report` can print the REVIEW row from
+    /// scores.jsonl alone): total reviewed rows, UNINTEL rows, UNINTEL
+    /// seconds, and scorable (non-UNINTEL) seconds.
+    reviewed_rows: usize,
+    unintel_rows: usize,
+    unintel_s: f64,
+    scorable_s: f64,
     /// SEPARATE metric — segmentation only, never folded into WER: hyp cues
     /// per reference speech row vs the row set's cue count, as boundary
     /// error. Gaming cue count cannot buy a word-error win.
@@ -1575,6 +1656,20 @@ fn score(artifacts: &Path, samples_dir: &Path) {
             reference.not_reviewed, reference.first_not_reviewed
         );
     }
+    if reference.uncovered_s > 1e-6 {
+        // Uncovered audio is unreviewed audio, reported exactly like a ???
+        // row. Content-free: interval bounds only, never text.
+        panic!(
+            "reference does not cover the DECLARED interval [0, {:.2}s]: \
+             {:.2}s covered by no row (first gap: [{:.2}, {:.2})) — add a \
+             row-{}+ spanning each gap (OK + empty text if it is silence)",
+            reference.dur_s,
+            reference.uncovered_s,
+            reference.first_uncovered.map(|g| g.0).unwrap_or(0.0),
+            reference.first_uncovered.map(|g| g.1).unwrap_or(0.0),
+            HUMAN_ROW_MIN
+        );
+    }
     let ref_tokens = &reference.ref_tokens;
     let ref_words = ref_tokens.len();
     let ref_cues = reference
@@ -1586,6 +1681,45 @@ fn score(artifacts: &Path, samples_dir: &Path) {
         ref_words > 0,
         "reference has 0 tokens — the filled file is empty or was not parsed; \
          refusing to score"
+    );
+
+    // ── REVIEW COMPLETION — reported separately from SCORABLE COVERAGE ──
+    // (ui-consultant, 2026-09-13) A file can be fully reviewed without
+    // supporting an accuracy score over all of its audio: UNINTEL rows are
+    // excluded from the WER denominator BY DESIGN. Reporting only WER would
+    // hide that exclusion; a variant cannot earn a better word error by
+    // being scored over a smaller interval because the excluded duration is
+    // FIXED BY THE REVIEW (same reference for every variant), computed once
+    // here, and shown on its own row before any SCORE line.
+    let reviewed_rows = reference.rows.len();
+    let unintel_rows = reference
+        .rows
+        .iter()
+        .filter(|r| matches!(r.status, RowStatus::Unintelligible))
+        .count();
+    let unintel_s: f64 = reference
+        .rows
+        .iter()
+        .filter(|r| matches!(r.status, RowStatus::Unintelligible))
+        .map(|r| r.end - r.start)
+        .sum();
+    let declared_s = reference.dur_s;
+    let scorable_s: f64 = reference
+        .rows
+        .iter()
+        .filter(|r| !matches!(r.status, RowStatus::Unintelligible))
+        .map(|r| r.end - r.start)
+        .sum();
+    println!(
+        "REVIEW {clip_id} COMPLETE rows={reviewed_rows} not_reviewed=0 uncovered_s={:.2} \
+         unintel_rows={unintel_rows} unintel_s={unintel_s:.2} scorable_s={scorable_s:.2} \
+         ({:.1}% of declared_s={declared_s:.2})",
+        reference.uncovered_s,
+        if declared_s > 0.0 {
+            100.0 * scorable_s / declared_s
+        } else {
+            f64::NAN
+        }
     );
 
     // EL transcript for the same clip (secondary disagreement).
@@ -1724,6 +1858,12 @@ fn score(artifacts: &Path, samples_dir: &Path) {
             wer,
             ins_on_confirmed_silence,
             del_in_speech_rows,
+            ref_scorable_words: ref_words,
+            unintel_excluded_s: unintel_s,
+            reviewed_rows,
+            unintel_rows,
+            unintel_s,
+            scorable_s,
             seg_boundary_error,
             hyp_cues,
             ref_cues,
@@ -1738,13 +1878,15 @@ fn score(artifacts: &Path, samples_dir: &Path) {
         out.write_all(json.as_bytes()).unwrap();
 
         println!(
-            "SCORE {} {} sub={} ins={} del={} wer={:.3} ins_sil={} del_rows={} seg_err={:.3} cues={}/{} spk_err={}/{} (x2 rules) el_disagree_sec={:.3} rule_flips={}",
+            "SCORE {} {} sub={} ins={} del={} wer={:.3} ref_scorable_w={} unintel_excl_s={:.2} ins_sil={} del_rows={} seg_err={:.3} cues={}/{} spk_err={}/{} (x2 rules) el_disagree_sec={:.3} rule_flips={}",
             line.clip,
             line.variant,
             line.sub,
             line.ins,
             line.del,
             line.wer,
+            line.ref_scorable_words,
+            line.unintel_excluded_s,
             line.ins_on_confirmed_silence,
             line.del_in_speech_rows,
             line.seg_boundary_error,
@@ -1790,14 +1932,30 @@ fn report(artifacts: &Path) {
     if let Ok(raw) = std::fs::read_to_string(run_dir.join("scores.jsonl")) {
         for line in raw.lines().filter(|l| !l.trim().is_empty()) {
             let s: serde_json::Value = serde_json::from_str(line).expect("score line");
+            // REVIEW COMPLETION vs SCORABLE COVERAGE, visible here too: the
+            // UNINTEL exclusion is fixed by the review and identical for
+            // every variant — it can never be a per-variant scoring choice.
             println!(
-                "{:<8} {:<11} sub={:>3} ins={:>3} del={:>3} wer={:.3} ins_sil={:>2} del_rows={:>2} seg_err={:.3} cues={:>3}/{} spk_err={:>3} (of {} matches) runs={:>2} EL-disagree={:.3} flips={:>3}",
+                "REVIEW {} COMPLETE rows={} unintel_rows={} unintel_s={:.2} scorable_s={:.2}",
+                s["clip"].as_str().unwrap_or("?"),
+                s["reviewed_rows"].as_u64().unwrap_or(0),
+                s["unintel_rows"].as_u64().unwrap_or(0),
+                s["unintel_s"].as_f64().unwrap_or(f64::NAN),
+                s["scorable_s"].as_f64().unwrap_or(f64::NAN),
+            );
+            break; // one REVIEW row per reference, not per variant
+        }
+        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+            let s: serde_json::Value = serde_json::from_str(line).expect("score line");
+            println!(
+                "{:<8} {:<11} sub={:>3} ins={:>3} del={:>3} wer={:.3} unintel_excl_s={:.2} ins_sil={:>2} del_rows={:>2} seg_err={:.3} cues={:>3}/{} spk_err={:>3} (of {} matches) runs={:>2} EL-disagree={:.3} flips={:>3}",
                 s["clip"].as_str().unwrap_or("?"),
                 s["variant"].as_str().unwrap_or("?"),
                 s["sub"].as_u64().unwrap_or(0),
                 s["ins"].as_u64().unwrap_or(0),
                 s["del"].as_u64().unwrap_or(0),
                 s["wer"].as_f64().unwrap_or(f64::NAN),
+                s["unintel_excluded_s"].as_f64().unwrap_or(f64::NAN),
                 s["ins_on_confirmed_silence"].as_u64().unwrap_or(0),
                 s["del_in_speech_rows"].as_u64().unwrap_or(0),
                 s["seg_boundary_error"].as_f64().unwrap_or(f64::NAN),
@@ -1945,7 +2103,7 @@ mod tests {
             v2_ref(&[
                 ("row-01", "0.00", "4.00", "S1", "", "???"),
                 ("row-02", "4.00", "8.00", "S2", "", "???"),
-            ]),
+            ]) + "# Duration: 8.0s.\n",
         )
         .unwrap();
         std::fs::write(
@@ -2253,7 +2411,7 @@ mod tests {
             v2_ref(&[
                 ("row-01", "0.00", "4.00", "S1", "", "???"),
                 ("row-02", "4.00", "8.00", "S2", "", "???"),
-            ]),
+            ]) + "# Duration: 8.0s.\n",
         )
         .unwrap();
         // Filled copy: row-01 left ??? (not reviewed), row-02 deleted
@@ -2298,6 +2456,133 @@ mod tests {
             status: RowStatus::Speech("DROPPED UTTERANCE WORDS".into()),
         };
         assert!(row_uncovered_is_deletion(&row, &[]), "no cue = deletion");
+    }
+
+    // ── whole-declared-interval completion gate (repo-auditor) ──
+    // A 100%-row-reviewed file proves only that the PROPOSED rows were
+    // reviewed. Completion must account for the ENTIRE declared interval.
+
+    #[test]
+    fn declared_interval_gap_blocks_scoring_as_unreviewed() {
+        // Template partitions [0,8]. The filled copy edits columns 2-3 on
+        // row-01 (ID untouched — the row-set audit passes) so [4,8) is
+        // covered by NO row: those seconds are unreviewed and scoring must
+        // refuse, exactly like a ??? row.
+        let dir = std::env::temp_dir().join("fs_local_eval_tests/gapaudit");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("clip-03.review.txt"),
+            v2_ref(&[
+                ("row-01", "0.00", "4.00", "S1", "", "???"),
+                ("row-02", "4.00", "8.00", "S1", "", "???"),
+            ]) + "# Duration: 8.0s.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("clip-03.filled.txt"),
+            v2_ref(&[("row-01", "0.00", "4.00", "S1", "true words", "OK")]),
+        )
+        .unwrap();
+        let r = load_reviewed(&dir, "clip-03");
+        // Missing row-02 already blocks; the gap audit must ALSO see the
+        // uncovered seconds independent of the row-set audit.
+        assert!(r.not_reviewed > 0);
+        assert!(
+            (r.uncovered_s - 4.0).abs() < 1e-9,
+            "uncovered seconds are unreviewed seconds, got {}",
+            r.uncovered_s
+        );
+        assert_eq!(r.first_uncovered, Some((4.0, 8.0)));
+    }
+
+    #[test]
+    fn added_row_over_a_gap_completes_the_review() {
+        // Andre hears speech in a gap neither system proposed and adds
+        // row-90 with its interval and text: the reference now covers the
+        // declared interval, the row is scored as speech, and nothing
+        // blocks. This is exactly the instruction he was given.
+        let dir = std::env::temp_dir().join("fs_local_eval_tests/gapadd");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("clip-03.review.txt"),
+            v2_ref(&[
+                ("row-01", "0.00", "4.00", "S1", "", "???"),
+                ("row-02", "6.00", "8.00", "S1", "", "???"),
+            ]) + "# Duration: 8.0s.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("clip-03.filled.txt"),
+            v2_ref(&[
+                ("row-01", "0.00", "4.00", "S1", "known words", "OK"),
+                (
+                    "row-90",
+                    "4.00",
+                    "6.00",
+                    "S1",
+                    "missed by both systems",
+                    "OK",
+                ),
+                ("row-02", "6.00", "8.00", "S1", "", "OK"),
+            ]),
+        )
+        .unwrap();
+        let r = load_reviewed(&dir, "clip-03");
+        assert_eq!(r.not_reviewed, 0);
+        assert!(r.uncovered_s.abs() < 1e-9, "gap closed by row-90");
+        let joined = r.ref_tokens.join(" ");
+        assert!(joined.contains("missed by both systems"));
+        assert!(joined.contains("known words"));
+    }
+
+    #[test]
+    fn reference_speech_outside_every_detected_turn_stays_in_the_denominator() {
+        // repo-auditor (c): a Speech row the decode has NO cue over must
+        // remain in the WER denominator as deletions — it must never
+        // disappear from the evaluation. Whole-clip sid over the reference
+        // tokens counts every one of its words as deleted when the
+        // hypothesis is empty; the localized deletion class must agree.
+        let missed = "speech neither system proposed";
+        let rows = vec![
+            RefRow {
+                id: "row-01".into(),
+                start: 0.0,
+                end: 4.0,
+                speaker: Some(0),
+                status: RowStatus::Speech("decoded words".into()),
+            },
+            RefRow {
+                id: "row-90".into(), // human-added over a detected gap
+                start: 4.0,
+                end: 7.0,
+                speaker: Some(0),
+                status: RowStatus::Speech(missed.into()),
+            },
+        ];
+        // Hypothesis covers ONLY row-01's audio; nothing over [4,7).
+        let hyp: Vec<String> = tokens("decoded words");
+        let ref_tokens: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match &r.status {
+                RowStatus::Speech(t) => Some(tokens(t)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let (sub, ins, del) = sid(&ref_tokens, &hyp);
+        assert_eq!((sub, ins, del), (0, 0, 4), "every missed word deleted");
+        // And the localized deletion class sees the gap row.
+        let cue_ivs = vec![(0.0f64, 4.0f64)];
+        assert!(!row_uncovered_is_deletion(&rows[0], &cue_ivs));
+        assert!(
+            row_uncovered_is_deletion(&rows[1], &cue_ivs),
+            "gap speech is a deletion, not an absence"
+        );
+        // SCORABLE vs REVIEWED stay separate: the missed row's words count
+        // in the denominator precisely because the review CONFIRMED them.
+        assert_eq!(ref_tokens.len(), 6);
     }
 
     // ── segmentation invariance ──
