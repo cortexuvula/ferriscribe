@@ -147,10 +147,11 @@ describe('TranscriptView uncertainty honesty', () => {
     expect(headings.length).toBe(2);
   });
 
-  it('shows a status heading for an entirely-unlabeled diarized result (not silent plain text)', () => {
-    // Multi-paragraph all-unlabeled text — looks like diarization ran but
-    // produced no speaker labels. Must NOT render as silent plain text
-    // (which would hide the fact that attribution was attempted).
+  it('multi-paragraph unlabeled text (outcome unknown) shows the status message, not fabricated unassigned headings', () => {
+    // #108 finding (a) REWRITE: the pre-fix version of this test asserted
+    // the defect — that three plain paragraphs (outcome defaults to
+    // 'unknown') manufacture "Speaker unassigned" headings. Paragraph count
+    // is not evidence that analysis ran. Unknown keeps its status message.
     const transcript = [
       'First paragraph of unattributed speech.',
       '',
@@ -159,10 +160,13 @@ describe('TranscriptView uncertainty honesty', () => {
       'Third paragraph of unattributed speech.',
     ].join('\n');
     render(TranscriptView, { value: transcript });
-    const headings = screen.getAllByText('Speaker unassigned');
-    expect(headings.length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('First paragraph of unattributed speech.')).toBeTruthy();
-    expect(screen.getByText('Second paragraph of unattributed speech.')).toBeTruthy();
+    expect(screen.queryByText('Speaker unassigned')).toBeNull();
+    expect(screen.getByText('Speaker-labelling status unavailable')).toBeTruthy();
+    // The body renders as one plain-text node (no fabricated sections),
+    // so assert containment rather than per-paragraph elements.
+    const body = document.querySelector('.plain-text, .unknown-value');
+    expect(body?.textContent).toContain('First paragraph of unattributed speech.');
+    expect(body?.textContent).toContain('Third paragraph of unattributed speech.');
   });
 
   it('displays a persistent transcript-level caveat above the sections', () => {
@@ -454,7 +458,6 @@ describe('TranscriptView failed outcome rendering', () => {
     // instead, straight from the component source (Vite ?raw import): the
     // failed banner's typography must match the skipped banner's exactly.
     // If someone makes the failure state visually subordinate, this fails.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const source = componentSource;
     const size = (cls: string) => source.match(new RegExp(`\\.${cls}\\s*\\{[^}]*font-size:\\s*([^;]+);`, 's'))?.[1]?.trim();
     const weight = (cls: string) => source.match(new RegExp(`\\.${cls}\\s*\\{[^}]*font-weight:\\s*([^;]+);`, 's'))?.[1]?.trim();
@@ -473,8 +476,13 @@ describe('TranscriptView failed outcome rendering', () => {
     const failed = document.querySelector('[data-testid="diarization-failed"]')!;
     const failedHeading = failed.querySelector('.failed-heading') as HTMLElement;
     const failedReason = failed.querySelector('.failed-reason') as HTMLElement;
-    expect(failedHeading.tagName).toBe('P');
+    // #108 (d): the failure statement is a real heading (h3), not a styled
+    // <p> — failed and completed must differ for heading navigation too.
+    expect(failedHeading.tagName).toBe('H3');
     expect(failedReason.tagName).toBe('P');
+    // Skipped banner symmetry: same heading level, same live-region role.
+    const skipped = document.querySelector('[data-testid="diarization-skipped"]');
+    expect(skipped).toBeNull(); // failed fixture renders no skipped banner
   });
 
   it('does not render the failed banner for any other outcome', () => {
@@ -486,5 +494,138 @@ describe('TranscriptView failed outcome rendering', () => {
       });
       expect(document.querySelector('[data-testid="diarization-failed"]')).toBeNull();
     }
+  });
+});
+
+// ── #108: paragraph count must not manufacture attribution; edit access is
+// outcome-independent; banner semantics for assistive tech ────────────────
+
+describe('TranscriptView issue #108 render contract', () => {
+  afterEach(cleanup);
+
+  const MULTI_PARAGRAPH = [
+    'First hand-written paragraph about refills.',
+    '',
+    'Second hand-written paragraph about follow-up.',
+    '',
+    'Third hand-written paragraph about labs.',
+  ].join('\n');
+
+  // Finding (a) / contract line E: for off/skipped/unknown, a multi-paragraph
+  // hand-written note must NOT render "Speaker unassigned" headings or the
+  // automatic-label caveat. Paragraph count is not evidence that analysis ran.
+  it('off + multi-paragraph text renders paragraphs without unassigned headings or caveat', () => {
+    render(TranscriptView, { value: MULTI_PARAGRAPH, diarizationOutcome: 'off' });
+    expect(screen.queryByText('Speaker unassigned')).toBeNull();
+    expect(
+      screen.queryByText(
+        'Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.',
+      ),
+    ).toBeNull();
+    // Renders as ONE plain-text node containing all three paragraphs.
+    const body = document.querySelector('.plain-text');
+    expect(body?.textContent).toContain('First hand-written paragraph about refills.');
+    expect(body?.textContent).toContain('Second hand-written paragraph about follow-up.');
+    expect(body?.textContent).toContain('Third hand-written paragraph about labs.');
+  });
+
+  it('skipped + multi-paragraph text keeps its banner and never contradicts it with unassigned headings', () => {
+    render(TranscriptView, { value: MULTI_PARAGRAPH, diarizationOutcome: 'skipped' });
+    // The banner is the truthful statement…
+    expect(screen.getByText("Speaker labelling wasn't run")).toBeTruthy();
+    // …so the body must not simultaneously assert an attribution attempt.
+    expect(screen.queryByText('Speaker unassigned')).toBeNull();
+    expect(
+      screen.queryByText(
+        'Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.',
+      ),
+    ).toBeNull();
+    const body = document.querySelector('.plain-text');
+    expect(body?.textContent).toContain('First hand-written paragraph about refills.');
+  });
+
+  it('unknown + multi-paragraph text keeps its status message (paragraph count no longer swallows it)', () => {
+    render(TranscriptView, { value: MULTI_PARAGRAPH, diarizationOutcome: 'unknown' });
+    expect(screen.getByText('Speaker-labelling status unavailable')).toBeTruthy();
+    expect(screen.queryByText('Speaker unassigned')).toBeNull();
+    const body = document.querySelector('.unknown-value');
+    expect(body?.textContent).toContain('First hand-written paragraph about refills.');
+  });
+
+  it('completed-with-unassigned + all-null multi-paragraph text still renders real unassigned headings', () => {
+    // The fix must not over-correct: a REAL unassigned result keeps its
+    // explicit headings (outcome, not paragraph count, drives them).
+    const segments = [
+      { speaker: null, text: 'First unattributed turn.', start: 0, end: 5 },
+      { speaker: null, text: 'Second unattributed turn.', start: 5, end: 10 },
+    ];
+    render(TranscriptView, {
+      value: 'First unattributed turn.\n\nSecond unattributed turn.',
+      segments,
+      diarizationOutcome: 'completed-with-unassigned',
+    });
+    expect(screen.getByText('Speaker unassigned')).toBeTruthy();
+    const body = document.querySelector('.speaker-text');
+    expect(body?.textContent).toContain('First unattributed turn.');
+    expect(body?.textContent).toContain('Second unattributed turn.');
+  });
+
+  // Finding (b) / contract line G: outcome messaging must never control
+  // access to editing. EVERY outcome offers Edit — including 'unknown'
+  // (previously the branch that swallowed the toolbar entirely).
+  it('every outcome offers the Edit action', () => {
+    for (const outcome of ['off', 'skipped', 'failed', 'completed', 'completed-with-unassigned', 'unknown'] as const) {
+      cleanup();
+      render(TranscriptView, {
+        value: MULTI_PARAGRAPH,
+        diarizationOutcome: outcome,
+      });
+      expect(screen.getByRole('button', { name: 'Edit' }), `outcome '${outcome}'`).toBeTruthy();
+    }
+  });
+
+  it('unknown single-paragraph transcript renders its status AND an Edit button (the #108 repro)', async () => {
+    // The exact live repro from the issue: legacy transcript, missing
+    // metadata, single paragraph — previously zero buttons.
+    render(TranscriptView, {
+      value: 'Legacy transcript with missing metadata.',
+      diarizationOutcome: 'unknown',
+    });
+    expect(screen.getByText('Speaker-labelling status unavailable')).toBeTruthy();
+    const edit = screen.getByRole('button', { name: 'Edit' });
+    expect(edit).toBeTruthy();
+    // And it actually works: editing opens the textarea.
+    await fireEvent.click(edit);
+    expect(document.querySelector('textarea')).toBeTruthy();
+  });
+
+  // Finding (d): banner semantics. The failure statement must be a real
+  // heading and the banner a live region, so failed ≠ completed for
+  // assistive tech — not only in visible pixels.
+  it('failed and skipped banners carry role=status and real headings (a11y structure)', () => {
+    cleanup();
+    render(TranscriptView, { value: 'x', diarizationOutcome: 'failed' });
+    const failed = document.querySelector('[data-testid="diarization-failed"]')!;
+    expect(failed.getAttribute('role')).toBe('status');
+    expect(failed.querySelector('.failed-heading')!.tagName).toBe('H3');
+
+    cleanup();
+    render(TranscriptView, { value: 'x', diarizationOutcome: 'skipped' });
+    const skipped = document.querySelector('[data-testid="diarization-skipped"]')!;
+    expect(skipped.getAttribute('role')).toBe('status');
+    expect(skipped.querySelector('.skipped-heading')!.tagName).toBe('H3');
+  });
+
+  it('completed is deliberately not announced (no banner, no live region) — decision per #108', () => {
+    // Success is signalled only by the ABSENCE of a banner. If someone adds
+    // a completion banner, make that a conscious change by editing this pin.
+    render(TranscriptView, {
+      value: 'Clean completed transcript.',
+      diarizationOutcome: 'completed',
+      segments: [{ speaker: 'Speaker 1', text: 'Clean completed transcript.', start: 0, end: 5 }],
+    });
+    expect(document.querySelector('[data-testid="diarization-failed"]')).toBeNull();
+    expect(document.querySelector('[data-testid="diarization-skipped"]')).toBeNull();
+    expect(document.querySelectorAll('[role="status"]').length).toBe(0);
   });
 });

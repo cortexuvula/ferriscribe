@@ -123,7 +123,8 @@
       return groupSegmentsIntoSections(segments);
     }
     return parseTextSections(parseCache);
-  });  const hasSpeakers = $derived(sections.some((s) => s.speaker !== null));
+  });
+  const hasSpeakers = $derived(sections.some((s) => s.speaker !== null));
   // Recording-level diarization outcome: did the backend attempt labelling?
   // 'completed', 'completed-with-unassigned', or 'failed' → diarization ran
   // (or tried); show structured view even when every segment is speaker:null.
@@ -135,20 +136,19 @@
   const hasDiarizationResult = $derived(
     diarizationOutcome !== 'off' && diarizationOutcome !== 'unknown' && diarizationOutcome !== 'skipped',
   );
-  // Text-parsed structure: speaker labels or multi-section content parsed from
-  // the stored transcript text. Preserves backward compatibility for transcripts
-  // rendered without explicit outcome (e.g. from copy/export paths).
-  const hasTextStructure = $derived(hasSpeakers || sections.length > 1);
-  // Combined gate: structured view renders when diarization ran OR text has
-  // clear speaker labels / multiple sections. 'unknown' with explicit labels
-  // in the text still renders those labels (structured view); 'unknown'
-  // without explicit labels shows the honest unavailability message.
-  const useStructuredView = $derived(hasDiarizationResult || hasTextStructure);
+  // #108 finding (a) / contract line E: paragraph count is NOT evidence that
+  // attribution was attempted. The structured view (badges, "Speaker
+  // unassigned" headings, caveat) renders ONLY when there is a real
+  // attribution signal: an explicit diarization outcome that ran, or actual
+  // speaker labels in the data. A multi-paragraph hand-written note must
+  // render as paragraphs, never as fabricated "attempted attribution".
+  const useStructuredView = $derived(hasSpeakers || hasDiarizationResult);
   // Honest 'unknown' rendering: when outcome is 'unknown' AND the text has
-  // no explicit speaker labels AND no multi-section structure, show
-  // "Speaker-labelling status unavailable" instead of silent plain text.
+  // no explicit speaker labels, show "Speaker-labelling status unavailable"
+  // instead of silent plain text. Multi-paragraph text without labels is
+  // still 'unknown' — paragraph count no longer promotes it.
   const showUnknownStatus = $derived(
-    diarizationOutcome === 'unknown' && !hasDiarizationResult && !hasTextStructure,
+    diarizationOutcome === 'unknown' && !hasSpeakers,
   );
   // 'skipped' rendering: requested but did not run. Distinct from 'off'
   // (not requested), 'failed' (attempted and errored), and 'unknown'
@@ -254,26 +254,34 @@
   // Plain Map is deliberate: mutating this cache during template rendering
   // is exactly what we want, and SvelteMap would throw
   // state_unsafe_mutation (see the note at the top of this file).
-  const speakerColors = new Map<string, string>(); // eslint-disable-line svelte/prefer-svelte-reactivity
+  const speakerColors = new Map<string, number>(); // eslint-disable-line svelte/prefer-svelte-reactivity
+  // #108 finding (c) / contract line H: the old palette set badge TEXT to
+  // the saturated base colour on a 12% tint — 1.82–3.42:1 in light mode,
+  // four entries below 4.5:1 in dark. The palette now supplies ONLY the
+  // border (colour-as-adjunct) and the tint background; the TEXT colour is
+  // a theme-aware per-slot class (.slot-N below) computed to exceed 4.5:1
+  // against the composited tint on both production surfaces in BOTH themes
+  // (worst case ≥5:1 — see TranscriptView.contrast.test.ts, which
+  // recomputes the ratios from this file's own CSS rather than trusting a
+  // parallel constant table).
   const palette = [
-    { bg: 'rgba(59, 130, 246, 0.12)', border: '#3b82f6', text: '#3b82f6' },  // blue
-    { bg: 'rgba(16, 185, 129, 0.12)', border: '#10b981', text: '#10b981' },  // emerald
-    { bg: 'rgba(168, 85, 247, 0.12)', border: '#a855f7', text: '#a855f7' },  // purple
-    { bg: 'rgba(245, 158, 11, 0.12)', border: '#f59e0b', text: '#f59e0b' },  // amber
-    { bg: 'rgba(236, 72, 153, 0.12)', border: '#ec4899', text: '#ec4899' },  // pink
-    { bg: 'rgba(6, 182, 212, 0.12)', border: '#06b6d4', text: '#06b6d4' },  // cyan
-    { bg: 'rgba(132, 204, 22, 0.12)', border: '#84cc16', text: '#84cc16' },  // lime
-    { bg: 'rgba(244, 63, 94, 0.12)', border: '#f43f5e', text: '#f43f5e' },  // rose
+    { bg: 'rgba(59, 130, 246, 0.12)', border: '#3b82f6' },   // blue
+    { bg: 'rgba(16, 185, 129, 0.12)', border: '#10b981' },   // emerald
+    { bg: 'rgba(168, 85, 247, 0.12)', border: '#a855f7' },   // purple
+    { bg: 'rgba(245, 158, 11, 0.12)', border: '#f59e0b' },   // amber
+    { bg: 'rgba(236, 72, 153, 0.12)', border: '#ec4899' },   // pink
+    { bg: 'rgba(6, 182, 212, 0.12)', border: '#06b6d4' },    // cyan
+    { bg: 'rgba(132, 204, 22, 0.12)', border: '#84cc16' },   // lime
+    { bg: 'rgba(244, 63, 94, 0.12)', border: '#f43f5e' },    // rose
   ];
 
-  function getSpeakerColor(speaker: string): { bg: string; border: string; text: string } {
+  function getSpeakerSlot(speaker: string): number {
     let idx = speakerColors.get(speaker);
-    if (!idx) {
-      const n = speakerColors.size;
-      idx = String(n % palette.length);
+    if (idx === undefined) {
+      idx = speakerColors.size % palette.length;
       speakerColors.set(speaker, idx);
     }
-    return palette[parseInt(idx)];
+    return idx;
   }
 
   function startEdit() {
@@ -300,18 +308,37 @@
 <div class="transcript-view">
   <!-- Uncertainty-honesty caveat: persistent, above the transcript, visible during editing too.
        Descriptive content — NOT role=alert, no modal, no repeated warning icons. -->
-  {#if useStructuredView || (sections.length === 1 && sections[0].speaker !== null)}
+  {#if useStructuredView}
     <p class="transcript-caveat">
       Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.
     </p>
+  {/if}
+  {#if showFailedStatus}
+    <!-- 'failed' rendering: attempted and errored. Distinct banner from
+         'skipped' (never ran) and from the unassigned sections (ran,
+         couldn't attribute some spans). The persisted outcome must remain
+         visible after reload — see contract line F.
+         #108 a11y: the heading is a real <h3> (heading navigation, matching
+         the unassigned section's <h4>) and the banner carries role="status"
+         so assistive tech announces failed ≠ completed. role="status" is
+         deliberate over role="alert": this is a persisted state on load,
+         not an interrupting change. The skipped banner above is symmetric
+         (same heading level, same role) — their parity is pinned by test.
+         'completed' is deliberately NOT announced: success is signaled by
+         the absence of any banner (decision recorded in issue #108). -->
+    <div class="failed-status" data-testid="diarization-failed" role="status">
+      <h3 class="failed-heading">Speaker labelling failed</h3>
+      <p class="failed-reason">{failedReasonLine}</p>
+    </div>
   {/if}
   {#if showSkippedStatus}
     <!-- 'skipped' rendering: requested but did not run. Distinct banner from
          'unknown' (metadata absent), 'off' (plain), and 'failed' (errored —
          renders via the structured/unassigned path). Supporting line and the
-         Audio-settings affordance key off the persisted reason code only. -->
-    <div class="skipped-status" data-testid="diarization-skipped">
-      <p class="skipped-heading">Speaker labelling wasn't run</p>
+         Audio-settings affordance key off the persisted reason code only.
+         Heading level + role symmetric with the failed banner (pinned). -->
+    <div class="skipped-status" data-testid="diarization-skipped" role="status">
+      <h3 class="skipped-heading">Speaker labelling wasn't run</h3>
       <p class="skipped-reason">{skippedReasonLine}</p>
       {#if onOpenAudioSettings}
         <button type="button" class="skipped-action" onclick={onOpenAudioSettings}>
@@ -320,24 +347,11 @@
       {/if}
     </div>
   {/if}
-  {#if showFailedStatus}
-    <!-- 'failed' rendering: attempted and errored. Distinct banner from
-         'skipped' (never ran) and from the unassigned sections (ran,
-         couldn't attribute some spans). The persisted outcome must remain
-         visible after reload — see contract line F. -->
-    <div class="failed-status" data-testid="diarization-failed">
-      <p class="failed-heading">Speaker labelling failed</p>
-      <p class="failed-reason">{failedReasonLine}</p>
-    </div>
-  {/if}
-  {#if showUnknownStatus}
-    <!-- Honest 'unknown' rendering: metadata missing, no explicit labels in text.
-         Shows unavailability message instead of silent plain text or false "Speaker unassigned". -->
-    <div class="unknown-status">
-      <p class="unknown-message">Speaker-labelling status unavailable</p>
-      <p class="unknown-value">{value || placeholder}</p>
-    </div>
-  {:else if editing}
+  <!-- #108 finding (b) / contract line G: the toolbar is OUTSIDE every
+       outcome/body branch. Edit access must never depend on diarization
+       outcome or body state — a legacy transcript with missing metadata
+       ('unknown') must be correctable exactly like any other. -->
+  {#if editing}
     <div class="edit-toolbar">
       <button class="btn-done" onclick={doneEdit}>Done</button>
     </div>
@@ -346,33 +360,39 @@
       {placeholder}
       class="editor-area"
     ></textarea>
-  {:else if useStructuredView}
-    <div class="view-toolbar">
-      <button class="btn-edit" onclick={startEdit}>Edit</button>
-    </div>
-    <div class="sections">
-      {#each sections as section, i (i)}
-        {#if section.speaker}
-          {@const colors = getSpeakerColor(section.speaker)}
-          <div class="speaker-section" style="border-left-color: {colors.border}" aria-labelledby="speaker-{i}">
-            <span id="speaker-{i}" class="speaker-badge" style="background-color: {colors.bg}; color: {colors.text}; border-color: {colors.border}">
-              {section.speaker}
-            </span>
-            <p class="speaker-text">{section.text}</p>
-          </div>
-        {:else}
-          <div class="speaker-section unlabeled" aria-labelledby="unlabeled-{i}">
-            <h4 id="unlabeled-{i}" class="unlabeled-heading">Speaker unassigned</h4>
-            <p class="speaker-text">{section.text}</p>
-          </div>
-        {/if}
-      {/each}
-    </div>
   {:else}
     <div class="view-toolbar">
       <button class="btn-edit" onclick={startEdit}>Edit</button>
     </div>
-    <div class="plain-text">{value || placeholder}</div>
+    {#if showUnknownStatus}
+      <!-- Honest 'unknown' rendering: metadata missing, no explicit labels in text.
+           Shows unavailability message instead of silent plain text or false "Speaker unassigned". -->
+      <div class="unknown-status">
+        <p class="unknown-message">Speaker-labelling status unavailable</p>
+        <p class="unknown-value">{value || placeholder}</p>
+      </div>
+    {:else if useStructuredView}
+      <div class="sections">
+        {#each sections as section, i (i)}
+          {#if section.speaker}
+            {@const slot = getSpeakerSlot(section.speaker)}
+            <div class="speaker-section" style="border-left-color: {palette[slot].border}" aria-labelledby="speaker-{i}">
+              <span id="speaker-{i}" class="speaker-badge slot-{slot}" style="background-color: {palette[slot].bg}; border-color: {palette[slot].border}">
+                {section.speaker}
+              </span>
+              <p class="speaker-text">{section.text}</p>
+            </div>
+          {:else}
+            <div class="speaker-section unlabeled" aria-labelledby="unlabeled-{i}">
+              <h4 id="unlabeled-{i}" class="unlabeled-heading">Speaker unassigned</h4>
+              <p class="speaker-text">{section.text}</p>
+            </div>
+          {/if}
+        {/each}
+      </div>
+    {:else}
+      <div class="plain-text">{value || placeholder}</div>
+    {/if}
   {/if}
 </div>
 
@@ -447,19 +467,26 @@
   }
 
   .speaker-section.unlabeled {
-    border-left: 3px dashed var(--border);
-    border-left-color: var(--border);
+    /* #108 finding (c): the unassigned boundary was the least visible
+       element (1.30:1 light / 1.51:1 dark with var(--border)). A 4px
+       dashed --text-secondary rail measures 7.76:1 light / 4.84:1 dark
+       against the production surfaces. The heading text itself is
+       --text-primary, so strengthening the boundary never fades the words. */
+    border-left: 4px dashed var(--text-secondary);
+    padding-left: 12px;
   }
 
-  /* Unlabeled heading: "Speaker unassigned" — normal body text weight,
-     NOT faded/italic/hidden. Neutral styling (no speaker color).
+  /* Unlabeled heading: "Speaker unassigned" — #108 finding (c): raised from
+     11px/--text-secondary to 13px/--text-primary (body-adjacent; body text
+     is 14px, banner headings are 13px). Normal weight+colour, NOT
+     faded/italic/hidden. Neutral styling (no speaker color).
      Relies on explicit text + dashed boundary (not color alone) for
      forced-colors mode and grayscale distinguishability. */
   .unlabeled-heading {
     margin: 0 0 4px 0;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-primary);
     letter-spacing: 0.02em;
     text-transform: none;
   }
@@ -473,7 +500,46 @@
     border: 1px solid;
     margin-bottom: 4px;
     letter-spacing: 0.02em;
+    /* Theme-aware per-slot text colour (see .slot-N below); falls back to
+       full-contrast body text if a slot class is ever missing. */
+    color: var(--slot-text, var(--text-primary));
   }
+
+  /* #108 finding (c) / contract line H: badge text contrast. Values were
+     computed (WCAG relative luminance, alpha-composited badge tint on
+     --bg-primary and --bg-secondary in each theme) to clear 4.5:1 in BOTH
+     themes — worst case ≥5:1. Light values are darkened variants of the
+     palette hue; dark values are lightened variants where the base colour
+     itself fails (Speaker 1/3/5/8 measured 4.06/3.82/4.28/4.16:1).
+     TranscriptView.contrast.test.ts recomputes every ratio from these
+     declarations — change a colour there, not in a parallel table.
+     svelte-ignore css-unused-selector: the slot-N class is attached
+     dynamically (class="speaker-badge slot-{slot}"), so Svelte cannot see
+     these selectors are used. */
+  /* svelte-ignore css-unused-selector */
+  .slot-0 { --slot-text: #0a59db; }
+  /* svelte-ignore css-unused-selector */
+  .slot-1 { --slot-text: #0a7250; }
+  /* svelte-ignore css-unused-selector */
+  .slot-2 { --slot-text: #8715f4; }
+  /* svelte-ignore css-unused-selector */
+  .slot-3 { --slot-text: #8e5b06; }
+  /* svelte-ignore css-unused-selector */
+  .slot-4 { --slot-text: #bc1467; }
+  /* svelte-ignore css-unused-selector */
+  .slot-5 { --slot-text: #046e81; }
+  /* svelte-ignore css-unused-selector */
+  .slot-6 { --slot-text: #49710c; }
+  /* svelte-ignore css-unused-selector */
+  .slot-7 { --slot-text: #c30b2b; }
+  :global([data-theme='dark']) .slot-0 { --slot-text: #6ba1f8; }
+  :global([data-theme='dark']) .slot-1 { --slot-text: #10bb82; }
+  :global([data-theme='dark']) .slot-2 { --slot-text: #c085f9; }
+  :global([data-theme='dark']) .slot-3 { --slot-text: #f59e0b; }
+  :global([data-theme='dark']) .slot-4 { --slot-text: #f176b2; }
+  :global([data-theme='dark']) .slot-5 { --slot-text: #06b6d4; }
+  :global([data-theme='dark']) .slot-6 { --slot-text: #84cc16; }
+  :global([data-theme='dark']) .slot-7 { --slot-text: #f7758b; }
 
   .speaker-text {
     font-size: 14px;
