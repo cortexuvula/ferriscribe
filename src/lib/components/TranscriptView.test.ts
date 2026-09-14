@@ -228,7 +228,7 @@ describe('TranscriptView uncertainty honesty', () => {
     const unlabeledSection = unlabeledHeading.closest('.speaker-section.unlabeled');
     expect(unlabeledSection).toBeTruthy();
     // The unlabeled section must have the 'unlabeled' class, which applies
-    // the dashed border style (verified in CSS: border-left: 3px dashed).
+    // the dashed rail (4px dashed var(--text-secondary) since #108).
     expect(unlabeledSection!.classList.contains('unlabeled')).toBe(true);
     // Speaker sections must NOT have the unlabeled class (they get solid borders
     // with speaker-specific colors via inline style).

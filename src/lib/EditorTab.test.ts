@@ -200,12 +200,13 @@ describe('EditorTab — diarizationOutcome pass-through (Codie gate)', () => {
       //
       // - 'off': must NOT show "Speaker-labelling status unavailable"
       //   (that's only for 'unknown'). With labeled segments, caveat still
-      //   appears (via hasTextStructure), but the outcome is 'off'.
+      //   appears (via hasSpeakers — #108 removed the old hasTextStructure
+      //   gate), but the outcome is 'off'.
       //
       // - 'failed'/'completed'/'completed-with-unassigned': diarization ran,
       //   so caveat appears and structured view renders.
       //
-      // - 'unknown': with labeled segments, hasTextStructure is true so
+      // - 'unknown': with labeled segments, hasSpeakers is true so
       //   structured view renders (preserving labels). The key: must NOT
       //   show "Speaker-labelling status unavailable" (that's only when
       //   outcome is 'unknown' AND no explicit labels in text).
@@ -214,12 +215,12 @@ describe('EditorTab — diarizationOutcome pass-through (Codie gate)', () => {
 
       if (outcome === 'unknown') {
         // With labeled segments, 'unknown' still renders structured view
-        // (hasTextStructure is true). The unavailable message does NOT appear
+        // (hasSpeakers is true). The unavailable message does NOT appear
         // because the text has explicit labels. This proves the outcome is
         // passed verbatim: if EditorTab inferred 'off' or 'completed', the
         // rendering would differ.
         expect(unavailable).toBeNull();
-        // Caveat appears because hasTextStructure is true (labeled segments).
+        // Caveat appears because hasSpeakers is true (labeled segments).
         expect(
           screen.getByText(
             'Speaker labels are automatic and unverified. Check who spoke before attributing a quote or statement.',
@@ -228,7 +229,7 @@ describe('EditorTab — diarizationOutcome pass-through (Codie gate)', () => {
       } else if (outcome === 'off') {
         // 'off' must NOT show the unavailable message (that's 'unknown' only).
         expect(unavailable).toBeNull();
-        // With labeled segments, caveat appears (hasTextStructure is true).
+        // With labeled segments, caveat appears (hasSpeakers is true).
         // The outcome 'off' is still passed verbatim — if EditorTab inferred
         // 'completed' from segments, the rendering would be identical, but
         // the contract is that the value is transported, not re-derived.
