@@ -1,0 +1,167 @@
+[
+ {
+  "kind": "badge",
+  "label": "Speaker 1",
+  "color": "rgb(10, 89, 219)",
+  "ratio": 5.28,
+  "theme": "light",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 2",
+  "color": "rgb(10, 114, 80)",
+  "ratio": 5.3,
+  "theme": "light",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 3",
+  "color": "rgb(135, 21, 244)",
+  "ratio": 5.27,
+  "theme": "light",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 4",
+  "color": "rgb(142, 91, 6)",
+  "ratio": 5.25,
+  "theme": "light",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 5",
+  "color": "rgb(188, 20, 103)",
+  "ratio": 5.28,
+  "theme": "light",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 6",
+  "color": "rgb(4, 110, 129)",
+  "ratio": 5.29,
+  "theme": "light",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 7",
+  "color": "rgb(73, 113, 12)",
+  "ratio": 5.3,
+  "theme": "light",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 8",
+  "color": "rgb(195, 11, 43)",
+  "ratio": 5.27,
+  "theme": "light",
+  "outcome": "labels"
+ },
+ {
+  "kind": "unassigned-heading",
+  "color": "rgb(33, 37, 41)",
+  "fontSize": "13px",
+  "ratio": 15.43,
+  "theme": "light",
+  "outcome": "completed-with-unassigned"
+ },
+ {
+  "kind": "unassigned-rail",
+  "color": "rgb(73, 80, 87)",
+  "width": "4px",
+  "style": "dashed",
+  "ratio": 8.18,
+  "theme": "light",
+  "outcome": "completed-with-unassigned"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 1",
+  "color": "rgb(107, 161, 248)",
+  "ratio": 5.74,
+  "theme": "dark",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 2",
+  "color": "rgb(16, 187, 130)",
+  "ratio": 5.77,
+  "theme": "dark",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 3",
+  "color": "rgb(192, 133, 249)",
+  "ratio": 5.74,
+  "theme": "dark",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 4",
+  "color": "rgb(245, 158, 11)",
+  "ratio": 6.49,
+  "theme": "dark",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 5",
+  "color": "rgb(241, 118, 178)",
+  "ratio": 5.74,
+  "theme": "dark",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 6",
+  "color": "rgb(6, 182, 212)",
+  "ratio": 5.88,
+  "theme": "dark",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 7",
+  "color": "rgb(132, 204, 22)",
+  "ratio": 6.95,
+  "theme": "dark",
+  "outcome": "labels"
+ },
+ {
+  "kind": "badge",
+  "label": "Speaker 8",
+  "color": "rgb(247, 117, 139)",
+  "ratio": 5.73,
+  "theme": "dark",
+  "outcome": "labels"
+ },
+ {
+  "kind": "unassigned-heading",
+  "color": "rgb(193, 194, 197)",
+  "fontSize": "13px",
+  "ratio": 9.67,
+  "theme": "dark",
+  "outcome": "completed-with-unassigned"
+ },
+ {
+  "kind": "unassigned-rail",
+  "color": "rgb(144, 146, 150)",
+  "width": "4px",
+  "style": "dashed",
+  "ratio": 5.53,
+  "theme": "dark",
+  "outcome": "completed-with-unassigned"
+ }
+]
+
+20 measurements, 0 below 4.5:1
+ALL PASS
