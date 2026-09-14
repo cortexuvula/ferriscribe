@@ -1363,8 +1363,29 @@ fn load_reviewed(ref_dir: &Path, clip_id: &str) -> ReviewedRef {
     let mut uncovered_s = 0.0f64;
     let mut first_uncovered: Option<(f64, f64)> = None;
     {
+        // ORDER-INDEPENDENT (Codie re-gate of 77aa64b): coverage is a
+        // property of the row SET, never of the file order. A human row
+        // appended at the END of the file (the natural add-a-row edit)
+        // walked the cursor in FILE order and produced FALSE uncovered
+        // seconds — refusing a perfectly reviewed file. Walk TIME-sorted
+        // rows instead, and while walking, hold the real invariant the
+        // file order used to hide: rows must TILE — overlap would
+        // double-count words and scorable seconds, so it refuses.
+        let mut sorted: Vec<&RefRow> = filled.iter().collect();
+        sorted.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
         let mut cursor = 0.0f64;
-        for r in &filled {
+        for r in sorted {
+            assert!(
+                r.start >= cursor - 1e-9,
+                "row {:?} [{:.2}, {:.2}) starts before the previous row ends \
+                 ({:.2}) — rows must tile the declared interval with NO \
+                 overlap (overlap would double-count words and seconds in the \
+                 score); adjust the boundary of one of the two rows",
+                r.id,
+                r.start,
+                r.end,
+                cursor
+            );
             if r.start > cursor + 1e-9 {
                 uncovered_s += r.start - cursor;
                 first_uncovered = first_uncovered.or(Some((cursor, r.start)));
@@ -1930,7 +1951,10 @@ fn report(artifacts: &Path) {
     }
     println!("\n== scores (hand-reference clip only; EL is SECONDARY DISAGREEMENT) ==");
     if let Ok(raw) = std::fs::read_to_string(run_dir.join("scores.jsonl")) {
-        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        // `break` after the first parsed line (one REVIEW row per
+        // reference, not per variant) trips clippy::never_loop (deny by
+        // default) — write the take-first as a take-first.
+        if let Some(line) = raw.lines().find(|l| !l.trim().is_empty()) {
             let s: serde_json::Value = serde_json::from_str(line).expect("score line");
             // REVIEW COMPLETION vs SCORABLE COVERAGE, visible here too: the
             // UNINTEL exclusion is fixed by the review and identical for
@@ -1943,7 +1967,6 @@ fn report(artifacts: &Path) {
                 s["unintel_s"].as_f64().unwrap_or(f64::NAN),
                 s["scorable_s"].as_f64().unwrap_or(f64::NAN),
             );
-            break; // one REVIEW row per reference, not per variant
         }
         for line in raw.lines().filter(|l| !l.trim().is_empty()) {
             let s: serde_json::Value = serde_json::from_str(line).expect("score line");
@@ -2535,6 +2558,78 @@ mod tests {
         let joined = r.ref_tokens.join(" ");
         assert!(joined.contains("missed by both systems"));
         assert!(joined.contains("known words"));
+    }
+
+    #[test]
+    fn rows_out_of_time_order_still_cover_the_declared_interval() {
+        // Codie re-gate of 77aa64b: the coverage walk ran in FILE order,
+        // so a human row appended at the END of the file (the natural
+        // add-a-row edit) rather than inserted in time position produced
+        // FALSE uncovered seconds and refused a perfectly reviewed file.
+        // Coverage is a property of the row SET, never of the file order.
+        let dir = std::env::temp_dir().join("fs_local_eval_tests/addroworder");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("clip-03.review.txt"),
+            v2_ref(&[
+                ("row-01", "0.00", "4.00", "S1", "", "???"),
+                ("row-02", "6.00", "8.00", "S1", "", "???"),
+            ]) + "# Duration: 8.0s.\n",
+        )
+        .unwrap();
+        // Codie's exact repro: file order [row-90, row-01, row-02]. The
+        // three rows together cover [0,8) exactly.
+        std::fs::write(
+            dir.join("clip-03.filled.txt"),
+            v2_ref(&[
+                ("row-90", "4.00", "6.00", "S1", "appended gap row", "OK"),
+                ("row-01", "0.00", "4.00", "S1", "known words", "OK"),
+                ("row-02", "6.00", "8.00", "S1", "", "OK"),
+            ]),
+        )
+        .unwrap();
+        let r = load_reviewed(&dir, "clip-03");
+        assert_eq!(r.not_reviewed, 0);
+        assert!(
+            r.uncovered_s.abs() < 1e-9,
+            "coverage must be order-independent, got {}s uncovered",
+            r.uncovered_s
+        );
+        let joined = r.ref_tokens.join(" ");
+        assert!(joined.contains("appended gap row"));
+        assert!(joined.contains("known words"));
+    }
+
+    #[test]
+    fn overlapping_rows_are_refused_in_any_file_order() {
+        // Mirror invariant (Codie): non-overlap is REAL — two rows over
+        // the same seconds would double-count them (WER denominator,
+        // scorable_s) — and the refusal must not become order-sensitive
+        // in the other direction now that the walk sorts by start time.
+        let dir = std::env::temp_dir().join("fs_local_eval_tests/overlaprefuse");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("clip-03.review.txt"),
+            v2_ref(&[("row-01", "0.00", "8.00", "S1", "", "???")]) + "# Duration: 8.0s.\n",
+        )
+        .unwrap();
+        // row-90 overlaps row-01 on [2,4): must refuse.
+        std::fs::write(
+            dir.join("clip-03.filled.txt"),
+            v2_ref(&[
+                ("row-01", "0.00", "4.00", "S1", "words", "OK"),
+                ("row-90", "2.00", "6.00", "S1", "overlapping add", "OK"),
+            ]),
+        )
+        .unwrap();
+        let dir_ref = dir.clone();
+        let result = std::panic::catch_unwind(move || load_reviewed(&dir_ref, "clip-03"));
+        assert!(
+            result.is_err(),
+            "overlapping rows must refuse, not score — each second may be covered by exactly one row"
+        );
     }
 
     #[test]
