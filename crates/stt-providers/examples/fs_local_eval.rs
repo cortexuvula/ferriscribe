@@ -1034,11 +1034,25 @@ fn emit_reference(rows: &[ReviewRow], dur_s: f64, el_cues: &[(f64, f64, String)]
 ///   local-eval/harness-artifacts/reference/<clip>.review.txt
 fn make_template(samples_dir: &Path, artifacts: &Path) {
     let clips = collect_clips(samples_dir);
+    // FS_EVAL_CLIP=<clip-id> overrides the shortest-clip default, so the
+    // next reference clip can be selected by overlap/balance criteria
+    // (Codie 2026-09-15) instead of by duration alone. The override must
+    // name a real clip; anything else fails loudly.
     let mut best: Option<(&Clip, f64)> = None;
-    for c in &clips {
-        let dur_s = load_clip_16k(c).len() as f64 / 16_000.0;
-        if best.as_ref().is_none_or(|(_, d)| dur_s < *d) {
-            best = Some((c, dur_s));
+    if let Some(want) = std::env::var_os("FS_EVAL_CLIP") {
+        let want = want.to_string_lossy().to_string();
+        best = clips
+            .iter()
+            .map(|c| (c, load_clip_16k(c).len() as f64 / 16_000.0))
+            .find(|(c, _)| c.id == want);
+        assert!(best.is_some(), "FS_EVAL_CLIP={want}: no such clip");
+    }
+    if best.is_none() {
+        for c in &clips {
+            let dur_s = load_clip_16k(c).len() as f64 / 16_000.0;
+            if best.as_ref().is_none_or(|(_, d)| dur_s < *d) {
+                best = Some((c, dur_s));
+            }
         }
     }
     let (shortest, dur_s) = best.expect("at least one clip");
