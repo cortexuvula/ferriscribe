@@ -79,6 +79,12 @@ pub fn export_support_bundle_inner(log_dir: &Path) -> AppResult<String> {
 pub async fn export_support_bundle(file_path: String) -> AppResult<()> {
     let log_dir = crate::log_dir();
 
+    // Same in-flight tracking as export_audio: the bundle is
+    // PHI-REDACTED before this write (not PHI-bearing), but the write is
+    // a single non-atomic fs::write to a user-chosen path, so the quit
+    // path refuses while it runs rather than truncate it.
+    let _export = crate::commands::quit::track_file_export();
+
     // Both the log reading AND the file write happen on spawn_blocking so
     // neither blocks the Tauri IPC thread.
     tokio::task::spawn_blocking(move || -> AppResult<()> {

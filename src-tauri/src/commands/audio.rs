@@ -89,14 +89,15 @@ pub async fn start_recording(
 ) -> AppResult<String> {
     info!("Starting audio recording");
 
-    // Restart TOCTOU guard (Codie review, 2026-09-09): once `restart_app`
-    // has committed to relaunching, refuse new takes — otherwise a
-    // recording started in the milliseconds between the coordinated-
-    // shutdown checks and process exit would be destroyed mid-capture.
-    if crate::commands::restart::restart_committed() {
-        warn!("Refusing to start recording: app restart is in progress");
+    // Exit TOCTOU guard (Codie review, 2026-09-09; widened 2026-09-23 to
+    // cover the coordinated-quit path): once a restart OR a quit has been
+    // committed, refuse new takes — otherwise a recording started in the
+    // milliseconds between the coordinated-shutdown checks and process
+    // exit would be destroyed mid-capture.
+    if crate::commands::restart::exit_committed() {
+        warn!("Refusing to start recording: app exit is in progress");
         return Err(AppError::audio(
-            "An app restart is in progress — try again in a moment".to_string(),
+            "The app is restarting or quitting — try again in a moment".to_string(),
         ));
     }
 

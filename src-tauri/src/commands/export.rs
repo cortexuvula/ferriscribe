@@ -101,6 +101,12 @@ pub async fn export_audio(
     file_path: String,
 ) -> AppResult<()> {
     let file_path = crate::commands::validate_user_path(&file_path)?;
+    // Mark the write window: this export decrypts PHI audio to a
+    // PLAINTEXT WAV written incrementally to a user-chosen path — not
+    // atomic, not cancellable — so the coordinated-quit path refuses to
+    // exit while it runs (commands/quit.rs). RAII: decrements on every
+    // exit path, including task panics.
+    let _export = crate::commands::quit::track_file_export();
     let db = Arc::clone(&state.db);
     tokio::task::spawn_blocking(move || -> AppResult<()> {
         let recording = load_recording_blocking(&db, &recording_id)?;

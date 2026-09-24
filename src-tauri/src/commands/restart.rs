@@ -1,38 +1,74 @@
-//! Crash-safe app restart for the update flow, with coordinated shutdown.
+//! Crash-safe process exit for the update flow AND normal quits, with
+//! coordinated shutdown.
 //!
-//! # Why this exists (2026-09-08 crash investigation)
+//! # Why this exists (2026-09-08 + 2026-09-23 crash investigations)
 //!
-//! The auto-updater's relaunch ends in tauri's `process::restart`, whose
-//! final step is `std::process::exit(0)` — which runs the C++ static
-//! destructors (`__cxa_finalize_ranges`). The statically linked ONNX
-//! Runtime / kaldi-native-fbank block (the diarization pipeline's `ort`
-//! download-binaries) registers a destructor that **aborts** when the
-//! process exits with the app's worker threads still live. Every
-//! auto-update relaunch since the diarization pipeline shipped produced a
-//! SIGABRT crash report on quit (2026-09-07 and 2026-09-08, both stacks:
-//! `exit → __cxa_finalize_ranges → abort`, frames inside the ORT/knf C++
-//! island between the only named C++ symbols in the binary). The crash is
-//! cosmetic in effect — the replacement process starts and runs — but it
-//! surfaces a crash dialog per update and buries the real story.
+//! The statically linked ONNX Runtime / kaldi-native-fbank block (the
+//! diarization pipeline's `ort` download-binaries + `knf-rs`) registers a
+//! C++ static destructor that **aborts** when the process exits with the
+//! app's worker threads still live. The destructor chain runs on every
+//! `exit`-shaped teardown. Two field reports pinned it:
 //!
-//! # The fix
+//! - 2026-09-07 / 2026-09-08 (update relaunch): tauri's `process::restart`
+//!   ends in a library `exit`, stack `exit → __cxa_finalize_ranges →
+//!   abort`, frames inside the ORT/knf C++ island.
+//! - 2026-09-23 (NORMAL quit, v0.77.11): the same SIGABRT on a plain
+//!   Cmd+Q — stack `-[NSApplication terminate:] → exit →
+//!   __cxa_finalize_ranges → abort`. AppKit's `terminate:` calls
+//!   `exit()` directly; control never returns to the Rust run loop, so
+//!   no Tauri event can intercept it. All four unnamed binary frames
+//!   were symbolicated against the exact shipped binary (bracketed by
+//!   the only defined C++ symbols — `knf::OnlineGenericBaseFeature…` and
+//!   `onnx::propagateShapeAndTypeFromFirstInput`, with the abort site
+//!   passing ORT-style source-line immediates) — they are the ORT/knf
+//!   island, not Rust code.
 //!
-//! `restart_app` sets a flag and calls tauri's own restart (which spawns
-//! the replacement correctly and then exits — no spawn logic of ours).
-//! The [`install_exit_guard`] call at boot registers an `atexit` handler
-//! from `run()`, i.e. AFTER every pre-main C++ static registration — and
-//! atexit runs LIFO, so the guard executes FIRST at exit. When the
-//! restart flag is set it terminates via `libc::_exit(0)`: the remaining
-//! atexit chain — including the ORT/knf destructor that aborts — never
-//! runs. Normal quits leave the flag unset: the guard no-ops and every
-//! destructor runs exactly as before (no abort was ever observed on a
-//! normal quit, only on the update relaunch).
+//! The earlier belief that only the update relaunch aborted was wrong;
+//! every deliberate exit runs the same destructor.
 //!
-//! Skipping static destructors is safe for the restart path: every
-//! durable write in this app is committed synchronously before this point
-//! (SQLite WAL commits, atomic fsync+rename file writes), and Rust
-//! destructors do not run at process exit anyway — the only teardown
-//! being skipped is the C++ runtime's, which holds no user state.
+//! # The fix (Phase 1 — every deliberate exit bypasses the destructors)
+//!
+//! [`install_exit_guard`] registers an `atexit` handler from `run()`,
+//! i.e. AFTER every pre-main C++ static registration — and atexit runs
+//! LIFO, so the guard executes FIRST at process exit. It terminates via
+//! `libc::_exit(0)` unconditionally: every exit that reaches atexit in
+//! this process is a deliberate app exit (normal quit, recovery-boot
+//! quit, last-window close, `AppHandle::exit`, update relaunch), and
+//! NONE of them may run the ORT/knf destructor that aborts. The decision
+//! matrix is [`ExitKind`] / [`bypasses_destructor_chain`], pinned by
+//! test so no future edit narrows a path back to the destructor chain.
+//!
+//! Skipping static destructors is safe for every one of those exits: on
+//! macOS a normal quit is `terminate: → exit()`, which never returns
+//! through `run()`'s epilogue — Rust locals (including the
+//! `tracing_appender` `WorkerGuard`) never `Drop` today either, and the
+//! run-loop epilogue on other platforms ends in a library `exit` before
+//! main returns. The only teardown an unconditional `_exit` skips is the
+//! remaining atexit chain (whose only handler of consequence is this
+//! guard) and the C++ static destructors, which hold no user state —
+//! the one C++ destructor that does something is ORT/knf, the thing that
+//! aborts. Durable-write safety was verified, not assumed:
+//!
+//! - **DB**: SQLite/SQLCipher commits are synchronous (WAL + fsync).
+//! - **Audio at rest**: `file_crypto::encrypt_file_in_place` is atomic
+//!   (temp + fsync + rename); anything it left half-done is finished by
+//!   the boot sweeps (`encryption_pending_sweep`, `orphaned_wav_sweep`).
+//! - **Backups** (`backup_run_now` and the scheduled sidecar — a separate
+//!   process an app exit cannot touch): snapshots build into a `.tmp-<id>`
+//!   sibling and rename into place; every payload blob (agent PUT, folder
+//!   push, drill re-pull) lands via `.tmp-` + hash-verify + rename, and
+//!   all payload bytes are encrypted (FE1 recordings, re-encrypted DB
+//!   copy, `manifest.json.enc`). Stale `.tmp-*` leftovers are swept.
+//! - **PDF/DOCX/FHIR exports**: the Rust side only returns bytes over
+//!   IPC; the file write happens in the frontend save dialog, whose
+//!   behavior under quit is unchanged from before this fix.
+//! - **`export_audio` / `export_support_bundle`**: NOT atomic —
+//!   `export_audio` decrypts PHI audio to a plaintext WAV and writes it
+//!   incrementally to a user-chosen path. These are tracked by an
+//!   in-flight counter ([`crate::commands::quit::file_export_in_flight`])
+//!   and the coordinated-quit path REFUSES to exit while one is running
+//!   (see `commands/quit.rs`); they are the documented exceptions, not
+//!   silent ones.
 //!
 //! # Coordinated shutdown (U1: restart can destroy active work)
 //!
@@ -71,49 +107,107 @@ use tauri::State;
 use crate::state::{AppState, PendingEdit};
 
 /// Set when the process is preparing to exit ONLY to relaunch a fresh copy
-/// (the update flow). Read by [`exit_guard`] — see the module docs — AND by
-/// `start_recording` to close the restart TOCTOU window: once a restart is
-/// committed, new recordings must not start (Codie review, 2026-09-09).
-/// Never cleared: it is only set after all refusal checks pass, and the
-/// process exits via `_exit` immediately after, so no reset path is needed.
+/// (the update flow). Read by [`exit_committed`]. Never cleared: it is
+/// only set after all refusal checks pass, and the process exits via
+/// `_exit` immediately after, so no reset path is needed.
 static RESTARTING: AtomicBool = AtomicBool::new(false);
 
-/// True when a restart has been committed (checks passed, exit imminent).
-/// `start_recording` consults this to refuse new takes during the window
-/// between the coordinated-shutdown checks and process exit.
-pub fn restart_committed() -> bool {
-    RESTARTING.load(Ordering::SeqCst)
+/// Set while a coordinated QUIT (`commands/quit.rs`) is settling work,
+/// CLEARED again if that quit is refused (active recording / in-flight
+/// file export / failed edit flush) so the app keeps working. Read by
+/// [`exit_committed`] — the same TOCTOU gate as restarts.
+static QUITTING: AtomicBool = AtomicBool::new(false);
+
+/// True when a deliberate exit (restart OR coordinated quit) has been
+/// committed and new destructive work must not start. `start_recording`
+/// consults this to refuse new takes during the window between the
+/// coordinated-shutdown checks and process exit.
+pub fn exit_committed() -> bool {
+    RESTARTING.load(Ordering::SeqCst) || QUITTING.load(Ordering::SeqCst)
 }
 
-/// Terminate immediately when `restarting`, skipping the remaining atexit
-/// chain. Split from the `extern "C"` shim so the no-op path is testable
-/// (the `_exit` path terminates the process by construction).
-fn exit_guard_if(restarting: bool) {
-    if restarting {
-        // _exit (not exit): atexit handlers — including the ORT/knf C++
-        // static destructor that aborts — must not run on a restart exit.
+/// Mark a coordinated quit as in progress (closes the start-new-work
+/// TOCTOU window while the settle sequence runs).
+pub(crate) fn mark_quitting() {
+    QUITTING.store(true, Ordering::SeqCst);
+}
+
+/// Withdraw a coordinated quit that was refused — the app keeps running
+/// and must accept new work again. Only `commands/quit.rs` calls this,
+/// on its refusal paths; once exit is truly committed the process never
+/// returns here.
+pub(crate) fn clear_quitting() {
+    QUITTING.store(false, Ordering::SeqCst);
+}
+
+/// Every deliberate exit this process can reach through atexit. The
+/// 2026-09-23 normal-quit SIGABRT proved this set cannot be narrowed to
+/// "just restarts": AppKit's Cmd+Q → `terminate:` → `exit()` runs the
+/// same aborting ORT/knf destructor, from a normal boot AND from a
+/// recovery/fatal boot alike (no managed `AppState` — the destructor
+/// doesn't care).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExitKind {
+    /// Normal quit: Cmd+Q, the Quit menu item, last-window close, or a
+    /// quit from the recovery/fatal-error boot (which manages no
+    /// AppState but links the same ORT/knf island).
+    NormalQuit,
+    /// An exit requested programmatically: `AppHandle::exit` or tao's
+    /// run-loop epilogue after a `RequestExit` (this is what the
+    /// intercepted Quit menu item terminates through, so coordinated
+    /// work is settled BEFORE the request is made).
+    RequestedExit,
+    /// The update relaunch (`restart_app` → tauri's restart).
+    Restart,
+}
+
+/// The atexit guard's bypass predicate: TRUE for every [`ExitKind`]. A
+/// function (not a bare unconditional in the shim) so the decision
+/// matrix is a pinned, unit-tested contract — if a future edit narrows
+/// any path back to the destructor chain, the test fails and points
+/// here.
+pub(crate) fn bypasses_destructor_chain(kind: ExitKind) -> bool {
+    matches!(
+        kind,
+        ExitKind::NormalQuit | ExitKind::RequestedExit | ExitKind::Restart
+    )
+}
+
+/// Terminate immediately, skipping the remaining atexit chain. Split
+/// from the `extern "C"` shim so the no-op path is testable (the `_exit`
+/// path terminates the process by construction).
+fn exit_guard_if(bypass: bool) {
+    if bypass {
+        // `_exit` (never the atexit-running library exit): the remaining
+        // atexit chain — including the ORT/knf C++ static destructor
+        // that aborts — must not run on ANY deliberate exit.
         unsafe { libc::_exit(0) }
     }
 }
 
 /// atexit shim. Registered from `run()` (after all pre-main static
 /// registrations) so LIFO ordering makes it the FIRST handler to run at
-/// process exit.
+/// process exit. Unconditional by design: atexit cannot tell us WHICH
+/// deliberate exit fired, and the 2026-09-23 report proved that treating
+/// the least-flagged path (normal quit) as safe is exactly the mistake
+/// that crashed. `NormalQuit` is that least-specific kind — if the
+/// predicate holds for it, the pinned matrix guarantees it holds for
+/// every kind.
 extern "C" fn exit_guard() {
-    exit_guard_if(RESTARTING.load(Ordering::SeqCst));
+    exit_guard_if(bypasses_destructor_chain(ExitKind::NormalQuit));
 }
 
 /// Register the exit guard. Call exactly once, early in `run()`.
 pub fn install_exit_guard() {
     // Best-effort: atexit failing (ENOMEM under fd/thread pressure) means
-    // restarts exit through the full destructor chain — the pre-fix
-    // behavior (crash report, relaunch still succeeds) — never a hard
+    // deliberate exits run the full destructor chain — the pre-fix
+    // behavior (SIGABRT crash report on every quit) — never a hard
     // error worth failing boot over.
     let rc = unsafe { libc::atexit(exit_guard) };
     if rc != 0 {
         tracing::warn!(
             rc,
-            "restart exit guard registration failed — update relaunches may show a quit-time crash report"
+            "exit guard registration failed — quitting may show a crash report"
         );
     }
 }
@@ -146,11 +240,12 @@ async fn flush_pending_edit(state: &AppState, edit: &PendingEdit) -> Result<(), 
     .await
 }
 
-/// Coordinated-shutdown checks shared by [`restart_app`]. Returns
-/// `Ok(())` when it is safe to relaunch, or the refusal error. Pure
-/// logic over the AppState — no exit, no flag mutation — so it is
-/// unit-testable without terminating the test process.
-async fn ensure_safe_to_restart(state: &AppState) -> Result<(), AppError> {
+/// Coordinated-shutdown checks shared by [`restart_app`] and the quit
+/// path (`commands/quit.rs` — flushes the same pending edit through the
+/// same code). Returns `Ok(())` when it is safe to exit, or the refusal
+/// error. Pure logic over the AppState — no exit, no flag mutation — so
+/// it is unit-testable without terminating the test process.
+pub(crate) async fn ensure_safe_to_restart(state: &AppState) -> Result<(), AppError> {
     if *state.recording_active.lock().await {
         return Err(AppError::InvalidInput(
             refusal::RECORDING_ACTIVE.to_string(),
@@ -228,7 +323,10 @@ pub async fn restart_app(app: tauri::AppHandle, state: State<'_, AppState>) -> A
     // unchanged: work settles first, always. `app.restart()` never
     // returns (its signature is `!`): it spawns the replacement and exits
     // the process via the guard, so there is no failure path that leaves
-    // the process alive with the flag set.
+    // the process alive with the flag set. The logged exit kind makes
+    // the final log line state which deliberate exit fired (the same
+    // forensics the 2026-09-23 crash investigation needed).
+    tracing::info!(exit_kind = ?ExitKind::Restart, "update relaunch committed");
     RESTARTING.store(true, Ordering::SeqCst);
     app.restart()
 }
@@ -237,20 +335,44 @@ pub async fn restart_app(app: tauri::AppHandle, state: State<'_, AppState>) -> A
 mod tests {
     use super::*;
 
-    /// The guard must be inert on a normal exit — every destructor runs
-    /// exactly as they did before this module existed.
+    /// The bypass predicate must hold for EVERY deliberate exit kind —
+    /// the 2026-09-23 normal-quit SIGABRT is what happens when any one
+    /// of them is narrowed back to the destructor chain.
     #[test]
-    fn exit_guard_noops_when_not_restarting() {
-        exit_guard_if(false); // returns — the test process survives
-        assert!(!RESTARTING.load(Ordering::SeqCst));
+    fn every_deliberate_exit_bypasses_the_destructor_chain() {
+        for kind in [
+            ExitKind::NormalQuit,
+            ExitKind::RequestedExit,
+            ExitKind::Restart,
+        ] {
+            assert!(
+                bypasses_destructor_chain(kind),
+                "exit kind {kind:?} must bypass the ORT/knf destructor chain"
+            );
+        }
     }
 
-    /// Structural pins: the flag defaults to unset (normal exits run every
-    /// destructor exactly as before), and the guard terminates via
-    /// `_exit` (a `std::process::exit` here would run the destructor chain
-    /// that aborts — the comment-stripped source must not contain one).
+    /// The no-op branch of the split guard helper returns — the test
+    /// process survives. (The bypass branch terminates by construction;
+    /// its behavior is pinned structurally below and by the manual
+    /// quit-repro gate.)
+    #[test]
+    fn exit_guard_helper_returns_when_not_bypassing() {
+        exit_guard_if(false);
+    }
+
+    /// Structural pins: the guard terminates via `_exit` (the atexit-
+    /// running library exit would run the destructor chain that aborts —
+    /// the comment-stripped source must not contain one), the shim's
+    /// body consults NO flag (an unconditional guard is the entire
+    /// normal-quit fix — a flag read would reintroduce the missed-path
+    /// bug), and it touches no state (a recovery-boot quit with no
+    /// managed AppState takes the identical, panic-free path).
     #[test]
     fn guard_defaults_and_exit_choice_are_pinned() {
+        // Only RESTARTING's default is pinned here: the widened-gate test
+        // below exercises QUITTING and tests run concurrently in one
+        // process, so no other test may read QUITTING.
         assert!(!RESTARTING.load(Ordering::SeqCst));
         let code: String = include_str!("restart.rs")
             .lines()
@@ -273,6 +395,49 @@ mod tests {
         assert!(
             !code.contains(&forbidden),
             "the guard must never call the atexit-running exit"
+        );
+        // Pin the shim to the unconditional shape: extract its body and
+        // assert it reads no exit flag and no app state.
+        let shim = code
+            .split("extern \"C\" fn exit_guard()")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("exit_guard shim must exist");
+        assert!(
+            !shim.contains("RESTARTING") && !shim.contains("QUITTING"),
+            "the guard must be unconditional — a flag read reintroduces the 2026-09-23 crash"
+        );
+        assert!(
+            !shim.contains("state"),
+            "the guard must not touch app state (recovery-boot quits ride it too)"
+        );
+    }
+
+    /// The widened exit gate: `exit_committed` must cover the
+    /// coordinated-quit commit (and the formula ORs in the restart flag,
+    /// pinned structurally — this test must not touch RESTARTING because
+    /// the defaults test above reads it concurrently). `start_recording`
+    /// refuses under the combined gate (audio.rs).
+    #[test]
+    fn exit_committed_covers_restart_and_quit_flags() {
+        assert!(!exit_committed());
+        mark_quitting();
+        assert!(exit_committed(), "quit commit must refuse new work");
+        clear_quitting();
+        assert!(!exit_committed(), "a refused quit must re-open the gate");
+        // The restart half of the OR, pinned structurally so this test
+        // never mutates the RESTARTING static.
+        let code: String = include_str!("restart.rs")
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("///") || t.starts_with("//!") || t.starts_with("//"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("RESTARTING.load(Ordering::SeqCst) || QUITTING.load(Ordering::SeqCst)"),
+            "exit_committed must OR the restart and quit commits"
         );
     }
 }

@@ -14,6 +14,7 @@ pub mod models;
 pub mod ocr;
 pub mod pipeline;
 pub mod providers;
+pub mod quit;
 pub mod recordings;
 pub mod recordings_edit;
 pub mod recovery;

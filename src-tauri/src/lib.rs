@@ -54,9 +54,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use state::{AppState, InitError, RecoveryState};
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+/// The non-blocking log writer's flush guard, parked here so the
+/// coordinated-quit path (`commands/quit.rs`) can flush the log tail
+/// before terminating — `_exit` skips destructors, so the guard would
+/// otherwise never drop and the buffered tail (including the final
+/// "exiting" line) would be lost. Taking it flushes; nothing re-arms it,
+/// which is fine: the only taker is the path that exits immediately.
+pub(crate) static LOG_GUARD: std::sync::Mutex<Option<WorkerGuard>> = std::sync::Mutex::new(None);
 
 /// Resolve the log directory inside the app data folder.
 ///
@@ -81,10 +90,12 @@ pub(crate) fn log_dir() -> PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // FIRST, before anything else: the restart exit guard (see
+    // FIRST, before anything else: the exit guard (see
     // commands/restart.rs). Registered from run() so atexit LIFO ordering
     // puts it ahead of every pre-main C++ static registration — it is the
-    // update-relaunch crash fix (exit-time ORT/knf destructor abort).
+    // quit-time SIGABRT crash fix, covering EVERY deliberate exit
+    // (normal quit, recovery-boot quit, last-window close, update
+    // relaunch): the ORT/knf C++ static destructor that aborts never runs.
     commands::restart::install_exit_guard();
 
     // ── Logging ──────────────────────────────────────────────────────────
@@ -112,7 +123,13 @@ pub fn run() {
     // (tracing_appender appends the date AFTER the prefix; current
     // file is `ferri-scribe.log` without suffix until rotation.)
     let file_appender = tracing_appender::rolling::daily(&log_directory, "ferri-scribe.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    // Park the flush guard where the quit path can reach it (see
+    // LOG_GUARD) instead of holding it as a `run()` local that never
+    // drops on exit anyway.
+    *LOG_GUARD
+        .lock()
+        .expect("log guard slot is only touched at boot and quit") = Some(guard);
 
     // Console layer — compact format for terminal
     let console_layer = tracing_subscriber::fmt::layer().compact();
@@ -333,6 +350,26 @@ pub fn run() {
             Ok(())
         });
     }
+
+    // App menu with an INTERCEPTED Quit item (2026-09-23 quit-time
+    // SIGABRT fix, phase 2). macOS Cmd+Q / Apple-menu Quit drive
+    // NSApp `terminate:` → `exit()` directly — no Tauri event fires —
+    // so the only interceptable surface is the menu item itself:
+    // `quit::build_app_menu` mirrors tauri's default menu with the
+    // predefined `terminate:` Quit replaced by a custom item whose
+    // selection runs the coordinated shutdown
+    // (`commands::quit::on_quit_requested`) before exiting through the
+    // atexit guard. Registered for EVERY boot (recovery/fatal dialogs
+    // included — their quits skip the settle and exit through the
+    // guard). Dock-icon Quit / logout still bypass the handler and get
+    // only the phase-1 crash fix; see the quit module docs.
+    builder = builder
+        .menu(crate::commands::quit::build_app_menu)
+        .on_menu_event(|app, event| {
+            if *event.id() == crate::commands::quit::QUIT_ITEM_ID {
+                crate::commands::quit::on_quit_requested(app);
+            }
+        });
 
     // Single-instance MUST be the first registered plugin. The primary
     // instance receives second-launch argv here: a `--capture-ocr` launch
