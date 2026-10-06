@@ -2,8 +2,9 @@
   import { settings } from '../../../stores/settings.svelte';
   async function handleRetentionChange(e: Event) {
     const days = Number((e.currentTarget as HTMLSelectElement).value);
-    // "Never (keep forever)" maps to null so old configs and an explicit
-    // off switch serialize identically on the backend (Option<u32>).
+    // "Never automatically move to Trash" maps to null so old configs and
+    // an explicit off switch serialize identically on the backend
+    // (Option<u32>).
     await settings.updateField('retention_days', days > 0 ? days : null);
   }
 
@@ -15,7 +16,7 @@
 <div class="form-group">
   <label for="retention-select" class="form-label">Automatically move recordings to trash when older than</label>
   <select id="retention-select" value={settings.state.retention_days ?? 0} onchange={handleRetentionChange}>
-    <option value={0}>Never (keep forever)</option>
+    <option value={0}>Never automatically move to Trash</option>
     <option value={30}>30 days</option>
     <option value={90}>90 days</option>
     <option value={180}>180 days</option>

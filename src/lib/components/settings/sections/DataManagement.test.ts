@@ -24,7 +24,7 @@
  * Markup facts these tests rely on (kept in sync with the component):
  *   - The retention select is `<select id="retention-select">` labelled by
  *     `<label for="retention-select">`.
- *   - Options: 0 = "Never (keep forever)", 30/90/180/365 = "N days".
+ *   - Options: 0 = "Never automatically move to Trash", 30/90/180/365 = "N days".
  *   - The hint span mentions the 30-day undo window.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -103,12 +103,12 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('DataManagement — Recording Retention', () => {
-  it('renders "Never (keep forever)" selected when retention_days is null (default)', async () => {
+  it('renders "Never automatically move to Trash" selected when retention_days is null (default)', async () => {
     renderSection();
     await tick();
     const select = getRetentionSelect();
     expect(select.value).toBe('0');
-    expect(select.selectedOptions[0]?.textContent?.trim()).toBe('Never (keep forever)');
+    expect(select.selectedOptions[0]?.textContent?.trim()).toBe('Never automatically move to Trash');
   });
 
   it('renders the configured window selected (90 → "90 days")', async () => {
