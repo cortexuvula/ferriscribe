@@ -1482,6 +1482,19 @@ mod tests {
         use crate::recordings::RecordingsRepo;
         use medical_core::types::recording::Recording;
 
+        // `changed_since` compares strictly (`>`), and on a fast runner the
+        // next repo write can land in the SAME microsecond as the stamp the
+        // test just read — the flake that took down CI's test + coverage
+        // jobs on 2026-10-06. Production avoids it by advancing the cursor
+        // +1µs (`advance_cursor`); this test pins re-travel semantics
+        // (`contains`), not cursor exactness, so a cursor sitting a full
+        // second behind the stamp is deterministic while still proving the
+        // tombstone/revive bumps re-travel past an advanced cursor.
+        fn one_second_behind(stamp: &str) -> String {
+            let dt = chrono::DateTime::parse_from_rfc3339(stamp).expect("parse stamp");
+            (dt.with_timezone(&chrono::Utc) - chrono::TimeDelta::seconds(1)).to_rfc3339()
+        }
+
         let db = Database::open_in_memory().expect("db");
         let conn = db.conn().expect("conn");
         let rec = Recording::new(
@@ -1497,12 +1510,13 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("read stamp");
-        ContentSyncRepo::set_push_cursor(&conn, &inserted_at).expect("cursor");
+        let insert_cursor = one_second_behind(&inserted_at);
+        ContentSyncRepo::set_push_cursor(&conn, &insert_cursor).expect("cursor");
 
         // Soft-delete → the tombstone must be selected again.
         RecordingsRepo::soft_delete(&conn, &rec.id).expect("soft delete");
         let (ids, _) =
-            ContentSyncRepo::changed_since(&conn, Some(&inserted_at), 100).expect("query");
+            ContentSyncRepo::changed_since(&conn, Some(&insert_cursor), 100).expect("query");
         assert!(
             ids.contains(&rec.id.to_string()),
             "tombstone must re-travel via the periodic push"
@@ -1516,10 +1530,11 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("read stamp");
-        ContentSyncRepo::set_push_cursor(&conn, &trashed_at).expect("cursor");
+        let tombstone_cursor = one_second_behind(&trashed_at);
+        ContentSyncRepo::set_push_cursor(&conn, &tombstone_cursor).expect("cursor");
         RecordingsRepo::restore(&conn, &rec.id).expect("restore");
         let (ids, _) =
-            ContentSyncRepo::changed_since(&conn, Some(&trashed_at), 100).expect("query");
+            ContentSyncRepo::changed_since(&conn, Some(&tombstone_cursor), 100).expect("query");
         assert!(
             ids.contains(&rec.id.to_string()),
             "revive must re-travel via the periodic push"
