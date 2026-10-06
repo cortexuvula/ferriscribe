@@ -317,6 +317,23 @@ pub(crate) fn open_recording_wav(
         }
     };
 
+    // A writer that never finalized its header (crash/force-quit mid-capture,
+    // or a stop that skipped finalize) leaves the data-chunk length at 0
+    // while real audio follows. hound opens such a file FINE (0 samples is a
+    // valid parse), so the error-path salvage below never fires and the
+    // pipeline reads no samples. Detect and repair it proactively.
+    if wav_has_unfinalized_zero_data_chunk(&wav_bytes)
+        && let Some(fixed) = salvage_partial_wav(&wav_bytes)
+    {
+        tracing::warn!(
+            original_len = wav_bytes.len(),
+            salvaged_len = fixed.len(),
+            "WAV data chunk length was 0 (unfinalized header); salvaged whole frames"
+        );
+        return hound::WavReader::new(std::io::Cursor::new(fixed))
+            .map_err(|e| AppError::processing(format!("Failed to open WAV: {e}")));
+    }
+
     // Validate the header on a borrowing cursor FIRST so the happy path
     // never duplicates the buffer — the unconditional `wav_bytes.clone()`
     // this replaces doubled peak memory for every transcription (a 1-hour
@@ -351,6 +368,50 @@ pub(crate) fn open_recording_wav(
 
     hound::WavReader::new(std::io::Cursor::new(wav_bytes))
         .map_err(|e| AppError::processing(format!("Failed to open WAV: {e}")))
+}
+
+/// Detect a WAV whose `data` chunk declares length 0 but is followed by real
+/// audio bytes — the signature of a writer that never finalized its header
+/// (crash/force-quit mid-capture, or a stop that skipped finalize). hound
+/// opens such a file fine (0 samples is a valid parse), so callers must
+/// detect this proactively rather than relying on a parse error.
+///
+/// PHI-safe: operates on raw bytes; callers log lengths only.
+fn wav_has_unfinalized_zero_data_chunk(bytes: &[u8]) -> bool {
+    const RIFF: &[u8; 4] = b"RIFF";
+    const WAVE: &[u8; 4] = b"WAVE";
+    const DATA: &[u8; 4] = b"data";
+
+    if bytes.len() < 12 || &bytes[0..4] != RIFF || &bytes[8..12] != WAVE {
+        return false;
+    }
+
+    let mut pos = 12usize;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let len = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
+        if id == DATA {
+            // Declared length 0 but bytes follow the data header => unfinalized.
+            return len == 0 && bytes.len() > pos + 8;
+        }
+        let Some(advance) = len
+            .checked_add(8)
+            .and_then(|a| a.checked_add(len & 1))
+            .filter(|a| *a > 0)
+        else {
+            return false;
+        };
+        let Some(next) = pos.checked_add(advance) else {
+            return false;
+        };
+        pos = next;
+    }
+    false
 }
 
 /// Best-effort repair of a RIFF/WAVE byte blob whose `data` chunk length is
@@ -415,11 +476,22 @@ fn salvage_partial_wav(bytes: &[u8]) -> Option<Vec<u8>> {
         return None;
     };
     let available = bytes.len().saturating_sub(start);
-    // Clamp to what's present AND to a whole-frame boundary. Trailing
-    // partial-frame bytes carry no usable audio.
-    let clamped = declared.min(available) / frame * frame;
-    if clamped == declared && declared <= available {
-        return None; // data chunk was already fine — nothing to salvage
+    // A declared length of 0 is NOT "already fine" - it means the writer's
+    // finalize() never back-patched the header (crash/force-quit mid-capture
+    // or a stop that skipped finalize), so the data chunk header claims zero
+    // samples while real audio follows. hound trusts that 0 and reads no
+    // samples. When the declared length is a lie (0), trust the bytes that
+    // are actually present instead.
+    let usable = if declared == 0 {
+        available
+    } else {
+        declared.min(available)
+    };
+    // Clamp to a whole-frame boundary. Trailing partial-frame bytes carry
+    // no usable audio.
+    let clamped = usable / frame * frame;
+    if clamped == declared && declared <= available && declared != 0 {
+        return None; // data chunk was already fine - nothing to salvage
     }
 
     let mut out = bytes[..start + clamped].to_vec();
@@ -742,6 +814,46 @@ mod tests {
             salvage_partial_wav(&wav).is_none(),
             "a well-formed WAV must pass through untouched"
         );
+    }
+
+    // Crash/force-quit before finalize(): the data-chunk length field is
+    // still 0 (the writer never back-patched it) but real audio follows.
+    // hound trusts the 0 and reads no samples; salvage must clamp to the
+    // whole frames actually present instead of treating 0 as "already fine".
+    #[test]
+    fn salvage_recovers_zero_length_data_chunk() {
+        let mut wav = sample_wav_bytes();
+        let data_start = find_data_chunk_start(&wav).expect("data chunk");
+        // Zero out the declared data length (and RIFF size) as a writer that
+        // never finalized would leave them.
+        wav[data_start - 4..data_start].copy_from_slice(&0u32.to_le_bytes());
+        wav[4..8].copy_from_slice(&0u32.to_le_bytes());
+
+        let salvaged = salvage_partial_wav(&wav).expect("must be salvageable");
+        let reader =
+            hound::WavReader::new(std::io::Cursor::new(salvaged)).expect("salvaged parses");
+        assert_eq!(
+            reader.duration() as usize,
+            100,
+            "all whole frames recovered from a zero-length data chunk"
+        );
+    }
+
+    #[test]
+    fn detects_unfinalized_zero_data_chunk() {
+        // A well-formed WAV is not flagged.
+        let wav = sample_wav_bytes();
+        assert!(!wav_has_unfinalized_zero_data_chunk(&wav));
+
+        // Zero the data length (writer never finalized): flagged.
+        let mut broken = sample_wav_bytes();
+        let data_start = find_data_chunk_start(&broken).expect("data chunk");
+        broken[data_start - 4..data_start].copy_from_slice(&0u32.to_le_bytes());
+        assert!(wav_has_unfinalized_zero_data_chunk(&broken));
+
+        // Non-RIFF garbage is not flagged.
+        assert!(!wav_has_unfinalized_zero_data_chunk(b"not a wav"));
+        assert!(!wav_has_unfinalized_zero_data_chunk(&[]));
     }
 
     #[test]
