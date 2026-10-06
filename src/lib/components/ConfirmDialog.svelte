@@ -1,8 +1,16 @@
 <script module lang="ts">
   /// Shared per-instance counter for unique aria-describedby body ids
   /// (module scope: one counter across every ConfirmDialog instance, so
-  /// stacked dialogs never cross-reference each other's bodies).
+  /// stacked dialogs never cross-reference each other's bodies). The
+  /// increment lives in this module-scope function on purpose: eslint's
+  /// no-useless-assignment can't see reads of a module-script `let` from
+  /// the instance script (Svelte compiles them as separate scopes) and
+  /// flagged the initializer as a dead assignment.
   let confirmDialogInstanceCounter = 0;
+
+  function nextConfirmDialogBodyId(): string {
+    return `confirm-dialog-body-${++confirmDialogInstanceCounter}`;
+  }
 </script>
 
 <script lang="ts">
@@ -43,7 +51,7 @@
 
   // Unique per-instance body id so aria-describedby survives two stacked
   // dialogs (e.g. a confirm over the Settings modal).
-  let bodyId = `confirm-dialog-body-${++confirmDialogInstanceCounter}`;
+  const bodyId = nextConfirmDialogBodyId();
 
   let root: HTMLElement | undefined = $state();
   let unregister: (() => void) | null = null;
