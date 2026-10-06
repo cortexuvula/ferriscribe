@@ -221,7 +221,7 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
                     Some(&cfg.recordings_dir),
                     &wrapping_key,
                 ))
-                .map_err(&push)?
+                .map_err(push)?
                 .map_err(|e| push(e.to_string()))?;
                 debug_assert_eq!(pushed.snapshot_id, receipt.snapshot_id);
                 events.push(ok(&format!(
@@ -247,7 +247,7 @@ pub fn run_backup_job(cfg: &JobConfig, db_key: [u8; 32], wrapping_key: [u8; 32])
                     staging,
                     &wrapping_key,
                 ))
-                .map_err(&pull)?
+                .map_err(pull)?
                 .map_err(|e| pull(e.to_string()))?;
                 events.push(step("drilling the target's copy (re-pulled + verified)"));
                 pulled
