@@ -21,7 +21,6 @@
 //!       FS_EVAL_MODEL (defaults to the installed turbo model)
 
 use std::path::PathBuf;
-use std::time::Instant;
 
 // Env-gated: never runs in CI, never runs without explicit local intent.
 fn main() {
@@ -43,7 +42,7 @@ fn main() {
     let mut clips: Vec<PathBuf> = std::fs::read_dir(&root)
         .expect("read samples dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().map_or(false, |x| x == "mp3"))
+        .filter(|p| p.extension().is_some_and(|x| x == "mp3"))
         .collect();
     clips.sort();
     assert!(!clips.is_empty(), "no clips found");
@@ -97,7 +96,9 @@ fn decode_wav_i16(bytes: &[u8]) -> Vec<i16> {
     }
     let (doff, dsz) = data.expect("data chunk");
     bytes[doff..doff + dsz]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

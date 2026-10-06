@@ -275,7 +275,9 @@ fn decode_wav_i16_bytes(bytes: &[u8]) -> Vec<i16> {
     }
     let (doff, dsz) = data.expect("data chunk");
     bytes[doff..doff + dsz]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -317,14 +319,16 @@ fn inventory(samples_dir: &Path) {
         let dur = samples.len() as f64 / 16_000.0;
         let fs_rtf = samples_dir.join(format!("FerriScribe Transcript {}.rtf", clip.stem));
         let el_txt = samples_dir.join(format!("Elevenlabs Transcript {}.txt", clip.stem));
-        let fs_words = fs_rtf
-            .exists()
-            .then(|| word_count_rtf(&fs_rtf))
-            .unwrap_or(0);
-        let el_words = el_txt
-            .exists()
-            .then(|| plain_word_count(&el_txt))
-            .unwrap_or(0);
+        let fs_words = if fs_rtf.exists() {
+            word_count_rtf(&fs_rtf)
+        } else {
+            0
+        };
+        let el_words = if el_txt.exists() {
+            plain_word_count(&el_txt)
+        } else {
+            0
+        };
         println!(
             "CLIP {} dur_s={:.1} fs_words={} el_words={}",
             clip.id, dur, fs_words, el_words
@@ -550,12 +554,12 @@ fn decode(ctx: &whisper_rs::WhisperContext, samples: &[f32], variant: Variant) -
             }
             let w_start = (t0 as f64 / 100.0).clamp(start, end);
             let w_end = (t1 as f64 / 100.0).clamp(start, end);
-            if w_end - w_start >= 0.01 {
-                if let Ok(w) = tok.to_str() {
-                    let t = w.trim();
-                    if !t.is_empty() {
-                        words.push((w_start, w_end, t.to_string()));
-                    }
+            if w_end - w_start >= 0.01
+                && let Ok(w) = tok.to_str()
+            {
+                let t = w.trim();
+                if !t.is_empty() {
+                    words.push((w_start, w_end, t.to_string()));
                 }
             }
         }
@@ -625,7 +629,7 @@ fn build_stages(
         }
     };
 
-    let mut transcript = mk_transcript(spans_raw.iter().map(|s| seg_of(s)).collect());
+    let mut transcript = mk_transcript(spans_raw.iter().map(seg_of).collect());
 
     // In-segment loop collapses (count before any drops).
     let mut probe = transcript.clone();
@@ -759,7 +763,7 @@ fn count_identical_runs(t: &medical_core::types::stt::Transcript) -> usize {
 
 /// Word-window attribution rule (word-window-attribution branch): with
 /// >=2 valid word windows, per-word overlap votes with dominance >=0.7;
-/// otherwise the whole-segment window rule (10 ms floor, dominance 0.7).
+/// > otherwise the whole-segment window rule (10 ms floor, dominance 0.7).
 fn attribute_wordwin(span: &Span, turns: &[Turn]) -> Option<String> {
     const MIN_OVERLAP_S: f64 = 0.01;
     const DOMINANCE: f64 = 0.7;
@@ -950,7 +954,7 @@ fn parse_el_cues(path: &Path) -> Vec<(f64, f64, String)> {
         if let Some((l, r)) = line.split_once("-->") {
             // Each half may carry a trailing label ("00:00:04,460 [Speaker 0]").
             fn clean(s: &str) -> &str {
-                s.trim().split_whitespace().next().unwrap_or("")
+                s.split_whitespace().next().unwrap_or("")
             }
             if let (Some(s), Some(e)) = (ts(clean(l)), ts(clean(r))) {
                 let mut text = String::new();
@@ -1280,17 +1284,16 @@ fn declared_dur_s(path: &Path) -> Option<f64> {
     for line in raw.lines() {
         if let Some(rest) = line.trim().strip_prefix("# Duration:") {
             let tok = rest
-                .trim()
                 .split_whitespace()
                 .next()
                 .unwrap_or("")
                 // "30.1s." — strip trailing unit + sentence punctuation in
                 // any order/combination.
-                .trim_end_matches(|c: char| c == 's' || c == '.');
-            if !tok.is_empty() {
-                if let Ok(v) = tok.parse::<f64>() {
-                    return Some(v);
-                }
+                .trim_end_matches(['s', '.']);
+            if !tok.is_empty()
+                && let Ok(v) = tok.parse::<f64>()
+            {
+                return Some(v);
             }
         }
     }
@@ -1534,16 +1537,16 @@ fn count_speaker_errors(
         if span_dur <= 0.0 {
             continue;
         }
-        if let Some(r) = assign_cue_to_row(sp.start, sp.end, rows) {
-            if matches!(r.status, RowStatus::Speech(_)) {
-                matches += 1;
-                for rule in [seg_rule, wordwin_rule] {
-                    let hyp = hyp_speaker_of(sp, rule);
-                    match (hyp, r.speaker) {
-                        (Some(h), Some(rr)) if h == rr => {}
-                        (None, None) => {}
-                        _ => errors += 1,
-                    }
+        if let Some(r) = assign_cue_to_row(sp.start, sp.end, rows)
+            && matches!(r.status, RowStatus::Speech(_))
+        {
+            matches += 1;
+            for rule in [seg_rule, wordwin_rule] {
+                let hyp = hyp_speaker_of(sp, rule);
+                match (hyp, r.speaker) {
+                    (Some(h), Some(rr)) if h == rr => {}
+                    (None, None) => {}
+                    _ => errors += 1,
                 }
             }
         }
@@ -1561,8 +1564,8 @@ fn sid(reference: &[String], hypothesis: &[String]) -> (usize, usize, usize) {
     for (i, row) in dp.iter_mut().enumerate().skip(1) {
         row[0] = (i, 0, 0); // all deletions
     }
-    for j in 1..=n {
-        dp[0][j] = (0, j, 0); // all insertions
+    for (j, cell) in dp[0].iter_mut().enumerate().take(n + 1).skip(1) {
+        *cell = (0, j, 0); // all insertions
     }
     for i in 1..=m {
         for j in 1..=n {
