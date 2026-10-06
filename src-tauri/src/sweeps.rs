@@ -225,89 +225,40 @@ pub fn orphaned_wav_sweep(db: &Database, recordings_dir: &Path) {
 /// One tick of the daily retention sweeper. Two idempotent, PHI-safe phases
 /// (logs carry counts/ids only):
 ///
-/// 1. Tombstone purge (server only): permanently delete recordings
-///    soft-deleted >30 days ago, after cleaning up their RAG vectors and
-///    audio files. Server-only because durable deletion is the server's
-///    policy; clients keep their soft-deletes for local undo.
+/// 1. Tombstone purge (EVERY machine, not just the server): permanently
+///    delete recordings soft-deleted >30 days ago. PURGE-FIRST ordering:
+///    the ledger purge transaction runs before any artifact cleanup, and
+///    RAG vectors + audio files are removed ONLY for ids the transaction
+///    confirmed purged — a restore landing between the listing and the
+///    purge leaves its row active, so the purge skips it and its artifacts
+///    survive (pinned by `restore_between_listing_and_purge_leaves_row_active_with_audio`).
+///    Runs on clients too: standalone machines must honor the 30-day
+///    window, and the `purged_recordings` ledger keeps paired machines
+///    safe on every side (`merge_incoming` refuses stale copies).
 /// 2. Retention sweep (per-machine): if the clinician configured a
 ///    retention window, move older visible recordings into the trash
-///    (from which phase 1 will eventually purge them on the server).
-///
-/// `is_server` is a parameter (not re-read from disk here) so tests can
-/// exercise both roles without touching the on-disk server config; the
-/// spawned loop in [`spawn_retention_sweeper`] re-reads it every tick so a
-/// machine that starts acting as the server mid-session is picked up
-/// without a restart.
-pub fn retention_sweep_tick(db: &Database, is_server: bool) {
+///    (from which phase 1 will eventually purge them).
+pub fn retention_sweep_tick(db: &Database) {
     let Ok(conn) = db.conn() else {
         return;
     };
 
-    // ── Phase 1: tombstone purge (server only) ─────────────────────────
-    if is_server {
-        // Get the IDs of recordings about to be purged, so we can also
-        // clean up their RAG vectors.
-        let to_purge =
-            match RecordingsRepo::list_soft_deleted_older_than(&conn, 30, chrono::Utc::now()) {
-                Ok(rows) => rows,
-                Err(e) => {
-                    tracing::warn!(error = %e, "tombstone sweeper: list failed");
-                    Vec::new()
-                }
-            };
-
-        if !to_purge.is_empty() {
-            // Clean up RAG vectors for each purged recording.
-            use medical_db::vectors::VectorsRepo;
-            for (id, _audio_path) in &to_purge {
-                if let Err(e) = VectorsRepo::delete_by_document(&conn, &id.to_string()) {
-                    tracing::warn!(
-                        recording_id = %id,
-                        error = %e,
-                        "tombstone sweeper: failed to delete RAG vectors"
-                    );
-                }
+    // ── Phase 1: tombstone purge (every machine) ─────────────────────
+    let to_purge =
+        match RecordingsRepo::list_soft_deleted_older_than(&conn, 30, chrono::Utc::now()) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "tombstone sweeper: list failed");
+                Vec::new()
             }
-
-            // Best-effort delete of audio files. Tolerate missing files.
-            for (id, audio_path) in &to_purge {
-                if !audio_path.is_empty()
-                    && let Err(e) = std::fs::remove_file(audio_path)
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    tracing::warn!(recording_id = %id, error = %e, "tombstone sweeper: failed to delete audio file");
-                }
-            }
-
-            // Now permanently delete the recording rows. This must go
-            // through the repo: a raw DELETE fires the FTS delete-trigger
-            // against rows that soft_delete already de-indexed, which fails
-            // with SQLITE_CORRUPT — the reason the 30-day durable-deletion
-            // policy never actually deleted rows before this fix.
-            //
-            // The ledger variant records each purged id in
-            // `purged_recordings` inside the same transaction, so
-            // `merge_incoming` can later refuse stale copies of these
-            // recordings pushed by machines that missed the deletion.
-            // Id + timestamp only — no PHI.
-            let ids: Vec<uuid::Uuid> = to_purge.iter().map(|(id, _)| *id).collect();
-            match RecordingsRepo::purge_soft_deleted_with_ledger(&conn, &ids) {
-                Ok(purged) => {
-                    tracing::info!(
-                        purged = purged.len(),
-                        vectors_cleaned = to_purge.len(),
-                        ledger_count = purged.len(),
-                        "tombstone sweeper purged soft-deleted recordings + RAG vectors + audio files"
-                    );
-                }
-                Err(e) => tracing::warn!(error = %e, "tombstone sweeper failed"),
-            }
-        }
+        };
+    if !to_purge.is_empty() {
+        purge_tombstone_batch(&conn, &to_purge);
     }
 
     // ── Phase 2: per-machine retention sweep ───────────────────────────
-    // Runs on every machine (server or client) — it only moves old visible
-    // recordings into the trash.
+    // Runs on every machine — it only moves old visible recordings into
+    // the trash.
     match medical_db::settings::SettingsRepo::load_config(&conn) {
         Ok(cfg) => {
             if let Some(days) = cfg.retention_days.filter(|d| *d > 0) {
@@ -331,6 +282,71 @@ pub fn retention_sweep_tick(db: &Database, is_server: bool) {
     }
 }
 
+/// Purge the given aged-tombstone candidates and clean up their artifacts,
+/// purge-first: the `purged_recordings`-ledger transaction runs BEFORE any
+/// artifact deletion, and RAG vectors + audio files are removed ONLY for
+/// the ids it CONFIRMED purged.
+///
+/// The candidates come from `list_soft_deleted_older_than` moments earlier;
+/// a restore may land in that window. The purge transaction's
+/// `deleted_at IS NOT NULL` guard skips such a row (rows=0 → not
+/// confirmed), so its audio and vectors are never deleted out from under a
+/// live recording. Missing audio files are tolerated.
+///
+/// Separate from `retention_sweep_tick` so the restore-race test can drive
+/// the exact production sequence with a stale listing.
+fn purge_tombstone_batch(
+    conn: &medical_db::Connection,
+    candidates: &[(uuid::Uuid, String)],
+) -> Vec<uuid::Uuid> {
+    let ids: Vec<uuid::Uuid> = candidates.iter().map(|(id, _)| *id).collect();
+    // Permanently delete the rows FIRST. This must go through the repo: a
+    // raw DELETE fires the FTS delete-trigger against rows that
+    // soft_delete already de-indexed, which fails with SQLITE_CORRUPT.
+    // The ledger variant records each purged id in `purged_recordings`
+    // inside the same transaction, so `merge_incoming` can later refuse
+    // stale copies of these recordings. Id + timestamp only — no PHI.
+    let confirmed = match RecordingsRepo::purge_soft_deleted_with_ledger(conn, &ids) {
+        Ok(purged) => purged,
+        Err(e) => {
+            tracing::warn!(error = %e, "tombstone sweeper failed");
+            return Vec::new();
+        }
+    };
+
+    // Artifact cleanup for the CONFIRMED ids only.
+    use medical_db::vectors::VectorsRepo;
+    let mut audio_removed = 0usize;
+    for (id, audio_path) in candidates {
+        if !confirmed.contains(id) {
+            continue; // restored (or otherwise revived) mid-sweep — not ours
+        }
+        if let Err(e) = VectorsRepo::delete_by_document(conn, &id.to_string()) {
+            tracing::warn!(
+                recording_id = %id,
+                error = %e,
+                "tombstone sweeper: failed to delete RAG vectors"
+            );
+        }
+        if audio_path.is_empty() {
+            continue;
+        }
+        match std::fs::remove_file(audio_path) {
+            Ok(()) => audio_removed += 1,
+            // Tolerate missing files (already cleaned up, pulled machine
+            // whose audio lives on the partner).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(recording_id = %id, error = %e, "tombstone sweeper: failed to delete audio file"),
+        }
+    }
+    tracing::info!(
+        purged = confirmed.len(),
+        audio_removed,
+        "tombstone sweeper purged soft-deleted recordings + RAG vectors + audio files"
+    );
+    confirmed
+}
+
 /// Spawn the periodic sweeper: first tick 5 minutes after boot, then daily.
 /// Machines that are powered off overnight (most clinician laptops) never
 /// accumulate 24h of uptime, so sleeping a full day BEFORE the first tick
@@ -341,8 +357,7 @@ pub fn spawn_retention_sweeper(db: Arc<Database>) {
         tokio::time::sleep(Duration::from_secs(300)).await;
         loop {
             tracing::info!("running tombstone sweeper");
-            let is_server = crate::state::load_server_config().is_some();
-            retention_sweep_tick(&db, is_server);
+            retention_sweep_tick(&db);
             // Daily cadence between sweeps after the boot-time first tick
             // (the 30-day window dwarfs the interval).
             tokio::time::sleep(Duration::from_secs(86400)).await;
@@ -400,36 +415,72 @@ mod tests {
             > 0
     }
 
+    /// Seed an AGED tombstone (deleted_at `days` ago) on a still-visible
+    /// row with a single raw UPDATE — the same statement shape
+    /// `soft_delete` uses. Updating `deleted_at` again AFTER soft_delete
+    /// would fire the FTS trigger against an already de-indexed row and
+    /// fail with SQLITE_CORRUPT.
+    fn seed_aged_tombstone(conn: &rusqlite::Connection, rec: &Recording, days: i64) {
+        let past = (chrono::Utc::now() - chrono::TimeDelta::days(days))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        conn.execute(
+            "UPDATE recordings SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![past, rec.id.to_string()],
+        )
+        .expect("seed aged tombstone");
+    }
+
+    /// INVERTED (trash-restore D7): the purge now runs on EVERY machine.
+    /// A client tick purges aged tombstones — row gone, audio file
+    /// removed, ledger entry written — while the retention phase still
+    /// only TRASHES old visible recordings (a just-trashed row is not yet
+    /// purge-eligible, so it survives as a row).
     #[test]
-    fn retention_sweep_client_trashes_old_but_never_purges() {
+    fn retention_sweep_client_purges_aged_tombstones_and_trashes_old_visible() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tombstone_audio = tmp.path().join("aged-tombstone.wav");
+        std::fs::write(&tombstone_audio, b"RIFF fake wav bytes").expect("write audio");
+
         let db = Database::open_in_memory().expect("db");
-        let (old, fresh) = {
+        let (aged, old, fresh) = {
             let conn = db.conn().expect("conn");
             set_retention_days(&conn, Some(90));
+            let aged = seed_days_old(&conn, 100, "aged.wav", tombstone_audio.clone().into());
             let old = seed_days_old(&conn, 100, "old-visit.wav", "/audio/old.wav".into());
             let fresh = seed_days_old(&conn, 10, "fresh-visit.wav", "/audio/fresh.wav".into());
-            (old, fresh)
+            seed_aged_tombstone(&conn, &aged, 40);
+            (aged, old, fresh)
         };
 
-        // Client tick: phase 2 only (is_server = false).
-        retention_sweep_tick(&db, false);
+        // Client tick — no server anywhere; the purge runs regardless.
+        retention_sweep_tick(&db);
 
         let conn = db.conn().expect("conn");
+        assert!(!row_exists(&conn, aged.id), "aged tombstone purged on a client");
+        assert!(
+            !tombstone_audio.exists(),
+            "audio file removed with the purged row"
+        );
+        let ledger_at: Option<String> = conn
+            .query_row(
+                "SELECT purged_at FROM purged_recordings WHERE id = ?1",
+                [aged.id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("query ledger");
+        assert!(ledger_at.is_some(), "client purge writes the ledger");
         assert!(
             deleted_at_raw(&conn, old.id).is_some(),
-            "old recording trashed"
+            "old visible recording trashed by the retention phase"
+        );
+        assert!(
+            row_exists(&conn, old.id),
+            "a just-trashed row is not purge-eligible — it survives"
         );
         assert!(
             deleted_at_raw(&conn, fresh.id).is_none(),
             "fresh recording untouched"
         );
-        assert!(row_exists(&conn, old.id), "clients never purge rows");
-        let ledger_rows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM purged_recordings", [], |row| {
-                row.get(0)
-            })
-            .expect("count ledger");
-        assert_eq!(ledger_rows, 0, "clients never write the purge ledger");
     }
 
     #[test]
@@ -442,24 +493,13 @@ mod tests {
         let (rec, visible) = {
             let conn = db.conn().expect("conn");
             set_retention_days(&conn, None); // phase 2 disabled; phase 1 only
-            let rec = seed_days_old(&conn, 100, "purged-visit.wav", audio_path.clone());
+            let rec = seed_days_old(&conn, 100, "purged-visit.wav", audio_path.clone().into());
             let visible = seed_days_old(&conn, 100, "kept-visit.wav", "/audio/kept.wav".into());
-            // Seed an aged tombstone with a single UPDATE on the still-
-            // visible row (the same statement shape `soft_delete` uses) —
-            // updating `deleted_at` again AFTER soft_delete fires the FTS
-            // trigger against an already de-indexed row and fails with
-            // SQLITE_CORRUPT.
-            let past = (chrono::Utc::now() - chrono::TimeDelta::days(40))
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            conn.execute(
-                "UPDATE recordings SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-                rusqlite::params![past, rec.id.to_string()],
-            )
-            .expect("seed aged tombstone");
+            seed_aged_tombstone(&conn, &rec, 40);
             (rec, visible)
         };
 
-        retention_sweep_tick(&db, true);
+        retention_sweep_tick(&db);
 
         let conn = db.conn().expect("conn");
         assert!(!row_exists(&conn, rec.id), "old tombstone purged");
@@ -488,6 +528,68 @@ mod tests {
         assert_eq!(ledgered_visible, 0, "kept rows are never ledgered");
     }
 
+    /// PURGE-FIRST race (trash-restore D7, Codie gate 1): a restore
+    /// landing between the sweeper's listing and its purge must leave the
+    /// row ACTIVE with its audio file intact on disk. Drives the exact
+    /// production sequence: the stale candidate listing from
+    /// `list_soft_deleted_older_than`, a restore, then
+    /// `purge_tombstone_batch` on the stale listing.
+    #[test]
+    fn restore_between_listing_and_purge_leaves_row_active_with_audio() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let audio_path = tmp.path().join("raced-visit.wav");
+        std::fs::write(&audio_path, b"RIFF fake wav bytes").expect("write audio");
+
+        let db = Database::open_in_memory().expect("db");
+        let rec = {
+            let conn = db.conn().expect("conn");
+            set_retention_days(&conn, None);
+            let rec = seed_days_old(&conn, 100, "raced-visit.wav", audio_path.clone().into());
+            seed_aged_tombstone(&conn, &rec, 40);
+            rec
+        };
+
+        // The sweeper's listing runs FIRST…
+        let stale_listing = {
+            let conn = db.conn().expect("conn");
+            RecordingsRepo::list_soft_deleted_older_than(&conn, 30, chrono::Utc::now())
+                .expect("list candidates")
+        };
+        assert_eq!(stale_listing.len(), 1, "fixture: one purge candidate");
+
+        // …then the user's restore lands inside the race window…
+        {
+            let conn = db.conn().expect("conn");
+            RecordingsRepo::restore(&conn, &rec.id).expect("restore lands mid-sweep");
+        }
+
+        // …and the purge proceeds with the STALE listing.
+        let confirmed = {
+            let conn = db.conn().expect("conn");
+            purge_tombstone_batch(&conn, &stale_listing)
+        };
+
+        assert!(confirmed.is_empty(), "the restored row is not purged");
+        let conn = db.conn().expect("conn");
+        assert!(row_exists(&conn, rec.id), "row survived");
+        assert!(
+            deleted_at_raw(&conn, rec.id).is_none(),
+            "row is ACTIVE, not trashed"
+        );
+        assert!(
+            audio_path.exists(),
+            "restored row's audio must still be on disk"
+        );
+        let ledgered: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+                [rec.id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("count ledger");
+        assert_eq!(ledgered, 0, "no ledger entry for a row that was never purged");
+    }
+
     #[test]
     fn retention_sweep_without_window_trashes_nothing() {
         let db = Database::open_in_memory().expect("db");
@@ -497,7 +599,7 @@ mod tests {
             seed_days_old(&conn, 400, "ancient-visit.wav", "/audio/ancient.wav".into())
         };
 
-        retention_sweep_tick(&db, false);
+        retention_sweep_tick(&db);
 
         let conn = db.conn().expect("conn");
         assert!(
