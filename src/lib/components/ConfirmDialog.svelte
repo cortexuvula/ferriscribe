@@ -1,3 +1,10 @@
+<script module lang="ts">
+  /// Shared per-instance counter for unique aria-describedby body ids
+  /// (module scope: one counter across every ConfirmDialog instance, so
+  /// stacked dialogs never cross-reference each other's bodies).
+  let confirmDialogInstanceCounter = 0;
+</script>
+
 <script lang="ts">
   import { pushOverlay, isTopmostOverlay, trapTabWithin } from '../stores/overlay';
 
@@ -12,6 +19,10 @@
     confirmOnly?: boolean;
     /** Scrollable monospace body for long text (e.g. stored prompts). */
     tallBody?: boolean;
+    /** Dialog ARIA role. Default 'alertdialog' (existing callers); use
+     *  'dialog' for message-heavy prompts that don't demand immediate
+     *  attention. */
+    role?: 'alertdialog' | 'dialog';
     onConfirm: () => void;
     onCancel: () => void;
   }
@@ -25,9 +36,14 @@
     danger = true,
     confirmOnly = false,
     tallBody = false,
+    role = 'alertdialog',
     onConfirm,
     onCancel,
   }: Props = $props();
+
+  // Unique per-instance body id so aria-describedby survives two stacked
+  // dialogs (e.g. a confirm over the Settings modal).
+  let bodyId = `confirm-dialog-body-${++confirmDialogInstanceCounter}`;
 
   let root: HTMLElement | undefined = $state();
   let unregister: (() => void) | null = null;
@@ -70,13 +86,19 @@
 
 {#if open}
   <div class="confirm-backdrop" bind:this={root} onclick={handleBackdrop} role="presentation" tabindex="-1">
-    <div class="confirm-dialog" role="alertdialog" aria-modal="true" aria-label={title}>
+    <div
+      class="confirm-dialog"
+      role={role}
+      aria-modal="true"
+      aria-label={title}
+      aria-describedby={bodyId}
+    >
       <div class="confirm-header">
         <span class="confirm-icon" class:danger>{danger ? '⚠' : '?'}</span>
         <span class="confirm-title">{title}</span>
       </div>
       <div class="confirm-body" class:tall={tallBody}>
-        <p>{message}</p>
+        <p id={bodyId}>{message}</p>
       </div>
       <div class="confirm-actions">
         {#if !confirmOnly}

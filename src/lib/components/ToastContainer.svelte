@@ -6,6 +6,18 @@
   }
   const { onNavigate }: Props = $props();
 
+  /// Announcement semantics (trash-restore D9): success toasts are polite
+  /// (role=status — they announce without interrupting), error toasts are
+  /// assertive (role=alert — they ARE actionable failures). Actionable
+  /// toasts (Undo/View) pause their auto-dismiss on focus/hover so the
+  /// button can't vanish mid-reach; dismissal resumes on blur/mouseleave
+  /// with the REMAINING budget (not a fresh 8 s).
+  function isActionable(toast: Toast): boolean {
+    return Boolean(
+      toast.actionLabel || (toast.type === 'success' && toast.recordingId),
+    );
+  }
+
   function handleView(toast: Toast) {
     if (toast.recordingId && onNavigate) {
       onNavigate('soap', toast.recordingId);
@@ -22,7 +34,16 @@
 {#if toasts.list.length > 0}
   <div class="toast-container">
     {#each toasts.list as toast (toast.id)}
-      <div class="toast" class:toast-success={toast.type === 'success'} class:toast-error={toast.type === 'error'}>
+      <div
+        class="toast"
+        class:toast-success={toast.type === 'success'}
+        class:toast-error={toast.type === 'error'}
+        role={toast.type === 'error' ? 'alert' : 'status'}
+        onfocusin={() => isActionable(toast) && toasts.pause(toast.id)}
+        onfocusout={() => isActionable(toast) && toasts.resume(toast.id)}
+        onmouseenter={() => isActionable(toast) && toasts.pause(toast.id)}
+        onmouseleave={() => isActionable(toast) && toasts.resume(toast.id)}
+      >
         <span class="toast-message">{toast.message}</span>
         <div class="toast-actions">
           {#if toast.actionLabel && toast.onAction}
