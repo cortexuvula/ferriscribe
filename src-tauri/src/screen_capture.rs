@@ -232,7 +232,10 @@ async fn capture_macos(data_dir: &Path) -> Result<Vec<u8>, RegionCaptureError> {
         let path = path.clone();
         move || {
             let bytes = std::fs::read(&path).unwrap_or_default();
-            shred_and_unlink(&path);
+            // Shared best-effort shred (zero-fill + unlink) from
+            // `file_crypto`; the result is irrelevant here — the file may
+            // legitimately not exist on a cancelled capture.
+            let _ = medical_security::file_crypto::shred_and_unlink(&path);
             bytes
         }
     })
@@ -265,36 +268,6 @@ fn private_capture_dir(data_dir: &Path) -> Result<std::path::PathBuf, RegionCapt
             .map_err(|e| RegionCaptureError::Failed(format!("create capture dir: {e}")))?;
     }
     Ok(dir)
-}
-
-/// Best-effort shred: overwrite the file's bytes with zeros, fsync, unlink.
-/// APFS may satisfy the overwrite via copy-on-write clones, so this is
-/// defense-in-depth, not a guarantee — the 0700 parent dir is the real
-/// boundary. The unlink always runs, even when the overwrite fails.
-#[cfg(target_os = "macos")]
-fn shred_and_unlink(path: &Path) {
-    use std::io::Write;
-    let result = std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .and_then(|mut f| {
-            let len = f.metadata()?.len() as usize;
-            let zeros = vec![0u8; len.min(8 * 1024 * 1024)];
-            let mut written = 0;
-            while written < len {
-                let n = len - written;
-                let chunk = &zeros[..n.min(zeros.len())];
-                f.write_all(chunk)?;
-                written += chunk.len();
-            }
-            f.sync_all()
-        });
-    if let Err(e) = result {
-        tracing::debug!(error = %e, "capture file shred best-effort step failed");
-    }
-    if let Err(e) = std::fs::remove_file(path) {
-        tracing::debug!(error = %e, "capture file unlink failed");
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -828,15 +801,5 @@ mod tests {
         assert_eq!(mode & 0o777, 0o700, "capture dir must be owner-only");
         // Idempotent: second call returns the same dir.
         assert_eq!(private_capture_dir(tmp.path()).unwrap(), dir);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn shred_and_unlink_removes_file_contents_and_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("capture-test.png");
-        std::fs::write(&path, vec![0xAB_u8; 4096]).unwrap();
-        shred_and_unlink(&path);
-        assert!(!path.exists(), "capture file must be unlinked");
     }
 }
