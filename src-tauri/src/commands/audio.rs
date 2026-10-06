@@ -672,7 +672,13 @@ pub async fn cancel_recording(state: tauri::State<'_, AppState>) -> AppResult<()
     if let Some(current) = current
         && current.wav_path.exists()
     {
-        let _ = std::fs::remove_file(&current.wav_path);
+        // The capture WAV is plaintext PHI by construction (at-rest
+        // encryption only happens on the stop path), so shred before
+        // unlink — a plain remove_file would leave the audio recoverable
+        // on disk, the same exposure the screen-capture path shreds against.
+        if let Err(e) = medical_security::file_crypto::shred_and_unlink(&current.wav_path) {
+            tracing::debug!(error = %e, "cancel: shred/unlink of discarded capture failed");
+        }
     }
 
     Ok(())

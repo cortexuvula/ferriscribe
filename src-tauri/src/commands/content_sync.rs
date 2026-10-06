@@ -1129,6 +1129,12 @@ pub async fn subscribe_content_sync(
 /// returns decrypted plaintext bytes; this command re-encrypts them at rest
 /// before the write completes so plaintext PHI never touches disk.
 ///
+/// Refuses to fetch for a trashed/missing row (active-row pre-check), and
+/// removes the written file if the row's `audio_path` update fails — the
+/// row is gone or tombstoned, so nothing would reference the file and no
+/// sweep cleans rowless `.enc` artifacts (both mirror the server-side PUT
+/// handler's semantics).
+///
 /// Returns the local file path. No-op (returns the existing path) if the
 /// audio is already present locally.
 #[tauri::command]
@@ -1155,45 +1161,34 @@ pub async fn fetch_audio_from_server(
         return Ok(target_path.to_string_lossy().into_owned());
     }
 
+    // Active-row pre-check, mirroring the server PUT handler's gate: a
+    // trashed or missing row must not fetch audio. `update_audio_location`
+    // below refuses tombstoned rows (`deleted_at IS NULL`), so without this
+    // check a delete landing mid-fetch would strand the downloaded file
+    // with no row pointing at it.
+    {
+        let db = Arc::clone(&state.db);
+        let rec_id = recording_id.clone();
+        tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db.conn()?;
+            let uuid = uuid::Uuid::parse_str(&rec_id)
+                .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+            RecordingsRepo::get_by_id_active(&conn, &uuid).map_err(AppError::from)?;
+            Ok(())
+        })
+        .await
+        .map_err(crate::commands::join_err)??;
+    }
+
     // Download decrypted plaintext bytes from the server.
     let plaintext = remote.fetch_audio(&recording_id).await?;
     let byte_count = plaintext.len();
 
-    // Encrypt + write to disk + update DB audio_path, all on the blocking
-    // pool. `encrypt_file` encrypts in memory and writes ciphertext
-    // atomically (temp + rename), so plaintext PHI is never persisted even
-    // if the process dies mid-write.
     let db2 = Arc::clone(&state.db);
     let target_for_task = target_path.clone();
     let rec_id_for_task = recording_id.clone();
-    let path_str = tokio::task::spawn_blocking(move || -> AppResult<String> {
-        let tmp_path =
-            target_for_task.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
-        medical_security::file_crypto::encrypt_file(&tmp_path, &plaintext).map_err(|e| {
-            // Clean up on failure — never leave PHI on disk.
-            let _ = std::fs::remove_file(&tmp_path);
-            AppError::security(format!("audio re-encrypt failed: {e}"))
-        })?;
-        if let Err(e) = std::fs::rename(&tmp_path, &target_for_task) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(AppError::Io(e));
-        }
-
-        // Update the recording's audio_path + file_size_bytes.
-        // Audio-location-only write: must not bump `updated_at` (LWW stamp
-        // inflation → silent loss of concurrent field edits).
-        let conn = db2.conn()?;
-        let uuid = uuid::Uuid::parse_str(&rec_id_for_task)
-            .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
-        RecordingsRepo::update_audio_location(
-            &conn,
-            &uuid,
-            &target_for_task,
-            Some(byte_count as u64),
-        )
-        .map_err(AppError::from)?;
-
-        Ok(target_for_task.to_string_lossy().into_owned())
+    let path_str = tokio::task::spawn_blocking(move || {
+        write_fetched_audio_locally(&db2, &target_for_task, &rec_id_for_task, &plaintext)
     })
     .await
     .map_err(crate::commands::join_err)??;
@@ -1204,6 +1199,53 @@ pub async fn fetch_audio_from_server(
         "audio fetched and re-encrypted locally"
     );
     Ok(path_str)
+}
+
+/// Blocking core of [`fetch_audio_from_server`]: persist the fetched
+/// plaintext as ciphertext at `target` (in-memory encrypt + atomic temp +
+/// rename, so plaintext PHI never touches disk even on a mid-write crash),
+/// then point the row's `audio_path` at it. Extracted from the command so
+/// the failure-cleanup contract is unit-testable without a server.
+fn write_fetched_audio_locally(
+    db: &Arc<Database>,
+    target: &std::path::Path,
+    rec_id: &str,
+    plaintext: &[u8],
+) -> AppResult<String> {
+    let byte_count = plaintext.len();
+    let result: AppResult<String> = (|| {
+        let tmp_path = target.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+        medical_security::file_crypto::encrypt_file(&tmp_path, plaintext).map_err(|e| {
+            // Clean up on failure — never leave PHI on disk.
+            let _ = std::fs::remove_file(&tmp_path);
+            AppError::security(format!("audio re-encrypt failed: {e}"))
+        })?;
+        if let Err(e) = std::fs::rename(&tmp_path, target) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(AppError::Io(e));
+        }
+
+        // Update the recording's audio_path + file_size_bytes.
+        // Audio-location-only write: must not bump `updated_at` (LWW stamp
+        // inflation → silent loss of concurrent field edits).
+        let conn = db.conn()?;
+        let uuid = uuid::Uuid::parse_str(rec_id)
+            .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+        RecordingsRepo::update_audio_location(&conn, &uuid, target, Some(byte_count as u64))
+            .map_err(AppError::from)?;
+        Ok(target.to_string_lossy().into_owned())
+    })();
+    // Any failure AFTER the atomic rename removes the target: the file now
+    // belongs to no row (`update_audio_location` refused because the row
+    // was trashed/purged mid-fetch — its `deleted_at IS NULL` guard — or
+    // the DB write itself failed) and NO sweep claims rowless `.enc`
+    // artifacts, so keeping it would strand decryptable PHI forever.
+    // Mirrors the server PUT handler's failure cleanup; a transient DB
+    // error also lands here and the next fetch simply re-downloads.
+    if result.is_err() {
+        let _ = std::fs::remove_file(target);
+    }
+    result
 }
 
 /// Read local audio for a recording, decrypt it to plaintext, and upload it
@@ -1274,6 +1316,85 @@ mod tests {
         assert_eq!(merged, vec!["old-a", "old-b", "new-c", "new-d"]);
         // Empty inputs stay empty.
         assert!(merge_audio_queue(&[], &[]).is_empty());
+    }
+
+    /// Happy path of the fetched-audio write: ciphertext on disk, row's
+    /// `audio_path` pointing at it, no temp leftovers.
+    #[test]
+    fn write_fetched_audio_persists_ciphertext_and_points_the_row_at_it() {
+        let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xCCu8; 32]);
+
+        let db = Arc::new(Database::open_in_memory().expect("db"));
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rec = {
+            let conn = db.conn().expect("conn");
+            let rec = Recording::new(
+                "pulled.wav",
+                std::path::PathBuf::from("/nonexistent/pulled.wav"),
+            );
+            RecordingsRepo::insert(&conn, &rec).expect("insert");
+            rec
+        };
+        let target = tmp.path().join(format!("{}.enc", rec.id));
+
+        let out = write_fetched_audio_locally(&db, &target, &rec.id.to_string(), b"SERVER AUDIO")
+            .expect("write succeeds for a live row");
+        assert_eq!(out, target.to_string_lossy().into_owned());
+        assert!(
+            medical_security::file_crypto::is_encrypted(&target),
+            "fetched audio must be ciphertext at rest"
+        );
+        {
+            let conn = db.conn().expect("conn");
+            let row = RecordingsRepo::get_by_id(&conn, &rec.id).expect("row");
+            assert_eq!(row.audio_path, target);
+            assert_eq!(row.file_size_bytes, Some(b"SERVER AUDIO".len() as u64));
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("read dir")
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| e.file_name().to_string_lossy().contains(".tmp"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "no temp files may remain");
+    }
+
+    /// The orphan fix (2026-10-06 audio-delete review): when the row was
+    /// trashed/purged while the fetch was in flight, the guarded
+    /// `update_audio_location` refuses — and the just-written ciphertext
+    /// must NOT be left behind (no sweep cleans rowless `.enc` files).
+    #[test]
+    fn write_fetched_audio_removes_target_when_row_refuses_the_update() {
+        let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xCDu8; 32]);
+
+        let db = Arc::new(Database::open_in_memory().expect("db"));
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rec = {
+            let conn = db.conn().expect("conn");
+            let rec = Recording::new(
+                "trashed.wav",
+                std::path::PathBuf::from("/nonexistent/trashed.wav"),
+            );
+            RecordingsRepo::insert(&conn, &rec).expect("insert");
+            // Tombstone AFTER insert — the fetch's pre-check may have passed
+            // moments earlier; this drives the mid-flight delete.
+            RecordingsRepo::soft_delete(&conn, &rec.id).expect("soft delete");
+            rec
+        };
+        let target = tmp.path().join(format!("{}.enc", rec.id));
+
+        let result =
+            write_fetched_audio_locally(&db, &target, &rec.id.to_string(), b"SERVER AUDIO");
+        assert!(
+            result.is_err(),
+            "guarded update must refuse a tombstoned row"
+        );
+        assert!(
+            !target.exists(),
+            "the written ciphertext must be removed with the error — never orphaned"
+        );
     }
 
     /// The retry queue's permanence classification: only live rows with a

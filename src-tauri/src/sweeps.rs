@@ -10,9 +10,31 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use medical_db::ContentSyncRepo;
 use medical_db::Database;
 use medical_db::recordings::RecordingsRepo;
 use tracing::info;
+use uuid::Uuid;
+
+/// Remove one audio file, shredding plaintext first when needed.
+///
+/// Encrypted artifacts (FE1-magic `.wav`, sync-transport `.enc`) hold only
+/// ciphertext — a plain unlink suffices. Legacy plaintext WAVs are shredded
+/// (zero-fill + fsync + unlink, `file_crypto::shred_and_unlink`) so
+/// unencrypted PHI isn't left recoverable on disk, matching the
+/// screen-capture precedent for discarding plaintext PHI files.
+///
+/// Returns the underlying io error so callers can classify: `NotFound`
+/// means already gone, anything else is retryable via the
+/// `pending_file_removals` queue.
+fn remove_audio_file(path: &str) -> std::io::Result<()> {
+    let path = Path::new(path);
+    if medical_security::file_crypto::is_encrypted(path) {
+        std::fs::remove_file(path)
+    } else {
+        medical_security::file_crypto::shred_and_unlink(path)
+    }
+}
 
 /// Flip any recordings still marked Processing from the previous session
 /// (crash, hard-quit, SIGKILL mid-pipeline) to Failed so the UI doesn't
@@ -243,6 +265,10 @@ pub fn retention_sweep_tick(db: &Database) {
         return;
     };
 
+    // Retry file removals a previous purge failed to complete (the rows are
+    // gone, so this queue is their only recovery path).
+    pending_file_removals_sweep(&conn);
+
     // ── Phase 1: tombstone purge (every machine) ─────────────────────
     let to_purge = match RecordingsRepo::list_soft_deleted_older_than(&conn, 30, chrono::Utc::now())
     {
@@ -291,7 +317,12 @@ pub fn retention_sweep_tick(db: &Database) {
 /// a restore may land in that window. The purge transaction's
 /// `deleted_at IS NOT NULL` guard skips such a row (rows=0 → not
 /// confirmed), so its audio and vectors are never deleted out from under a
-/// live recording. Missing audio files are tolerated.
+/// live recording. Missing audio files are tolerated. Audio removal itself
+/// shreds legacy plaintext WAVs before unlinking (encrypted artifacts get
+/// a plain unlink — they hold only ciphertext), and a non-NotFound removal
+/// failure enqueues the path in the `pending_file_removals` retry queue:
+/// the row is already deleted, so no later tombstone listing can re-see
+/// the id.
 ///
 /// Separate from `retention_sweep_tick` so the restore-race test can drive
 /// the exact production sequence with a stale listing.
@@ -317,6 +348,7 @@ fn purge_tombstone_batch(
     // Artifact cleanup for the CONFIRMED ids only.
     use medical_db::vectors::VectorsRepo;
     let mut audio_removed = 0usize;
+    let mut failed_removals: Vec<String> = Vec::new();
     for (id, audio_path) in candidates {
         if !confirmed.contains(id) {
             continue; // restored (or otherwise revived) mid-sweep — not ours
@@ -331,14 +363,47 @@ fn purge_tombstone_batch(
         if audio_path.is_empty() {
             continue;
         }
-        match std::fs::remove_file(audio_path) {
+        match remove_audio_file(audio_path) {
             Ok(()) => audio_removed += 1,
             // Tolerate missing files (already cleaned up, pulled machine
             // whose audio lives on the partner).
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                tracing::warn!(recording_id = %id, error = %e, "tombstone sweeper: failed to delete audio file")
+                // The row is already deleted, so no future tombstone
+                // listing can re-see this id — enqueue the path for retry
+                // by `pending_file_removals_sweep` (boot + every tick).
+                tracing::warn!(
+                    recording_id = %id,
+                    error = %e,
+                    "tombstone sweeper: audio removal failed — queued for retry"
+                );
+                failed_removals.push(audio_path.clone());
             }
+        }
+    }
+    if !failed_removals.is_empty() {
+        // Best-effort persistence: a failure here leaves the files in place
+        // (warned above) — never aborts the already-committed purge.
+        match ContentSyncRepo::get_pending_file_removals(conn) {
+            Ok(mut queue) => {
+                for path in &failed_removals {
+                    if !queue.contains(path) {
+                        queue.push(path.clone());
+                    }
+                }
+                if let Err(e) = ContentSyncRepo::set_pending_file_removals(conn, &queue) {
+                    tracing::warn!(
+                        error = %e,
+                        count = failed_removals.len(),
+                        "tombstone sweeper: persisting file-removal retry queue failed"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                count = failed_removals.len(),
+                "tombstone sweeper: reading file-removal retry queue failed"
+            ),
         }
     }
     tracing::info!(
@@ -347,6 +412,150 @@ fn purge_tombstone_batch(
         "tombstone sweeper purged soft-deleted recordings + RAG vectors + audio files"
     );
     confirmed
+}
+
+/// Retry audio-file removals queued by a failed purge (see
+/// [`purge_tombstone_batch`]). Success or NotFound drops a path — the
+/// latter means the file was cleaned up by other means; any other error
+/// keeps it for the next tick. Runs at boot and at the top of every
+/// retention tick. PHI-safe: logs carry counts only, never paths.
+pub fn pending_file_removals_sweep(conn: &medical_db::Connection) {
+    let mut queue = match ContentSyncRepo::get_pending_file_removals(conn) {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::warn!(error = %e, "file removal retry sweep: queue read failed");
+            return;
+        }
+    };
+    if queue.is_empty() {
+        return;
+    }
+    let mut removed = 0usize;
+    let before = queue.len();
+    queue.retain(|path| match remove_audio_file(path) {
+        Ok(()) => {
+            removed += 1;
+            false
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            removed += 1;
+            false
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "file removal retry failed — kept for next sweep");
+            true
+        }
+    });
+    if queue.len() != before
+        && let Err(e) = ContentSyncRepo::set_pending_file_removals(conn, &queue)
+    {
+        tracing::warn!(error = %e, "file removal retry sweep: queue persist failed");
+    }
+    if removed > 0 {
+        info!(count = removed, "Removed previously-failed audio file(s)");
+    }
+}
+
+/// Delete `.enc` sync artifacts in the recordings dir that no row's
+/// `audio_path` references.
+///
+/// `{uuid}.enc` files are written exclusively by the audio sync paths (the
+/// server-side PUT handler and the client-side fetch), each of which sets
+/// the row's `audio_path` immediately after — so a rowless `.enc` is a
+/// crash leftover (process died between the atomic rename and the DB
+/// update) whose row can never reference it again. Unlike the rowless-WAV
+/// sweep, which ENCRYPTS for possible manual recovery, these are deleted:
+/// they are decryptable PHI (the key is on this machine) that nothing else
+/// would ever clean. The audio GET handler resolves via the row's
+/// `audio_path`, so a rowless file is never servable — deleting it cannot
+/// break a live recording; a live row whose fetch crashed mid-way simply
+/// re-fetches.
+///
+/// Only files whose stem parses as a UUID (our naming convention — never a
+/// user-named file) are touched, and only when modified more than 10
+/// minutes ago (an in-flight fetch/upload legitimately writes the file
+/// before its row update lands). PHI-safe: logs carry counts only.
+pub fn orphaned_enc_sweep(db: &Database, recordings_dir: &Path) {
+    let dir = match std::fs::read_dir(recordings_dir) {
+        Ok(d) => d,
+        Err(_) => return, // dir doesn't exist yet — nothing to sweep
+    };
+
+    // Basenames every row references (basename compare — stored paths may
+    // be absolute while we list the dir directly). Tombstoned rows count
+    // too: their audio is the 30-day purge's business, not ours.
+    let known: std::collections::HashSet<String> = {
+        let conn = match db.conn() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "orphan enc sweep: cannot open DB");
+                return;
+            }
+        };
+        match conn
+            .prepare("SELECT audio_path FROM recordings")
+            .and_then(|mut stmt| {
+                let mut out = std::collections::HashSet::new();
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                for path in rows.flatten() {
+                    if let Some(name) = std::path::Path::new(&path).file_name() {
+                        out.insert(name.to_string_lossy().into_owned());
+                    }
+                }
+                Ok(out)
+            }) {
+            Ok(set) => set,
+            Err(e) => {
+                tracing::warn!(error = %e, "orphan enc sweep: audio_path query failed");
+                return;
+            }
+        }
+    };
+
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for entry in dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("enc") {
+            continue;
+        }
+        // Only our own sync artifacts — `{uuid}.enc`. A user-named `.enc`
+        // file is never touched.
+        let stem_is_uuid = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .is_some();
+        if !stem_is_uuid {
+            continue;
+        }
+        let name = match path.file_name() {
+            Some(n) => n.to_string_lossy().into_owned(),
+            None => continue,
+        };
+        if known.contains(&name) {
+            continue; // a row (live or trashed) references this file
+        }
+        // Age guard: an in-flight fetch/upload may have written the file
+        // before its row update landed.
+        let mtime = entry.metadata().and_then(|m| m.modified()).ok();
+        if let Some(t) = mtime
+            && now.duration_since(t).unwrap_or(Duration::ZERO) < Duration::from_secs(600)
+        {
+            continue;
+        }
+        // Ciphertext at rest — a plain unlink is sufficient.
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(error = %e, "orphan enc sweep: delete failed"),
+        }
+    }
+    if removed > 0 {
+        info!(
+            count = removed,
+            "Deleted orphaned .enc audio artifacts with no DB row"
+        );
+    }
 }
 
 /// Spawn the periodic sweeper: first tick 5 minutes after boot, then daily.
@@ -771,5 +980,154 @@ mod tests {
 
         // Missing directory is a no-op, not an error (nothing ever captured).
         translation_wav_sweep(&tmp.path().join("does-not-exist"));
+    }
+
+    /// Backdate a file's mtime by an hour so the age guards let the sweeps
+    /// see it (shared fixture helper for the newer sweeps).
+    fn backdate(path: &Path) {
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let ft = filetime::FileTime::from_system_time(past);
+        filetime::set_file_mtime(path, ft).expect("backdate mtime");
+    }
+
+    /// A purge whose audio removal FAILS (here: the path is a directory, so
+    /// unlink errors with something other than NotFound) must enqueue the
+    /// path for retry — the row is already gone, so the queue is the only
+    /// thing that can ever finish the deletion.
+    #[test]
+    fn purge_removal_failure_queues_path_and_retry_sweep_completes_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // A directory where the audio file should be: remove_file fails
+        // (EISDIR-class), never NotFound.
+        let stubborn = tmp.path().join("locked-visit.wav");
+        std::fs::create_dir(&stubborn).expect("create dir-as-audio-path");
+
+        let db = Database::open_in_memory().expect("db");
+        let rec = {
+            let conn = db.conn().expect("conn");
+            set_retention_days(&conn, None);
+            let rec = seed_days_old(&conn, 100, "locked.wav", stubborn.clone());
+            seed_aged_tombstone(&conn, &rec, 40);
+            rec
+        };
+
+        // First tick: row purged, removal fails, path enqueued.
+        retention_sweep_tick(&db);
+        {
+            let conn = db.conn().expect("conn");
+            assert!(
+                !row_exists(&conn, rec.id),
+                "row purged despite file failure"
+            );
+        }
+        let queue = {
+            let conn = db.conn().expect("conn");
+            ContentSyncRepo::get_pending_file_removals(&conn).expect("queue read")
+        };
+        assert_eq!(
+            queue,
+            vec![stubborn.to_string_lossy().into_owned()],
+            "failed removal path must be queued for retry"
+        );
+        assert!(stubborn.exists(), "the stubborn path itself is untouched");
+
+        // Retry while still failing: the path stays queued.
+        {
+            let conn = db.conn().expect("conn");
+            pending_file_removals_sweep(&conn);
+            let queue = ContentSyncRepo::get_pending_file_removals(&conn).expect("queue read");
+            assert_eq!(queue.len(), 1, "still-failing removal stays queued");
+        }
+
+        // Obstacle removed (e.g. the lock released / user cleared it): the
+        // next retry sweep finishes the job and empties the queue.
+        std::fs::remove_dir(&stubborn).expect("clear the obstacle");
+        {
+            let conn = db.conn().expect("conn");
+            pending_file_removals_sweep(&conn);
+            let queue = ContentSyncRepo::get_pending_file_removals(&conn).expect("queue read");
+            assert!(queue.is_empty(), "completed removal leaves the queue");
+        }
+    }
+
+    /// The retry sweep drops a path on success AND on NotFound (cleaned up
+    /// by other means) — only real errors keep it.
+    #[test]
+    fn pending_file_removals_sweep_removes_files_and_drops_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("queued-visit.wav");
+        std::fs::write(&file, b"RIFF queued").expect("write file");
+        let missing = tmp.path().join("already-gone.wav");
+
+        let db = Database::open_in_memory().expect("db");
+        {
+            let conn = db.conn().expect("conn");
+            ContentSyncRepo::set_pending_file_removals(
+                &conn,
+                &[
+                    file.to_string_lossy().into_owned(),
+                    missing.to_string_lossy().into_owned(),
+                ],
+            )
+            .expect("seed queue");
+            pending_file_removals_sweep(&conn);
+
+            assert!(!file.exists(), "queued file must be removed");
+            let queue = ContentSyncRepo::get_pending_file_removals(&conn).expect("queue read");
+            assert!(
+                queue.is_empty(),
+                "success and NotFound both drop their paths"
+            );
+        }
+    }
+
+    /// Rowless `.enc` sync artifacts are deleted; row-backed, fresh,
+    /// non-UUID-named, and non-`.enc` files are never touched.
+    #[test]
+    fn orphaned_enc_sweep_deletes_only_aged_rowless_uuid_enc() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Aged + rowless + UUID stem — the crash-leftover this sweep exists
+        // for.
+        let orphan = tmp.path().join(format!("{}.enc", Uuid::new_v4()));
+        std::fs::write(&orphan, b"FE1\x00\x01ciphertext").expect("write orphan");
+        backdate(&orphan);
+
+        // Row-backed: a row's audio_path references it — kept (its row's
+        // 30-day purge owns it, live or trashed).
+        let owned = tmp.path().join(format!("{}.enc", Uuid::new_v4()));
+        std::fs::write(&owned, b"FE1\x00\x01ciphertext").expect("write owned");
+        backdate(&owned);
+
+        // Fresh rowless — may belong to an in-flight fetch/upload.
+        let fresh = tmp.path().join(format!("{}.enc", Uuid::new_v4()));
+        std::fs::write(&fresh, b"FE1\x00\x01ciphertext").expect("write fresh");
+
+        // Aged rowless but NOT UUID-named — could be a user file.
+        let foreign = tmp.path().join("notes.enc");
+        std::fs::write(&foreign, b"user data").expect("write foreign");
+        backdate(&foreign);
+
+        // Aged rowless WAV — the wav sweep's business, never ours.
+        let wav = tmp.path().join("crash.wav");
+        std::fs::write(&wav, b"RIFF plaintext").expect("write wav");
+        backdate(&wav);
+
+        let db = Database::open_in_memory().expect("db");
+        {
+            let conn = db.conn().expect("conn");
+            seed_days_old(&conn, 0, "owned.wav", owned.clone());
+        }
+
+        orphaned_enc_sweep(&db, tmp.path());
+
+        assert!(
+            !orphan.exists(),
+            "aged rowless uuid-stem .enc must be deleted"
+        );
+        assert!(owned.exists(), "row-backed .enc must be kept");
+        assert!(fresh.exists(), "fresh .enc may be in flight — kept");
+        assert!(foreign.exists(), "non-UUID .enc is never ours to delete");
+        assert!(wav.exists(), "wav files are the other sweep's business");
     }
 }

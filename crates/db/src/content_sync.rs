@@ -435,6 +435,55 @@ impl ContentSyncRepo {
         Ok(())
     }
 
+    /// Audio file paths whose removal was attempted during a tombstone
+    /// purge but failed with a non-NotFound error.
+    ///
+    /// The purge deletes the DB row FIRST (purge-first ordering), so once a
+    /// removal fails no later tombstone listing can ever re-see the id —
+    /// without this queue a single transient IO error (locked file,
+    /// permission blip) would strand the file forever. The retention sweep
+    /// and the boot sweeps drain it: success or NotFound drops a path,
+    /// other errors keep it for the next tick. Stored as a JSON array of
+    /// path strings under the `pending_file_removals` sync-state key,
+    /// created on demand. Paths are no more sensitive than the
+    /// `recordings.audio_path` column in this same encrypted database;
+    /// logs carry counts only, never paths.
+    pub fn get_pending_file_removals(conn: &Connection) -> DbResult<Vec<String>> {
+        let value: Option<String> = match conn.query_row(
+            "SELECT value FROM sync_state WHERE key = 'pending_file_removals'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(DbError::from(e)),
+        };
+        let Some(json) = value else {
+            return Ok(Vec::new());
+        };
+        match serde_json::from_str(&json) {
+            Ok(paths) => Ok(paths),
+            Err(e) => {
+                // Reset rather than propagate, mirroring the audio queue: a
+                // corrupt queue must never block the retention sweep.
+                tracing::warn!(error = %e, "pending file removal queue unreadable — resetting");
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Persist the pending file-removal queue (see
+    /// [`get_pending_file_removals`]).
+    pub fn set_pending_file_removals(conn: &Connection, paths: &[String]) -> DbResult<()> {
+        let json = serde_json::to_string(paths)
+            .map_err(|e| DbError::Migration(format!("serialize file removal queue: {e}")))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('pending_file_removals', ?1)",
+            params![json],
+        )?;
+        Ok(())
+    }
+
     /// Delta query: return recording IDs modified since the given cursor.
     ///
     /// `since` is an RFC 3339 `updated_at` watermark; `None` returns
@@ -1279,6 +1328,54 @@ mod tests {
         .expect("corrupt");
         assert!(
             ContentSyncRepo::get_pending_audio_uploads(&conn)
+                .expect("corrupt reads empty")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn pending_file_removals_round_trips_and_tolerates_bad_state() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+
+        // Fresh DB (no row at all) → empty.
+        assert!(
+            ContentSyncRepo::get_pending_file_removals(&conn)
+                .expect("get")
+                .is_empty()
+        );
+
+        // Round-trip.
+        let paths = vec![
+            "/recordings/a.wav".to_string(),
+            "/recordings/b.enc".to_string(),
+        ];
+        ContentSyncRepo::set_pending_file_removals(&conn, &paths).expect("set");
+        assert_eq!(
+            ContentSyncRepo::get_pending_file_removals(&conn).expect("get"),
+            paths
+        );
+
+        // A NULL row (the legacy shape the audio queue tolerates) reads empty.
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('pending_file_removals', NULL)",
+            [],
+        )
+        .expect("seed null");
+        assert!(
+            ContentSyncRepo::get_pending_file_removals(&conn)
+                .expect("null reads empty")
+                .is_empty()
+        );
+
+        // Corrupt JSON resets to empty rather than blocking the sweep.
+        conn.execute(
+            "UPDATE sync_state SET value = '{not json' WHERE key = 'pending_file_removals'",
+            [],
+        )
+        .expect("corrupt");
+        assert!(
+            ContentSyncRepo::get_pending_file_removals(&conn)
                 .expect("corrupt reads empty")
                 .is_empty()
         );

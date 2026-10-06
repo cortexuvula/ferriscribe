@@ -265,6 +265,41 @@ pub fn is_encrypted(path: &Path) -> bool {
     ok && &buf == MAGIC
 }
 
+/// Best-effort shred of a PLAINTEXT PHI file: overwrite its bytes with
+/// zeros, fsync, then unlink. Used when discarding files that were never
+/// encrypted at rest (a cancelled recording's fresh WAV, a legacy plaintext
+/// WAV being purged) — encrypted files (FE1 magic) contain only ciphertext
+/// and a plain [`std::fs::remove_file`] suffices for them.
+///
+/// APFS may satisfy the overwrite via copy-on-write clones, so this is
+/// defense-in-depth, not a guarantee. The overwrite step is best-effort:
+/// on failure it is logged and the unlink still runs, mirroring the
+/// original screen-capture helper these semantics come from. Returns the
+/// unlink result — `Err` means the file is still on disk and the caller
+/// may want to retry (e.g. via a pending-removals queue).
+pub fn shred_and_unlink(path: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let overwrite = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|mut f| {
+            let len = f.metadata()?.len() as usize;
+            let zeros = vec![0u8; len.min(8 * 1024 * 1024)];
+            let mut written = 0;
+            while written < len {
+                let n = len - written;
+                let chunk = &zeros[..n.min(zeros.len())];
+                f.write_all(chunk)?;
+                written += chunk.len();
+            }
+            f.sync_all()
+        });
+    if let Err(e) = overwrite {
+        tracing::debug!(error = %e, "shred overwrite best-effort step failed");
+    }
+    std::fs::remove_file(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,5 +498,26 @@ mod tests {
         encrypt_file_in_place_with(&no_ext, &cipher).expect("encrypt no ext");
         assert_eq!(decrypt_file_with(&with_ext, &cipher).unwrap(), b"RIFF one");
         assert_eq!(decrypt_file_with(&no_ext, &cipher).unwrap(), b"RIFF two");
+    }
+
+    #[test]
+    fn shred_and_unlink_removes_file_contents_and_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("plaintext-phi.wav");
+        std::fs::write(&path, vec![0xAB_u8; 4096]).unwrap();
+
+        shred_and_unlink(&path).expect("shred succeeds on a writable file");
+
+        assert!(!path.exists(), "shredded file must be unlinked");
+    }
+
+    #[test]
+    fn shred_and_unlink_reports_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("already-gone.wav");
+        assert!(
+            shred_and_unlink(&path).is_err(),
+            "a missing file must surface as an error so callers can classify NotFound"
+        );
     }
 }
