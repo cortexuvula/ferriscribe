@@ -134,15 +134,7 @@ pub async fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> 
 /// silently break deletion propagation in the privacy-critical direction.
 ///
 /// Logs carry counts and ids only — never recording content (PHI).
-fn spawn_recordings_push(
-    parts: Option<(
-        crate::commands::sharing::PairedConnection,
-        String,
-        Arc<reqwest::Client>,
-    )>,
-    db: Arc<medical_db::Database>,
-    ids: Vec<String>,
-) {
+fn spawn_recordings_push(parts: SyncPushParts, db: Arc<medical_db::Database>, ids: Vec<String>) {
     let Some((conn_paired, bearer, client)) = parts else {
         return;
     };
@@ -281,6 +273,18 @@ pub struct DeleteAllResult {
     pub ids: Vec<String>,
 }
 
+/// The paired-server push target once resolved (owned connection + bearer
+/// + HTTP client), as produced by `content_sync_target_parts`.
+pub(crate) type SyncPushParts = Option<(
+    crate::commands::sharing::PairedConnection,
+    String,
+    Arc<reqwest::Client>,
+)>;
+
+/// Blocking outcome of Move-all-to-Trash: the trashed ids plus the
+/// resolved push target for the fire-and-forget tombstone batch.
+type SoftDeleteAllOutcome = (Vec<Uuid>, SyncPushParts);
+
 /// Move every active recording to Trash (reversible Delete All).
 ///
 /// Soft-deletes all visible rows in one transaction (`soft_delete_all`):
@@ -303,14 +307,7 @@ pub async fn delete_all_recordings(
     // The soft-delete transaction and the sync-target gates (SQLite pool
     // checkout, config load, OS keychain read) are both blocking — one
     // blocking hop for both, mirroring `delete_recording`.
-    let (ids, parts) = tokio::task::spawn_blocking(move || -> AppResult<(
-        Vec<Uuid>,
-        Option<(
-            crate::commands::sharing::PairedConnection,
-            String,
-            Arc<reqwest::Client>,
-        )>,
-    )> {
+    let (ids, parts) = tokio::task::spawn_blocking(move || -> AppResult<SoftDeleteAllOutcome> {
         let conn = db.conn()?;
         let ids = RecordingsRepo::soft_delete_all(&conn).map_err(AppError::from)?;
         let parts = crate::commands::content_sync::content_sync_target_parts(&db_for_push, http);

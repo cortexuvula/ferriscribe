@@ -447,7 +447,7 @@ mod tests {
         let (aged, old, fresh) = {
             let conn = db.conn().expect("conn");
             set_retention_days(&conn, Some(90));
-            let aged = seed_days_old(&conn, 100, "aged.wav", tombstone_audio.clone().into());
+            let aged = seed_days_old(&conn, 100, "aged.wav", tombstone_audio.clone());
             let old = seed_days_old(&conn, 100, "old-visit.wav", "/audio/old.wav".into());
             let fresh = seed_days_old(&conn, 10, "fresh-visit.wav", "/audio/fresh.wav".into());
             seed_aged_tombstone(&conn, &aged, 40);
@@ -498,7 +498,7 @@ mod tests {
         let (rec, visible) = {
             let conn = db.conn().expect("conn");
             set_retention_days(&conn, None); // phase 2 disabled; phase 1 only
-            let rec = seed_days_old(&conn, 100, "purged-visit.wav", audio_path.clone().into());
+            let rec = seed_days_old(&conn, 100, "purged-visit.wav", audio_path.clone());
             let visible = seed_days_old(&conn, 100, "kept-visit.wav", "/audio/kept.wav".into());
             seed_aged_tombstone(&conn, &rec, 40);
             (rec, visible)
@@ -549,7 +549,7 @@ mod tests {
         let rec = {
             let conn = db.conn().expect("conn");
             set_retention_days(&conn, None);
-            let rec = seed_days_old(&conn, 100, "raced-visit.wav", audio_path.clone().into());
+            let rec = seed_days_old(&conn, 100, "raced-visit.wav", audio_path.clone());
             seed_aged_tombstone(&conn, &rec, 40);
             rec
         };

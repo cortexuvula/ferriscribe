@@ -569,10 +569,8 @@ impl RecordingsRepo {
         let tx = conn.unchecked_transaction()?;
         let id_strs: Vec<String> = {
             let mut stmt = tx.prepare("SELECT id FROM recordings WHERE deleted_at IS NULL")?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut trashed = Vec::with_capacity(id_strs.len());
         {
@@ -776,10 +774,8 @@ impl RecordingsRepo {
         let tx = conn.unchecked_transaction()?;
         let id_strs: Vec<String> = {
             let mut stmt = tx.prepare("SELECT id FROM recordings WHERE deleted_at IS NOT NULL")?;
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut restored = Vec::with_capacity(id_strs.len());
         for id_str in id_strs {
@@ -822,12 +818,10 @@ impl RecordingsRepo {
                 "SELECT id FROM recordings WHERE {}",
                 Self::DELETED_BETWEEN_WHERE
             ))?;
-            let rows = stmt
-                .query_map(rusqlite::params![start_iso, end_iso], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
+            stmt.query_map(rusqlite::params![start_iso, end_iso], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut restored = Vec::with_capacity(id_strs.len());
         for id_str in id_strs {

@@ -1384,7 +1384,6 @@ mod tests {
     fn changed_since_re_travels_tombstones_and_revives() {
         use crate::recordings::RecordingsRepo;
         use medical_core::types::recording::Recording;
-        use uuid::Uuid;
 
         let db = Database::open_in_memory().expect("db");
         let conn = db.conn().expect("conn");
