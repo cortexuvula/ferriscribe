@@ -4,6 +4,7 @@
   import SearchBar from './SearchBar.svelte';
   import TrashRecordingRow from './TrashRecordingRow.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import RestoreByDateDialog from './RestoreByDateDialog.svelte';
 
   /// Trash view panel. Search state is LOCAL and separate from the Active
   /// view's — entering Trash always starts with an empty query. The search
@@ -17,6 +18,7 @@
   /// filter and the box (the debounced onSearch only flows one way).
   let searchInput = $state('');
   let showRestoreAll = $state(false);
+  let showRestoreByDate = $state(false);
 
   /// The ONE polite live region for trash-local results (D9): per-row
   /// restore completions land here — never ALSO as a toast (no double
@@ -110,13 +112,22 @@
       {recordings.trashedTotal}
       {recordings.trashedTotal === 1 ? 'recording' : 'recordings'} in Trash
     </span>
-    <button
-      class="btn-restore-all"
-      onclick={() => (showRestoreAll = true)}
-      disabled={recordings.trashedTotal === 0}
-    >
-      Restore all…
-    </button>
+    <div class="trash-actions">
+      <button
+        class="btn-restore-date"
+        onclick={() => (showRestoreByDate = true)}
+        disabled={recordings.trashedTotal === 0}
+      >
+        Restore by deletion date…
+      </button>
+      <button
+        class="btn-restore-all"
+        onclick={() => (showRestoreAll = true)}
+        disabled={recordings.trashedTotal === 0}
+      >
+        Restore all…
+      </button>
+    </div>
   </div>
 
   <SearchBar
@@ -206,6 +217,13 @@
   />
 {/if}
 
+{#if showRestoreByDate && recordings.trashedTotal > 0}
+  <RestoreByDateDialog
+    onClose={() => (showRestoreByDate = false)}
+    onAnnounce={announce}
+  />
+{/if}
+
 <style>
   .trash-panel {
     flex: 1;
@@ -246,7 +264,8 @@
     color: var(--text-muted);
   }
 
-  .btn-restore-all {
+  .btn-restore-all,
+  .btn-restore-date {
     padding: 4px 10px;
     font-size: 12px;
     font-weight: 500;
@@ -257,12 +276,19 @@
     cursor: pointer;
   }
 
-  .btn-restore-all:hover:not(:disabled) {
+  .trash-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .btn-restore-all:hover:not(:disabled),
+  .btn-restore-date:hover:not(:disabled) {
     background-color: var(--bg-hover);
     color: var(--text-primary);
   }
 
-  .btn-restore-all:disabled {
+  .btn-restore-all:disabled,
+  .btn-restore-date:disabled {
     opacity: 0.6;
     cursor: not-allowed;
   }
