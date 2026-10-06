@@ -15,6 +15,9 @@
  *   - ONE polite role="status" region (result announcements), plus a
  *     focusable Trash heading (focus fallback for vanished rows).
  *   - Per-row restore calls store.restoreTrashed([id]) and announces.
+ *   - Restore-failure toasts are SANITIZED (PHI never reaches the glass):
+ *     generic value for raw backend strings, the safe `recording <uuid>`
+ *     reference kept when the message carries one.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
@@ -24,7 +27,7 @@ import type { TrashedRecordingSummary } from '../types';
 // ── Store + toasts mocks ───────────────────────────────────────────────────
 // vi.mock factories are hoisted above every const, so the store object is
 // created inside vi.hoisted and shared through the mocks holder.
-const { fakeStore, mockRestoreTrashed, mockLoadTrashed } = vi.hoisted(() => {
+const { fakeStore, mockRestoreTrashed, mockLoadTrashed, mockToastsError } = vi.hoisted(() => {
   const fakeStore = {
     trashedList: [] as import('../types').TrashedRecordingSummary[],
     trashedTotal: 0,
@@ -42,6 +45,7 @@ const { fakeStore, mockRestoreTrashed, mockLoadTrashed } = vi.hoisted(() => {
     fakeStore,
     mockRestoreTrashed: fakeStore.restoreTrashed,
     mockLoadTrashed: fakeStore.loadTrashed,
+    mockToastsError: vi.fn(),
   };
 });
 
@@ -58,7 +62,7 @@ function makeTrashed(id: string, deletedAt = '2026-10-01T12:00:00Z'): TrashedRec
 
 vi.mock('../stores/recordings.svelte', () => ({ recordings: fakeStore }));
 vi.mock('../stores/toasts.svelte', () => ({
-  toasts: { add: vi.fn(), error: vi.fn(), success: vi.fn(), dismiss: vi.fn() },
+  toasts: { add: vi.fn(), error: mockToastsError, success: vi.fn(), dismiss: vi.fn() },
 }));
 
 beforeEach(() => {
@@ -264,5 +268,42 @@ describe('TrashPanel — Restore all (D5)', () => {
     expect(fakeStore.restoreAllFromTrash).toHaveBeenCalledTimes(1);
     // The dialog closes before the await — a double-click hits nothing.
     expect(screen.queryByText('Restore all 2 recordings from Trash?')).toBeNull();
+  });
+});
+
+describe('TrashPanel — restore-failure toasts are sanitized (PHI)', () => {
+  it('per-row failure shows the generic value, never the raw backend message', async () => {
+    fakeStore.trashedList = [makeTrashed('row-a')];
+    fakeStore.trashedTotal = 1;
+    mockRestoreTrashed.mockRejectedValueOnce(
+      new Error('failed to open Smith_John_visit.wav'),
+    );
+    render(TrashPanel);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    await waitFor(() =>
+      expect(mockToastsError).toHaveBeenCalledWith(
+        "Couldn't restore recording: unexpected error",
+      ),
+    );
+    // The raw backend message never reached the glass.
+    expect(mockToastsError.mock.calls.flat().join(' ')).not.toContain('Smith');
+  });
+
+  it('restore-all failure keeps only the safe recording id reference', async () => {
+    fakeStore.trashedList = [makeTrashed('a')];
+    fakeStore.trashedTotal = 1;
+    fakeStore.restoreAllFromTrash.mockRejectedValueOnce(
+      new Error('Not found: recording 3fa85f64-5717-4562-b3fc-2c963f66afa6'),
+    );
+    render(TrashPanel);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Restore all…' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Restore all 1' }));
+    await waitFor(() =>
+      expect(mockToastsError).toHaveBeenCalledWith(
+        "Couldn't restore recordings: recording 3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      ),
+    );
   });
 });

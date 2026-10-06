@@ -13,7 +13,9 @@
  *   - Restore rides restoreTrashedOnDate with a duplicate-submit guard;
  *     success closes the dialog and announces ACTUAL vs preview (they can
  *     differ when a purge intervened); failure keeps date + dialog with the
- *     retry copy.
+ *     retry copy AND invalidates + re-queries the preview (polish Item 4:
+ *     a stale N must never survive a failure — the retry executes against
+ *     a fresh count).
  */
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
@@ -180,11 +182,13 @@ describe('RestoreByDateDialog — restore', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('failure keeps the date + dialog open with the retry copy', async () => {
+  it('failure keeps the date + dialog open with the retry copy and re-queries the preview', async () => {
     const onClose = vi.fn();
     const onAnnounce = vi.fn();
     await previewedDialog(onClose, onAnnounce);
     mockRestoreTrashedOnDate.mockRejectedValueOnce(new Error('db busy'));
+    // The recount the failure path must run (polish Item 4).
+    mockCountTrashedOnDate.mockResolvedValueOnce(4);
 
     await fireEvent.click(screen.getByRole('button', { name: 'Restore 4 recordings' }));
 
@@ -195,6 +199,34 @@ describe('RestoreByDateDialog — restore', () => {
     expect(
       (screen.getByLabelText('Deleted on') as HTMLInputElement).value,
     ).not.toBe('');
+    // The stale preview was invalidated and re-queried: the count command
+    // ran again and a FRESH preview stands for the retry.
+    expect(mockCountTrashedOnDate).toHaveBeenCalledTimes(2);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Restore 4 recordings' })).toBeTruthy(),
+    );
+  });
+
+  it('retry after a failure executes against the RE-QUERIED count, not the stale one', async () => {
+    const onClose = vi.fn();
+    const onAnnounce = vi.fn();
+    const day = await previewedDialog(onClose, onAnnounce);
+    mockRestoreTrashedOnDate.mockRejectedValueOnce(new Error('db busy'));
+    mockCountTrashedOnDate.mockResolvedValueOnce(3); // one purged since
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Restore 4 recordings' }));
+    // Recount lands: the button now promises the fresh N.
+    const retry = await screen.findByRole('button', { name: 'Restore 3 recordings' });
+    mockRestoreTrashedOnDate.mockResolvedValueOnce(3);
+
+    await fireEvent.click(retry);
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(mockRestoreTrashedOnDate).toHaveBeenLastCalledWith(
+      new Date(day.getFullYear(), day.getMonth(), day.getDate()),
+    );
+    // Announced against the fresh preview (3 vs 3 — no "no longer" line).
+    expect(onAnnounce).toHaveBeenCalledWith('3 recordings restored to Active.');
   });
 
   it('Restoring state guards duplicate submissions', async () => {

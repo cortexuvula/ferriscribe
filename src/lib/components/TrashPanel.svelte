@@ -5,6 +5,7 @@
   import TrashRecordingRow from './TrashRecordingRow.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import RestoreByDateDialog from './RestoreByDateDialog.svelte';
+  import { sanitizedErr } from '../utils/sanitizedErr';
 
   /// Trash view panel. Search state is LOCAL and separate from the Active
   /// view's — entering Trash always starts with an empty query. The search
@@ -72,7 +73,7 @@
       });
     } catch (err) {
       console.error('Failed to restore recording:', err);
-      toasts.error(`Couldn't restore recording: ${err}`);
+      toasts.error(`Couldn't restore recording: ${sanitizedErr(err)}`);
     }
   }
 
@@ -88,7 +89,7 @@
       announce(`${count} ${noun} restored to Active.`);
     } catch (err) {
       console.error('Failed to restore all recordings:', err);
-      toasts.error(`Couldn't restore recordings: ${err}`);
+      toasts.error(`Couldn't restore recordings: ${sanitizedErr(err)}`);
     }
   }
 </script>

@@ -65,6 +65,25 @@
   );
   const futureDate = $derived(chosenDay !== null && isFuture(chosenDay));
 
+  /// Re-query the count preview for the chosen day. Shared by the
+  /// date-change path and the restore-failure retry path: a preview
+  /// captured before a failed restore may be stale (a purge may have
+  /// changed the candidate set), so a retry must re-count before it can
+  /// execute again — never restore against the pre-failure N.
+  async function refreshPreview(): Promise<void> {
+    if (chosenDay === null) return;
+    phase = 'counting';
+    previewCount = null;
+    try {
+      previewCount = await recordings.countTrashedOnDate(chosenDay);
+      phase = 'preview';
+    } catch (err) {
+      console.error('Failed to count trashed recordings by date:', err);
+      errorMsg = "Couldn't count recordings. Try again.";
+      phase = 'idle';
+    }
+  }
+
   async function handleDateChange() {
     errorMsg = null;
     if (chosenDay === null) {
@@ -77,17 +96,7 @@
       previewCount = null;
       return;
     }
-    phase = 'counting';
-    previewCount = null;
-    try {
-      const n = await recordings.countTrashedOnDate(chosenDay);
-      previewCount = n;
-      phase = 'preview';
-    } catch (err) {
-      console.error('Failed to count trashed recordings by date:', err);
-      errorMsg = "Couldn't count recordings. Try again.";
-      phase = 'idle';
-    }
+    await refreshPreview();
   }
 
   async function handleRestore() {
@@ -110,9 +119,12 @@
       onClose();
     } catch (err) {
       console.error('Failed to restore recordings by date:', err);
-      // Keep the date + dialog; the preview stands for a retry.
+      // Keep the date + dialog — but the stored preview may be stale (the
+      // purge that caused the mismatch may have happened before a retry),
+      // so it is invalidated and re-queried here: the next Restore click
+      // executes against a fresh count, never the pre-failure N.
       errorMsg = "Couldn't restore recordings. Try again.";
-      phase = 'preview';
+      await refreshPreview();
     }
   }
 

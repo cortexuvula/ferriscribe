@@ -588,10 +588,10 @@ impl RecordingsRepo {
                 };
                 let rows = update.execute(rusqlite::params![now, id_str])?;
                 if rows == 0 {
-                    // Raced with a concurrent single-delete inside the
-                    // transaction window — the row is already tombstoned and
-                    // its FTS 'delete' already fired; skip it (it is in the
-                    // other path's undo set, not this one).
+                    // Defensive: unreachable under snapshot isolation (a
+                    // concurrent writer yields SQLITE_BUSY, not zero rows);
+                    // kept so a zero-row UPDATE can never fire the FTS
+                    // 'delete' against an already-de-indexed row.
                     continue;
                 }
                 fts_delete.execute([&id_str])?;

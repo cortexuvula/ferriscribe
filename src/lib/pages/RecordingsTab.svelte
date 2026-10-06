@@ -8,6 +8,7 @@
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import RecordingViewSwitch from '../components/RecordingViewSwitch.svelte';
   import TrashPanel from '../components/TrashPanel.svelte';
+  import { sanitizedErr } from '../utils/sanitizedErr';
 
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
   let showMoveAll = $state(false);
@@ -58,13 +59,13 @@
             await recordings.restore(targetId);
             toasts.success('Recording restored');
           } catch (err) {
-            toasts.error(`Could not restore: ${err}`);
+            toasts.error(`Could not restore: ${sanitizedErr(err)}`);
           }
         },
       });
     } catch (err) {
       console.error('Failed to move recording to Trash:', err);
-      toasts.error(`Failed to move recording to Trash: ${err}`);
+      toasts.error(`Failed to move recording to Trash: ${sanitizedErr(err)}`);
     }
   }
 
@@ -93,13 +94,13 @@
             toasts.success(`${restored} ${restoredNoun} restored to Active.`);
           } catch (err) {
             console.error('Failed to undo move-all:', err);
-            toasts.error(`Could not restore: ${err}`);
+            toasts.error(`Could not restore: ${sanitizedErr(err)}`);
           }
         },
       });
     } catch (err) {
       console.error('Failed to move all recordings to Trash:', err);
-      toasts.error(`Failed to move recordings to Trash: ${err}`);
+      toasts.error(`Failed to move recordings to Trash: ${sanitizedErr(err)}`);
     }
   }
 
