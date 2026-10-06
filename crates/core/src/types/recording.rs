@@ -301,6 +301,44 @@ impl std::fmt::Debug for RecordingSummary {
     }
 }
 
+/// Summary of a soft-deleted recording for the Trash list view.
+///
+/// Carries ONLY structural metadata — never transcript/SOAP/referral/
+/// letter content: a trash listing must not move clinical text around
+/// (PHI minimization). `deleted_at` is the moved-to-Trash timestamp; the
+/// frontend derives the days-remaining display from it.
+///
+/// Manual `Debug` redacts `patient_name`, mirroring
+/// [`RecordingSummary`].
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TrashedRecordingSummary {
+    /// Recording UUID.
+    pub id: Uuid,
+    /// Original filename.
+    pub filename: String,
+    /// Patient name (if known) — the row's display label when present.
+    pub patient_name: Option<String>,
+    /// Audio duration in seconds.
+    pub duration_seconds: Option<f64>,
+    /// When the recording was created (recorded).
+    pub created_at: DateTime<Utc>,
+    /// When it was moved to Trash (the row's `deleted_at`).
+    pub deleted_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for TrashedRecordingSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrashedRecordingSummary")
+            .field("id", &self.id)
+            .field("filename", &self.filename)
+            .field("patient_name", &"<redacted>")
+            .field("duration_seconds", &self.duration_seconds)
+            .field("created_at", &self.created_at)
+            .field("deleted_at", &self.deleted_at)
+            .finish()
+    }
+}
+
 impl From<&Recording> for RecordingSummary {
     fn from(r: &Recording) -> Self {
         Self {

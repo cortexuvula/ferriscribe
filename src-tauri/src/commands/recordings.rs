@@ -345,6 +345,135 @@ pub async fn count_recordings(state: tauri::State<'_, AppState>) -> AppResult<u3
     .map_err(join_err)?
 }
 
+/// One page of the Trash view plus the authoritative total (D4).
+#[derive(serde::Serialize)]
+pub struct TrashedListResult {
+    pub items: Vec<medical_core::types::recording::TrashedRecordingSummary>,
+    pub total: u32,
+}
+
+/// List soft-deleted recordings (Trash view), newest deletion first.
+/// Summaries carry structural metadata only — never transcript/SOAP
+/// content.
+#[tauri::command]
+pub async fn list_trashed_recordings(
+    state: tauri::State<'_, AppState>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> AppResult<TrashedListResult> {
+    let db = state.db.clone();
+    let (items, total) = tokio::task::spawn_blocking(move || -> AppResult<(_, _)> {
+        let conn = db.conn()?;
+        RecordingsRepo::list_trashed(&conn, limit.unwrap_or(50), offset.unwrap_or(0))
+            .map_err(AppError::from)
+    })
+    .await
+    .map_err(join_err)??;
+    Ok(TrashedListResult { items, total })
+}
+
+/// Validate a `[start, end)` RFC3339 pair for the day-scoped restore
+/// surfaces (D6): both must parse, and start must be strictly before end.
+/// Shared by the count-preview and the restore command so the two can
+/// never disagree about what a valid window is.
+fn validate_interval(
+    start_iso: &str,
+    end_iso: &str,
+) -> AppResult<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+    let parse = |s: &str, label: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .map_err(|e| {
+                AppError::InvalidInput(format!("invalid {label} timestamp: {e}"))
+            })
+    };
+    let start = parse(start_iso, "start")?;
+    let end = parse(end_iso, "end")?;
+    if start >= end {
+        return Err(AppError::InvalidInput(
+            "start timestamp must be before end timestamp".into(),
+        ));
+    }
+    Ok((start, end))
+}
+
+/// Restore EVERY recording in Trash ("Restore all", D5). Returns the
+/// actual restored count; revives are pushed to the paired server.
+#[tauri::command]
+pub async fn restore_all_trashed(
+    state: tauri::State<'_, AppState>,
+) -> AppResult<RestoreResult> {
+    let db = state.db.clone();
+    let restored = tokio::task::spawn_blocking(move || -> AppResult<Vec<Uuid>> {
+        let conn = db.conn()?;
+        RecordingsRepo::restore_all(&conn).map_err(AppError::from)
+    })
+    .await
+    .map_err(join_err)??;
+
+    let count = restored.len() as u32;
+    let id_strs: Vec<String> = restored.iter().map(|i| i.to_string()).collect();
+    let parts = crate::commands::content_sync::content_sync_target(&state).await;
+    spawn_recordings_push(parts, state.db.clone(), id_strs.clone());
+    tracing::info!(count, "restored all recordings from Trash");
+    Ok(RestoreResult {
+        count,
+        ids: id_strs,
+    })
+}
+
+/// Preview count for restore-by-date (D6): how many recordings currently
+/// in Trash were moved there inside `[start_iso, end_iso)`. MUST be the
+/// count command — never derived from paginated trash pages.
+#[tauri::command]
+pub async fn count_recordings_deleted_between(
+    state: tauri::State<'_, AppState>,
+    start_iso: String,
+    end_iso: String,
+) -> AppResult<u32> {
+    validate_interval(&start_iso, &end_iso)?;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        RecordingsRepo::count_deleted_between(&conn, &start_iso, &end_iso)
+            .map_err(AppError::from)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+/// Restore every recording moved to Trash inside the half-open
+/// `[start_iso, end_iso)` window (exact local-calendar-day restore, D6).
+/// Returns the ACTUAL restored count — a purge or concurrent restore may
+/// have changed the candidate set since the preview; callers report
+/// actual vs preview.
+#[tauri::command]
+pub async fn restore_recordings_deleted_between(
+    state: tauri::State<'_, AppState>,
+    start_iso: String,
+    end_iso: String,
+) -> AppResult<RestoreResult> {
+    validate_interval(&start_iso, &end_iso)?;
+    let db = state.db.clone();
+    let restored = tokio::task::spawn_blocking(move || -> AppResult<Vec<Uuid>> {
+        let conn = db.conn()?;
+        RecordingsRepo::restore_deleted_between(&conn, &start_iso, &end_iso)
+            .map_err(AppError::from)
+    })
+    .await
+    .map_err(join_err)??;
+
+    let count = restored.len() as u32;
+    let id_strs: Vec<String> = restored.iter().map(|i| i.to_string()).collect();
+    let parts = crate::commands::content_sync::content_sync_target(&state).await;
+    spawn_recordings_push(parts, state.db.clone(), id_strs.clone());
+    tracing::info!(count, "restored recordings from Trash by deletion date");
+    Ok(RestoreResult {
+        count,
+        ids: id_strs,
+    })
+}
+
 /// Import an audio file from the filesystem into the recordings library.
 ///
 /// Non-WAV files (MP3, FLAC, OGG, M4A, AAC) are automatically converted to

@@ -6,7 +6,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Row};
 use uuid::Uuid;
 
-use medical_core::types::recording::{ProcessingStatus, Recording, RecordingSummary};
+use medical_core::types::recording::{
+    ProcessingStatus, Recording, RecordingSummary, TrashedRecordingSummary,
+};
 
 use crate::{DbError, DbResult};
 
@@ -765,6 +767,157 @@ impl RecordingsRepo {
         }
         tx.commit()?;
         Ok(restored)
+    }
+
+    /// Restore EVERY soft-deleted recording ("Restore all") in one
+    /// transaction, with the same per-row semantics as
+    /// [`restore`](Self::restore). Returns the ids actually restored.
+    pub fn restore_all(conn: &Connection) -> DbResult<Vec<Uuid>> {
+        let tx = conn.unchecked_transaction()?;
+        let id_strs: Vec<String> = {
+            let mut stmt =
+                tx.prepare("SELECT id FROM recordings WHERE deleted_at IS NOT NULL")?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut restored = Vec::with_capacity(id_strs.len());
+        for id_str in id_strs {
+            let Ok(id) = Uuid::parse_str(&id_str) else {
+                continue;
+            };
+            match Self::restore_row_within_tx(&tx, &id) {
+                Ok(()) => restored.push(id),
+                Err(DbError::NotFound(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        tx.commit()?;
+        Ok(restored)
+    }
+
+    /// The half-open `[start, end)` interval over `deleted_at` shared by
+    /// [`restore_deleted_between`](Self::restore_deleted_between) and
+    /// [`count_deleted_between`](Self::count_deleted_between). `datetime()`
+    /// on both sides matches the retention sweep's comparison convention
+    /// and correctly orders the RFC3339-with-offset strings this table
+    /// stores. Callers validate the timestamps parse; the SQL is shared so
+    /// the preview count and the restore can never disagree about the
+    /// candidate set's boundaries.
+    const DELETED_BETWEEN_WHERE: &'static str =
+        "deleted_at IS NOT NULL AND datetime(deleted_at) >= datetime(?1) AND datetime(deleted_at) < datetime(?2)";
+
+    /// Restore every recording moved to Trash inside the half-open
+    /// `[start, end)` interval (exact local-calendar-day restore: the
+    /// frontend sends `[local-midnight, next-local-midnight)` as UTC
+    /// RFC3339). One transaction, per-row semantics identical to
+    /// [`restore`](Self::restore). Returns the ids actually restored.
+    pub fn restore_deleted_between(
+        conn: &Connection,
+        start_iso: &str,
+        end_iso: &str,
+    ) -> DbResult<Vec<Uuid>> {
+        let tx = conn.unchecked_transaction()?;
+        let id_strs: Vec<String> = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT id FROM recordings WHERE {}",
+                Self::DELETED_BETWEEN_WHERE
+            ))?;
+            let rows = stmt
+                .query_map(rusqlite::params![start_iso, end_iso], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut restored = Vec::with_capacity(id_strs.len());
+        for id_str in id_strs {
+            let Ok(id) = Uuid::parse_str(&id_str) else {
+                continue;
+            };
+            match Self::restore_row_within_tx(&tx, &id) {
+                Ok(()) => restored.push(id),
+                Err(DbError::NotFound(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        tx.commit()?;
+        Ok(restored)
+    }
+
+    /// Count recordings moved to Trash inside the same half-open
+    /// `[start, end)` interval — the D6 preview-count surface. MUST use
+    /// the same WHERE clause as [`restore_deleted_between`](Self::restore_deleted_between)
+    /// so the preview and the execution reference the same candidate set.
+    pub fn count_deleted_between(
+        conn: &Connection,
+        start_iso: &str,
+        end_iso: &str,
+    ) -> DbResult<u32> {
+        let n: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM recordings WHERE {}",
+                Self::DELETED_BETWEEN_WHERE
+            ),
+            rusqlite::params![start_iso, end_iso],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
+    /// List soft-deleted recordings for the Trash view, newest deletion
+    /// first. Returns `(page, total)` — the total is the authoritative
+    /// trashed count (badge, "M in Trash" copy), independent of paging.
+    ///
+    /// The summary carries ONLY structural metadata (id, filename,
+    /// patient_name, duration, created_at, deleted_at) — never
+    /// transcript/SOAP content.
+    pub fn list_trashed(
+        conn: &Connection,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<(Vec<TrashedRecordingSummary>, u32)> {
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM recordings WHERE deleted_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT id, filename, patient_name, duration_seconds, created_at, deleted_at
+             FROM recordings
+             WHERE deleted_at IS NOT NULL
+             ORDER BY deleted_at DESC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit, offset], |row| {
+                let id_str: String = row.get(0)?;
+                let id = Uuid::parse_str(&id_str).map_err(|e| {
+                    tracing::warn!(error = %e, "unparseable recording id in trash listing");
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let created_at_str: String = row.get(4)?;
+                let deleted_at_str: String = row.get(5)?;
+                Ok(TrashedRecordingSummary {
+                    id,
+                    filename: row.get(1)?,
+                    patient_name: row.get(2)?,
+                    duration_seconds: row.get(3)?,
+                    created_at: crate::parse_db_timestamp(4, &created_at_str, "recordings.created_at")?,
+                    deleted_at: crate::parse_db_timestamp(5, &deleted_at_str, "recordings.deleted_at")?,
+                })
+            })?
+            .filter_map(|r| {
+                r.map_err(|e| tracing::warn!(error = %e, "dropping unreadable row in trash listing"))
+                    .ok()
+            })
+            .collect();
+        Ok((rows, total as u32))
     }
 
     /// Retention sweep: soft-delete every visible recording older than the
@@ -1818,6 +1971,141 @@ mod tests {
     fn restore_many_empty_input_is_noop() {
         let conn = migrated_conn();
         assert!(RecordingsRepo::restore_many(&conn, &[]).unwrap().is_empty());
+    }
+
+    /// Seed a row that is already trashed with an EXACT `deleted_at`
+    /// (day-scoped restore fixtures). Raw UPDATE on a still-visible row —
+    /// the same statement shape the sweeper test uses; updating
+    /// `deleted_at` again AFTER soft_delete would fire the FTS trigger
+    /// against a de-indexed row (SQLITE_CORRUPT).
+    fn seed_trashed_at(conn: &Connection, filename: &str, deleted_at: &str) -> Recording {
+        let mut rec = new_rec();
+        rec.filename = filename.into();
+        RecordingsRepo::insert(conn, &rec).expect("insert fixture");
+        conn.execute(
+            "UPDATE recordings SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![deleted_at, rec.id.to_string()],
+        )
+        .expect("seed deleted_at");
+        rec
+    }
+
+    #[test]
+    fn list_trashed_pages_newest_deletion_first_with_authoritative_total() {
+        let conn = migrated_conn();
+        let oldest = seed_trashed_at(&conn, "old-trash.wav", "2026-10-01T09:00:00+00:00");
+        let newest = seed_trashed_at(&conn, "new-trash.wav", "2026-10-03T09:00:00+00:00");
+        let middle = seed_trashed_at(&conn, "mid-trash.wav", "2026-10-02T09:00:00+00:00");
+        // An active row must never appear.
+        let live = new_rec();
+        RecordingsRepo::insert(&conn, &live).unwrap();
+
+        let (page1, total) = RecordingsRepo::list_trashed(&conn, 2, 0).unwrap();
+        assert_eq!(total, 3, "total is the authoritative trashed count");
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1[0].id, newest.id, "newest deletion first");
+        assert_eq!(page1[1].id, middle.id);
+
+        let (page2, total) = RecordingsRepo::list_trashed(&conn, 2, 2).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].id, oldest.id);
+        assert!(page1.iter().all(|s| s.id != live.id));
+
+        // Summary carries the structural fields the row display needs.
+        let s = &page1[0];
+        assert_eq!(s.filename, "new-trash.wav");
+        assert!(s.deleted_at.to_rfc3339().starts_with("2026-10-03T09:00:00"));
+    }
+
+    #[test]
+    fn restore_all_revives_every_trashed_row_with_exemption() {
+        let conn = migrated_conn();
+        let a = seed_trashed_at(&conn, "all-a.wav", "2026-10-01T09:00:00+00:00");
+        let b = seed_trashed_at(&conn, "all-b.wav", "2026-10-05T09:00:00+00:00");
+        let live = new_rec();
+        RecordingsRepo::insert(&conn, &live).unwrap();
+
+        let restored = RecordingsRepo::restore_all(&conn).unwrap();
+
+        assert_eq!(restored.len(), 2);
+        for rec in [&a, &b] {
+            let row = RecordingsRepo::get_by_id_active(&conn, &rec.id).unwrap();
+            assert_eq!(row.metadata["retention_exempt"], true);
+        }
+        assert!(RecordingsRepo::restore_all(&conn).unwrap().is_empty());
+    }
+
+    /// D6 acceptance: a recording deleted on day B is NOT restored when
+    /// restoring day A; boundaries are exact (start inclusive, end
+    /// exclusive — half-open interval, matching the sweep convention).
+    #[test]
+    fn restore_deleted_between_is_day_exact_and_count_agrees() {
+        let conn = migrated_conn();
+        // Day A = 2026-10-01 (UTC window [00:00, next 00:00)).
+        let at_start = seed_trashed_at(&conn, "at-start.wav", "2026-10-01T00:00:00+00:00");
+        let mid_day = seed_trashed_at(&conn, "mid-day.wav", "2026-10-01T12:30:00+00:00");
+        let at_end = seed_trashed_at(&conn, "at-end.wav", "2026-10-02T00:00:00+00:00");
+        let day_b = seed_trashed_at(&conn, "day-b.wav", "2026-10-02T12:30:00+00:00");
+        let live = new_rec();
+        RecordingsRepo::insert(&conn, &live).unwrap();
+
+        let (start, end) = ("2026-10-01T00:00:00+00:00", "2026-10-02T00:00:00+00:00");
+
+        // Preview count and restore reference the same candidate set.
+        assert_eq!(
+            RecordingsRepo::count_deleted_between(&conn, start, end).unwrap(),
+            2
+        );
+
+        let restored = RecordingsRepo::restore_deleted_between(&conn, start, end).unwrap();
+
+        let restored_ids: std::collections::HashSet<Uuid> = restored.into_iter().collect();
+        assert!(restored_ids.contains(&at_start.id), "start boundary inclusive");
+        assert!(restored_ids.contains(&mid_day.id));
+        assert!(
+            !restored_ids.contains(&at_end.id),
+            "end boundary exclusive (half-open)"
+        );
+        assert!(!restored_ids.contains(&day_b.id), "day-B row untouched");
+        for rec in [&at_start, &mid_day] {
+            let row = RecordingsRepo::get_by_id_active(&conn, &rec.id).unwrap();
+            assert_eq!(row.metadata["retention_exempt"], true);
+        }
+        // Day-B row stays trashed; the live row stays live.
+        assert!(
+            RecordingsRepo::get_by_id_active(&conn, &day_b.id).is_err(),
+            "day-B row still trashed"
+        );
+        assert!(RecordingsRepo::get_by_id_active(&conn, &live.id).is_ok());
+
+        // After the restore the preview count for the same window is 0.
+        assert_eq!(
+            RecordingsRepo::count_deleted_between(&conn, start, end).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn deleted_between_empty_window_counts_zero() {
+        let conn = migrated_conn();
+        seed_trashed_at(&conn, "far-away.wav", "2026-01-01T00:00:00+00:00");
+        assert_eq!(
+            RecordingsRepo::count_deleted_between(
+                &conn,
+                "2026-10-01T00:00:00+00:00",
+                "2026-10-02T00:00:00+00:00"
+            )
+            .unwrap(),
+            0
+        );
+        assert!(RecordingsRepo::restore_deleted_between(
+            &conn,
+            "2026-10-01T00:00:00+00:00",
+            "2026-10-02T00:00:00+00:00"
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]
