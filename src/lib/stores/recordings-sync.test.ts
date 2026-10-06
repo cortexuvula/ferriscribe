@@ -24,6 +24,10 @@ vi.mock('../api/recordings', () => ({
   restoreRecordings: vi.fn(async () => ({ count: 0, ids: [] as string[] })),
   deleteAllRecordings: vi.fn(async () => ({ count: 0, ids: [] as string[] })),
   countRecordings: vi.fn(async () => 0),
+  listTrashedRecordings: vi.fn(async () => ({ items: [], total: 0 })),
+  restoreAllTrashed: vi.fn(async () => ({ count: 0, ids: [] as string[] })),
+  restoreRecordingsDeletedBetween: vi.fn(async () => ({ count: 0, ids: [] as string[] })),
+  countRecordingsDeletedBetween: vi.fn(async () => 0),
 }));
 
 vi.mock('../api/contentSync', () => ({

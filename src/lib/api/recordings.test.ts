@@ -11,6 +11,10 @@ import {
   deleteAllRecordings,
   countRecordings,
   restoreRecordings,
+  listTrashedRecordings,
+  restoreAllTrashed,
+  restoreRecordingsDeletedBetween,
+  countRecordingsDeletedBetween,
   importAudioFile,
 } from './recordings';
 
@@ -66,6 +70,39 @@ describe('recordings api', () => {
     });
     expect(invokeMock).toHaveBeenCalledWith('restore_recordings', {
       ids: ['a', 'b'],
+    });
+  });
+
+  it('listTrashedRecordings defaults limit=50, offset=0 and returns items+total', async () => {
+    invokeMock.mockResolvedValueOnce({ items: [], total: 3 });
+    await expect(listTrashedRecordings()).resolves.toEqual({ items: [], total: 3 });
+    expect(invokeMock).toHaveBeenCalledWith('list_trashed_recordings', {
+      limit: 50,
+      offset: 0,
+    });
+  });
+
+  it('restoreAllTrashed invokes with no args', async () => {
+    invokeMock.mockResolvedValueOnce({ count: 0, ids: [] });
+    await restoreAllTrashed();
+    expect(invokeMock).toHaveBeenCalledWith('restore_all_trashed');
+  });
+
+  it('count/restore by deletion date pass both interval bounds', async () => {
+    invokeMock.mockResolvedValueOnce(4);
+    await expect(
+      countRecordingsDeletedBetween('2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z'),
+    ).resolves.toBe(4);
+    expect(invokeMock).toHaveBeenCalledWith('count_recordings_deleted_between', {
+      startIso: '2026-10-01T00:00:00Z',
+      endIso: '2026-10-02T00:00:00Z',
+    });
+
+    invokeMock.mockResolvedValueOnce({ count: 4, ids: [] });
+    await restoreRecordingsDeletedBetween('2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z');
+    expect(invokeMock).toHaveBeenCalledWith('restore_recordings_deleted_between', {
+      startIso: '2026-10-01T00:00:00Z',
+      endIso: '2026-10-02T00:00:00Z',
     });
   });
 

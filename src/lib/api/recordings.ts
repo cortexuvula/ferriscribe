@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { Recording, RecordingSummary } from '../types';
+import type { Recording, RecordingSummary, TrashedRecordingSummary } from '../types';
 
 export async function listRecordings(limit = 50, offset = 0): Promise<RecordingSummary[]> {
   return invoke('list_recordings', { limit, offset });
@@ -50,6 +50,47 @@ export async function deleteAllRecordings(): Promise<DeleteAllResult> {
  *  use this number, never `list.length`. */
 export async function countRecordings(): Promise<number> {
   return invoke('count_recordings');
+}
+
+/** One page of the Trash view plus the authoritative total. */
+export interface TrashedListResult {
+  items: TrashedRecordingSummary[];
+  total: number;
+}
+
+/** List trashed recordings, newest deletion first. `total` is the
+ *  authoritative trashed count (badge / "M in Trash" copy) — independent
+ *  of pagination. */
+export async function listTrashedRecordings(
+  limit = 50,
+  offset = 0,
+): Promise<TrashedListResult> {
+  return invoke('list_trashed_recordings', { limit, offset });
+}
+
+/** Restore EVERY recording in Trash. Returns the actual restored count. */
+export async function restoreAllTrashed(): Promise<RestoreResult> {
+  return invoke('restore_all_trashed');
+}
+
+/** Preview count for restore-by-date: how many recordings in Trash were
+ *  moved there inside the half-open [startIso, endIso) window. Always the
+ *  dedicated count command — never derived from paginated trash pages. */
+export async function countRecordingsDeletedBetween(
+  startIso: string,
+  endIso: string,
+): Promise<number> {
+  return invoke('count_recordings_deleted_between', { startIso, endIso });
+}
+
+/** Restore every recording moved to Trash inside the half-open
+ *  [startIso, endIso) window. Returns the ACTUAL restored count (a purge
+ *  or concurrent restore may have changed the set since the preview). */
+export async function restoreRecordingsDeletedBetween(
+  startIso: string,
+  endIso: string,
+): Promise<RestoreResult> {
+  return invoke('restore_recordings_deleted_between', { startIso, endIso });
 }
 
 export async function importAudioFile(filePath: string): Promise<string> {

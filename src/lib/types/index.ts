@@ -89,6 +89,22 @@ export interface RecordingSummary {
 export type { ContextTemplate } from '../api/contextTemplates';
 import type { ContextTemplate } from '../api/contextTemplates';
 
+// ── Trashed Recording Summary ────────────────────────────────────────────────
+
+/** Structural summary of a soft-deleted recording (Trash view). Mirrors
+ *  `TrashedRecordingSummary` in crates/core/src/types/recording.rs —
+ *  content fields (transcript, SOAP, …) are deliberately absent: a trash
+ *  listing must not move clinical text around. */
+export interface TrashedRecordingSummary {
+  id: string;
+  filename: string;
+  patient_name: string | null;
+  duration_seconds: number | null;
+  created_at: string;
+  /** When the recording was moved to Trash (the row's `deleted_at`). */
+  deleted_at: string;
+}
+
 // ── App Config ────────────────────────────────────────────────────────────────
 
 // The Rust AppConfig (crates/core/src/types/settings.rs) defines additional

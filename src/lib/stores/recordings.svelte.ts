@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { SyncSummary } from '../api/contentSync';
-import type { Recording, RecordingSummary } from '../types';
+import type { Recording, RecordingSummary, TrashedRecordingSummary } from '../types';
 import {
   listRecordings,
   getRecording,
@@ -10,6 +10,10 @@ import {
   restoreRecordings,
   deleteAllRecordings,
   countRecordings,
+  listTrashedRecordings,
+  restoreAllTrashed,
+  restoreRecordingsDeletedBetween,
+  countRecordingsDeletedBetween,
   type DeleteAllResult,
 } from '../api/recordings';
 import { syncContentNow } from '../api/contentSync';
@@ -49,6 +53,23 @@ class RecordingsStore {
   /// recordings" (Move-all-to-Trash) must use this number, never
   /// `list.length`. Null until the first successful count.
   activeTotal = $state<number | null>(null);
+
+  // ── Trash state (D4/D8) ────────────────────────────────────────────────
+  /// Trashed recordings, newest deletion first (paginated like `list`).
+  trashedList = $state<TrashedRecordingSummary[]>([]);
+  /// Authoritative total of recordings in Trash (the Trash(N) badge and
+  /// "M in Trash" copy) — independent of pagination.
+  trashedTotal = $state<number>(0);
+  trashedLoading = $state<boolean>(false);
+  trashedLoadingMore = $state<boolean>(false);
+  trashedHasMore = $state<boolean>(false);
+  /// Error message from the last failed trash load, or null. The Trash
+  /// panel renders this as a retryable error state — never as an empty
+  /// trash (a load failure must not look like "nothing to restore").
+  trashedError = $state<string | null>(null);
+  /// Monotonic request id guarding trash-list writes (same discipline as
+  /// `listRequestId`: a stale trash load must never clobber a fresh one).
+  trashedRequestId = 0;
 
   /// Fetch the authoritative active count (COUNT query — cheap). Swallows
   /// errors: a failed count leaves the previous value in place rather than
@@ -191,6 +212,7 @@ class RecordingsStore {
         this.selectedRecording = null;
       }
       void this.refreshActiveTotal();
+      void this.refreshTrashedTotal();
     } catch (err) {
       console.error('Failed to delete recording:', err);
       this.lastDeleted = null;
@@ -233,6 +255,8 @@ class RecordingsStore {
       this.hasMore = false;
       this.selectedRecording = null;
       this.activeTotal = 0;
+      // Everything just moved into Trash — keep its badge honest too.
+      void this.refreshTrashedTotal();
       // Capture the exact set for the batch Undo toast (D2).
       this.lastDeletedAllIds = result.ids;
       return result;
@@ -269,6 +293,125 @@ class RecordingsStore {
     }
   }
 
+  /// Load the first page of the Trash view, replacing the list. Monotonic
+  /// request-id discipline identical to load(): stale responses are
+  /// discarded, and a failure sets `trashedError` (rendered as a retryable
+  /// error — never as an empty trash).
+  async loadTrashed(limit = PAGE_SIZE, offset = 0): Promise<void> {
+    const token = ++this.trashedRequestId;
+    this.trashedLoading = true;
+    this.trashedError = null;
+    try {
+      const { items, total } = await listTrashedRecordings(limit, offset);
+      if (token !== this.trashedRequestId) return;
+      this.trashedList = items;
+      this.trashedTotal = total;
+      this.trashedHasMore = items.length >= limit && items.length < total;
+    } catch (err) {
+      console.error('Failed to load Trash:', err);
+      if (token === this.trashedRequestId) {
+        this.trashedError = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      if (token === this.trashedRequestId) this.trashedLoading = false;
+    }
+  }
+
+  /// Fetch the next trash page and append it. No-op while a load is in
+  /// flight or when the previous fetch said no more results.
+  async loadMoreTrashed(): Promise<void> {
+    if (this.trashedLoadingMore || !this.trashedHasMore) return;
+    this.trashedLoadingMore = true;
+    const tokenAtStart = this.trashedRequestId;
+    try {
+      const offset = this.trashedList.length;
+      const { items, total } = await listTrashedRecordings(PAGE_SIZE, offset);
+      if (tokenAtStart !== this.trashedRequestId) return;
+      const existing = new Set(this.trashedList.map((r) => r.id));
+      const fresh = items.filter((r) => !existing.has(r.id));
+      this.trashedList = [...this.trashedList, ...fresh];
+      this.trashedTotal = total;
+      this.trashedHasMore = fresh.length >= PAGE_SIZE;
+    } catch (err) {
+      console.error('Failed to load more Trash:', err);
+    } finally {
+      this.trashedLoadingMore = false;
+    }
+  }
+
+  /// Refresh ONLY the authoritative trash total (badge updates after
+  /// mutations/sync/purge) without disturbing the loaded page.
+  async refreshTrashedTotal(): Promise<void> {
+    try {
+      // limit=0: no rows, just the COUNT — the total is folded into
+      // list_trashed_recordings by design (fewer commands).
+      const { total } = await listTrashedRecordings(0, 0);
+      this.trashedTotal = total;
+    } catch (err) {
+      console.error('Failed to refresh Trash total:', err);
+    }
+  }
+
+  /// Shared post-restore refresh: both Active and Trash totals move on
+  /// every restore/delete/sync/purge, so both are refreshed together.
+  private async refreshAfterMutation(): Promise<void> {
+    await Promise.all([this.load(), this.loadTrashed()]);
+  }
+
+  /// Restore specific trashed recordings by id (per-row Restore button).
+  /// Duplicate submissions while a restore is in flight are rejected.
+  /// Returns the actual restored count (0 when the row was purged or
+  /// already restored elsewhere).
+  async restoreTrashed(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0;
+    if (this.restoring) throw new Error('A restore is already in progress');
+    this.restoring = true;
+    try {
+      const result = await restoreRecordings(ids);
+      await this.refreshAfterMutation();
+      return result.count;
+    } finally {
+      this.restoring = false;
+    }
+  }
+
+  /// "Restore all" — every recording in Trash, regardless of what page is
+  /// loaded or what search filter is active.
+  async restoreAllFromTrash(): Promise<number> {
+    if (this.restoring) throw new Error('A restore is already in progress');
+    this.restoring = true;
+    try {
+      const result = await restoreAllTrashed();
+      await this.refreshAfterMutation();
+      return result.count;
+    } finally {
+      this.restoring = false;
+    }
+  }
+
+  /// Preview count for restore-by-date (the dedicated count command —
+  /// never derived from the loaded trash pages).
+  async countTrashedOnDate(day: Date): Promise<number> {
+    const { startIso, endIso } = localDayIntervalUtc(day);
+    return countRecordingsDeletedBetween(startIso, endIso);
+  }
+
+  /// Restore every recording moved to Trash on the given LOCAL calendar
+  /// day (exact day, not "on or after"). Returns the ACTUAL restored
+  /// count, which may differ from the preview (purge race).
+  async restoreTrashedOnDate(day: Date): Promise<number> {
+    if (this.restoring) throw new Error('A restore is already in progress');
+    const { startIso, endIso } = localDayIntervalUtc(day);
+    this.restoring = true;
+    try {
+      const result = await restoreRecordingsDeletedBetween(startIso, endIso);
+      await this.refreshAfterMutation();
+      return result.count;
+    } finally {
+      this.restoring = false;
+    }
+  }
+
   /// Sync with server (manual trigger or `content-changed` event). Sets the
   /// `syncing` flag for the duration, reloads the list afterwards so the UI
   /// reflects any merged changes, and stamps `lastSyncedAt`.
@@ -292,6 +435,9 @@ class RecordingsStore {
       summary = await invoke<SyncSummary>('sync_content_now');
       if (!summary?.disabled) {
         await this.load();
+        // Sync merges tombstones and revives from the partner — the Trash
+        // badge moves with them.
+        void this.refreshTrashedTotal();
         this.lastSyncedAt = new Date();
       }
     } catch (err) {
@@ -409,4 +555,17 @@ export async function selectRecording(id: string): Promise<void> {
     console.error('Failed to select recording:', err);
     throw err;
   }
+}
+
+/// The UTC interval `[startIso, endIso)` covering the LOCAL calendar day
+/// of `day` — the exact-day restore window (Andre's ruling: exact day,
+/// NOT "on or after"). `new Date(y, m, d)` is local midnight; passing
+/// `d + 1` rolls month/year boundaries correctly (and absorbs DST shifts,
+/// since both bounds are constructed as calendar midnights, not as
+/// 24-hour offsets). The backend compares half-open:
+/// `datetime(deleted_at) >= datetime(start) AND < datetime(end)`.
+export function localDayIntervalUtc(day: Date): { startIso: string; endIso: string } {
+  const start = new Date(day.getFullYear(), day.getMonth(), day.getDate());
+  const end = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1);
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
 }

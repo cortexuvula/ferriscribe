@@ -9,6 +9,10 @@ const mockCountRecordings = vi.fn();
 const mockDeleteAllRecordings = vi.fn();
 const mockRestoreRecordings = vi.fn();
 const mockDeleteRecording = vi.fn();
+const mockListTrashed = vi.fn();
+const mockRestoreAllTrashed = vi.fn();
+const mockRestoreBetween = vi.fn();
+const mockCountBetween = vi.fn();
 vi.mock('../api/recordings', () => ({
   listRecordings: (...args: unknown[]) => mockListRecordings(...args),
   searchRecordings: (...args: unknown[]) => mockSearchRecordings(...args),
@@ -16,6 +20,10 @@ vi.mock('../api/recordings', () => ({
   deleteAllRecordings: (...args: unknown[]) => mockDeleteAllRecordings(...args),
   restoreRecordings: (...args: unknown[]) => mockRestoreRecordings(...args),
   deleteRecording: (...args: unknown[]) => mockDeleteRecording(...args),
+  listTrashedRecordings: (...args: unknown[]) => mockListTrashed(...args),
+  restoreAllTrashed: (...args: unknown[]) => mockRestoreAllTrashed(...args),
+  restoreRecordingsDeletedBetween: (...args: unknown[]) => mockRestoreBetween(...args),
+  countRecordingsDeletedBetween: (...args: unknown[]) => mockCountBetween(...args),
   getRecording: vi.fn(),
   restoreRecording: vi.fn(),
 }));
@@ -168,7 +176,12 @@ describe('RecordingsStore — Move all to Trash (D1/D2 contract)', () => {
     mockDeleteAllRecordings.mockReset();
     mockRestoreRecordings.mockReset();
     mockDeleteRecording.mockReset();
+    mockListTrashed.mockReset();
+    mockRestoreAllTrashed.mockReset();
+    mockRestoreBetween.mockReset();
+    mockCountBetween.mockReset();
     mockCountRecordings.mockResolvedValue(0);
+    mockListTrashed.mockResolvedValue({ items: [], total: 0 });
     vi.clearAllMocks();
   });
 
@@ -270,6 +283,180 @@ describe('RecordingsStore — Move all to Trash (D1/D2 contract)', () => {
   it('undoMoveAll() with nothing captured is an error', async () => {
     const { recordings } = await freshStore();
     await expect(recordings.undoMoveAll()).rejects.toThrow(/no move-all to undo/i);
+  });
+});
+
+function makeTrashed(id: string, deletedAt = '2026-10-01T12:00:00Z') {
+  return {
+    id,
+    filename: `${id}.wav`,
+    patient_name: null,
+    duration_seconds: 60,
+    created_at: '2026-09-01T10:00:00Z',
+    deleted_at: deletedAt,
+  };
+}
+
+describe('RecordingsStore — Trash state + restore paths (D4/D8)', () => {
+  beforeEach(() => {
+    mockListRecordings.mockReset();
+    mockSearchRecordings.mockReset();
+    mockCountRecordings.mockReset();
+    mockDeleteAllRecordings.mockReset();
+    mockRestoreRecordings.mockReset();
+    mockDeleteRecording.mockReset();
+    mockListTrashed.mockReset();
+    mockRestoreAllTrashed.mockReset();
+    mockRestoreBetween.mockReset();
+    mockCountBetween.mockReset();
+    mockCountRecordings.mockResolvedValue(0);
+    mockListRecordings.mockResolvedValue([]);
+    mockListTrashed.mockResolvedValue({ items: [], total: 0 });
+    vi.clearAllMocks();
+  });
+
+  it('loadTrashed() fills list + authoritative total; a full page under the total means hasMore', async () => {
+    const page = Array.from({ length: 2 }, (_, i) => makeTrashed(`t${i}`));
+    mockListTrashed.mockResolvedValue({ items: page, total: 5 });
+    const { recordings } = await freshStore();
+
+    await recordings.loadTrashed(2, 0);
+
+    expect(recordings.trashedList).toHaveLength(2);
+    expect(recordings.trashedTotal).toBe(5);
+    expect(recordings.trashedHasMore).toBe(true);
+    expect(mockListTrashed).toHaveBeenCalledWith(2, 0);
+  });
+
+  it('loadTrashed() failure sets trashedError — a load failure is never an empty trash', async () => {
+    mockListTrashed.mockRejectedValue(new Error('db busy'));
+    const { recordings } = await freshStore();
+
+    await recordings.loadTrashed();
+
+    expect(recordings.trashedError).toBe('db busy');
+    expect(recordings.trashedList).toHaveLength(0);
+    expect(recordings.trashedLoading).toBe(false);
+  });
+
+  it('a stale trash load cannot clobber a fresh one (monotonic request id)', async () => {
+    let resolveSlow: (v: { items: unknown[]; total: number }) => void = () => {};
+    mockListTrashed.mockImplementationOnce(
+      () => new Promise((res) => { resolveSlow = res; }),
+    );
+    mockListTrashed.mockResolvedValueOnce({ items: [makeTrashed('fresh')], total: 1 });
+    const { recordings } = await freshStore();
+
+    const slow = recordings.loadTrashed();
+    await recordings.loadTrashed();
+    expect(recordings.trashedList.map((r) => r.id)).toEqual(['fresh']);
+
+    resolveSlow({ items: [makeTrashed('stale')], total: 99 });
+    await slow;
+    expect(recordings.trashedList.map((r) => r.id)).toEqual(['fresh'], 'stale response discarded');
+    expect(recordings.trashedTotal).toBe(1);
+  });
+
+  it('loadMoreTrashed() appends the next page and refreshes the total', async () => {
+    mockListTrashed
+      .mockResolvedValueOnce({ items: [makeTrashed('t0'), makeTrashed('t1')], total: 3 })
+      .mockResolvedValueOnce({ items: [makeTrashed('t2')], total: 3 });
+    const { recordings } = await freshStore();
+
+    await recordings.loadTrashed(2, 0);
+    await recordings.loadMoreTrashed();
+
+    expect(recordings.trashedList.map((r) => r.id)).toEqual(['t0', 't1', 't2']);
+    expect(recordings.trashedHasMore).toBe(false);
+  });
+
+  it('refreshTrashedTotal() fetches only the count (limit 0)', async () => {
+    mockListTrashed.mockResolvedValue({ items: [], total: 7 });
+    const { recordings } = await freshStore();
+
+    await recordings.refreshTrashedTotal();
+
+    expect(mockListTrashed).toHaveBeenCalledWith(0, 0);
+    expect(recordings.trashedTotal).toBe(7);
+  });
+
+  it('restoreTrashed() restores, refreshes BOTH lists, and guards duplicate submissions', async () => {
+    mockRestoreRecordings.mockResolvedValue({ count: 1, ids: ['t0'] });
+    const { recordings } = await freshStore();
+    let blockRefresh: () => void = () => {};
+    mockListTrashed.mockImplementationOnce(
+      () => new Promise((res) => { blockRefresh = () => res({ items: [], total: 0 }); }),
+    );
+
+    const first = recordings.restoreTrashed(['t0']);
+    await expect(recordings.restoreTrashed(['t1'])).rejects.toThrow(/already in progress/);
+    blockRefresh();
+    await expect(first).resolves.toBe(1);
+
+    expect(mockRestoreRecordings).toHaveBeenCalledWith(['t0']);
+    expect(mockRestoreRecordings).toHaveBeenCalledTimes(1);
+  });
+
+  it('restoreAllFromTrash() rides the dedicated command and refreshes both lists', async () => {
+    mockRestoreAllTrashed.mockResolvedValue({ count: 3, ids: ['a', 'b', 'c'] });
+    const { recordings } = await freshStore();
+
+    await expect(recordings.restoreAllFromTrash()).resolves.toBe(3);
+
+    expect(mockRestoreAllTrashed).toHaveBeenCalledTimes(1);
+    expect(mockListRecordings).toHaveBeenCalled();
+    expect(mockListTrashed).toHaveBeenCalled();
+  });
+
+  it('restore-by-date sends the LOCAL day as a half-open UTC interval', async () => {
+    // Local timezone in jsdom is machine-dependent — assert shape via the
+    // exported helper, and that the store forwards exactly its output.
+    const { recordings, localDayIntervalUtc } = await freshStore();
+    mockCountBetween.mockResolvedValue(2);
+    mockRestoreBetween.mockResolvedValue({ count: 2, ids: ['x', 'y'] });
+
+    const day = new Date(2026, 9, 6); // Oct 6 2026, local midnight
+    const { startIso, endIso } = localDayIntervalUtc(day);
+    expect(new Date(startIso).getTime()).toBeLessThan(new Date(endIso).getTime());
+
+    await expect(recordings.countTrashedOnDate(day)).resolves.toBe(2);
+    expect(mockCountBetween).toHaveBeenCalledWith(startIso, endIso);
+
+    await expect(recordings.restoreTrashedOnDate(day)).resolves.toBe(2);
+    expect(mockRestoreBetween).toHaveBeenCalledWith(startIso, endIso);
+  });
+});
+
+describe('localDayIntervalUtc — exact local calendar day', () => {
+  it('covers exactly one local day, starting at local midnight', async () => {
+    const { localDayIntervalUtc } = await freshStore();
+    // Machine-independent property: start is the local midnight of the
+    // given day, end is the NEXT local midnight (23h/25h under DST because
+    // both bounds are calendar midnights, not 24h offsets).
+    const { startIso: s, endIso: e } = localDayIntervalUtc(new Date(2026, 9, 6));
+    const start = new Date(s);
+    const end = new Date(e);
+    expect(start.getHours()).toBe(0);
+    expect(start.getMinutes()).toBe(0);
+    expect(end.getHours()).toBe(0);
+    const dayMs = end.getTime() - start.getTime();
+    // A calendar day is 23, 24, or 25 hours depending on DST — never
+    // anything else.
+    const hours = dayMs / 3_600_000;
+    expect([23, 24, 25]).toContain(hours);
+  });
+
+  it('rolls month and year boundaries correctly', async () => {
+    const { localDayIntervalUtc } = await freshStore();
+    // Dec 31 → Jan 1 next year.
+    const { startIso, endIso } = localDayIntervalUtc(new Date(2026, 11, 31));
+    expect(new Date(endIso).getUTCFullYear()).toBe(2027);
+    expect(new Date(endIso).getUTCMonth()).toBe(0);
+    expect(new Date(endIso).getUTCDate()).toBe(1);
+    // Jan 31 → Feb 1 (non-31-day month).
+    const feb = localDayIntervalUtc(new Date(2027, 0, 31));
+    expect(new Date(feb.endIso).getUTCMonth()).toBe(1);
+    expect(new Date(feb.endIso).getUTCDate()).toBeGreaterThanOrEqual(1);
   });
 });
 
