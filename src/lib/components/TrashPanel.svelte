@@ -103,8 +103,7 @@
     Trash
   </h3>
   <p class="trash-explain">
-    Recordings stay in Trash for 30 days. After that, their audio, transcripts,
-    SOAP notes, and generated documents are permanently deleted.
+    Recordings stay in Trash for 30 days. After that, their audio, transcripts, SOAP notes, and generated documents are permanently deleted.
   </p>
 
   <div class="trash-toolbar">
@@ -169,8 +168,7 @@
         <div class="state-icon">🗑️</div>
         <p>Trash is empty.</p>
         <p class="hint">
-          Recordings moved to Trash appear here for 30 days before permanent
-          deletion.
+          Recordings moved to Trash appear here for 30 days before permanent deletion.
         </p>
       </div>
 
