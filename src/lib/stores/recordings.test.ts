@@ -353,7 +353,7 @@ describe('RecordingsStore — Trash state + restore paths (D4/D8)', () => {
 
     resolveSlow({ items: [makeTrashed('stale')], total: 99 });
     await slow;
-    expect(recordings.trashedList.map((r) => r.id)).toEqual(['fresh'], 'stale response discarded');
+    expect(recordings.trashedList.map((r) => r.id)).toEqual(['fresh']);
     expect(recordings.trashedTotal).toBe(1);
   });
 
@@ -448,15 +448,19 @@ describe('localDayIntervalUtc — exact local calendar day', () => {
 
   it('rolls month and year boundaries correctly', async () => {
     const { localDayIntervalUtc } = await freshStore();
-    // Dec 31 → Jan 1 next year.
-    const { startIso, endIso } = localDayIntervalUtc(new Date(2026, 11, 31));
-    expect(new Date(endIso).getUTCFullYear()).toBe(2027);
-    expect(new Date(endIso).getUTCMonth()).toBe(0);
-    expect(new Date(endIso).getUTCDate()).toBe(1);
+    // Dec 31 → Jan 1 next year. Compare with LOCAL getters — the bounds
+    // are local midnights, so their local calendar fields are exact
+    // regardless of the machine's timezone.
+    const dec = localDayIntervalUtc(new Date(2026, 11, 31));
+    expect(new Date(dec.startIso).getDate()).toBe(31);
+    expect(new Date(dec.startIso).getMonth()).toBe(11);
+    expect(new Date(dec.endIso).getDate()).toBe(1);
+    expect(new Date(dec.endIso).getMonth()).toBe(0);
+    expect(new Date(dec.endIso).getFullYear()).toBe(2027);
     // Jan 31 → Feb 1 (non-31-day month).
     const feb = localDayIntervalUtc(new Date(2027, 0, 31));
-    expect(new Date(feb.endIso).getUTCMonth()).toBe(1);
-    expect(new Date(feb.endIso).getUTCDate()).toBeGreaterThanOrEqual(1);
+    expect(new Date(feb.endIso).getMonth()).toBe(1);
+    expect(new Date(feb.endIso).getDate()).toBe(1);
   });
 });
 

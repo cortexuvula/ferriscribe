@@ -322,7 +322,10 @@ pub async fn delete_all_recordings(
     let count = ids.len() as u32;
     let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
     spawn_recordings_push(parts, state.db.clone(), id_strs.clone());
-    tracing::info!(count, "Move all to Trash: recordings moved (30-day recovery window)");
+    tracing::info!(
+        count,
+        "Move all to Trash: recordings moved (30-day recovery window)"
+    );
     Ok(DeleteAllResult {
         count,
         ids: id_strs,
@@ -383,9 +386,7 @@ fn validate_interval(
     let parse = |s: &str, label: &str| {
         chrono::DateTime::parse_from_rfc3339(s)
             .map(|dt| dt.with_timezone(&chrono::Utc))
-            .map_err(|e| {
-                AppError::InvalidInput(format!("invalid {label} timestamp: {e}"))
-            })
+            .map_err(|e| AppError::InvalidInput(format!("invalid {label} timestamp: {e}")))
     };
     let start = parse(start_iso, "start")?;
     let end = parse(end_iso, "end")?;
@@ -400,9 +401,7 @@ fn validate_interval(
 /// Restore EVERY recording in Trash ("Restore all", D5). Returns the
 /// actual restored count; revives are pushed to the paired server.
 #[tauri::command]
-pub async fn restore_all_trashed(
-    state: tauri::State<'_, AppState>,
-) -> AppResult<RestoreResult> {
+pub async fn restore_all_trashed(state: tauri::State<'_, AppState>) -> AppResult<RestoreResult> {
     let db = state.db.clone();
     let restored = tokio::task::spawn_blocking(move || -> AppResult<Vec<Uuid>> {
         let conn = db.conn()?;
@@ -435,8 +434,7 @@ pub async fn count_recordings_deleted_between(
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let conn = db.conn()?;
-        RecordingsRepo::count_deleted_between(&conn, &start_iso, &end_iso)
-            .map_err(AppError::from)
+        RecordingsRepo::count_deleted_between(&conn, &start_iso, &end_iso).map_err(AppError::from)
     })
     .await
     .map_err(join_err)?
@@ -457,8 +455,7 @@ pub async fn restore_recordings_deleted_between(
     let db = state.db.clone();
     let restored = tokio::task::spawn_blocking(move || -> AppResult<Vec<Uuid>> {
         let conn = db.conn()?;
-        RecordingsRepo::restore_deleted_between(&conn, &start_iso, &end_iso)
-            .map_err(AppError::from)
+        RecordingsRepo::restore_deleted_between(&conn, &start_iso, &end_iso).map_err(AppError::from)
     })
     .await
     .map_err(join_err)??;

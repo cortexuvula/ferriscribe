@@ -244,14 +244,14 @@ pub fn retention_sweep_tick(db: &Database) {
     };
 
     // ── Phase 1: tombstone purge (every machine) ─────────────────────
-    let to_purge =
-        match RecordingsRepo::list_soft_deleted_older_than(&conn, 30, chrono::Utc::now()) {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!(error = %e, "tombstone sweeper: list failed");
-                Vec::new()
-            }
-        };
+    let to_purge = match RecordingsRepo::list_soft_deleted_older_than(&conn, 30, chrono::Utc::now())
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "tombstone sweeper: list failed");
+            Vec::new()
+        }
+    };
     if !to_purge.is_empty() {
         purge_tombstone_batch(&conn, &to_purge);
     }
@@ -336,7 +336,9 @@ fn purge_tombstone_batch(
             // Tolerate missing files (already cleaned up, pulled machine
             // whose audio lives on the partner).
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(recording_id = %id, error = %e, "tombstone sweeper: failed to delete audio file"),
+            Err(e) => {
+                tracing::warn!(recording_id = %id, error = %e, "tombstone sweeper: failed to delete audio file")
+            }
         }
     }
     tracing::info!(
@@ -456,7 +458,10 @@ mod tests {
         retention_sweep_tick(&db);
 
         let conn = db.conn().expect("conn");
-        assert!(!row_exists(&conn, aged.id), "aged tombstone purged on a client");
+        assert!(
+            !row_exists(&conn, aged.id),
+            "aged tombstone purged on a client"
+        );
         assert!(
             !tombstone_audio.exists(),
             "audio file removed with the purged row"
@@ -587,7 +592,10 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count ledger");
-        assert_eq!(ledgered, 0, "no ledger entry for a row that was never purged");
+        assert_eq!(
+            ledgered, 0,
+            "no ledger entry for a row that was never purged"
+        );
     }
 
     #[test]

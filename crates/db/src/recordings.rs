@@ -775,8 +775,7 @@ impl RecordingsRepo {
     pub fn restore_all(conn: &Connection) -> DbResult<Vec<Uuid>> {
         let tx = conn.unchecked_transaction()?;
         let id_strs: Vec<String> = {
-            let mut stmt =
-                tx.prepare("SELECT id FROM recordings WHERE deleted_at IS NOT NULL")?;
+            let mut stmt = tx.prepare("SELECT id FROM recordings WHERE deleted_at IS NOT NULL")?;
             let rows = stmt
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -805,8 +804,7 @@ impl RecordingsRepo {
     /// stores. Callers validate the timestamps parse; the SQL is shared so
     /// the preview count and the restore can never disagree about the
     /// candidate set's boundaries.
-    const DELETED_BETWEEN_WHERE: &'static str =
-        "deleted_at IS NOT NULL AND datetime(deleted_at) >= datetime(?1) AND datetime(deleted_at) < datetime(?2)";
+    const DELETED_BETWEEN_WHERE: &'static str = "deleted_at IS NOT NULL AND datetime(deleted_at) >= datetime(?1) AND datetime(deleted_at) < datetime(?2)";
 
     /// Restore every recording moved to Trash inside the half-open
     /// `[start, end)` interval (exact local-calendar-day restore: the
@@ -908,13 +906,23 @@ impl RecordingsRepo {
                     filename: row.get(1)?,
                     patient_name: row.get(2)?,
                     duration_seconds: row.get(3)?,
-                    created_at: crate::parse_db_timestamp(4, &created_at_str, "recordings.created_at")?,
-                    deleted_at: crate::parse_db_timestamp(5, &deleted_at_str, "recordings.deleted_at")?,
+                    created_at: crate::parse_db_timestamp(
+                        4,
+                        &created_at_str,
+                        "recordings.created_at",
+                    )?,
+                    deleted_at: crate::parse_db_timestamp(
+                        5,
+                        &deleted_at_str,
+                        "recordings.deleted_at",
+                    )?,
                 })
             })?
             .filter_map(|r| {
-                r.map_err(|e| tracing::warn!(error = %e, "dropping unreadable row in trash listing"))
-                    .ok()
+                r.map_err(
+                    |e| tracing::warn!(error = %e, "dropping unreadable row in trash listing"),
+                )
+                .ok()
             })
             .collect();
         Ok((rows, total as u32))
@@ -1848,7 +1856,10 @@ mod tests {
         assert_eq!(trashed.len(), 2, "only the two visible rows move");
         assert!(trashed.contains(&r1.id));
         assert!(trashed.contains(&r2.id));
-        assert!(!trashed.contains(&r3.id), "already-trashed row not re-stamped");
+        assert!(
+            !trashed.contains(&r3.id),
+            "already-trashed row not re-stamped"
+        );
         assert_eq!(RecordingsRepo::count(&conn).unwrap(), 0);
         for rec in [&r1, &r2, &r3] {
             assert!(
@@ -1915,9 +1926,7 @@ mod tests {
     #[test]
     fn soft_delete_all_on_empty_library_is_noop() {
         let conn = migrated_conn();
-        assert!(RecordingsRepo::soft_delete_all(&conn)
-            .unwrap()
-            .is_empty());
+        assert!(RecordingsRepo::soft_delete_all(&conn).unwrap().is_empty());
     }
 
     /// Batch Undo / bulk restore (D3): restores exactly the requested
@@ -1940,11 +1949,8 @@ mod tests {
         RecordingsRepo::soft_delete(&conn, &t2.id).unwrap();
         let ghost = Uuid::new_v4();
 
-        let restored = RecordingsRepo::restore_many(
-            &conn,
-            &[t1.id, t2.id, live.id, ghost],
-        )
-        .unwrap();
+        let restored =
+            RecordingsRepo::restore_many(&conn, &[t1.id, t2.id, live.id, ghost]).unwrap();
 
         assert_eq!(restored, vec![t1.id, t2.id], "only the trashed ids return");
         for rec in [&t1, &t2] {
@@ -1962,9 +1968,11 @@ mod tests {
         assert!(live_row.metadata.get("retention_exempt").is_none());
         // Re-running the batch is idempotent-ish: everything is now active,
         // so nothing is restored a second time.
-        assert!(RecordingsRepo::restore_many(&conn, &[t1.id, t2.id])
-            .unwrap()
-            .is_empty());
+        assert!(
+            RecordingsRepo::restore_many(&conn, &[t1.id, t2.id])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2061,7 +2069,10 @@ mod tests {
         let restored = RecordingsRepo::restore_deleted_between(&conn, start, end).unwrap();
 
         let restored_ids: std::collections::HashSet<Uuid> = restored.into_iter().collect();
-        assert!(restored_ids.contains(&at_start.id), "start boundary inclusive");
+        assert!(
+            restored_ids.contains(&at_start.id),
+            "start boundary inclusive"
+        );
         assert!(restored_ids.contains(&mid_day.id));
         assert!(
             !restored_ids.contains(&at_end.id),
@@ -2099,13 +2110,15 @@ mod tests {
             .unwrap(),
             0
         );
-        assert!(RecordingsRepo::restore_deleted_between(
-            &conn,
-            "2026-10-01T00:00:00+00:00",
-            "2026-10-02T00:00:00+00:00"
-        )
-        .unwrap()
-        .is_empty());
+        assert!(
+            RecordingsRepo::restore_deleted_between(
+                &conn,
+                "2026-10-01T00:00:00+00:00",
+                "2026-10-02T00:00:00+00:00"
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 
     #[test]
