@@ -36,6 +36,7 @@ const { fakeStore, mockRestoreTrashed, mockLoadTrashed } = vi.hoisted(() => {
     loadTrashed: vi.fn(),
     loadMoreTrashed: vi.fn(),
     restoreTrashed: vi.fn(),
+    restoreAllFromTrash: vi.fn(),
   };
   return {
     fakeStore,
@@ -224,5 +225,44 @@ describe('TrashPanel — per-row restore + a11y', () => {
     fakeStore.trashedHasMore = true;
     render(TrashPanel);
     expect(screen.getByRole('button', { name: 'Load more' })).toBeTruthy();
+  });
+});
+
+describe('TrashPanel — Restore all (D5)', () => {
+  it('Restore all… is disabled when Trash is empty', () => {
+    render(TrashPanel);
+    expect((screen.getByRole('button', { name: 'Restore all…' }) as HTMLButtonElement).disabled)
+      .toBe(true);
+  });
+
+  it('confirm dialog carries the authoritative N and the all-scope clarification', async () => {
+    fakeStore.trashedList = [makeTrashed('a')];
+    fakeStore.trashedTotal = 41; // more than the loaded page
+    render(TrashPanel);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Restore all…' }));
+    expect(screen.getByText('Restore all 41 recordings from Trash?')).toBeTruthy();
+    expect(
+      screen.getByText(
+        'They will return to Active with their saved audio and documents. This restores every recording in Trash, not just the ones currently listed.',
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Restore all 41' })).toBeTruthy();
+  });
+
+  it('confirming restores via the store and announces the actual count', async () => {
+    fakeStore.trashedList = [makeTrashed('a'), makeTrashed('b')];
+    fakeStore.trashedTotal = 2;
+    fakeStore.restoreAllFromTrash.mockResolvedValueOnce(2);
+    render(TrashPanel);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Restore all…' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Restore all 2' }));
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe('2 recordings restored to Active.'),
+    );
+    expect(fakeStore.restoreAllFromTrash).toHaveBeenCalledTimes(1);
+    // The dialog closes before the await — a double-click hits nothing.
+    expect(screen.queryByText('Restore all 2 recordings from Trash?')).toBeNull();
   });
 });

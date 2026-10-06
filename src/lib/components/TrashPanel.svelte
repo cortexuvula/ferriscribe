@@ -3,6 +3,7 @@
   import { toasts } from '../stores/toasts.svelte';
   import SearchBar from './SearchBar.svelte';
   import TrashRecordingRow from './TrashRecordingRow.svelte';
+  import ConfirmDialog from './ConfirmDialog.svelte';
 
   /// Trash view panel. Search state is LOCAL and separate from the Active
   /// view's — entering Trash always starts with an empty query. The search
@@ -15,6 +16,7 @@
   /// The visible input text, bound so "Clear search" empties BOTH the
   /// filter and the box (the debounced onSearch only flows one way).
   let searchInput = $state('');
+  let showRestoreAll = $state(false);
 
   /// The ONE polite live region for trash-local results (D9): per-row
   /// restore completions land here — never ALSO as a toast (no double
@@ -71,6 +73,22 @@
       toasts.error(`Couldn't restore recording: ${err}`);
     }
   }
+
+  /// "Restore all" — operates on EVERY trashed recording (the dialog says
+  /// so), not the loaded page or the active search filter. Duplicate
+  /// submissions are one restore: the dialog closes before the await and
+  /// the store's in-flight guard rejects any racing second call.
+  async function confirmRestoreAll() {
+    showRestoreAll = false;
+    try {
+      const count = await recordings.restoreAllFromTrash();
+      const noun = count === 1 ? 'recording' : 'recordings';
+      announce(`${count} ${noun} restored to Active.`);
+    } catch (err) {
+      console.error('Failed to restore all recordings:', err);
+      toasts.error(`Couldn't restore recordings: ${err}`);
+    }
+  }
 </script>
 
 <div class="trash-panel">
@@ -92,6 +110,13 @@
       {recordings.trashedTotal}
       {recordings.trashedTotal === 1 ? 'recording' : 'recordings'} in Trash
     </span>
+    <button
+      class="btn-restore-all"
+      onclick={() => (showRestoreAll = true)}
+      disabled={recordings.trashedTotal === 0}
+    >
+      Restore all…
+    </button>
   </div>
 
   <SearchBar
@@ -167,6 +192,20 @@
   </div>
 </div>
 
+{#if showRestoreAll && recordings.trashedTotal > 0}
+  {@const restoreAllN = recordings.trashedTotal}
+  {@const restoreAllNoun = restoreAllN === 1 ? 'recording' : 'recordings'}
+  <ConfirmDialog
+    open={true}
+    title={`Restore all ${restoreAllN} ${restoreAllNoun} from Trash?`}
+    message="They will return to Active with their saved audio and documents. This restores every recording in Trash, not just the ones currently listed."
+    confirmLabel={`Restore all ${restoreAllN}`}
+    danger={false}
+    onConfirm={confirmRestoreAll}
+    onCancel={() => (showRestoreAll = false)}
+  />
+{/if}
+
 <style>
   .trash-panel {
     flex: 1;
@@ -205,6 +244,27 @@
   .trash-count {
     font-size: 12px;
     color: var(--text-muted);
+  }
+
+  .btn-restore-all {
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background-color: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+
+  .btn-restore-all:hover:not(:disabled) {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .btn-restore-all:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   .match-line {
