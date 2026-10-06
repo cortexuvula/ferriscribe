@@ -21,6 +21,18 @@ export async function restoreRecording(id: string): Promise<void> {
   return invoke('restore_recording', { id });
 }
 
+/** Result of any bulk restore path: the ACTUAL count restored (may be lower
+ *  than a preview when a purge or concurrent restore intervened). */
+export interface RestoreResult {
+  count: number;
+  ids: string[];
+}
+
+/** Restore recordings by exact id set — the batch Undo for Move-all-to-Trash. */
+export async function restoreRecordings(ids: string[]): Promise<RestoreResult> {
+  return invoke('restore_recordings', { ids });
+}
+
 /** Result of "Move all to Trash": the count plus the exact id set trashed.
  *  The Undo toast restores exactly these ids — never "everything deleted
  *  since T", which could sweep in a later, unrelated deletion. */

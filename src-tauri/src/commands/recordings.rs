@@ -212,6 +212,51 @@ pub async fn restore_recording(state: tauri::State<'_, AppState>, id: String) ->
     Ok(())
 }
 
+/// Result of any bulk restore path: the ACTUAL count restored plus the
+/// restored ids. The count can be lower than a preview (D6) when a purge
+/// or a concurrent restore changed the candidate set in between — callers
+/// report actual vs preview, never assume equality.
+#[derive(serde::Serialize)]
+pub struct RestoreResult {
+    pub count: u32,
+    pub ids: Vec<String>,
+}
+
+/// Restore multiple soft-deleted recordings by id — the exact-set batch
+/// Undo for Move-all-to-Trash, and the shared backend for bulk restore
+/// surfaces. One transaction (`restore_many`); ids that are not currently
+/// trashed are skipped, not errors. The revived rows are pushed to the
+/// paired server (fire-and-forget, backstopped by the periodic sync).
+#[tauri::command]
+pub async fn restore_recordings(
+    state: tauri::State<'_, AppState>,
+    ids: Vec<String>,
+) -> AppResult<RestoreResult> {
+    let mut uuids = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let uuid = Uuid::parse_str(id)
+            .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+        uuids.push(uuid);
+    }
+    let db = state.db.clone();
+    let restored = tokio::task::spawn_blocking(move || -> AppResult<Vec<Uuid>> {
+        let conn = db.conn()?;
+        RecordingsRepo::restore_many(&conn, &uuids).map_err(AppError::from)
+    })
+    .await
+    .map_err(join_err)??;
+
+    let count = restored.len() as u32;
+    let id_strs: Vec<String> = restored.iter().map(|i| i.to_string()).collect();
+    let parts = crate::commands::content_sync::content_sync_target(&state).await;
+    spawn_recordings_push(parts, state.db.clone(), id_strs.clone());
+    tracing::info!(count, "restored recordings from Trash (batch undo)");
+    Ok(RestoreResult {
+        count,
+        ids: id_strs,
+    })
+}
+
 /// Delete RAG vectors for a recording, logging failures rather than aborting
 /// the recording deletion. Used by the future purge sweeper (permanent delete).
 /// The soft-delete path preserves vectors for undo.

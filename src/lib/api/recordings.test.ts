@@ -10,6 +10,7 @@ import {
   deleteRecording,
   deleteAllRecordings,
   countRecordings,
+  restoreRecordings,
   importAudioFile,
 } from './recordings';
 
@@ -55,6 +56,17 @@ describe('recordings api', () => {
     invokeMock.mockResolvedValueOnce(3);
     await expect(countRecordings()).resolves.toBe(3);
     expect(invokeMock).toHaveBeenCalledWith('count_recordings');
+  });
+
+  it('restoreRecordings passes the exact id set', async () => {
+    invokeMock.mockResolvedValueOnce({ count: 2, ids: ['a', 'b'] });
+    await expect(restoreRecordings(['a', 'b'])).resolves.toEqual({
+      count: 2,
+      ids: ['a', 'b'],
+    });
+    expect(invokeMock).toHaveBeenCalledWith('restore_recordings', {
+      ids: ['a', 'b'],
+    });
   });
 
   it('importAudioFile passes filePath in camelCase', async () => {

@@ -638,12 +638,28 @@ impl RecordingsRepo {
     /// [`retention_soft_delete_older_than`](Self::retention_soft_delete_older_than)
     /// sweep.
     pub fn restore(conn: &Connection, id: &Uuid) -> DbResult<()> {
-        let now = chrono::Utc::now().to_rfc3339();
         // Single transaction for the read + FTS insert + UPDATE: the FTS
         // re-insert and the row UPDATE must land together, or a crash in
         // between re-indexes a trashed row / untrashes an unindexed one and
         // the next trigger 'delete' corrupts the index (SQLITE_CORRUPT).
         let tx = conn.unchecked_transaction()?;
+        Self::restore_row_within_tx(&tx, id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Per-row restore logic inside a caller-owned transaction. Shared by
+    /// [`restore`](Self::restore) (single) and the bulk restore paths
+    /// ([`restore_many`](Self::restore_many),
+    /// [`restore_all`](Self::restore_all),
+    /// [`restore_deleted_between`](Self::restore_deleted_between)) so the
+    /// `retention_exempt` stamp, the FTS membership probe, and the guarded
+    /// re-index behave identically everywhere. The caller commits.
+    ///
+    /// Returns [`DbError::NotFound`] when the row is missing or not
+    /// currently soft-deleted — bulk callers treat that as "skip", single
+    /// restore propagates it.
+    fn restore_row_within_tx(tx: &rusqlite::Transaction<'_>, id: &Uuid) -> DbResult<()> {
         // Read the current row (metadata + trash state) up front. A missing
         // row or one that isn't soft-deleted gets the same NotFound the
         // UPDATE-based check below has always produced — checked early so
@@ -698,7 +714,7 @@ impl RecordingsRepo {
         // absent index state — corrupting the index and wedging every
         // later FTS operation. Failing the restore leaves the row
         // consistently trashed + de-indexed, ready for a retry.
-        match Self::fts_row_indexed(&tx, &id.to_string()) {
+        match Self::fts_row_indexed(tx, &id.to_string()) {
             Ok(true) => {}
             probe => {
                 if let Err(e) = probe {
@@ -714,15 +730,41 @@ impl RecordingsRepo {
         }
         let rows = tx.execute(
             "UPDATE recordings SET deleted_at = NULL, updated_at = ?1, metadata = ?2 WHERE id = ?3 AND deleted_at IS NOT NULL",
-            rusqlite::params![now, metadata_json, id.to_string()],
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), metadata_json, id.to_string()],
         )?;
         if rows == 0 {
             return Err(DbError::NotFound(format!(
                 "recording {id} (not deleted or not found)"
             )));
         }
-        tx.commit()?;
         Ok(())
+    }
+
+    /// Restore the given soft-deleted recordings (batch Undo / bulk
+    /// restore) in ONE transaction, with the same per-row semantics as
+    /// [`restore`](Self::restore) (`retention_exempt` stamp, FTS membership
+    /// probe, guarded re-index).
+    ///
+    /// Returns the ids ACTUALLY restored. An id that is not currently
+    /// soft-deleted (already restored, active, purged, or never existed)
+    /// is skipped, not an error — a batch Undo racing another restore or
+    /// the purge sweeper must restore what it can. Any other DB error
+    /// aborts the whole transaction (all-or-nothing).
+    pub fn restore_many(conn: &Connection, ids: &[Uuid]) -> DbResult<Vec<Uuid>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tx = conn.unchecked_transaction()?;
+        let mut restored = Vec::with_capacity(ids.len());
+        for id in ids {
+            match Self::restore_row_within_tx(&tx, id) {
+                Ok(()) => restored.push(*id),
+                Err(DbError::NotFound(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        tx.commit()?;
+        Ok(restored)
     }
 
     /// Retention sweep: soft-delete every visible recording older than the
@@ -1723,6 +1765,59 @@ mod tests {
         assert!(RecordingsRepo::soft_delete_all(&conn)
             .unwrap()
             .is_empty());
+    }
+
+    /// Batch Undo / bulk restore (D3): restores exactly the requested
+    /// TRASHED ids in one transaction; ids that aren't currently trashed
+    /// (active, already-restored, purged, missing) are skipped, not errors.
+    /// Exemption stamped, FTS re-indexed exactly once per restored row.
+    #[test]
+    fn restore_many_restores_exactly_trashed_ids_and_stamps_exemption() {
+        let conn = migrated_conn();
+        let mut t1 = new_rec();
+        t1.filename = "undoa.wav".into();
+        let mut t2 = new_rec();
+        t2.filename = "undob.wav".into();
+        let mut live = new_rec();
+        live.filename = "stilllive.wav".into();
+        RecordingsRepo::insert(&conn, &t1).unwrap();
+        RecordingsRepo::insert(&conn, &t2).unwrap();
+        RecordingsRepo::insert(&conn, &live).unwrap();
+        RecordingsRepo::soft_delete(&conn, &t1.id).unwrap();
+        RecordingsRepo::soft_delete(&conn, &t2.id).unwrap();
+        let ghost = Uuid::new_v4();
+
+        let restored = RecordingsRepo::restore_many(
+            &conn,
+            &[t1.id, t2.id, live.id, ghost],
+        )
+        .unwrap();
+
+        assert_eq!(restored, vec![t1.id, t2.id], "only the trashed ids return");
+        for rec in [&t1, &t2] {
+            let row = RecordingsRepo::get_by_id(&conn, &rec.id).unwrap();
+            assert_eq!(
+                row.metadata["retention_exempt"], true,
+                "exemption stamped on every restored row"
+            );
+            assert!(RecordingsRepo::fts_row_indexed(&conn, &rec.id.to_string()).unwrap());
+        }
+        assert_eq!(fts_match_count_by_stem(&conn, "undoa"), 1);
+        assert_eq!(fts_match_count_by_stem(&conn, "undob"), 1);
+        // The live row was never trashed — unchanged and still active.
+        let live_row = RecordingsRepo::get_by_id(&conn, &live.id).unwrap();
+        assert!(live_row.metadata.get("retention_exempt").is_none());
+        // Re-running the batch is idempotent-ish: everything is now active,
+        // so nothing is restored a second time.
+        assert!(RecordingsRepo::restore_many(&conn, &[t1.id, t2.id])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn restore_many_empty_input_is_noop() {
+        let conn = migrated_conn();
+        assert!(RecordingsRepo::restore_many(&conn, &[]).unwrap().is_empty());
     }
 
     #[test]
