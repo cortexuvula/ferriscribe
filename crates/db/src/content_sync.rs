@@ -1373,6 +1373,63 @@ mod tests {
         assert!(!has_more);
     }
 
+    /// Tombstone backstop (trash-restore D1): the periodic push selects by
+    /// `updated_at` with NO `deleted_at` filter — that is what makes a
+    /// failed fire-and-forget push acceptable. `soft_delete` and `restore`
+    /// both bump `updated_at`, so a tombstone AND a later revive re-travel
+    /// past a cursor stamped before them. NEVER add a `deleted_at IS NULL`
+    /// filter to this selection: it would silently break deletion
+    /// propagation in the privacy-critical direction.
+    #[test]
+    fn changed_since_re_travels_tombstones_and_revives() {
+        use crate::recordings::RecordingsRepo;
+        use medical_core::types::recording::Recording;
+        use uuid::Uuid;
+
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let rec = Recording::new(
+            "backstop.wav",
+            std::path::PathBuf::from("/audio/backstop.wav"),
+        );
+        RecordingsRepo::insert(&conn, &rec).expect("insert");
+        // Advance the push cursor past the insert's updated_at.
+        let inserted_at: String = conn
+            .query_row(
+                "SELECT updated_at FROM recordings WHERE id = ?1",
+                [&rec.id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("read stamp");
+        ContentSyncRepo::set_push_cursor(&conn, &inserted_at).expect("cursor");
+
+        // Soft-delete → the tombstone must be selected again.
+        RecordingsRepo::soft_delete(&conn, &rec.id).expect("soft delete");
+        let (ids, _) =
+            ContentSyncRepo::changed_since(&conn, Some(&inserted_at), 100).expect("query");
+        assert!(
+            ids.contains(&rec.id.to_string()),
+            "tombstone must re-travel via the periodic push"
+        );
+
+        // Advance past the tombstone, restore → the revive must re-travel.
+        let trashed_at: String = conn
+            .query_row(
+                "SELECT updated_at FROM recordings WHERE id = ?1",
+                [&rec.id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("read stamp");
+        ContentSyncRepo::set_push_cursor(&conn, &trashed_at).expect("cursor");
+        RecordingsRepo::restore(&conn, &rec.id).expect("restore");
+        let (ids, _) =
+            ContentSyncRepo::changed_since(&conn, Some(&trashed_at), 100).expect("query");
+        assert!(
+            ids.contains(&rec.id.to_string()),
+            "revive must re-travel via the periodic push"
+        );
+    }
+
     #[test]
     fn revisions_for_batch_handles_empty_input() {
         let db = Database::open_in_memory().expect("db");

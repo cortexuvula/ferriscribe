@@ -8,6 +8,8 @@ import {
   deleteRecording,
   restoreRecording,
   deleteAllRecordings,
+  countRecordings,
+  type DeleteAllResult,
 } from '../api/recordings';
 import { syncContentNow } from '../api/contentSync';
 import { latestTokensPerSecond } from '../utils/generationStats';
@@ -41,10 +43,28 @@ class RecordingsStore {
   /// how UI callers distinguish a failed sync from a queued one (both return
   /// null). Cleared at the start of each sync attempt.
   lastSyncError = $state<string | null>(null);
+  /// Authoritative count of active recordings from the backend. `list` is a
+  /// paginated/search-filtered subset — dialogs that promise "all N
+  /// recordings" (Move-all-to-Trash) must use this number, never
+  /// `list.length`. Null until the first successful count.
+  activeTotal = $state<number | null>(null);
+
+  /// Fetch the authoritative active count (COUNT query — cheap). Swallows
+  /// errors: a failed count leaves the previous value in place rather than
+  /// blanking dialogs that depend on it.
+  async refreshActiveTotal(): Promise<void> {
+    try {
+      this.activeTotal = await countRecordings();
+    } catch (err) {
+      console.error('Failed to count recordings:', err);
+    }
+  }
 
   /// Load the first page, replacing the list. Called on mount and after
-  /// mutations that change ordering (new recording, generation, etc.).
+  /// mutations that change ordering (new recording, generation, etc).
   async load(limit = PAGE_SIZE, offset = 0): Promise<void> {
+    // Keep the authoritative count fresh alongside every list refresh.
+    void this.refreshActiveTotal();
     // An active search must survive background refreshes (post-sync load(),
     // content-changed debounces): an unfiltered page here would silently
     // un-filter the list while the search box still shows the query.
@@ -169,6 +189,7 @@ class RecordingsStore {
       if (this.selectedRecording?.id === id) {
         this.selectedRecording = null;
       }
+      void this.refreshActiveTotal();
     } catch (err) {
       console.error('Failed to delete recording:', err);
       this.lastDeleted = null;
@@ -194,15 +215,28 @@ class RecordingsStore {
     }
   }
 
-  async removeAll(): Promise<number> {
+  /** The exact id set of the most recent Move-all-to-Trash, for the batch
+   *  Undo toast. Undo restores EXACTLY these ids — a recording deleted
+   *  AFTER the move must never be swept into that undo. Cleared after the
+   *  undo runs (or the toast is dismissed without acting). */
+  lastDeletedAllIds = $state<string[] | null>(null);
+
+  /** Guard against duplicate restore submissions while one is in flight
+   *  (double-click on Undo / Restore buttons must be one operation). */
+  restoring = $state<boolean>(false);
+
+  async removeAll(): Promise<DeleteAllResult> {
     try {
-      const count = await deleteAllRecordings();
+      const result = await deleteAllRecordings();
       this.list = [];
       this.hasMore = false;
       this.selectedRecording = null;
-      return count;
+      this.activeTotal = 0;
+      // Capture the exact set for the batch Undo toast (D2).
+      this.lastDeletedAllIds = result.ids;
+      return result;
     } catch (err) {
-      console.error('Failed to delete all recordings:', err);
+      console.error('Failed to move all recordings to Trash:', err);
       throw err;
     }
   }

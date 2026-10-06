@@ -9,6 +9,7 @@ import {
   searchRecordings,
   deleteRecording,
   deleteAllRecordings,
+  countRecordings,
   importAudioFile,
 } from './recordings';
 
@@ -48,6 +49,12 @@ describe('recordings api', () => {
   it('deleteAllRecordings invokes with no args', async () => {
     await deleteAllRecordings();
     expect(invokeMock).toHaveBeenCalledWith('delete_all_recordings');
+  });
+
+  it('countRecordings invokes the authoritative active count command', async () => {
+    invokeMock.mockResolvedValueOnce(3);
+    await expect(countRecordings()).resolves.toBe(3);
+    expect(invokeMock).toHaveBeenCalledWith('count_recordings');
   });
 
   it('importAudioFile passes filePath in camelCase', async () => {

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::recording::{ProcessingStatus, Recording, RecordingSummary};
@@ -64,15 +65,13 @@ pub async fn search_recordings(
     .map_err(join_err)?
 }
 
-/// Delete a recording by UUID.
+/// Move a recording to Trash (single delete).
 ///
-/// Removes the DB row, associated RAG vectors, and the WAV file from disk.
-/// The DB delete and vector cleanup are atomic (same transaction); the WAV
-/// Soft-delete a recording. Marks `deleted_at` on the row and removes it
-/// from FTS. The WAV file and RAG vectors are **preserved** for undo. A
-/// future purge sweeper will permanently delete old soft-deleted recordings.
-///
-/// The frontend shows an Undo toast for 8 seconds after this succeeds.
+/// Soft-deletes: marks `deleted_at` on the row and removes it from FTS in
+/// one transaction. The WAV file and RAG vectors are **preserved** for the
+/// 30-day recovery window; the purge sweeper permanently deletes trashed
+/// recordings after 30 days. The tombstone is pushed to the paired server
+/// (fire-and-forget, backstopped by the periodic sync).
 #[tauri::command]
 pub async fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
     let uuid =
@@ -114,43 +113,85 @@ pub async fn delete_recording(state: tauri::State<'_, AppState>, id: String) -> 
     // (owned PairedConnection + bearer + client) and the db clone here, then
     // move them into a fire-and-forget task — `tauri::State` is a borrow and
     // can't cross the spawn boundary. Mirrors the condition-chip push pattern.
-    if let Some((conn_paired, bearer, client)) = sync_target {
-        let db = state.db.clone();
-        let rec_id = id.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Some(remote) =
-                crate::content_remote::ContentRemote::from(&conn_paired, Some(bearer), client)
-            {
-                let result = tokio::task::spawn_blocking(move || -> AppResult<Vec<_>> {
-                    let c = db.conn()?;
-                    let mut sync_rec =
-                        crate::commands::content_sync::build_sync_recording(&c, &rec_id)?;
-                    // Read deleted_at to include the tombstone marker so the
-                    // server's merge sees the deletion.
-                    let deleted_at: Option<String> = c
-                        .query_row(
-                            "SELECT deleted_at FROM recordings WHERE id = ?1",
-                            rusqlite::params![rec_id],
-                            |row| row.get(0),
-                        )
-                        .ok()
-                        .flatten();
-                    sync_rec.deleted_at = deleted_at;
-                    Ok(vec![sync_rec])
-                })
-                .await;
-                if let Ok(Ok(recordings)) = result {
-                    let _ = remote.push(recordings).await;
-                }
-            }
-        });
+    if let Some(parts) = sync_target {
+        spawn_recordings_push(Some(parts), state.db.clone(), vec![id]);
     }
 
     Ok(())
 }
 
+/// Fire-and-forget push of the CURRENT wire state for the given recording
+/// ids to the paired server. Serves BOTH directions: after a soft-delete the
+/// rows carry `deleted_at` (tombstone), after a restore they carry
+/// `deleted_at = NULL` (revive) — `build_sync_recording` reads the marker
+/// from the row, so the same helper covers delete and restore pushes.
+///
+/// A failure here is acceptable ONLY because the periodic sync backstops it:
+/// its `changed_since` selection filters by `updated_at` with NO
+/// `deleted_at` filter, and both soft-delete and restore bump `updated_at`,
+/// so tombstones and revives re-travel on the next cycle regardless. NEVER
+/// add a `deleted_at IS NULL` filter to the periodic push path — that would
+/// silently break deletion propagation in the privacy-critical direction.
+///
+/// Logs carry counts and ids only — never recording content (PHI).
+fn spawn_recordings_push(
+    parts: Option<(
+        crate::commands::sharing::PairedConnection,
+        String,
+        Arc<reqwest::Client>,
+    )>,
+    db: Arc<medical_db::Database>,
+    ids: Vec<String>,
+) {
+    let Some((conn_paired, bearer, client)) = parts else {
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        let Some(remote) =
+            crate::content_remote::ContentRemote::from(&conn_paired, Some(bearer), client)
+        else {
+            return;
+        };
+        let result = tokio::task::spawn_blocking(move || -> AppResult<Vec<_>> {
+            let c = db.conn()?;
+            let mut out = Vec::with_capacity(ids.len());
+            for id in &ids {
+                match crate::commands::content_sync::build_sync_recording(&c, id) {
+                    Ok(sync_rec) => out.push(sync_rec),
+                    Err(e) => tracing::warn!(
+                        recording_id_len = id.len(),
+                        error = %e,
+                        "recordings push: skipping unreadable recording"
+                    ),
+                }
+            }
+            Ok(out)
+        })
+        .await;
+        match result {
+            Ok(Ok(recordings)) if !recordings.is_empty() => {
+                let count = recordings.len();
+                if let Err(e) = remote.push(recordings).await {
+                    tracing::warn!(
+                        error = %e,
+                        count,
+                        "recordings push failed (fire-and-forget; periodic sync will retry)"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "recordings push: build task failed"),
+        }
+    });
+}
+
 /// Restore a soft-deleted recording (undo). Clears `deleted_at` and
 /// re-inserts the FTS row so search finds it again.
+///
+/// The revive is pushed to the paired server (fire-and-forget): a sync
+/// recording with `deleted_at = null`, which the server's restore-vs-
+/// tombstone LWW merge resolves. The periodic sync backstops a failed
+/// push (restore bumps `updated_at`, so the row re-travels).
 #[tauri::command]
 pub async fn restore_recording(state: tauri::State<'_, AppState>, id: String) -> AppResult<()> {
     let uuid =
@@ -162,7 +203,13 @@ pub async fn restore_recording(state: tauri::State<'_, AppState>, id: String) ->
         Ok(())
     })
     .await
-    .map_err(join_err)?
+    .map_err(join_err)??;
+
+    // Revive push — same fire-and-forget shape as the delete push; the
+    // row now carries deleted_at = NULL, which is the revive marker.
+    let parts = crate::commands::content_sync::content_sync_target(&state).await;
+    spawn_recordings_push(parts, state.db.clone(), vec![id]);
+    Ok(())
 }
 
 /// Delete RAG vectors for a recording, logging failures rather than aborting
@@ -179,77 +226,75 @@ fn delete_rag_vectors_best_effort(conn: &medical_db::Connection, recording_id: &
     }
 }
 
-/// Delete all recordings and their associated data.
+/// Result of "Move all to Trash": the count plus the exact id set trashed.
+/// The Undo toast restores exactly these ids — a recording deleted AFTER
+/// the move must never be swept into that undo (which a "restore everything
+/// deleted since T" design would do).
+#[derive(serde::Serialize)]
+pub struct DeleteAllResult {
+    pub count: u32,
+    pub ids: Vec<String>,
+}
+
+/// Move every active recording to Trash (reversible Delete All).
 ///
-/// Removes all recording rows, RAG vectors, and WAV files from disk.
-/// Returns the number of recordings deleted.
+/// Soft-deletes all visible rows in one transaction (`soft_delete_all`):
+/// rows tombstoned, FTS de-indexed, WAV files and RAG vectors preserved
+/// for the 30-day recovery window. Content-sync cursors are NOT reset —
+/// tombstones are the propagation mechanism (a cursor reset would
+/// resurrect everything from a partner on the next pull; the old
+/// hard-delete rationale no longer applies).
 ///
-/// Also resets the content-sync cursors so the next sync re-pulls
-/// everything from the partner machine. Without this, Delete All would
-/// permanently break sync — the partner's push cursor would already be
-/// advanced past its old recordings, and the local pull cursor would skip
-/// the partner's recordings that were already "seen" (but now deleted
-/// locally).
+/// Returns the trashed count and exact id set; after commit, the tombstones
+/// are pushed to the paired server in one fire-and-forget batch.
 #[tauri::command]
-pub async fn delete_all_recordings(state: tauri::State<'_, AppState>) -> AppResult<u32> {
+pub async fn delete_all_recordings(
+    state: tauri::State<'_, AppState>,
+) -> AppResult<DeleteAllResult> {
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || -> AppResult<u32> {
+    let db_for_push = state.db.clone();
+    let http = state.http_client.clone();
+
+    // The soft-delete transaction and the sync-target gates (SQLite pool
+    // checkout, config load, OS keychain read) are both blocking — one
+    // blocking hop for both, mirroring `delete_recording`.
+    let (ids, parts) = tokio::task::spawn_blocking(move || -> AppResult<(
+        Vec<Uuid>,
+        Option<(
+            crate::commands::sharing::PairedConnection,
+            String,
+            Arc<reqwest::Client>,
+        )>,
+    )> {
         let conn = db.conn()?;
+        let ids = RecordingsRepo::soft_delete_all(&conn).map_err(AppError::from)?;
+        let parts = crate::commands::content_sync::content_sync_target_parts(&db_for_push, http);
+        Ok((ids, parts))
+    })
+    .await
+    .map_err(join_err)??;
 
-        // Wrap deletes + cursor resets in a single transaction so a crash
-        // between them can't leave diverged cursors.
-        conn.execute_batch("BEGIN")
-            .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
-        let result: AppResult<(Vec<std::path::PathBuf>, u32)> = (|| {
-            // Delete all RAG vectors
-            if let Err(e) = conn.execute("DELETE FROM vectors", []) {
-                tracing::error!(error = %e, "RAG vector cleanup failed during delete_all_recordings; orphan vectors may remain");
-            }
+    let count = ids.len() as u32;
+    let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+    spawn_recordings_push(parts, state.db.clone(), id_strs.clone());
+    tracing::info!(count, "Move all to Trash: recordings moved (30-day recovery window)");
+    Ok(DeleteAllResult {
+        count,
+        ids: id_strs,
+    })
+}
 
-            // Delete all recordings and get audio paths for file cleanup
-            let paths = RecordingsRepo::delete_all(&conn).map_err(AppError::from)?;
-            let count = paths.len() as u32;
-
-            // Reset content-sync cursors so the next sync re-syncs everything.
-            // These are hard errors, not best-effort: the cursor reset is the
-            // only thing keeping Delete All from permanently breaking sync —
-            // committing the deletes while a cursor survives would silently
-            // diverge every paired machine. Fail the transaction instead;
-            // the user can retry Delete All.
-            if let Err(e) = medical_db::content_sync::ContentSyncRepo::set_cursor(&conn, None) {
-                return Err(AppError::from(e));
-            }
-            conn.execute(
-                "UPDATE sync_state SET value = NULL WHERE key = 'content_sync_push_cursor'",
-                [],
-            )
-            .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
-            tracing::info!("Delete All: content-sync cursors reset, next sync will re-pull everything");
-
-            Ok((paths, count))
-        })();
-
-        let (paths, count) = match result {
-            Ok(v) => {
-                conn.execute_batch("COMMIT")
-                    .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
-                v
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return Err(e);
-            }
-        };
-
-        // Remove audio files from disk (after commit, so we only delete
-        // if the DB transaction succeeded).
-        for path in &paths {
-            if path.exists() {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-
-        Ok(count)
+/// Authoritative count of active (non-trashed) recordings.
+///
+/// The frontend's `recordings.list` is a paginated subset — dialogs that
+/// promise "all N recordings" (Move-all-to-Trash confirm) must use this
+/// number instead.
+#[tauri::command]
+pub async fn count_recordings(state: tauri::State<'_, AppState>) -> AppResult<u32> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        RecordingsRepo::count(&conn).map_err(AppError::from)
     })
     .await
     .map_err(join_err)?

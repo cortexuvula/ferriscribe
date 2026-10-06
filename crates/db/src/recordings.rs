@@ -547,6 +547,61 @@ impl RecordingsRepo {
         Ok(())
     }
 
+    /// Soft-delete every visible recording ("Move all to Trash").
+    ///
+    /// One transaction; per row the exact statement pair
+    /// [`soft_delete`](Self::soft_delete) uses (row UPDATE + guarded FTS
+    /// `'delete'` — see that method for why the pair must land together and
+    /// why the `'delete'` needs the currently indexed column values).
+    /// Returns the ids trashed, for the bulk tombstone push and the
+    /// exact-set batch Undo (an Undo must never sweep in a recording
+    /// deleted AFTER the move).
+    ///
+    /// Audio files and RAG vectors are preserved — undo owns them until the
+    /// 30-day purge. Content-sync cursors are deliberately untouched:
+    /// tombstones are the propagation mechanism (the periodic push
+    /// re-travels them), and resetting the pull cursor would resurrect
+    /// everything from a partner on the next pull.
+    pub fn soft_delete_all(conn: &Connection) -> DbResult<Vec<Uuid>> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let tx = conn.unchecked_transaction()?;
+        let id_strs: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM recordings WHERE deleted_at IS NULL")?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut trashed = Vec::with_capacity(id_strs.len());
+        {
+            let mut update = tx.prepare(
+                "UPDATE recordings SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            )?;
+            let mut fts_delete = tx.prepare(
+                "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT 'delete', rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1",
+            )?;
+            for id_str in id_strs {
+                let Ok(id) = Uuid::parse_str(&id_str) else {
+                    continue;
+                };
+                let rows = update.execute(rusqlite::params![now, id_str])?;
+                if rows == 0 {
+                    // Raced with a concurrent single-delete inside the
+                    // transaction window — the row is already tombstoned and
+                    // its FTS 'delete' already fired; skip it (it is in the
+                    // other path's undo set, not this one).
+                    continue;
+                }
+                fts_delete.execute([&id_str])?;
+                trashed.push(id);
+            }
+        }
+        tx.commit()?;
+        Ok(trashed)
+    }
+
     /// Whether the recording's row currently has an entry in the
     /// external-content FTS index.
     ///
@@ -850,34 +905,6 @@ impl RecordingsRepo {
         }
         tx.commit()?;
         Ok(purged)
-    }
-
-    /// Delete all recordings. Returns the audio paths so callers can clean up
-    /// files on disk.
-    /// Permanently delete all visible (non-soft-deleted) recordings.
-    ///
-    /// This is a **hard DELETE** — it permanently removes recordings that have
-    /// not been soft-deleted. Used by the "Delete All" button in settings,
-    /// which is explicitly a destructive action with confirmation. Unlike the
-    /// single-record soft-delete path, there is no undo for delete-all.
-    ///
-    /// Returns the audio paths so the caller can clean up files on disk.
-    pub fn delete_all(conn: &Connection) -> DbResult<Vec<PathBuf>> {
-        let mut stmt =
-            conn.prepare("SELECT audio_path FROM recordings WHERE deleted_at IS NULL")?;
-        let paths: Vec<PathBuf> = stmt
-            .query_map([], |row| {
-                let p: String = row.get(0)?;
-                Ok(PathBuf::from(p))
-            })?
-            .filter_map(|r| {
-                r.map_err(|e| tracing::warn!(error = %e, "dropping unreadable row"))
-                    .ok()
-            })
-            .collect();
-
-        conn.execute("DELETE FROM recordings WHERE deleted_at IS NULL", [])?;
-        Ok(paths)
     }
 
     /// Total number of recordings in the table.
@@ -1594,6 +1621,108 @@ mod tests {
         RecordingsRepo::insert(&conn, &new_rec()).unwrap();
         RecordingsRepo::insert(&conn, &new_rec()).unwrap();
         assert_eq!(RecordingsRepo::count(&conn).unwrap(), 2);
+    }
+
+    /// Move-all-to-Trash (D1): every visible row tombstoned in ONE
+    /// transaction, FTS de-indexed per row, ids returned for the bulk
+    /// tombstone push + exact-set Undo. Pre-existing tombstones are neither
+    /// re-stamped nor included in the returned set.
+    #[test]
+    fn soft_delete_all_tombstones_every_row_and_deindexes_fts() {
+        let conn = migrated_conn();
+        let r1 = new_rec();
+        let mut r2 = new_rec();
+        r2.filename = "second.wav".into();
+        let mut r3 = new_rec();
+        r3.filename = "third.wav".into();
+        RecordingsRepo::insert(&conn, &r1).unwrap();
+        RecordingsRepo::insert(&conn, &r2).unwrap();
+        RecordingsRepo::insert(&conn, &r3).unwrap();
+        // A row already in trash before the move — must stay out of the set.
+        RecordingsRepo::soft_delete(&conn, &r3.id).unwrap();
+        let pre_delete_stamp: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM recordings WHERE id = ?1",
+                [r3.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let trashed = RecordingsRepo::soft_delete_all(&conn).unwrap();
+
+        assert_eq!(trashed.len(), 2, "only the two visible rows move");
+        assert!(trashed.contains(&r1.id));
+        assert!(trashed.contains(&r2.id));
+        assert!(!trashed.contains(&r3.id), "already-trashed row not re-stamped");
+        assert_eq!(RecordingsRepo::count(&conn).unwrap(), 0);
+        for rec in [&r1, &r2, &r3] {
+            assert!(
+                !RecordingsRepo::fts_row_indexed(&conn, &rec.id.to_string()).unwrap(),
+                "every trashed row must be de-indexed"
+            );
+        }
+        assert_eq!(fts_match_count_by_stem(&conn, "test"), 0);
+        assert_eq!(fts_match_count_by_stem(&conn, "second"), 0);
+        assert_eq!(fts_match_count_by_stem(&conn, "third"), 0);
+        // The pre-existing tombstone's stamp is untouched.
+        let stamp_now: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM recordings WHERE id = ?1",
+                [r3.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamp_now, pre_delete_stamp);
+
+        // Round-trip: restoring a moved row works and re-indexes exactly once.
+        RecordingsRepo::restore(&conn, &r1.id).unwrap();
+        assert_eq!(fts_match_count_by_stem(&conn, "test"), 1);
+        assert!(RecordingsRepo::get_by_id_active(&conn, &r1.id).is_ok());
+    }
+
+    /// Move-all-to-Trash must NEVER touch the content-sync cursors: with
+    /// tombstones as the propagation mechanism, a cursor reset would
+    /// resurrect everything from a partner on the next pull.
+    #[test]
+    fn soft_delete_all_preserves_sync_cursors() {
+        use crate::content_sync::ContentSyncRepo;
+
+        let conn = migrated_conn();
+        RecordingsRepo::insert(&conn, &new_rec()).unwrap();
+        ContentSyncRepo::set_cursor(&conn, Some("2026-01-01T00:00:00Z")).unwrap();
+        ContentSyncRepo::set_push_cursor(&conn, "2026-01-02T00:00:00Z").unwrap();
+
+        RecordingsRepo::soft_delete_all(&conn).unwrap();
+
+        let cursor = ContentSyncRepo::get_cursor(&conn).unwrap();
+        assert_eq!(
+            cursor.cursor.as_deref(),
+            Some("2026-01-01T00:00:00Z"),
+            "pull cursor survives the move"
+        );
+        // Read the raw sync_state rows (get_push_cursor would first run its
+        // one-time v3 reset on this fresh DB — unrelated to the property
+        // under test, which is that soft_delete_all never writes here).
+        let push: Option<String> = conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = 'content_sync_push_cursor'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            push.as_deref(),
+            Some("2026-01-02T00:00:00Z"),
+            "push cursor survives the move"
+        );
+    }
+
+    #[test]
+    fn soft_delete_all_on_empty_library_is_noop() {
+        let conn = migrated_conn();
+        assert!(RecordingsRepo::soft_delete_all(&conn)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

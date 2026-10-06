@@ -21,8 +21,23 @@ export async function restoreRecording(id: string): Promise<void> {
   return invoke('restore_recording', { id });
 }
 
-export async function deleteAllRecordings(): Promise<number> {
+/** Result of "Move all to Trash": the count plus the exact id set trashed.
+ *  The Undo toast restores exactly these ids — never "everything deleted
+ *  since T", which could sweep in a later, unrelated deletion. */
+export interface DeleteAllResult {
+  count: number;
+  ids: string[];
+}
+
+export async function deleteAllRecordings(): Promise<DeleteAllResult> {
   return invoke('delete_all_recordings');
+}
+
+/** Authoritative count of active (non-trashed) recordings. The recordings
+ *  list is a paginated subset — dialogs promising "all N recordings" must
+ *  use this number, never `list.length`. */
+export async function countRecordings(): Promise<number> {
+  return invoke('count_recordings');
 }
 
 export async function importAudioFile(filePath: string): Promise<string> {

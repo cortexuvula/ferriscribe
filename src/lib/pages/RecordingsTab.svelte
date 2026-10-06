@@ -8,7 +8,7 @@
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
 
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
-  let showDeleteAll = $state(false);
+  let showMoveAll = $state(false);
 
   onMount(() => {
     recordings.load();
@@ -31,9 +31,8 @@
     deleteTarget = null;
     try {
       await recordings.remove(targetId);
-      // Show the Undo toast — the 8s auto-dismiss acts as the "commit" window.
       toasts.add({
-        message: `Recording deleted`,
+        message: 'Recording moved to Trash.',
         type: 'success',
         autoDismiss: true,
         actionLabel: 'Undo',
@@ -47,19 +46,32 @@
         },
       });
     } catch (err) {
-      console.error('Failed to delete recording:', err);
-      toasts.error(`Failed to delete recording: ${err}`);
+      console.error('Failed to move recording to Trash:', err);
+      toasts.error(`Failed to move recording to Trash: ${err}`);
     }
   }
 
-  async function confirmDeleteAll() {
+  function openMoveAllDialog() {
+    // Refresh the authoritative count right before the dialog renders —
+    // the list may be stale or filtered, and the dialog promises "all N".
+    void recordings.refreshActiveTotal();
+    showMoveAll = true;
+  }
+
+  async function confirmMoveAll() {
     // Clear BEFORE awaiting — same double-click shape as confirmDelete.
-    showDeleteAll = false;
+    showMoveAll = false;
     try {
-      await recordings.removeAll();
+      const result = await recordings.removeAll();
+      const noun = result.count === 1 ? 'recording' : 'recordings';
+      toasts.add({
+        message: `${result.count} ${noun} moved to Trash. Available to restore for 30 days.`,
+        type: 'success',
+        autoDismiss: true,
+      });
     } catch (err) {
-      console.error('Failed to delete all recordings:', err);
-      toasts.error(`Failed to delete all recordings: ${err}`);
+      console.error('Failed to move all recordings to Trash:', err);
+      toasts.error(`Failed to move recordings to Trash: ${err}`);
     }
   }
 
@@ -92,10 +104,10 @@
       <div class="list-toolbar">
         <span class="recording-count">{recordings.list.length} recording{recordings.list.length === 1 ? '' : 's'}</span>
         <button
-          class="btn-delete-all"
-          onclick={() => showDeleteAll = true}
+          class="btn-move-all"
+          onclick={openMoveAllDialog}
         >
-          Delete All
+          Move all to Trash
         </button>
       </div>
       {#each recordings.list as rec (rec.id)}
@@ -124,21 +136,27 @@
 
 <ConfirmDialog
   open={deleteTarget !== null}
-  title="Delete Recording"
-  message={deleteTarget ? `Delete "${deleteTarget.name}"? You can undo this for 8 seconds after deleting.` : ''}
-  confirmLabel="Delete"
+  title="Move recording to Trash?"
+  message="You can restore this recording from Trash for 30 days. After that, it and its saved audio and documents are permanently deleted."
+  confirmLabel="Move to Trash"
+  danger={false}
   onConfirm={confirmDelete}
   onCancel={() => deleteTarget = null}
 />
 
-<ConfirmDialog
-  open={showDeleteAll}
-  title="Delete All Recordings"
-  message={`This will permanently delete all ${recordings.list.length} recording${recordings.list.length === 1 ? '' : 's'}, including audio files, transcripts, SOAP notes, and all generated documents. This cannot be undone.`}
-  confirmLabel="Delete All"
-  onConfirm={confirmDeleteAll}
-  onCancel={() => showDeleteAll = false}
-/>
+{#if showMoveAll && recordings.activeTotal !== null}
+  {@const moveAllN = recordings.activeTotal ?? 0}
+  {@const moveAllNoun = moveAllN === 1 ? 'recording' : 'recordings'}
+  <ConfirmDialog
+    open={true}
+    title={`Move all ${moveAllN} ${moveAllNoun} to Trash?`}
+    message="This moves all active recordings to Trash, including recordings outside the current search. Their audio, transcripts, SOAP notes, and generated documents are kept for 30 days. You can restore them from Trash during that time. After 30 days, they are permanently deleted."
+    confirmLabel={`Move ${moveAllN} ${moveAllNoun} to Trash`}
+    danger={false}
+    onConfirm={confirmMoveAll}
+    onCancel={() => showMoveAll = false}
+  />
+{/if}
 
 <style>
   .recordings-tab {
@@ -195,20 +213,24 @@
     color: var(--text-muted);
   }
 
-  .btn-delete-all {
+  /* Restrained by design: Move-all-to-Trash is reversible for 30 days, so
+   * it must not carry the irreversible-danger treatment (red) the old
+   * hard-delete button had. */
+  .btn-move-all {
     padding: 4px 10px;
     font-size: 12px;
     font-weight: 500;
-    color: var(--danger, #ef4444);
+    color: var(--text-secondary);
     background-color: transparent;
-    border: 1px solid var(--danger, #ef4444);
+    border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     cursor: pointer;
     transition: background-color 0.15s ease;
   }
 
-  .btn-delete-all:hover {
-    background-color: rgba(239, 68, 68, 0.1);
+  .btn-move-all:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
   }
 
   .load-more {

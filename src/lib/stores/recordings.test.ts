@@ -5,9 +5,16 @@ import type { RecordingSummary } from '../types';
 // Mock the API layer so we control listRecordings output + pagination offsets.
 const mockListRecordings = vi.fn();
 const mockSearchRecordings = vi.fn();
+const mockCountRecordings = vi.fn();
+const mockDeleteAllRecordings = vi.fn();
 vi.mock('../api/recordings', () => ({
   listRecordings: (...args: unknown[]) => mockListRecordings(...args),
   searchRecordings: (...args: unknown[]) => mockSearchRecordings(...args),
+  countRecordings: (...args: unknown[]) => mockCountRecordings(...args),
+  deleteAllRecordings: (...args: unknown[]) => mockDeleteAllRecordings(...args),
+  getRecording: vi.fn(),
+  deleteRecording: vi.fn(),
+  restoreRecording: vi.fn(),
 }));
 
 function makeSummary(id: string): RecordingSummary {
@@ -38,6 +45,8 @@ async function freshStore() {
 describe('RecordingsStore — pagination + dedup', () => {
   beforeEach(() => {
     mockListRecordings.mockReset();
+    mockCountRecordings.mockReset();
+    mockCountRecordings.mockResolvedValue(0);
     vi.clearAllMocks();
   });
 
@@ -145,6 +154,56 @@ describe('RecordingsStore — pagination + dedup', () => {
     await p1;
     expect(recordings.list.map((r) => r.id)).toEqual(['smith-1']);
     expect(recordings.loading).toBe(false);
+  });
+});
+
+describe('RecordingsStore — Move all to Trash (D1/D2 contract)', () => {
+  beforeEach(() => {
+    mockListRecordings.mockReset();
+    mockSearchRecordings.mockReset();
+    mockCountRecordings.mockReset();
+    mockDeleteAllRecordings.mockReset();
+    mockCountRecordings.mockResolvedValue(0);
+    vi.clearAllMocks();
+  });
+
+  it('load() refreshes the authoritative active count alongside the list', async () => {
+    mockListRecordings.mockResolvedValue([makeSummary('a'), makeSummary('b')]);
+    mockCountRecordings.mockResolvedValue(42);
+    const { recordings } = await freshStore();
+
+    await recordings.load();
+    // The count is the backend truth, not the loaded page length.
+    expect(recordings.activeTotal).toBe(42);
+  });
+
+  it('refreshActiveTotal() leaves the previous count in place on failure', async () => {
+    mockCountRecordings.mockResolvedValue(7);
+    const { recordings } = await freshStore();
+    await recordings.refreshActiveTotal();
+    expect(recordings.activeTotal).toBe(7);
+
+    mockCountRecordings.mockRejectedValue(new Error('db locked'));
+    await recordings.refreshActiveTotal();
+    expect(recordings.activeTotal).toBe(7);
+  });
+
+  it('removeAll() captures the EXACT id set for the batch Undo toast', async () => {
+    mockListRecordings.mockResolvedValue([makeSummary('a')]);
+    mockDeleteAllRecordings.mockResolvedValue({
+      count: 2,
+      ids: ['id-a', 'id-b'],
+    });
+    const { recordings } = await freshStore();
+    await recordings.load();
+
+    const result = await recordings.removeAll();
+
+    expect(result.count).toBe(2);
+    expect(recordings.lastDeletedAllIds).toEqual(['id-a', 'id-b']);
+    expect(recordings.list).toHaveLength(0);
+    expect(recordings.activeTotal).toBe(0);
+    expect(recordings.selectedRecording).toBeNull();
   });
 });
 
