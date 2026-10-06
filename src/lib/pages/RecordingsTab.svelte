@@ -6,13 +6,30 @@
   import SearchBar from '../components/SearchBar.svelte';
   import RecordingCard from '../components/RecordingCard.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
+  import RecordingViewSwitch from '../components/RecordingViewSwitch.svelte';
+  import TrashPanel from '../components/TrashPanel.svelte';
 
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
   let showMoveAll = $state(false);
+  /// Active | Trash view. The switch is ALWAYS rendered — an empty Active
+  /// list must never hide the route to Trash recovery.
+  let view = $state<'active' | 'trash'>('active');
 
   onMount(() => {
     recordings.load();
+    // Badge count only — the full trash page loads on first entry.
+    void recordings.refreshTrashedTotal();
   });
+
+  function switchView(next: 'active' | 'trash') {
+    view = next;
+    if (next === 'trash' && recordings.trashedList.length === 0) {
+      // Fresh trash view (or emptied by a restore) — load page 1. An
+      // error state also retries here; an EMPTY result will not reload
+      // until re-entered, matching the Active view's load-once behavior.
+      void recordings.loadTrashed();
+    }
+  }
 
   function requestDelete(id: string, name: string) {
     deleteTarget = { id, name };
@@ -93,56 +110,81 @@
 </script>
 
 <div class="recordings-tab">
-  <SearchBar
-    placeholder="Search recordings…"
-    onSearch={(q) => recordings.search(q)}
-  />
+  <RecordingViewSwitch view={view} trashCount={recordings.trashedTotal} onChange={switchView} />
 
-  <div class="recordings-list">
-    {#if recordings.loading}
-      <div class="state-msg">
-        <span>Loading recordings…</span>
-      </div>
+  {#if view === 'trash'}
+    <div
+      id="view-panel-trash"
+      role="tabpanel"
+      aria-labelledby="view-tab-trash"
+      class="view-panel"
+    >
+      <TrashPanel />
+    </div>
+  {:else}
+    <div
+      id="view-panel-active"
+      role="tabpanel"
+      aria-labelledby="view-tab-active"
+      class="view-panel"
+    >
+      <SearchBar
+        placeholder="Search recordings…"
+        onSearch={(q) => recordings.search(q)}
+      />
 
-    {:else if recordings.list.length === 0}
-      <div class="state-msg">
-        <div class="state-icon">📋</div>
-        <p>No recordings yet.</p>
-        <p class="hint">Go to the <strong>Record</strong> tab to capture audio.</p>
-      </div>
+      <div class="recordings-list">
+        {#if recordings.loading}
+          <div class="state-msg">
+            <span>Loading recordings…</span>
+          </div>
 
-    {:else}
-      <div class="list-toolbar">
-        <span class="recording-count">{recordings.list.length} recording{recordings.list.length === 1 ? '' : 's'}</span>
-        <button
-          class="btn-move-all"
-          onclick={openMoveAllDialog}
-        >
-          Move all to Trash
-        </button>
+        {:else if recordings.list.length === 0}
+          <div class="state-msg">
+            <div class="state-icon">📋</div>
+            <p>No recordings yet.</p>
+            <p class="hint">Go to the <strong>Record</strong> tab to capture audio.</p>
+            {#if recordings.trashedTotal > 0}
+              <button class="btn-view-trash" onclick={() => switchView('trash')}>
+                View Trash
+              </button>
+            {/if}
+          </div>
+
+        {:else}
+          <div class="list-toolbar">
+            <span class="recording-count">{recordings.list.length} recording{recordings.list.length === 1 ? '' : 's'}</span>
+            <button
+              class="btn-move-all"
+              onclick={openMoveAllDialog}
+            >
+              Move all to Trash
+            </button>
+          </div>
+          {#each recordings.list as rec (rec.id)}
+            <RecordingCard
+              recording={rec}
+              selected={recordings.selectedRecording?.id === rec.id}
+              onClick={() => selectRecording(rec.id)}
+              onDelete={() => requestDelete(rec.id, rec.patient_name || rec.filename)}
+              onRetry={() => retryTranscription(rec.id)}
+            />
+          {/each}
+          {#if recordings.hasMore}
+            <div class="load-more">
+              <button
+                class="btn-load-more"
+                onclick={() => recordings.loadMore()}
+                disabled={recordings.loadingMore}
+              >
+                {recordings.loadingMore ? 'Loading…' : 'Load more'}
+              </button>
+            </div>
+          {/if}
+        {/if}
       </div>
-      {#each recordings.list as rec (rec.id)}
-        <RecordingCard
-          recording={rec}
-          selected={recordings.selectedRecording?.id === rec.id}
-          onClick={() => selectRecording(rec.id)}
-          onDelete={() => requestDelete(rec.id, rec.patient_name || rec.filename)}
-          onRetry={() => retryTranscription(rec.id)}
-        />
-      {/each}
-      {#if recordings.hasMore}
-        <div class="load-more">
-          <button
-            class="btn-load-more"
-            onclick={() => recordings.loadMore()}
-            disabled={recordings.loadingMore}
-          >
-            {recordings.loadingMore ? 'Loading…' : 'Load more'}
-          </button>
-        </div>
-      {/if}
-    {/if}
-  </div>
+    </div>
+  {/if}
 </div>
 
 <ConfirmDialog
@@ -177,9 +219,33 @@
     overflow: hidden;
   }
 
+  .view-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
   .recordings-list {
     flex: 1;
     overflow-y: auto;
+  }
+
+  .btn-view-trash {
+    margin-top: 8px;
+    padding: 6px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent);
+    background-color: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+
+  .btn-view-trash:hover {
+    background-color: var(--bg-hover);
+    border-color: var(--accent);
   }
 
   .state-msg {

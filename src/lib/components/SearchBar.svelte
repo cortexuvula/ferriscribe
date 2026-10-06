@@ -4,10 +4,20 @@
   interface Props {
     value?: string;
     placeholder?: string;
+    /// Accessible label + input id. Configurable because the Active and
+    /// Trash views render a SearchBar each — a hardcoded id would collide.
+    label?: string;
+    inputId?: string;
     onSearch?: (query: string) => void;
   }
 
-  let { value = $bindable(''), placeholder = 'Search…', onSearch = () => {} }: Props = $props();
+  let {
+    value = $bindable(''),
+    placeholder = 'Search…',
+    label = 'Search recordings',
+    inputId = 'search-input',
+    onSearch = () => {},
+  }: Props = $props();
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -24,13 +34,13 @@
 </script>
 
 <div class="search-bar">
-  <label for="search-input" class="sr-only">Search recordings</label>
+  <label for={inputId} class="sr-only">{label}</label>
   <input
-    id="search-input"
+    id={inputId}
     type="text"
     {value}
     {placeholder}
-    aria-label="Search recordings"
+    aria-label={label}
     oninput={handleInput}
     class="search-input"
   />
