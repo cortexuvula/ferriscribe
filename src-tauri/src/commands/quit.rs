@@ -2,9 +2,13 @@
 //!
 //! # What this module does
 //!
-//! The crash itself is fixed by the unconditional atexit guard
-//! (`commands/restart.rs` — every deliberate exit terminates via
-//! `libc::_exit`, so the ORT/knf C++ static destructor never aborts).
+//! The crash itself is fixed by the atexit guard machinery
+//! (`commands/restart.rs`): the guard terminates via `libc::_exit`, it
+//! is re-armed after every diarization use AND immediately before the
+//! exits initiated here, so the ORT/knf C++ static destructor — which
+//! registers lazily at first inference and aborts over live worker
+//! threads — never runs (2026-10-06: v0.77.12 proved a boot-time-only
+//! guard loses that atexit LIFO walk; see restart.rs module docs).
 //! Independently of the crash, a plain quit ALSO (a) orphaned the
 //! whisper-server child process — a live PHI-processing process with
 //! ports open — and (b) lost the non-blocking log tail. This module adds
@@ -61,6 +65,7 @@
 //!    lock — which is exactly why step 7's timeout exists.
 //! 6. Emit the final "exiting" log line, THEN flush the non-blocking
 //!    log buffer (dropping the `WorkerGuard` from `crate::LOG_GUARD`),
+//!    THEN re-arm the exit guard (newest atexit entry, by construction),
 //!    THEN terminate. Inverted order loses the final line — the exact
 //!    bug this step exists to fix. Lines logged by the runtime teardown
 //!    after the flush reach the console only; the flushed "exiting"
@@ -479,27 +484,22 @@ async fn cancel_active_chat_stream(state: &AppState) -> bool {
 
 /// Step 6 + termination: final log line, then flush the non-blocking
 /// buffer (dropping the worker guard flushes everything buffered before
-/// it), then exit through tauri — whose exit chain ends in the library
-/// `exit` the atexit guard converts to `_exit(0)`.
+/// it), then a LAST-LINE re-arm of the exit guard, then exit through
+/// tauri — whose exit chain ends in the library `exit` the (re-armed,
+/// therefore newest) atexit guard converts to `_exit(0)`. The re-arm is
+/// the 2026-10-06 fix's layer 3: the boot-time guard alone loses the
+/// LIFO walk to the ORT/knf destructors that register lazily at first
+/// diarization inference, which is exactly how v0.77.12 still crashed.
 async fn exit_through_guard(app: &tauri::AppHandle) {
     // The exit kind on the final line mirrors restart_app's — log
     // forensics for "which deliberate exit fired" (what the 2026-09-23
     // investigation had to reconstruct from a crash report).
     tracing::info!(exit_kind = ?restart::ExitKind::RequestedExit, "FerriScribe exiting");
-    flush_log_buffer();
+    restart::flush_log_buffer();
+    // Our entry must be the newest in the atexit table when the library
+    // exit walks it (module docs, restart.rs layer 3).
+    restart::rearm_exit_guard();
     app.exit(0);
-}
-
-/// Flush the non-blocking tracing buffer. Must be the LAST log-related
-/// action before termination: the final line is emitted first, then the
-/// guard drop flushes it; anything logged after reaches the console
-/// layer only. A poisoned slot (only possible if a panic hit while
-/// holding it) means no flush — the crash-log tail survives via the
-/// console layer.
-fn flush_log_buffer() {
-    if let Ok(mut slot) = crate::LOG_GUARD.lock() {
-        drop(slot.take());
-    }
 }
 
 /// Surface a refusal natively — the webview is dying, so the dialog
@@ -567,6 +567,41 @@ mod tests {
             assert!(!reason.dialog_title().is_empty());
             assert!(!reason.dialog_body().is_empty());
         }
+    }
+
+    /// 2026-10-06 fix pin: the terminal step must re-arm the exit guard
+    /// AFTER flushing the log and BEFORE `app.exit(0)`'s library exit
+    /// walks the atexit table — the boot-time guard alone lost that walk
+    /// (v0.77.12 field crash). Comment-stripped source, ordering by
+    /// byte position, per the restart.rs pin style.
+    #[test]
+    fn exit_path_rearms_after_flush_before_exit() {
+        let code: String = include_str!("quit.rs")
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("///") || t.starts_with("//!") || t.starts_with("//"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = code
+            .split("async fn exit_through_guard(")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("exit_through_guard must exist");
+        let flush = body
+            .find("restart::flush_log_buffer();")
+            .expect("exit path must flush the log buffer");
+        let rearm = body
+            .find("restart::rearm_exit_guard();")
+            .expect("exit path must re-arm the exit guard");
+        let exit = body
+            .find("app.exit(0);")
+            .expect("exit path must terminate through tauri");
+        assert!(
+            flush < rearm && rearm < exit,
+            "exit_through_guard must flush → re-arm → exit, in that order"
+        );
     }
 
     /// The in-flight export counter round-trips and the RAII guard

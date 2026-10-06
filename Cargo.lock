@@ -3805,6 +3805,7 @@ dependencies = [
  "hex",
  "hound",
  "knf-rs",
+ "libc",
  "medical-core",
  "medical-processing",
  "medical-security",

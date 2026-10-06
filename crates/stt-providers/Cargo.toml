@@ -39,6 +39,8 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 wiremock = { workspace = true }
 tempfile = { workspace = true }
 hound = { workspace = true }
+# ort_exit_repro_guard_rearm harness only: the _exit(0) atexit shim
+libc = "0.2"
 
 [lints]
 workspace = true

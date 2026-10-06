@@ -41,6 +41,61 @@ use tracing::{debug, info};
 
 use medical_core::error::{AppError, AppResult};
 
+/// Exit-guard re-arm hook (2026-10-06 quit-time SIGABRT on v0.77.12).
+///
+/// The app installs an `atexit` guard (src-tauri `commands/restart.rs`)
+/// that terminates via `libc::_exit(0)` so the ORT/knf C++ static
+/// destructor that aborts on live worker threads never runs. atexit runs
+/// LIFO, and the guard is registered at `run()` start — but the ORT/knf
+/// island registers its destructors **lazily, at first inference** (the
+/// v0.77.12 field crash: guard registered, diarization-heavy session,
+/// destructor still ran first and aborted 130 ms after "update relaunch
+/// committed"). The fix: after every diarization use, re-register the
+/// guard so the newest atexit entry — the one that runs first — is always
+/// ours again, postdating any registration the island made mid-run.
+///
+/// The hook decouples the crates: this crate knows *when* ORT ran; only
+/// the app knows *what* to re-register. The app calls
+/// [`set_exit_rearm_hook`] once at boot; [`SpeakerDiarizer::diarize`]
+/// fires it on every exit path via [`ExitRearmOnDrop`]. Test binaries
+/// leave it unset (a no-op) — the guard must never be registered in a
+/// test process, where a `_exit(0)` shim would mask test failures.
+static EXIT_REARM_HOOK: std::sync::Mutex<Option<fn()>> = std::sync::Mutex::new(None);
+
+/// Register the app's exit-guard re-arm callback. Called once, early in
+/// the app's `run()`. Overwrites any previous registration.
+pub fn set_exit_rearm_hook(hook: fn()) {
+    let mut slot = EXIT_REARM_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = Some(hook);
+}
+
+/// Fire the re-arm hook if one is registered. Never panics: a poisoned
+/// lock still carries the hook (or None), and the hook itself is the
+/// app's non-panicking `atexit` re-registration.
+fn run_exit_rearm_hook() {
+    let slot = EXIT_REARM_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(hook) = *slot {
+        hook();
+    }
+}
+
+/// Drop guard that fires the re-arm hook on every exit path from
+/// [`SpeakerDiarizer::diarize`] — early return, error, and panic unwind
+/// included: the ORT statics may have initialized even on a failed call
+/// (sessions load before inference), and every one of those paths leaves
+/// the process exit-ordered wrongly without a re-arm.
+struct ExitRearmOnDrop;
+
+impl Drop for ExitRearmOnDrop {
+    fn drop(&mut self) {
+        run_exit_rearm_hook();
+    }
+}
+
 /// Number of output channels of pyannote segmentation-3.0: channel 0 is
 /// non-speech, channels 1..=NUM_SPEAKER_SLOTS are local speaker slots.
 const SEGMENTATION_CHANNELS: usize = 7;
@@ -170,6 +225,11 @@ impl SpeakerDiarizer {
         sample_rate: u32,
         max_speakers: Option<u32>,
     ) -> AppResult<Vec<SpeakerTurn>> {
+        // First statement by design: this call may lazily initialize the
+        // ORT/knf C++ statics (registering their atexit destructors AFTER
+        // the app's boot-time exit guard), so every path out of this
+        // function must re-arm the guard — see [`set_exit_rearm_hook`].
+        let _exit_rearm = ExitRearmOnDrop;
         info!(
             samples = samples_i16.len(),
             sample_rate, "Starting speaker diarization"
@@ -790,26 +850,85 @@ fn cosine_similarity(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    // Aliased: the module already uses std::cmp::Ordering via `super::*`.
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-    /// ORT exit-abort investigation harness (2026-09-08 crash review).
-    ///
-    /// Two app crashes (2026-09-07, 2026-09-08) aborted inside a C++
-    /// static destructor during process exit after sessions where
-    /// diarization (ONNX Runtime) had run. FINDING: this standalone repro
-    /// — full diarize() inference against the real pyannote models, then
-    /// normal process exit — does NOT abort; the abort requires the
-    /// updater-relaunch exit shape (tauri's restart calling exit(0) while
-    /// the app's worker threads are still live), which a test binary
-    /// cannot faithfully produce. Symbolication pinned the aborting frames
-    /// to the ORT/kaldi-native-fbank C++ island (the only named C++
-    /// symbols in the release binary bracket the crash region); the fix
-    /// lives in src-tauri/src/commands/restart.rs (atexit guard +
-    /// `_exit` on restart exits). This harness stays as the fastest way
-    /// to re-check the ORT teardown story after any `ort` re-pin:
-    ///
-    ///     FERRISCRIBE_ORT_REPRO=<models dir> cargo test -p medical-stt-providers --lib ort_exit_repro -- --nocapture
+    /// The re-arm hook round-trips: set → fired on demand, unset → no-op.
+    /// (The Drop-guard wiring inside `diarize` is pinned structurally by
+    /// the src-tauri restart tests' cross-crate contract test — firing the
+    /// real hook here would need the app's guard, which must never be
+    /// registered in a test process.)
     #[test]
-    fn ort_exit_repro_builds_session_then_process_exits() {
+    fn exit_rearm_hook_fires_when_set() {
+        static FIRED: AtomicUsize = AtomicUsize::new(0);
+        fn count_hook() {
+            FIRED.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+        run_exit_rearm_hook(); // unset: no-op, must not panic
+        assert_eq!(FIRED.load(AtomicOrdering::SeqCst), 0);
+        set_exit_rearm_hook(count_hook);
+        run_exit_rearm_hook();
+        run_exit_rearm_hook();
+        // NOT an exact count: libtest runs tests in parallel threads, and
+        // ungated tests in this module call `diarize` (e.g.
+        // `diarizer_missing_models_returns_error`), whose Drop guard fires
+        // whatever hook is registered at that instant — a concurrent hit
+        // during the window above would push the count past 2.
+        assert!(
+            FIRED.load(AtomicOrdering::SeqCst) >= 2,
+            "the hook must fire once per run_exit_rearm_hook call"
+        );
+        // Restore the unset state for any test that runs after this one.
+        set_exit_rearm_hook(noop_hook);
+    }
+
+    fn noop_hook() {}
+
+    /// `diarize` must instantiate the re-arm Drop guard as its FIRST
+    /// action — the structural pin that every path through diarization
+    /// re-arms the app's exit guard (early returns, errors, and panics
+    /// included). Comment-stripped source, per the restart.rs pin style.
+    #[test]
+    fn diarize_instantiates_the_rearm_drop_guard_first() {
+        let code: String = include_str!("diarization.rs")
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("///") || t.starts_with("//!") || t.starts_with("//"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = code
+            .split("pub fn diarize(")
+            .nth(1)
+            .and_then(|rest| rest.split("info!(").next())
+            .expect("diarize body must exist");
+        assert!(
+            body.contains("let _exit_rearm = ExitRearmOnDrop;"),
+            "diarize must hold the ExitRearmOnDrop guard before any other statement"
+        );
+    }
+
+    /// ORT exit-abort investigation harness (2026-09-08 + 2026-10-06 crash
+    /// reviews).
+    ///
+    /// App crashes (2026-09-07, 2026-09-08, 2026-10-06) aborted inside a
+    /// C++ static destructor during process exit after sessions where
+    /// diarization (ONNX Runtime) had run. The 2026-10-06 crash fired on
+    /// v0.77.12 — WITH the unconditional atexit guard — proving the guard
+    /// loses the LIFO race: ORT/knf register their destructors lazily at
+    /// first inference (after the guard's boot-time registration), so they
+    /// run FIRST at exit. This harness reproduces the raw shape (full
+    /// diarize() inference + live parked worker threads + normal process
+    /// exit) WITHOUT any guard, to watch the destructor's behavior after
+    /// any `ort` re-pin. The fix itself lives in src-tauri
+    /// (commands/restart.rs: direct `_exit` on owned exits + the re-arm
+    /// hook this module fires); use
+    /// [`ort_exit_repro_guard_rearm_exits_clean`] to verify the mechanism.
+    ///
+    ///     FERRISCRIBE_ORT_REPRO=<models dir> cargo test -p medical-stt-providers --lib ort_exit_repro_abort_shape -- --nocapture
+    #[test]
+    fn ort_exit_repro_abort_shape() {
         let Some(dir) = std::env::var_os("FERRISCRIBE_ORT_REPRO") else {
             eprintln!("skipping: set FERRISCRIBE_ORT_REPRO=<models dir> to run");
             return;
@@ -837,7 +956,107 @@ mod tests {
             Ok(turns) => eprintln!("diarize returned {} turns", turns.len()),
             Err(e) => eprintln!("diarize error (repro continues): {e}"),
         }
-        eprintln!("pipeline done; exiting normally next — watch for signal 6");
+        // Live worker threads at exit — the abort condition the 2026-10-06
+        // crash report showed (47 live threads: tokio/r2d2/WebKit/audio).
+        // FINDING (2026-09-08, re-confirmed 2026-10-06): this harness exits
+        // CLEAN even with them — plain parked std threads do not trigger
+        // the destructor's abort; the field crash still requires the full
+        // app exit environment (GCD/WebKit/tokio mix). Kept anyway so the
+        // harness stays as close to the field shape as a test binary can
+        // get, and so any future `ort` re-pin re-answers the question.
+        let parked: Vec<_> = (0..8)
+            .map(|i| {
+                std::thread::Builder::new()
+                    .name(format!("repro-parked-{i}"))
+                    .spawn(|| {
+                        loop {
+                            std::thread::park();
+                        }
+                    })
+                    .expect("spawn parked thread")
+            })
+            .collect();
+        eprintln!(
+            "pipeline done with {} parked threads live; exiting normally next — watch for signal 6",
+            parked.len()
+        );
+        // Deliberately leak `parked`: they must stay live through process
+        // exit (joining them would change the exit shape under test).
+    }
+
+    /// The FIX-side verification harness (2026-10-06): same shape as
+    /// [`ort_exit_repro_abort_shape`] — full diarize() inference, live
+    /// parked threads — but with the app guard's exact mechanism
+    /// installed: an atexit shim registered AFTER the ORT work (the
+    /// re-arm position), terminating via `_exit(0)`. If the LIFO
+    /// re-ordering works, the process ends cleanly with exit code 0 and
+    /// NO signal 6, regardless of what the ORT/knf destructors would do.
+    ///
+    /// This test TERMINATES the test process on success (that is the
+    /// thing being verified) — run it alone:
+    ///
+    ///     FERRISCRIBE_ORT_REPRO=<models dir> cargo test -p medical-stt-providers --lib ort_exit_repro_guard_rearm -- --nocapture
+    ///
+    /// The shim is a local copy of the app's (src-tauri
+    /// commands/restart.rs pins the real one structurally); NEVER register
+    /// the real app guard here — a `_exit(0)` shim in a shared test
+    /// process masks test failures by exiting 0.
+    #[test]
+    fn ort_exit_repro_guard_rearm_exits_clean() {
+        let Some(dir) = std::env::var_os("FERRISCRIBE_ORT_REPRO") else {
+            eprintln!("skipping: set FERRISCRIBE_ORT_REPRO=<models dir> to run");
+            return;
+        };
+        let root = PathBuf::from(&dir);
+        let segmentation = root.join("pyannote").join("segmentation-3.0.onnx");
+        let embedding = root
+            .join("pyannote")
+            .join("wespeaker_en_voxceleb_CAM++.onnx");
+        if !segmentation.exists() || !embedding.exists() {
+            eprintln!("skipping: no diarization models under {}", root.display());
+            return;
+        }
+        extern "C" fn guard_shim() {
+            // The app's real shim consults its bypass matrix; here the
+            // bypass is the whole point, so terminate directly.
+            unsafe { libc::_exit(0) }
+        }
+        let diarizer = SpeakerDiarizer::new(segmentation, embedding);
+        let mut samples = vec![0i16; 16000 * 12];
+        for (i, s) in samples.iter_mut().enumerate() {
+            *s = ((i as f32 * 0.05).sin() * 8000.0) as i16;
+        }
+        match diarizer.diarize(&samples, 16000, None) {
+            Ok(turns) => eprintln!("diarize returned {} turns", turns.len()),
+            Err(e) => eprintln!("diarize error (repro continues): {e}"),
+        }
+        let parked: Vec<_> = (0..8)
+            .map(|i| {
+                std::thread::Builder::new()
+                    .name(format!("repro-guard-parked-{i}"))
+                    .spawn(|| {
+                        loop {
+                            std::thread::park();
+                        }
+                    })
+                    .expect("spawn parked thread")
+            })
+            .collect();
+        eprintln!(
+            "{} parked threads live; re-arming the exit guard AFTER the ORT work, then exiting",
+            parked.len()
+        );
+        // The re-arm position: AFTER diarize() returned, so this atexit
+        // entry postdates every registration ORT/knf made during the run
+        // and runs FIRST at exit (LIFO) — the ordering the 2026-10-06 fix
+        // restores for the exit paths the app cannot terminate directly.
+        let rc = unsafe { libc::atexit(guard_shim) };
+        assert_eq!(rc, 0, "guard shim registration must succeed");
+        eprintln!(
+            "guard armed; exiting through normal process exit next — must be clean (no signal 6)"
+        );
+        // The harness exits when the test process ends; the shim converts
+        // that exit into _exit(0) before any C++ destructor can run.
     }
 
     /// Multi-speaker eval: alternating speakers with NO intervening silence,

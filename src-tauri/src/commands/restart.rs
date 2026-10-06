@@ -1,13 +1,14 @@
 //! Crash-safe process exit for the update flow AND normal quits, with
 //! coordinated shutdown.
 //!
-//! # Why this exists (2026-09-08 + 2026-09-23 crash investigations)
+//! # Why this exists (2026-09-08 + 2026-09-23 + 2026-10-06 crash
+//! investigations)
 //!
 //! The statically linked ONNX Runtime / kaldi-native-fbank block (the
 //! diarization pipeline's `ort` download-binaries + `knf-rs`) registers a
 //! C++ static destructor that **aborts** when the process exits with the
 //! app's worker threads still live. The destructor chain runs on every
-//! `exit`-shaped teardown. Two field reports pinned it:
+//! `exit`-shaped teardown. Three field reports pinned it:
 //!
 //! - 2026-09-07 / 2026-09-08 (update relaunch): tauri's `process::restart`
 //!   ends in a library `exit`, stack `exit → __cxa_finalize_ranges →
@@ -22,21 +23,69 @@
 //!   `onnx::propagateShapeAndTypeFromFirstInput`, with the abort site
 //!   passing ORT-style source-line immediates) — they are the ORT/knf
 //!   island, not Rust code.
+//! - 2026-10-06 (update relaunch, **v0.77.12 — WITH the guard**): the
+//!   same SIGABRT 130 ms after `update relaunch committed`, in a session
+//!   that had run heavy diarization (19k diarization log lines). The
+//!   crashed binary's UUID matched the v0.77.12 release artifact exactly,
+//!   and the boot log carried no `exit guard registration failed` warn —
+//!   the guard WAS registered and still lost. Root cause: atexit runs
+//!   LIFO over one shared table, and the ORT/knf island registers its
+//!   destructors **lazily at first inference** — i.e. AFTER the guard's
+//!   boot-time registration — so they run FIRST at exit and the aborting
+//!   one fires before the guard's `_exit(0)`. (Corroborating asymmetry:
+//!   the replacement v0.78.0 process quit cleanly 73 s after boot — a
+//!   session with no diarization has no post-guard registrations, so the
+//!   boot-time guard was still the newest entry and won.)
 //!
 //! The earlier belief that only the update relaunch aborted was wrong;
-//! every deliberate exit runs the same destructor.
+//! every deliberate exit runs the same destructor. The 2026-10-06 report
+//! then proved that an atexit guard registered at boot CANNOT reliably
+//! win the LIFO race against runtime-registered destructors at all.
 //!
-//! # The fix (Phase 1 — every deliberate exit bypasses the destructors)
+//! # The fix (Phase 1 — every deliberate exit bypasses the destructors;
+//! Phase 3 — always own the newest atexit entry)
 //!
-//! [`install_exit_guard`] registers an `atexit` handler from `run()`,
-//! i.e. AFTER every pre-main C++ static registration — and atexit runs
-//! LIFO, so the guard executes FIRST at process exit. It terminates via
-//! `libc::_exit(0)` unconditionally: every exit that reaches atexit in
-//! this process is a deliberate app exit (normal quit, recovery-boot
-//! quit, last-window close, `AppHandle::exit`, update relaunch), and
-//! NONE of them may run the ORT/knf destructor that aborts. The decision
-//! matrix is [`ExitKind`] / [`bypasses_destructor_chain`], pinned by
-//! test so no future edit narrows a path back to the destructor chain.
+//! Layer 1 (2026-09-23, kept): [`install_exit_guard`] registers an
+//! `atexit` handler from `run()`, terminating via `libc::_exit(0)`
+//! unconditionally for every [`ExitKind`]. Covers every exit in a
+//! session that has not run diarization — there, the boot-time guard is
+//! still the newest table entry and wins the LIFO walk.
+//!
+//! Layer 2 (2026-10-06): after EVERY diarization use, the guard is
+//! RE-registered ([`rearm_exit_guard`], wired through
+//! `medical_stt_providers::diarization::set_exit_rearm_hook` and fired
+//! by a Drop guard on every `diarize` exit path). The ORT/knf island —
+//! the ONLY aborting destructor in the process (12 days of v0.77.12
+//! field history quit WebKit/CoreAudio/GCD-thread-carrying sessions
+//! without a single SIGABRT; only diarization sessions crashed) —
+//! registers its destructors lazily at first inference; re-arming after
+//! every use puts our entry strictly AFTER theirs again.
+//!
+//! Layer 3 (2026-10-06): the exits this app initiates re-arm one final
+//! time immediately before riding the library `exit` — [`restart_app`]
+//! flushes the log and re-arms right before `app.restart()` (tauri's
+//! restart: spawn the replacement, then `exit(0)`), and the coordinated
+//! quit's terminal step does the same before `app.exit(0)`. At the
+//! moment `exit()` walks the table, our entry is the newest BY
+//! CONSTRUCTION: the only code that runs between the re-arm and the
+//! walk is the single-threaded spawn/exit sequence itself, and the only
+//! aborting registrant (ORT/knf) registered strictly before our
+//! post-diarize re-arms. Pinned across crates: diarization's test
+//! module pins that `diarize` holds the re-arm Drop guard from its
+//! first statement.
+//!
+//! Residual window (accepted, documented): the UN-interceptable exits
+//! (dock-icon Quit / logout → AppKit `terminate:` straight to `exit()`)
+//! during the FIRST `diarize` call of a session, after the island's lazy
+//! registration but before the call's trailing re-arm, would still walk
+//! the table with ORT/knf ahead of the boot guard. Unavoidable by
+//! registration order (nothing can be registered ahead of an entry that
+//! has not happened yet), and narrowed by this fix from "any quit after
+//! any diarization, forever" to "quit within one diarize call, once per
+//! session". The exits the app initiates are not meaningfully exposed:
+//! they re-arm after the settle sequence (which cancels in-flight
+//! pipelines under an 8 s bound), and a diarize still running at exit
+//! time contributes its own trailing re-arm on completion.
 //!
 //! Skipping static destructors is safe for every one of those exits: on
 //! macOS a normal quit is `terminate: → exit()`, which never returns
@@ -212,6 +261,42 @@ pub fn install_exit_guard() {
     }
 }
 
+/// Re-register the exit guard so it is again the NEWEST atexit entry
+/// (2026-10-06 fix, layer 3). atexit is one shared LIFO table: the ORT/knf
+/// island registers its destructors lazily at first inference, which
+/// pushes them AHEAD of the boot-time guard — so after every diarization
+/// use the guard must be re-registered to reclaim the first slot. Wired
+/// via `medical_stt_providers::diarization::set_exit_rearm_hook` in
+/// `run()`; fires after every `diarize` call on every exit path.
+///
+/// Each call appends one table entry that will never individually run
+/// (the newest entry `_exit`s first); the per-recording cost is a few
+/// dozen bytes and one registration — negligible next to the inference
+/// that just ran. Failing (ENOMEM) is warned, never fatal: the previous
+/// entries remain, degrading to the boot-time guard's coverage.
+pub fn rearm_exit_guard() {
+    let rc = unsafe { libc::atexit(exit_guard) };
+    if rc != 0 {
+        tracing::warn!(
+            rc,
+            "exit guard re-arm failed — quitting after diarization may show a crash report"
+        );
+    }
+}
+
+/// Flush the non-blocking tracing buffer. Must be the LAST log-related
+/// action before ANY direct termination (`_exit` skips the worker-guard
+/// drop): the final line is emitted first, then this flush makes it
+/// durable; anything logged after reaches the console layer only. A
+/// poisoned slot (only possible if a panic hit while holding it) means
+/// no flush — the tail survives via the console layer. Shared by the
+/// quit path (`commands/quit.rs`) and [`restart_app`].
+pub(crate) fn flush_log_buffer() {
+    if let Ok(mut slot) = crate::LOG_GUARD.lock() {
+        drop(slot.take());
+    }
+}
+
 /// Why a restart was refused. Returned to the frontend as a typed
 /// `AppError::InvalidInput` whose message starts with a stable machine
 /// prefix so both update surfaces (UpdateBanner, Settings → About) can
@@ -310,24 +395,30 @@ pub async fn clear_pending_edit(state: State<'_, AppState>, field: String) -> Ap
 /// Relaunch the app after an update install, crash-safely — but only
 /// after coordinated shutdown (see module docs). On success never
 /// returns: tauri's `restart()` spawns the replacement and exits the
-/// current process (both its exit paths — the direct main-thread one and
-/// the run-loop one — run atexit, where the guard converts the exit).
-/// On refusal, returns an error and the app keeps running with the
-/// user's work intact.
+/// current process through the library `exit`, whose atexit walk the
+/// re-armed guard converts to `_exit(0)` before any ORT/knf destructor
+/// (layer 3 — the boot-time guard ALONE lost exactly that walk in the
+/// 2026-10-06 v0.77.12 field crash). On refusal, returns an error and
+/// the app keeps running with the user's work intact.
 #[tauri::command]
 pub async fn restart_app(app: tauri::AppHandle, state: State<'_, AppState>) -> AppResult<()> {
     ensure_safe_to_restart(&state).await?;
     // All work settled — commit the restart. Once RESTARTING is set,
     // `start_recording` refuses new takes, closing the check→exit TOCTOU
-    // window (Codie review, 2026-09-09). Ordering vs. the guard is
-    // unchanged: work settles first, always. `app.restart()` never
-    // returns (its signature is `!`): it spawns the replacement and exits
-    // the process via the guard, so there is no failure path that leaves
-    // the process alive with the flag set. The logged exit kind makes
-    // the final log line state which deliberate exit fired (the same
-    // forensics the 2026-09-23 crash investigation needed).
+    // window (Codie review, 2026-09-09). Work settles first, always. The
+    // logged exit kind states which deliberate exit fired (the forensics
+    // the 2026-09-23 and 2026-10-06 investigations needed); the flush
+    // makes it durable BEFORE the process can die inside tauri's exit —
+    // `_exit` (which the guard converts that exit into) skips the
+    // tracing worker's drop.
     tracing::info!(exit_kind = ?ExitKind::Restart, "update relaunch committed");
     RESTARTING.store(true, Ordering::SeqCst);
+    flush_log_buffer();
+    // Last-line re-arm (layer 3): our atexit entry must be the NEWEST by
+    // construction when tauri's restart calls exit(0) microseconds later.
+    // `app.restart()` never returns (its signature is `!`), so there is
+    // no failure path that leaves the process alive past this point.
+    rearm_exit_guard();
     app.restart()
 }
 
@@ -410,6 +501,72 @@ mod tests {
         assert!(
             !shim.contains("state"),
             "the guard must not touch app state (recovery-boot quits ride it too)"
+        );
+    }
+
+    /// 2026-10-06 fix pins: a dedicated re-arm entry point must exist and
+    /// register the SAME shim as the boot-time install (a differently
+    /// behaving entry would break the newest-entry invariant), and
+    /// `restart_app` must flush → re-arm → `app.restart()` in that order
+    /// — the trailing library `exit` inside tauri's restart is where the
+    /// boot-time-only guard lost the LIFO walk (v0.77.12 field crash).
+    #[test]
+    fn rearm_and_restart_exit_ordering_are_pinned() {
+        let code: String = include_str!("restart.rs")
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("///") || t.starts_with("//!") || t.starts_with("//"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("pub fn rearm_exit_guard()"),
+            "the re-arm entry point must exist"
+        );
+        assert!(
+            code.matches("libc::atexit(exit_guard)").count() >= 2,
+            "install AND re-arm must register the same shim"
+        );
+        let body = code
+            .split("pub async fn restart_app(")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("restart_app must exist");
+        let flush = body
+            .find("flush_log_buffer();")
+            .expect("restart_app must flush the log before the process can die");
+        let rearm = body
+            .find("rearm_exit_guard();")
+            .expect("restart_app must re-arm the guard before tauri's exit");
+        let restart = body
+            .find("app.restart()")
+            .expect("restart_app must terminate through tauri's restart");
+        assert!(
+            flush < rearm && rearm < restart,
+            "restart_app must flush → re-arm → restart, in that order"
+        );
+    }
+
+    /// Cross-crate contract (2026-10-06 fix, layer 2): `run()` must wire
+    /// the diarization re-arm hook to the guard. A missing registration —
+    /// or a drift to a differently-named function — silently drops the
+    /// post-diarization coverage; the diarization crate pins the other
+    /// half (its `diarize` holds the Drop guard from its first
+    /// statement).
+    #[test]
+    fn run_registers_the_diarization_rearm_hook() {
+        let lib: String = include_str!("../lib.rs")
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("///") || t.starts_with("//!") || t.starts_with("//"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            lib.contains("set_exit_rearm_hook(commands::restart::rearm_exit_guard)"),
+            "run() must wire the diarization re-arm hook to the exit guard"
         );
     }
 

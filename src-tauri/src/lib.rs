@@ -97,6 +97,13 @@ pub fn run() {
     // (normal quit, recovery-boot quit, last-window close, update
     // relaunch): the ORT/knf C++ static destructor that aborts never runs.
     commands::restart::install_exit_guard();
+    // 2026-10-06 (v0.77.12 field crash): the ORT/knf island registers its
+    // destructors LAZILY at first diarization inference — after this
+    // boot-time guard — and atexit runs LIFO, so those destructors ran
+    // FIRST at exit and aborted. Re-arming after every diarize (and once
+    // more immediately before the exits the app initiates) keeps the
+    // guard the newest table entry; see commands/restart.rs module docs.
+    medical_stt_providers::diarization::set_exit_rearm_hook(commands::restart::rearm_exit_guard);
 
     // ── Logging ──────────────────────────────────────────────────────────
     //
