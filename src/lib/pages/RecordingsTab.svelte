@@ -68,6 +68,17 @@
         message: `${result.count} ${noun} moved to Trash. Available to restore for 30 days.`,
         type: 'success',
         autoDismiss: true,
+        actionLabel: 'Undo',
+        onAction: async () => {
+          try {
+            const restored = await recordings.undoMoveAll();
+            const restoredNoun = restored === 1 ? 'recording' : 'recordings';
+            toasts.success(`${restored} ${restoredNoun} restored to Active.`);
+          } catch (err) {
+            console.error('Failed to undo move-all:', err);
+            toasts.error(`Could not restore: ${err}`);
+          }
+        },
       });
     } catch (err) {
       console.error('Failed to move all recordings to Trash:', err);

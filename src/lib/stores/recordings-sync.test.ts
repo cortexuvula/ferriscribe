@@ -21,6 +21,7 @@ vi.mock('../api/recordings', () => ({
   searchRecordings: vi.fn(async () => []),
   deleteRecording: vi.fn(async () => {}),
   restoreRecording: vi.fn(async () => {}),
+  restoreRecordings: vi.fn(async () => ({ count: 0, ids: [] as string[] })),
   deleteAllRecordings: vi.fn(async () => ({ count: 0, ids: [] as string[] })),
   countRecordings: vi.fn(async () => 0),
 }));

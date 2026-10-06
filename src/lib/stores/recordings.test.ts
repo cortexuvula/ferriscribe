@@ -7,13 +7,16 @@ const mockListRecordings = vi.fn();
 const mockSearchRecordings = vi.fn();
 const mockCountRecordings = vi.fn();
 const mockDeleteAllRecordings = vi.fn();
+const mockRestoreRecordings = vi.fn();
+const mockDeleteRecording = vi.fn();
 vi.mock('../api/recordings', () => ({
   listRecordings: (...args: unknown[]) => mockListRecordings(...args),
   searchRecordings: (...args: unknown[]) => mockSearchRecordings(...args),
   countRecordings: (...args: unknown[]) => mockCountRecordings(...args),
   deleteAllRecordings: (...args: unknown[]) => mockDeleteAllRecordings(...args),
+  restoreRecordings: (...args: unknown[]) => mockRestoreRecordings(...args),
+  deleteRecording: (...args: unknown[]) => mockDeleteRecording(...args),
   getRecording: vi.fn(),
-  deleteRecording: vi.fn(),
   restoreRecording: vi.fn(),
 }));
 
@@ -163,6 +166,8 @@ describe('RecordingsStore — Move all to Trash (D1/D2 contract)', () => {
     mockSearchRecordings.mockReset();
     mockCountRecordings.mockReset();
     mockDeleteAllRecordings.mockReset();
+    mockRestoreRecordings.mockReset();
+    mockDeleteRecording.mockReset();
     mockCountRecordings.mockResolvedValue(0);
     vi.clearAllMocks();
   });
@@ -204,6 +209,67 @@ describe('RecordingsStore — Move all to Trash (D1/D2 contract)', () => {
     expect(recordings.list).toHaveLength(0);
     expect(recordings.activeTotal).toBe(0);
     expect(recordings.selectedRecording).toBeNull();
+  });
+
+  it('undoMoveAll() restores exactly the captured set — never a later deletion', async () => {
+    mockListRecordings.mockResolvedValue([]);
+    mockCountRecordings.mockResolvedValue(0);
+    mockDeleteAllRecordings.mockResolvedValue({
+      count: 2,
+      ids: ['id-a', 'id-b'],
+    });
+    mockRestoreRecordings.mockResolvedValue({ count: 2, ids: ['id-a', 'id-b'] });
+    const { recordings } = await freshStore();
+
+    await recordings.removeAll();
+    // A recording deleted AFTER the move (single delete of id-c) must not
+    // be swept into the undo — the undo restores the snapshot, not "everything
+    // deleted since the move".
+    mockDeleteRecording.mockResolvedValue(undefined);
+    await recordings.remove('id-c');
+
+    const restored = await recordings.undoMoveAll();
+
+    expect(restored).toBe(2);
+    expect(mockRestoreRecordings).toHaveBeenCalledWith(['id-a', 'id-b']);
+    expect(mockRestoreRecordings).toHaveBeenCalledTimes(1);
+    expect(recordings.lastDeletedAllIds).toBeNull();
+    expect(recordings.restoring).toBe(false);
+  });
+
+  it('undoMoveAll() rejects a duplicate submission while one is in flight', async () => {
+    mockListRecordings.mockResolvedValue([]);
+    mockCountRecordings.mockResolvedValue(0);
+    mockDeleteAllRecordings.mockResolvedValue({ count: 1, ids: ['id-a'] });
+    let resolveRestore: (v: { count: number; ids: string[] }) => void = () => {};
+    mockRestoreRecordings.mockImplementationOnce(
+      () => new Promise((res) => { resolveRestore = res; }),
+    );
+    const { recordings } = await freshStore();
+    await recordings.removeAll();
+
+    const first = recordings.undoMoveAll();
+    // Second click while the first restore is still in flight.
+    await expect(recordings.undoMoveAll()).rejects.toThrow(/already in progress/);
+    resolveRestore({ count: 1, ids: ['id-a'] });
+    await expect(first).resolves.toBe(1);
+    expect(mockRestoreRecordings).toHaveBeenCalledTimes(1);
+  });
+
+  it('undoMoveAll() reports the ACTUAL restored count when some ids were purged', async () => {
+    mockListRecordings.mockResolvedValue([]);
+    mockCountRecordings.mockResolvedValue(0);
+    mockDeleteAllRecordings.mockResolvedValue({ count: 3, ids: ['a', 'b', 'c'] });
+    mockRestoreRecordings.mockResolvedValue({ count: 1, ids: ['a'] });
+    const { recordings } = await freshStore();
+
+    await recordings.removeAll();
+    await expect(recordings.undoMoveAll()).resolves.toBe(1);
+  });
+
+  it('undoMoveAll() with nothing captured is an error', async () => {
+    const { recordings } = await freshStore();
+    await expect(recordings.undoMoveAll()).rejects.toThrow(/no move-all to undo/i);
   });
 });
 

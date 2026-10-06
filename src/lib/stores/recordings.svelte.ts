@@ -7,6 +7,7 @@ import {
   searchRecordings,
   deleteRecording,
   restoreRecording,
+  restoreRecordings,
   deleteAllRecordings,
   countRecordings,
   type DeleteAllResult,
@@ -238,6 +239,33 @@ class RecordingsStore {
     } catch (err) {
       console.error('Failed to move all recordings to Trash:', err);
       throw err;
+    }
+  }
+
+  /** Batch Undo for Move-all-to-Trash: restores EXACTLY the captured id
+   *  set — never "everything deleted since T", which would sweep in a
+   *  later, unrelated deletion. Duplicate submissions while one is in
+   *  flight are rejected (a double-click is one restore, not two racing
+   *  transactions). Returns the ACTUAL restored count, which may be lower
+   *  if a purge intervened. */
+  async undoMoveAll(): Promise<number> {
+    const ids = this.lastDeletedAllIds;
+    if (!ids || ids.length === 0) {
+      throw new Error('No move-all to undo');
+    }
+    if (this.restoring) {
+      throw new Error('A restore is already in progress');
+    }
+    this.restoring = true;
+    try {
+      const result = await restoreRecordings(ids);
+      this.lastDeletedAllIds = null;
+      // Refresh the active list + authoritative count (Trash totals are
+      // refreshed by the trash store surfaces).
+      await this.load();
+      return result.count;
+    } finally {
+      this.restoring = false;
     }
   }
 
