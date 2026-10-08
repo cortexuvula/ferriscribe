@@ -1,4 +1,4 @@
-//! Acceptance cases 9–12: the late additions to the spec matrix.
+//! Acceptance cases 9–13: the late additions to the spec matrix.
 //!
 //! - Case 9 (migration): a database created BEFORE the provenance table
 //!   (schema m019, on a real disk file) carrying legacy outputs, then
@@ -11,6 +11,12 @@
 //!   model actually SAW. A mid-generation context edit must leave the
 //!   output stale-or-unknown — never falsely fresh — and after
 //!   regenerating with the new inputs, fresh.
+//! - Case 13 (digest trim normalization): every write-side digest that is
+//!   compared against a stored text column must trim like the read side
+//!   (`text_digest`) — an output persisted with trailing whitespace
+//!   (`strip_markdown` does not trim) or a SOAP source column carrying a
+//!   trailing newline must read fresh immediately after generation, not
+//!   `output_modified`/`source_changed`.
 
 use super::freshness::{CurrentDocInputs, FreshnessStatus, compute_report_for_test};
 use super::test_helpers::{MockCompletionProvider, build_test_state_with_provider};
@@ -238,4 +244,71 @@ async fn a12_provenance_snapshots_inputs_actually_sent() {
             && args_window.contains("patient_context"),
         "write-side digest must bind the command's argument copies, got: {args_window}"
     );
+}
+
+/// Case 13 (digest trim normalization, 2026-10-08 review): the write side
+/// used to hash RAW text while the read side trims, so a referral/letter
+/// persisted with a trailing newline (strip_markdown does not trim) read
+/// `output_modified`, and a SOAP source column carrying trailing
+/// whitespace (hand-edit or sync) flagged freshly generated derived
+/// outputs `source_changed` the moment they were written. Every compared
+/// digest now goes through the trimming variant on BOTH sides.
+#[tokio::test]
+async fn a13_trim_normalized_digests_keep_whitespace_padded_outputs_fresh() {
+    // The mock's completion ends with newlines — strip_markdown keeps
+    // them, so the persisted referral/letter columns carry trailing
+    // whitespace exactly like a real model response does.
+    let provider = Arc::new(MockCompletionProvider::new(
+        "ollama",
+        "Dear Cardiology, please assess this patient for chest pain.\n\n",
+        64,
+    ));
+    let (state, rid) =
+        build_test_state_with_provider(base_config(), "Patient reports back pain.", provider).await;
+
+    let inputs = CurrentDocInputs::default();
+    super::soap::generate_soap_inner_for_test_with(&state, &rid, &inputs)
+        .await
+        .expect("generation must succeed");
+
+    // Simulate a hand-edited/sync-arrived SOAP note whose column value
+    // carries a trailing newline — the derived types bind this column as
+    // their source, and the read side trims it before hashing.
+    {
+        let uuid = uuid::Uuid::parse_str(&rid).expect("uuid");
+        let conn = state.db.conn().expect("conn");
+        let mut rec =
+            medical_db::recordings::RecordingsRepo::get_by_id(&conn, &uuid).expect("recording");
+        let trimmed_note = rec.soap_note.as_deref().expect("soap note").to_string();
+        rec.soap_note = Some(format!("{trimmed_note}\n"));
+        medical_db::recordings::RecordingsRepo::update(&conn, &rec).expect("update");
+    }
+
+    super::referral::generate_referral_inner_for_test(&state, &rid, &inputs)
+        .await
+        .expect("referral generation must succeed");
+    super::letter::generate_letter_inner_for_test(&state, &rid, &inputs)
+        .await
+        .expect("letter generation must succeed");
+
+    // Both derived types must read FRESH: no output_modified (their own
+    // stored output ends with whitespace) and no source_changed (the SOAP
+    // column they bind ends with a newline).
+    let r = report(&state, &rid, &inputs).await;
+    for (name, v) in [("referral", &r.referral), ("letter", &r.letter)] {
+        assert_eq!(
+            v.status,
+            FreshnessStatus::Fresh,
+            "{name}: whitespace padding must not break its own freshness binding (reasons: {:?})",
+            v.reasons
+        );
+        assert!(
+            !v.reasons.contains(&"output_modified"),
+            "{name}: output digest must be trim-normalized"
+        );
+        assert!(
+            !v.reasons.contains(&"source_changed"),
+            "{name}: source digest must be trim-normalized"
+        );
+    }
 }

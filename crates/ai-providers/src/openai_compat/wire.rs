@@ -118,6 +118,12 @@ pub(super) struct ApiToolDef {
 #[derive(Debug, Deserialize)]
 pub(super) struct ChatResponse {
     pub model: Option<String>,
+    /// `#[serde(default)]`: SSE servers may emit `data:` frames without a
+    /// `choices` member at all (keep-alive/usage-only events). A missing
+    /// field means "no deltas this frame" — deserializing it as an empty
+    /// vec lets the stream skip the frame instead of failing the parse
+    /// (which would kill the whole stream mid-generation).
+    #[serde(default)]
     pub choices: Vec<ChatChoice>,
     pub usage: Option<ApiUsage>,
 }
@@ -314,6 +320,25 @@ mod tests {
         assert_eq!(u.prompt_tokens, 22);
         assert_eq!(u.completion_tokens, 120);
         assert_eq!(u.generation_tokens_per_second, Some(99.34));
+    }
+
+    #[test]
+    fn deserialize_frame_without_choices() {
+        // An SSE frame with no `choices` member at all (keep-alive /
+        // usage-only events) must parse — a missing field means "no deltas
+        // this frame", not a malformed stream.
+        let raw = r#"{"model":"llama3:8b","usage":null}"#;
+        let resp: ChatResponse = serde_json::from_str(raw).expect("parse");
+        assert!(
+            resp.choices.is_empty(),
+            "missing choices must default to an empty vec"
+        );
+
+        // And the usage-only frame shape some servers send between deltas.
+        let raw = r#"{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#;
+        let resp: ChatResponse = serde_json::from_str(raw).expect("parse");
+        assert!(resp.choices.is_empty());
+        assert_eq!(resp.usage.expect("usage present").total_tokens, 3);
     }
 
     #[test]

@@ -38,49 +38,63 @@ use medical_db::recordings::RecordingsRepo;
 use crate::commands::sharing::PairedConnection;
 use crate::state::{self, AppState};
 
-/// Advance a cursor timestamp by 1 microsecond past the batch boundary.
+/// Build the next composite keyset cursor from a batch boundary.
 ///
-/// After a push/pull batch succeeds, the cursor is set to the batch's
-/// `max(updated_at)`. Because `changed_since` uses strict `>` comparison,
-/// two recordings sharing the same `updated_at` would silently lose the
-/// second one (its timestamp is not `>` the cursor). Advancing the cursor
-/// by 1 microsecond guarantees it is strictly greater than every timestamp
-/// in the batch while still including same-timestamp recordings that were
-/// not part of this batch.
+/// After a push/pull batch succeeds, the cursor must encode the
+/// last-delivered position so `changed_since` can resume exactly after it.
+/// A bare timestamp can't do that: bulk writers like `soft_delete_all`
+/// stamp whole batches with one shared `updated_at`, and `julianday`
+/// comparison (millisecond precision) can't see a +1µs nudge — so the
+/// cursor is now `<updated_at>|<last-delivered-id>` and the selector pages
+/// within a shared timestamp by id (see `ContentSyncRepo::changed_since`).
+///
+/// The batch's timestamp string is preserved verbatim: `changed_since`'s
+/// tie arm compares `updated_at` strings for equality, and re-serializing
+/// would normalize a `Z`-suffixed stamp to `+00:00` and silently break that
+/// comparison. The old +1µs nudge is gone for the same reason — a nudged
+/// timestamp no longer string-matches the rows it must tie-break against
+/// (the id component subsumes what the nudge achieved).
 ///
 /// Clock-skew clamp (2026-08-17 tracked item, fixed 2026-09-03): a server
 /// row written by a machine with a fast clock carries a FUTURE timestamp;
 /// advancing the cursor past it would pin every pull fleet-wide at that
 /// future instant, and no machine's present-day writes would be `>` the
 /// cursor until real time caught up — silently missed updates across the
-/// whole practice. The cursor is therefore clamped to the LOCAL now: a
-/// future-stamped batch re-delivers on subsequent pulls (LWW merges are
-/// idempotent, so the only cost is redundant transfer) instead of
-/// skipping everyone else's rows.
+/// whole practice. A future batch max is therefore clamped to the LOCAL
+/// now with the id component left EMPTY (a plain timestamp — the legacy
+/// cursor shape), so the bucket at that timestamp re-delivers on subsequent
+/// pulls (LWW merges are idempotent, so the only cost is redundant
+/// transfer) instead of skipping everyone else's rows.
 ///
-/// Parses the RFC3339 timestamp, adds 1 microsecond, clamps to local now,
-/// re-serializes. If the input fails to parse, it is returned unchanged
-/// (the raw `max_ts` is still a safe-enough cursor — the data-loss window
-/// only affects rows sharing that exact timestamp).
-fn advance_cursor(ts: &str) -> String {
-    match chrono::DateTime::parse_from_rfc3339(ts) {
-        Ok(dt) => {
-            let advanced = dt
-                .checked_add_signed(chrono::Duration::microseconds(1))
-                .unwrap_or(dt);
-            let local_now = chrono::Utc::now();
-            let clamped: chrono::DateTime<chrono::FixedOffset> = if advanced > local_now {
-                tracing::warn!(
-                    "sync cursor clamped to local now — server row carries a future timestamp (clock skew?)"
-                );
-                local_now.fixed_offset()
-            } else {
-                advanced
-            };
-            clamped.to_rfc3339()
-        }
-        Err(_) => ts.to_string(),
+/// If the input fails to parse it is returned unchanged with no id
+/// component (the raw `max_ts` is still a safe-enough cursor — the
+/// data-loss window only affects rows sharing that exact timestamp, which
+/// re-deliver under the legacy shape).
+fn advance_cursor(ts: &str, last_id: &str) -> String {
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        return ts.to_string();
+    };
+    let local_now = chrono::Utc::now();
+    if dt > local_now {
+        tracing::warn!(
+            "sync cursor clamped to local now — server row carries a future timestamp (clock skew?)"
+        );
+        return local_now.to_rfc3339();
     }
+    format!("{ts}|{last_id}")
+}
+
+/// The batch boundary [`advance_cursor`] consumes: the maximum `updated_at`
+/// in the batch plus the maximum id among the rows carrying that exact
+/// timestamp. Every delivered row sorts at or before this `(timestamp, id)`
+/// position in `changed_since`'s `(julianday, updated_at, id)` delivery
+/// order, so the composite cursor resumes exactly after the batch.
+fn batch_cursor_boundary(batch: &[SyncRecording]) -> Option<(String, String)> {
+    batch
+        .iter()
+        .map(|r| (r.updated_at.as_str(), r.id.as_str()))
+        .max_by(|a, b| a.cmp(b))
+        .map(|(ts, id)| (ts.to_string(), id.to_string()))
 }
 
 /// Returns `Some((conn, bearer, http_client))` when content sync should route
@@ -308,6 +322,122 @@ fn read_local_audio(db: &Arc<Database>, rec_id: &str) -> PendingAudioRead {
     }
 }
 
+/// Upper bound on the persisted audio-fetch skip set. The OLDEST entries
+/// (longest-tenured skips) are dropped first, so a permanently-skipped id
+/// eventually re-enters selection and is retried — the set bounds state,
+/// not forever-ness.
+const AUDIO_FETCH_SKIP_CAP: usize = 100;
+
+/// The audio-fetch skip set's in-memory shape: `(id, consecutive-miss
+/// count)` pairs, ordered oldest-entry-first (tenure — see
+/// [`AUDIO_FETCH_SKIP_CAP`]).
+type AudioFetchSkips = Vec<(String, u64)>;
+
+/// The typed "no audio on the server" outcome the audio GET endpoint
+/// returns via `ContentRemote::fetch_audio` (whose error surface is
+/// stringly `AppError::Other`, so the discriminator is the producer's
+/// message). This is the ONLY failure shape that may enter the skip set: a
+/// transport/auth/5xx failure is potentially transient and must retry next
+/// cycle, while "row exists, file never arrives" is the permanent shape
+/// that head-of-line blocks later rows.
+fn is_no_audio_on_server(err: &AppError) -> bool {
+    err.to_string().contains("no audio on the office server")
+}
+
+/// Record one consecutive "no audio on the server" miss for `rec_id`:
+/// increment the existing entry in place (list position = tenure is kept)
+/// or append the id, capping the set by dropping the OLDEST entries.
+fn bump_audio_fetch_skip(skips: &mut AudioFetchSkips, rec_id: &str) {
+    if let Some((_, count)) = skips.iter_mut().find(|(id, _)| id == rec_id) {
+        *count += 1;
+        return;
+    }
+    skips.push((rec_id.to_string(), 1));
+    while skips.len() > AUDIO_FETCH_SKIP_CAP {
+        skips.remove(0);
+    }
+}
+
+/// Drop `rec_id` from the skip set (fetch succeeded, or the row is gone).
+/// Returns whether the set changed and needs persisting.
+fn clear_audio_fetch_skip(skips: &mut AudioFetchSkips, rec_id: &str) -> bool {
+    let before = skips.len();
+    skips.retain(|(id, _)| id != rec_id);
+    skips.len() != before
+}
+
+/// Live rows still missing local audio, oldest first, EXCLUDING the skip
+/// set. The exclusion lives in SQL so the LIMIT applies to ATTEMPTABLE
+/// rows: filtering after the LIMIT would let permanently-skipped ids keep
+/// holding selection slots — the exact head-of-line block this exists to
+/// break.
+fn select_empty_audio_ids(
+    conn: &rusqlite::Connection,
+    skip_ids: &[String],
+) -> AppResult<Vec<String>> {
+    let (sql, params): (String, Vec<&dyn rusqlite::ToSql>) = if skip_ids.is_empty() {
+        (
+            "SELECT id FROM recordings
+              WHERE audio_path = '' AND deleted_at IS NULL
+              ORDER BY created_at ASC LIMIT 10"
+                .to_string(),
+            Vec::new(),
+        )
+    } else {
+        let placeholders = skip_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        (
+            format!(
+                "SELECT id FROM recordings
+                  WHERE audio_path = '' AND deleted_at IS NULL
+                    AND id NOT IN ({placeholders})
+                  ORDER BY created_at ASC LIMIT 10"
+            ),
+            skip_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect(),
+        )
+    };
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+    let ids = stmt
+        .query_map(params.as_slice(), |row| row.get::<_, String>(0))
+        .map_err(|e| AppError::from(medical_db::DbError::from(e)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(ids)
+}
+
+/// Prune skip entries whose rows are no longer empty-audio live rows
+/// (audio arrived via the manual fetch command, the row was tombstoned,
+/// purged, or deleted): a skip must never outlive its usefulness, or a
+/// later legitimate fetch of that row would stay suppressed forever.
+fn prune_audio_fetch_skips(
+    conn: &rusqlite::Connection,
+    skips: AudioFetchSkips,
+) -> AppResult<AudioFetchSkips> {
+    if skips.is_empty() {
+        return Ok(skips);
+    }
+    let placeholders = skips.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT id FROM recordings
+          WHERE audio_path = '' AND deleted_at IS NULL AND id IN ({placeholders})"
+    );
+    let ids: Vec<&str> = skips.iter().map(|(id, _)| id.as_str()).collect();
+    let params: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
+    let still_candidates: std::collections::HashSet<String> = stmt
+        .query_map(params.as_slice(), |row| row.get::<_, String>(0))
+        .map_err(|e| AppError::from(medical_db::DbError::from(e)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(skips
+        .into_iter()
+        .filter(|(id, _)| still_candidates.contains(id))
+        .collect())
+}
+
 /// Run one full bidirectional content sync against the office server.
 ///
 /// This is the core logic shared by the [`sync_content_now`] command and the
@@ -368,15 +498,12 @@ async fn run_sync(
         let batch_count = batch.recordings.len();
         let has_more = batch.has_more;
 
-        // Merge incoming + advance the cursor. The next cursor is the max
-        // `updated_at` in the batch (the server returns rows ordered by
-        // updated_at ascending, so it's the last row's timestamp).
-        let next_cursor = batch
-            .recordings
-            .iter()
-            .map(|r| r.updated_at.as_str())
-            .max()
-            .map(|s| s.to_string());
+        // Merge incoming + advance the cursor. The next cursor is the batch
+        // boundary — max `updated_at` plus the max id among the rows
+        // carrying it (the server returns rows ordered by updated_at
+        // ascending; the composite encodes the last-delivered position so
+        // same-timestamp overflow rows aren't stranded past the batch limit).
+        let next_cursor = batch_cursor_boundary(&batch.recordings);
 
         // Purge notifications travel on the same response; they are applied
         // on the same connection right after a successful merge (below).
@@ -450,9 +577,9 @@ async fn run_sync(
         }
 
         // Advance the cursor if we made progress.
-        if let Some(ref nc) = next_cursor {
+        if let Some((nc_ts, nc_id)) = next_cursor {
             let cursor_db = Arc::clone(&db);
-            let nc = advance_cursor(nc);
+            let nc = advance_cursor(&nc_ts, &nc_id);
             tokio::task::spawn_blocking(move || {
                 let conn = cursor_db.conn()?;
                 ContentSyncRepo::set_cursor(&conn, Some(&nc)).map_err(AppError::from)
@@ -468,128 +595,11 @@ async fn run_sync(
 
     // ── Audio fetch for newly-synced recordings ────────────────────────
     // After pulling metadata, fetch audio for recordings that arrived
-    // without it (audio_path is empty). Best-effort: errors are logged
-    // and don't abort the sync. Limit to 10 per cycle to bound latency.
-    let audio_fetch_db = Arc::clone(&db);
-    let audio_conn = crate::state::load_paired_connection_offload().await;
-    let audio_tailscale = audio_conn.as_ref().and_then(|c| c.tailscale.clone());
-    let audio_vocab_port = audio_conn.as_ref().and_then(|c| c.ports.vocab);
-    let audio_bearer = crate::state::load_sharing_bearer_offload().await;
-    if let (Some(ts), Some(vp), Some(bearer)) = (audio_tailscale, audio_vocab_port, audio_bearer) {
-        let audio_conn = crate::commands::sharing::PairedConnection {
-            lan: None,
-            tailscale: Some(ts),
-            ports: medical_sharing::qr::PairPorts {
-                ollama: 0,
-                whisper: 0,
-                pairing: 0,
-                lmstudio: None,
-                omlx: None,
-                vocab: Some(vp),
-            },
-            label: String::new(),
-        };
-        let remote_for_audio = crate::content_remote::ContentRemote::from(
-            &audio_conn,
-            Some(bearer),
-            remote.client.clone(),
-        );
-        if let Some(audio_remote) = remote_for_audio {
-            // Find recordings with empty audio_path (synced metadata, no audio yet).
-            let missing_ids: Vec<String> = tokio::task::spawn_blocking({
-                let db = Arc::clone(&audio_fetch_db);
-                move || -> AppResult<Vec<String>> {
-                    let conn = db.conn()?;
-                    let mut stmt = conn.prepare(
-                        "SELECT id FROM recordings WHERE audio_path = '' AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 10",
-                    ).map_err(|e| AppError::from(medical_db::DbError::from(e)))?;
-                    let ids = stmt.query_map([], |row| row.get::<_, String>(0))
-                        .map_err(|e| AppError::from(medical_db::DbError::from(e)))?
-                        .filter_map(|r| r.ok())
-                        .collect();
-                    Ok(ids)
-                }
-            })
-            .await
-            .map_err(crate::commands::join_err)??;
-
-            for rec_id in &missing_ids {
-                match audio_remote.fetch_audio(rec_id).await {
-                    Ok(plaintext) => {
-                        let byte_count = plaintext.len();
-                        // Re-encrypt and save locally.
-                        let db2 = Arc::clone(&audio_fetch_db);
-                        let rec_id_owned = rec_id.clone();
-                        let plaintext_bytes = plaintext;
-                        let data_dir_owned = data_dir.to_path_buf();
-                        match tokio::task::spawn_blocking(move || -> AppResult<String> {
-                            let conn = db2.conn()?;
-                            let recordings_dir =
-                                crate::commands::resolve_recordings_dir(&db2, &data_dir_owned)?;
-                            let target = recordings_dir.join(format!("{rec_id_owned}.enc"));
-                            if target.exists() {
-                                // File already exists (race with manual fetch).
-                                // Still update the DB audio_path since it was
-                                // empty when we selected this row.
-                                let uuid = uuid::Uuid::parse_str(&rec_id_owned).map_err(|e| {
-                                    AppError::Other(format!("invalid recording id: {e}"))
-                                })?;
-                                let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
-                                // Audio-location-only write: must not bump
-                                // `updated_at` (LWW stamp inflation → silent
-                                // loss of concurrent field edits).
-                                let _ =
-                                    medical_db::recordings::RecordingsRepo::update_audio_location(
-                                        &conn,
-                                        &uuid,
-                                        &target,
-                                        Some(size),
-                                    );
-                                return Ok(target.to_string_lossy().into_owned());
-                            }
-                            // Encrypt in memory before anything touches disk —
-                            // a crash between write and encrypt would
-                            // otherwise leave plaintext PHI in a .tmp file
-                            // that no sweep cleans.
-                            let tmp = target.with_extension("tmp");
-                            medical_security::file_crypto::encrypt_file(&tmp, &plaintext_bytes)
-                                .map_err(|e| {
-                                    let _ = std::fs::remove_file(&tmp);
-                                    AppError::security(format!("audio re-encrypt failed: {e}"))
-                                })?;
-                            std::fs::rename(&tmp, &target)?;
-                            // Update DB. Audio-location-only write: must not
-                            // bump `updated_at` (LWW stamp inflation → silent
-                            // loss of concurrent field edits).
-                            let uuid = uuid::Uuid::parse_str(&rec_id_owned)
-                                .map_err(|e| AppError::Other(format!("invalid id: {e}")))?;
-                            medical_db::recordings::RecordingsRepo::update_audio_location(
-                                &conn,
-                                &uuid,
-                                &target,
-                                Some(byte_count as u64),
-                            )
-                            .map_err(AppError::from)?;
-                            Ok(target.to_string_lossy().into_owned())
-                        })
-                        .await
-                        .map_err(crate::commands::join_err)
-                        {
-                            Ok(_) => {
-                                tracing::debug!(byte_count, "audio fetched and saved during sync");
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "sync: failed to save fetched audio (non-fatal)");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, "sync: audio fetch failed (may not be available yet)");
-                    }
-                }
-            }
-        }
-    }
+    // without it (audio_path is empty). Best-effort per recording: fetch
+    // and write errors are logged and don't abort the sync (limit 10 per
+    // cycle to bound latency); a DB-level selection failure still fails
+    // the round so the cursor doesn't advance past unmerged state.
+    sync_fetch_missing_audio(&db, data_dir, &remote.client).await?;
 
     // ── Push ────────────────────────────────────────────────────────────
     // Use a SEPARATE push cursor (independent from the pull cursor) so that
@@ -619,6 +629,11 @@ async fn run_sync(
         .await
         .map_err(crate::commands::join_err)??
     };
+    // Whether the push loop's final iteration had no batch — the steady
+    // state, where the queued upload retries still need their one bounded
+    // drain for the round (see the drain call after the loop). Assigned at
+    // the top of every iteration, so it is always initialized when read.
+    let mut last_batch_was_empty;
     loop {
         let push_db = Arc::clone(&db);
         let push_result = tokio::task::spawn_blocking(move || {
@@ -640,26 +655,28 @@ async fn run_sync(
                     }
                 }
             }
-            // If the batch is empty but there were IDs, we need the max
-            // updated_at of those IDs so we can advance the push cursor past
-            // them. Otherwise the push loop will livelock, retrying the same
+            // If the batch is empty but there were IDs, we need the batch
+            // boundary of those IDs (max updated_at + max id at that
+            // timestamp) so we can advance the push cursor past them.
+            // Otherwise the push loop will livelock, retrying the same
             // unreadable recordings on every sync forever.
             let skip_cursor = if out.is_empty() && !ids.is_empty() {
-                // Query the max updated_at of the IDs that failed to build.
+                // Query the batch boundary of the IDs that failed to build.
                 let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let sql =
-                    format!("SELECT MAX(updated_at) FROM recordings WHERE id IN ({placeholders})");
+                let sql = format!(
+                    "SELECT updated_at, id FROM recordings WHERE id IN ({placeholders})
+                     ORDER BY updated_at DESC, id DESC LIMIT 1"
+                );
                 let params: Vec<&dyn rusqlite::ToSql> =
                     ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
                 conn.query_row(&sql, params.as_slice(), |row| {
-                    row.get::<_, Option<String>>(0)
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
                 .ok()
-                .flatten()
             } else {
                 None
             };
-            Ok::<(Vec<SyncRecording>, bool, Option<String>), AppError>((out, has_more, skip_cursor))
+            Ok::<_, AppError>((out, has_more, skip_cursor))
         })
         .await
         .map_err(crate::commands::join_err)??;
@@ -668,16 +685,13 @@ async fn run_sync(
         let batch = push_result.0;
         let skip_cursor = push_result.2;
         let batch_was_empty = batch.is_empty();
+        last_batch_was_empty = batch_was_empty;
 
         if !batch_was_empty {
             let push_count = batch.len();
-            // Capture recording IDs and max updated_at BEFORE moving batch.
+            // Capture recording IDs and the batch boundary BEFORE moving batch.
             let pushed_ids: Vec<String> = batch.iter().map(|r| r.id.clone()).collect();
-            let max_ts = batch
-                .iter()
-                .map(|r| r.updated_at.as_str())
-                .max()
-                .map(|s| s.to_string());
+            let boundary = batch_cursor_boundary(&batch);
             let push_resp = match remote.push(batch).await {
                 Ok(resp) => resp,
                 Err(e) => {
@@ -695,9 +709,9 @@ async fn run_sync(
             summary.pushed += push_count;
             summary.push_conflicts += push_resp.conflicts.len();
             // Advance the push cursor so we don't re-push these next time.
-            if let Some(ts) = max_ts {
+            if let Some((ts, id)) = boundary {
                 let pc_db = Arc::clone(&db);
-                let ts = advance_cursor(&ts);
+                let ts = advance_cursor(&ts, &id);
                 tokio::task::spawn_blocking(move || -> AppResult<()> {
                     let conn = pc_db.conn()?;
                     ContentSyncRepo::set_push_cursor(&conn, &ts).map_err(AppError::from)
@@ -714,85 +728,20 @@ async fn run_sync(
             persist_audio_queue(&db, &audio_queue).await;
 
             // Drain a bounded slice (oldest first) so one sync cycle can't
-            // spend minutes uploading a catch-up backlog. Success or a
-            // permanently-gone id leaves the queue; transient failures keep
-            // their id for the next cycle.
-            let attempt: Vec<String> = audio_queue
-                .iter()
-                .take(AUDIO_UPLOADS_PER_BATCH)
-                .cloned()
-                .collect();
-            let mut remove_ids: Vec<String> = Vec::new();
-            for rec_id in &attempt {
-                let upload_db = Arc::clone(&db);
-                let rec_id_owned = rec_id.clone();
-                let plaintext_result = tokio::task::spawn_blocking(move || {
-                    read_local_audio(&upload_db, &rec_id_owned)
-                })
-                .await
-                .map_err(crate::commands::join_err);
-                match plaintext_result {
-                    // Join failure is transient (task panicked / runtime
-                    // shutdown) — keep the id.
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            recording_id = %rec_id,
-                            "sync: audio read task failed — queued for retry"
-                        );
-                    }
-                    Ok(read) => match read {
-                        PendingAudioRead::Bytes(plaintext) => {
-                            match remote.upload_audio(rec_id, plaintext).await {
-                                Ok(()) => {
-                                    remove_ids.push(rec_id.clone());
-                                }
-                                Err(e) => {
-                                    tracing::debug!(
-                                        error = %e,
-                                        recording_id = %rec_id,
-                                        "sync: audio upload failed — queued for retry"
-                                    );
-                                }
-                            }
-                        }
-                        PendingAudioRead::Gone => {
-                            // Row deleted, tombstoned, or no local audio
-                            // (e.g. a pulled recording whose audio still
-                            // lives on the partner) — this id can never
-                            // upload.
-                            tracing::debug!(
-                                recording_id = %rec_id,
-                                "sync: audio upload dropped — no uploadable local audio"
-                            );
-                            remove_ids.push(rec_id.clone());
-                        }
-                        PendingAudioRead::Failed(e) => {
-                            // At-rest corruption or a keychain failure —
-                            // retried next cycle (bounded: one attempt per
-                            // cycle) and diagnosable via the warn.
-                            tracing::warn!(
-                                error = %e,
-                                recording_id = %rec_id,
-                                "sync: audio upload deferred — local audio unreadable"
-                            );
-                        }
-                    },
-                }
-            }
-            if !remove_ids.is_empty() {
-                audio_queue.retain(|id| !remove_ids.contains(id));
-                persist_audio_queue(&db, &audio_queue).await;
-            }
-        } else if let Some(ts) = skip_cursor {
+            // spend minutes uploading a catch-up backlog.
+            drain_audio_uploads(&db, &mut audio_queue, |id, bytes| async move {
+                remote.upload_audio(&id, bytes).await
+            })
+            .await;
+        } else if let Some((ts, id)) = skip_cursor {
             // All recordings in this page were unreadable — advance the push
             // cursor past them so they're not retried on every sync.
-            tracing::warn!(cursor = %ts, "content sync push: advancing cursor past unreadable recordings");
+            let cursor = advance_cursor(&ts, &id);
+            tracing::warn!(cursor = %cursor, "content sync push: advancing cursor past unreadable recordings");
             let pc_db = Arc::clone(&db);
-            let ts_owned = advance_cursor(&ts);
             tokio::task::spawn_blocking(move || -> AppResult<()> {
                 let conn = pc_db.conn()?;
-                ContentSyncRepo::set_push_cursor(&conn, &ts_owned).map_err(AppError::from)
+                ContentSyncRepo::set_push_cursor(&conn, &cursor).map_err(AppError::from)
             })
             .await
             .map_err(crate::commands::join_err)??;
@@ -802,8 +751,286 @@ async fn run_sync(
             break;
         }
     }
+    // The steady state: the loop exited without a batch to push (no local
+    // changes). The drain above only ran inside a pushed batch, so queued
+    // upload retries would NEVER fire while local changes are quiet — run
+    // the same bounded drain once for the round instead.
+    if last_batch_was_empty {
+        drain_audio_uploads(&db, &mut audio_queue, |id, bytes| async move {
+            remote.upload_audio(&id, bytes).await
+        })
+        .await;
+    }
 
     Ok(summary)
+}
+
+/// Attempt up to [`AUDIO_UPLOADS_PER_BATCH`] queued audio uploads, oldest
+/// first. Success or a permanently-unuploadable id (`PendingAudioRead::Gone`)
+/// leaves the queue; transient failures (upload error, unreadable audio,
+/// task join failure) keep their id for a later cycle — one bounded attempt
+/// per id per drain. Removals are persisted before returning.
+///
+/// Extracted so BOTH push-loop outcomes drain: after a successfully pushed
+/// batch, and once when the round exits without any batch to push (the
+/// steady state — no local changes — where the per-batch drain never runs
+/// but the queue's retries still deserve their attempt).
+async fn drain_audio_uploads<F, Fut>(
+    db: &Arc<Database>,
+    audio_queue: &mut Vec<String>,
+    mut upload: F,
+) where
+    F: FnMut(String, Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = AppResult<()>>,
+{
+    let attempt: Vec<String> = audio_queue
+        .iter()
+        .take(AUDIO_UPLOADS_PER_BATCH)
+        .cloned()
+        .collect();
+    let mut remove_ids: Vec<String> = Vec::new();
+    for rec_id in &attempt {
+        let upload_db = Arc::clone(db);
+        let rec_id_owned = rec_id.clone();
+        let plaintext_result =
+            tokio::task::spawn_blocking(move || read_local_audio(&upload_db, &rec_id_owned))
+                .await
+                .map_err(crate::commands::join_err);
+        match plaintext_result {
+            // Join failure is transient (task panicked / runtime shutdown)
+            // — keep the id.
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    recording_id = %rec_id,
+                    "sync: audio read task failed — queued for retry"
+                );
+            }
+            Ok(read) => match read {
+                PendingAudioRead::Bytes(plaintext) => {
+                    match upload(rec_id.clone(), plaintext).await {
+                        Ok(()) => {
+                            remove_ids.push(rec_id.clone());
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                error = %e,
+                                recording_id = %rec_id,
+                                "sync: audio upload failed — queued for retry"
+                            );
+                        }
+                    }
+                }
+                PendingAudioRead::Gone => {
+                    // Row deleted, tombstoned, or no local audio (e.g. a
+                    // pulled recording whose audio still lives on the
+                    // partner) — this id can never upload.
+                    tracing::debug!(
+                        recording_id = %rec_id,
+                        "sync: audio upload dropped — no uploadable local audio"
+                    );
+                    remove_ids.push(rec_id.clone());
+                }
+                PendingAudioRead::Failed(e) => {
+                    // At-rest corruption or a keychain failure — retried
+                    // next cycle (bounded: one attempt per cycle) and
+                    // diagnosable via the warn.
+                    tracing::warn!(
+                        error = %e,
+                        recording_id = %rec_id,
+                        "sync: audio upload deferred — local audio unreadable"
+                    );
+                }
+            },
+        }
+    }
+    if !remove_ids.is_empty() {
+        audio_queue.retain(|id| !remove_ids.contains(id));
+        persist_audio_queue(db, audio_queue).await;
+    }
+}
+
+/// Post-pull audio catch-up inside [`run_sync`]: fetch audio for recordings
+/// whose metadata arrived via sync without the blob (`audio_path` is
+/// empty). Best-effort — per-recording failures are logged and never abort
+/// the round; a DB-level selection failure propagates to the caller (the
+/// round fails and retries, matching the pre-extraction behavior).
+///
+/// Rows the server answers "no audio on the server" enter the persisted
+/// skip set (see [`AUDIO_FETCH_SKIP_CAP`]) so a permanently-missing blob
+/// cannot head-of-line block the later rows behind it; every other failure
+/// shape retries next cycle.
+async fn sync_fetch_missing_audio(
+    db: &Arc<Database>,
+    data_dir: &std::path::Path,
+    client: &std::sync::Arc<reqwest::Client>,
+) -> AppResult<()> {
+    let audio_conn = crate::state::load_paired_connection_offload().await;
+    let audio_tailscale = audio_conn.as_ref().and_then(|c| c.tailscale.clone());
+    let audio_vocab_port = audio_conn.as_ref().and_then(|c| c.ports.vocab);
+    let audio_bearer = crate::state::load_sharing_bearer_offload().await;
+    let (Some(ts), Some(vp), Some(bearer)) = (audio_tailscale, audio_vocab_port, audio_bearer)
+    else {
+        return Ok(());
+    };
+    let audio_conn = crate::commands::sharing::PairedConnection {
+        lan: None,
+        tailscale: Some(ts),
+        ports: medical_sharing::qr::PairPorts {
+            ollama: 0,
+            whisper: 0,
+            pairing: 0,
+            lmstudio: None,
+            omlx: None,
+            vocab: Some(vp),
+        },
+        label: String::new(),
+    };
+    let remote_for_audio =
+        crate::content_remote::ContentRemote::from(&audio_conn, Some(bearer), Arc::clone(client));
+    let Some(audio_remote) = remote_for_audio else {
+        return Ok(());
+    };
+
+    // Resolve the recordings dir once (the per-recording writes below used
+    // to re-resolve it inside every blocking task). Failure is non-fatal to
+    // the round — it just skips the audio catch-up.
+    let recordings_dir = {
+        let db = Arc::clone(db);
+        let data_dir_owned = data_dir.to_path_buf();
+        let resolved = tokio::task::spawn_blocking(move || {
+            crate::commands::resolve_recordings_dir(&db, &data_dir_owned)
+        })
+        .await
+        .map_err(crate::commands::join_err);
+        match resolved {
+            Ok(Ok(dir)) => Some(dir),
+            Ok(Err(ref e)) | Err(ref e) => {
+                tracing::warn!(error = %e, "sync: recordings dir unavailable — skipping audio fetch (non-fatal)");
+                None
+            }
+        }
+    };
+    let Some(recordings_dir) = recordings_dir else {
+        return Ok(());
+    };
+
+    // Load the persisted skip set, pruning entries whose rows are no longer
+    // empty-audio live rows, then select this cycle's candidates EXCLUDING
+    // the skips. Without the exclusion the same oldest rows were reselected
+    // forever, so a recording whose audio never arrives server-side
+    // head-of-line blocked every later row from ever being attempted.
+    let skips_and_ids = {
+        let db = Arc::clone(db);
+        tokio::task::spawn_blocking(move || -> AppResult<(AudioFetchSkips, Vec<String>)> {
+            let conn = db.conn()?;
+            let mut skips =
+                ContentSyncRepo::get_audio_fetch_skips(&conn).map_err(AppError::from)?;
+            skips = prune_audio_fetch_skips(&conn, skips)?;
+            let skip_ids: Vec<String> = skips.iter().map(|(id, _)| id.clone()).collect();
+            let ids = select_empty_audio_ids(&conn, &skip_ids)?;
+            Ok((skips, ids))
+        })
+        .await
+        .map_err(crate::commands::join_err)??
+    };
+    let (mut skips, missing_ids): (AudioFetchSkips, Vec<String>) = skips_and_ids;
+    let mut skips_dirty = false;
+
+    for rec_id in &missing_ids {
+        // Active-row pre-check, mirroring the manual fetch command's gate: a
+        // row trashed/purged after selection must not fetch (the guarded
+        // audio-location write below would refuse it anyway). Failure of the
+        // check itself is non-fatal.
+        let row_active = {
+            let db = Arc::clone(db);
+            let rec_id_owned = rec_id.clone();
+            let checked = tokio::task::spawn_blocking(move || -> AppResult<bool> {
+                let conn = db.conn()?;
+                let uuid = uuid::Uuid::parse_str(&rec_id_owned)
+                    .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+                RecordingsRepo::get_by_id_active(&conn, &uuid)
+                    .map(|_| true)
+                    .or_else(|e| match e {
+                        medical_db::DbError::NotFound(_) => Ok(false),
+                        other => Err(AppError::from(other)),
+                    })
+            })
+            .await
+            .map_err(crate::commands::join_err);
+            match checked {
+                Ok(Ok(active)) => active,
+                Ok(Err(ref e)) | Err(ref e) => {
+                    tracing::warn!(error = %e, "sync: audio pre-check failed (non-fatal)");
+                    false
+                }
+            }
+        };
+        if !row_active {
+            // Row gone mid-cycle — its skip entry (if any) is useless now;
+            // the prune would also catch it next cycle.
+            skips_dirty |= clear_audio_fetch_skip(&mut skips, rec_id);
+            continue;
+        }
+
+        match audio_remote.fetch_audio(rec_id).await {
+            Ok(plaintext) => {
+                let byte_count = plaintext.len();
+                // Re-encrypt and save locally through the shared write
+                // helper — the same orphan-cleanup contract as the manual
+                // fetch command.
+                let db2 = Arc::clone(db);
+                let rec_id_owned = rec_id.clone();
+                let recordings_dir_owned = recordings_dir.clone();
+                match tokio::task::spawn_blocking(move || {
+                    sync_loop_save_audio(&db2, &recordings_dir_owned, &rec_id_owned, &plaintext)
+                })
+                .await
+                .map_err(crate::commands::join_err)
+                {
+                    Ok(_) => {
+                        // Success clears any stale skip for the row.
+                        skips_dirty |= clear_audio_fetch_skip(&mut skips, rec_id);
+                        tracing::debug!(byte_count, "audio fetched and saved during sync");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "sync: failed to save fetched audio (non-fatal)");
+                    }
+                }
+            }
+            Err(e) if is_no_audio_on_server(&e) => {
+                // The server holds the row but no audio for it yet. Skip the
+                // row in future selections so later rows get their turn;
+                // entries are pruned and capped, so this never becomes a
+                // permanent block.
+                bump_audio_fetch_skip(&mut skips, rec_id);
+                skips_dirty = true;
+                tracing::debug!(
+                    recording_id = %rec_id,
+                    "sync: no audio on the office server yet — row skipped for now"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "sync: audio fetch failed (may not be available yet)");
+            }
+        }
+    }
+    if skips_dirty {
+        let db = Arc::clone(db);
+        let skips_for_persist = skips.clone();
+        let result = tokio::task::spawn_blocking(move || -> AppResult<()> {
+            let conn = db.conn()?;
+            ContentSyncRepo::set_audio_fetch_skips(&conn, &skips_for_persist)
+                .map_err(AppError::from)
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "sync: persist audio fetch skips failed"),
+            Err(e) => tracing::warn!(error = %e, "sync: persist audio fetch skips task failed"),
+        }
+    }
+    Ok(())
 }
 
 /// Counts-only summary of a sync round (no PHI).
@@ -1248,6 +1475,38 @@ fn write_fetched_audio_locally(
     result
 }
 
+/// Blocking write path for audio the SYNC LOOP fetched (see
+/// [`sync_fetch_missing_audio`]). Rides [`write_fetched_audio_locally`] for
+/// the fresh-write path so the orphan-cleanup contract (a row refusing the
+/// guarded audio-location update mid-flight never strands the downloaded
+/// ciphertext) is shared with the manual fetch command. The one
+/// loop-specific addition: a file that already exists at the target is a
+/// manual fetch racing the loop — point the row at it instead of
+/// re-writing, since the row was selected for its empty `audio_path` and
+/// would otherwise be reselected forever.
+fn sync_loop_save_audio(
+    db: &Arc<Database>,
+    recordings_dir: &std::path::Path,
+    rec_id: &str,
+    plaintext: &[u8],
+) -> AppResult<String> {
+    let target = recordings_dir.join(format!("{rec_id}.enc"));
+    if target.exists() {
+        let conn = db.conn()?;
+        let uuid = uuid::Uuid::parse_str(rec_id)
+            .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+        let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+        // Audio-location-only write: must not bump `updated_at` (LWW stamp
+        // inflation → silent loss of concurrent field edits). A refusal here
+        // (row trashed mid-fetch) propagates — nothing was written, so
+        // there is nothing to clean up.
+        RecordingsRepo::update_audio_location(&conn, &uuid, &target, Some(size))
+            .map_err(AppError::from)?;
+        return Ok(target.to_string_lossy().into_owned());
+    }
+    write_fetched_audio_locally(db, &target, rec_id, plaintext)
+}
+
 /// Read local audio for a recording, decrypt it to plaintext, and upload it
 /// to the office server.
 ///
@@ -1397,6 +1656,268 @@ mod tests {
         );
     }
 
+    /// The LOOP-path mirror of the orphan fix above (2026-10-08 review,
+    /// fix 5): the sync loop's fetched-audio write rides the same shared
+    /// helper, so a row refusing the guarded update mid-flight must not
+    /// strand the downloaded ciphertext there either.
+    #[test]
+    fn sync_loop_save_audio_removes_target_when_row_refuses_the_update() {
+        let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xCEu8; 32]);
+
+        let db = Arc::new(Database::open_in_memory().expect("db"));
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rec = {
+            let conn = db.conn().expect("conn");
+            let rec = Recording::new(
+                "loop-trashed.wav",
+                std::path::PathBuf::from("/nonexistent/loop-trashed.wav"),
+            );
+            RecordingsRepo::insert(&conn, &rec).expect("insert");
+            // Tombstone AFTER insert — the loop's pre-download active-row
+            // check may have passed moments earlier; this drives the
+            // mid-flight delete reaching the write past the check.
+            RecordingsRepo::soft_delete(&conn, &rec.id).expect("soft delete");
+            rec
+        };
+        let target = tmp.path().join(format!("{}.enc", rec.id));
+
+        let result = sync_loop_save_audio(&db, tmp.path(), &rec.id.to_string(), b"SERVER AUDIO");
+        assert!(
+            result.is_err(),
+            "guarded update must refuse a tombstoned row on the loop path too"
+        );
+        assert!(
+            !target.exists(),
+            "the loop path must clean up the written ciphertext — never orphan it"
+        );
+    }
+
+    /// Happy path of the loop-path write: ciphertext on disk, row pointed
+    /// at it, and the already-exists race shortcut points the row at the
+    /// existing file instead of re-writing it.
+    #[test]
+    fn sync_loop_save_audio_writes_ciphertext_and_handles_existing_target() {
+        let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xCFu8; 32]);
+
+        let db = Arc::new(Database::open_in_memory().expect("db"));
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rec = {
+            let conn = db.conn().expect("conn");
+            let rec = Recording::new(
+                "loop-live.wav",
+                std::path::PathBuf::from("/nonexistent/loop-live.wav"),
+            );
+            RecordingsRepo::insert(&conn, &rec).expect("insert");
+            rec
+        };
+
+        // Fresh write.
+        let out = sync_loop_save_audio(&db, tmp.path(), &rec.id.to_string(), b"LOOP AUDIO")
+            .expect("write");
+        assert_eq!(
+            out,
+            tmp.path().join(format!("{}.enc", rec.id)).to_string_lossy()
+        );
+        {
+            let conn = db.conn().expect("conn");
+            let row = RecordingsRepo::get_by_id(&conn, &rec.id).expect("row");
+            assert_eq!(row.audio_path, tmp.path().join(format!("{}.enc", rec.id)));
+        }
+
+        // Already-exists race: a second save (as if the manual fetch command
+        // won) re-points the row at the existing file without re-writing.
+        let before = std::fs::read(tmp.path().join(format!("{}.enc", rec.id))).expect("ciphertext");
+        let out = sync_loop_save_audio(&db, tmp.path(), &rec.id.to_string(), b"OTHER AUDIO")
+            .expect("existing target short-circuits");
+        assert_eq!(
+            out,
+            tmp.path().join(format!("{}.enc", rec.id)).to_string_lossy()
+        );
+        let after = std::fs::read(tmp.path().join(format!("{}.enc", rec.id))).expect("ciphertext");
+        assert_eq!(
+            before, after,
+            "the existing ciphertext must not be re-written"
+        );
+    }
+
+    /// The steady-state drain (2026-10-08 review, fix 3): queued upload
+    /// retries used to fire only inside a non-empty push batch, so with no
+    /// local changes they never ran. The extracted drain is what the
+    /// empty-batch exit calls — it must attempt the queued id, drop it on
+    /// success, and keep it on a transient upload failure.
+    #[tokio::test]
+    async fn drain_audio_uploads_attempts_queued_ids_without_a_push_batch() {
+        let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xD1u8; 32]);
+
+        let db = Arc::new(Database::open_in_memory().expect("db"));
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rec = {
+            let conn = db.conn().expect("conn");
+            let wav = tmp.path().join("queued.wav");
+            std::fs::write(&wav, b"RIFF....WAVEfmt ").expect("write wav");
+            let rec = Recording::new("queued.wav", wav);
+            RecordingsRepo::insert(&conn, &rec).expect("insert");
+            rec
+        };
+
+        // A successful upload attempts once and empties the queue.
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_upload = std::sync::Arc::clone(&attempts);
+        let mut queue = vec![rec.id.to_string()];
+        drain_audio_uploads(&db, &mut queue, move |_id, _bytes| {
+            let attempts = std::sync::Arc::clone(&attempts_for_upload);
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await;
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the queued id must be attempted without any push batch"
+        );
+        assert!(queue.is_empty(), "a successful upload leaves the queue");
+
+        // A failed upload keeps the id for the next round.
+        let mut queue = vec![rec.id.to_string()];
+        drain_audio_uploads(&db, &mut queue, move |_id, _bytes| async {
+            Err(AppError::Other("upload failed".to_string()))
+        })
+        .await;
+        assert_eq!(
+            queue,
+            vec![rec.id.to_string()],
+            "a transient failure re-queues the id"
+        );
+    }
+
+    /// The head-of-line fix (2026-10-08 review, fix 7): a 404-no-audio id is
+    /// excluded from the next selection while a fresh empty-audio row is
+    /// still selected; a successful fetch clears the entry so the row
+    /// returns to selection; the skip set is capped by dropping the OLDEST
+    /// entries.
+    #[test]
+    fn audio_fetch_selection_excludes_skips_until_cleared_and_caps_by_tenure() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let skipped = "00000000-0000-0000-0000-0000000000aa";
+        let fresh = "00000000-0000-0000-0000-0000000000bb";
+        for id in [skipped, fresh] {
+            conn.execute(
+                "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
+                 VALUES (?1, ?2, '', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                rusqlite::params![id, format!("{id}.wav")],
+            )
+            .expect("insert");
+        }
+
+        let mut skips: Vec<(String, u64)> = Vec::new();
+        bump_audio_fetch_skip(&mut skips, skipped);
+        let skip_ids: Vec<String> = skips.iter().map(|(id, _)| id.clone()).collect();
+        let selected = select_empty_audio_ids(&conn, &skip_ids).expect("select with skip");
+        assert!(
+            !selected.contains(&skipped.to_string()),
+            "the 404-no-audio id must be excluded from selection"
+        );
+        assert_eq!(
+            selected,
+            vec![fresh.to_string()],
+            "a fresh empty-audio row is still selected"
+        );
+
+        // A successful fetch clears the entry — the row returns to selection.
+        assert!(clear_audio_fetch_skip(&mut skips, skipped));
+        assert!(skips.is_empty());
+        let selected = select_empty_audio_ids(&conn, &[]).expect("select without skips");
+        assert_eq!(
+            selected.len(),
+            2,
+            "with the skip cleared both rows are selectable again"
+        );
+
+        // Repeated bumps increment in place; the cap drops the OLDEST entry.
+        bump_audio_fetch_skip(&mut skips, skipped);
+        assert_eq!(skips, vec![(skipped.to_string(), 1)]);
+        bump_audio_fetch_skip(&mut skips, skipped);
+        assert_eq!(skips, vec![(skipped.to_string(), 2)]);
+        for i in 0..AUDIO_FETCH_SKIP_CAP {
+            bump_audio_fetch_skip(&mut skips, &format!("cap-{i:03}"));
+        }
+        assert_eq!(skips.len(), AUDIO_FETCH_SKIP_CAP, "the skip set is capped");
+        assert!(
+            !skips.iter().any(|(id, _)| id == skipped),
+            "the OLDEST entry (first bumped) is the one dropped at the cap"
+        );
+    }
+
+    /// The skip set only ever records the typed "no audio on the server"
+    /// 404 — transport/auth/5xx failures must retry next cycle instead of
+    /// silently suppressing the row.
+    #[test]
+    fn is_no_audio_on_server_matches_only_the_typed_404_wording() {
+        assert!(is_no_audio_on_server(&AppError::Other(
+            "content audio fetch: no audio on the office server for this recording".into()
+        )));
+        assert!(!is_no_audio_on_server(&AppError::Other(
+            "content audio fetch: HTTP 500".into()
+        )));
+        assert!(!is_no_audio_on_server(&AppError::Other(
+            "content audio fetch: office server does not support content sync (update it to a later release)".into()
+        )));
+    }
+
+    /// A skip must never outlive its usefulness: entries whose rows are no
+    /// longer empty-audio live rows (audio arrived, row trashed/purged) are
+    /// pruned at selection time.
+    #[test]
+    fn audio_fetch_skips_are_pruned_when_rows_leave_the_empty_audio_selection() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let fetched = "00000000-0000-0000-0000-0000000000cc";
+        let trashed = "00000000-0000-0000-0000-0000000000dd";
+        let still_missing = "00000000-0000-0000-0000-0000000000ee";
+        for id in [fetched, trashed, still_missing] {
+            conn.execute(
+                "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
+                 VALUES (?1, ?2, '', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                rusqlite::params![id, format!("{id}.wav")],
+            )
+            .expect("insert");
+        }
+        // `fetched` got its audio via the manual command.
+        conn.execute(
+            "UPDATE recordings SET audio_path = '/audio/got-it.enc' WHERE id = ?1",
+            [fetched],
+        )
+        .expect("fill audio_path");
+        // `trashed` was tombstoned.
+        conn.execute(
+            "UPDATE recordings SET deleted_at = '2026-01-02T00:00:00+00:00' WHERE id = ?1",
+            [trashed],
+        )
+        .expect("tombstone");
+
+        let skips = vec![
+            (fetched.to_string(), 2),
+            (trashed.to_string(), 1),
+            (still_missing.to_string(), 1),
+        ];
+        let pruned = prune_audio_fetch_skips(&conn, skips).expect("prune");
+        assert_eq!(
+            pruned,
+            vec![(still_missing.to_string(), 1)],
+            "only rows still empty-audio and live keep their skip entry"
+        );
+
+        // Empty input short-circuits.
+        assert!(
+            prune_audio_fetch_skips(&conn, Vec::new())
+                .expect("prune empty")
+                .is_empty()
+        );
+    }
+
     /// The retry queue's permanence classification: only live rows with a
     /// readable local audio file produce uploadable bytes — everything a
     /// cycle can never fix classifies `Gone` so it leaves the queue instead
@@ -1492,38 +2013,50 @@ mod tests {
         }
     }
 
+    /// The composite cursor: the timestamp string is preserved verbatim
+    /// (re-serializing would normalize `Z`→`+00:00` and break the exact
+    /// string tie arm in `changed_since`) with the last-delivered id
+    /// appended after `|`.
     #[test]
-    fn advance_cursor_adds_exactly_one_microsecond() {
-        // Strict-`>` cursors lose same-timestamp rows; the +1µs advance is
-        // what guarantees the second of two rows sharing max(updated_at) is
-        // still picked up on the next pull.
-        let out = advance_cursor("2026-01-02T03:04:05.123456Z");
-        let dt = chrono::DateTime::parse_from_rfc3339(&out).expect("advanced parses");
-        assert_eq!(dt.to_rfc3339(), "2026-01-02T03:04:05.123457+00:00");
-        let orig = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05.123456Z")
-            .expect("orig parses");
-        assert_eq!(
-            dt.signed_duration_since(orig).num_microseconds(),
-            Some(1),
-            "exactly one microsecond added"
+    fn advance_cursor_preserves_ts_and_appends_last_id() {
+        let out = advance_cursor(
+            "2026-01-02T03:04:05.123456Z",
+            "00000000-0000-0000-0000-0000000000ff",
         );
+        assert_eq!(
+            out,
+            "2026-01-02T03:04:05.123456Z|00000000-0000-0000-0000-0000000000ff"
+        );
+        // A `+00:00`-format timestamp round-trips identically.
+        let out = advance_cursor("2026-01-02T03:04:05.123456+00:00", "aa");
+        assert_eq!(out, "2026-01-02T03:04:05.123456+00:00|aa");
     }
 
     #[test]
     fn advance_cursor_passthrough_on_unparseable_input() {
         // An unparseable batch max is still a safe-enough cursor — the raw
-        // value must come back unchanged rather than empty or zeroed.
-        assert_eq!(advance_cursor("not-a-timestamp"), "not-a-timestamp");
+        // value must come back unchanged (and bare, the legacy shape)
+        // rather than empty or zeroed.
+        assert_eq!(
+            advance_cursor("not-a-timestamp", "some-id"),
+            "not-a-timestamp"
+        );
     }
 
     // Clock-skew clamp (2026-08-17 tracked item): a future-stamped batch max
     // must NOT advance the cursor past local now — that would pin every
     // fleet pull at the future instant and silently skip all present-day
-    // writes until real time caught up.
+    // writes until real time caught up. The clamped cursor keeps the id
+    // component EMPTY (legacy shape): the bucket at that timestamp
+    // re-delivers next pull, which the idempotent merges absorb.
     #[test]
     fn advance_cursor_clamps_future_timestamps_to_local_now() {
         let far_future = "2999-01-01T00:00:00Z";
-        let out = advance_cursor(far_future);
+        let out = advance_cursor(far_future, "00000000-0000-0000-0000-0000000000ff");
+        assert!(
+            !out.contains('|'),
+            "a clamped cursor must carry no id component (got {out})"
+        );
         let dt = chrono::DateTime::parse_from_rfc3339(&out).expect("clamped parses");
         let now = chrono::Utc::now();
         assert!(
@@ -1532,6 +2065,94 @@ mod tests {
         );
         // Sanity: the clamp didn't happen via parse failure passthrough.
         assert_ne!(out, far_future);
+    }
+
+    /// The stranding bug this branch fixes (2026-10-08 review, fix 1):
+    /// `soft_delete_all` stamps every row with one shared `updated_at`, and
+    /// a batch limit of 200 used to strand the overflow tombstones forever
+    /// (`julianday` cannot see a +1µs advance). Drive the actual
+    /// selection+advance loop shape — changed_since → advance_cursor →
+    /// repeat — and pin that all 205 same-timestamp rows travel.
+    #[test]
+    fn same_timestamp_rows_all_travel_across_repeated_batches() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+
+        // 205 rows sharing one exact updated_at (the soft_delete_all shape).
+        // Raw inserts, mirroring the db-side changed_since fixtures.
+        let shared_ts = "2026-01-01T00:00:00+00:00";
+        for i in 0..205 {
+            conn.execute(
+                "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
+                 VALUES (?1, ?2, '', ?3, ?3)",
+                rusqlite::params![
+                    format!("00000000-0000-0000-{i:04}-000000000000"),
+                    format!("bulk{i}.wav"),
+                    shared_ts
+                ],
+            )
+            .expect("insert");
+        }
+
+        // The pull/push loop shape: select a batch, compute the batch
+        // boundary (max ts + max id among rows carrying it), advance the
+        // cursor, repeat until nothing new comes back.
+        let mut cursor = Some(advance_cursor("2025-12-31T00:00:00+00:00", ""));
+        let mut delivered: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            assert!(
+                rounds < 10,
+                "loop must terminate — same-timestamp rows are re-delivering forever"
+            );
+            let (ids, _has_more) =
+                ContentSyncRepo::changed_since(&conn, cursor.as_deref(), 200).expect("select");
+            if ids.is_empty() {
+                break;
+            }
+            // What run_sync sees on the wire: each delivered row's
+            // (updated_at, id), rebuilt from the row so the boundary math
+            // is the production one over real payloads.
+            let mut batch: Vec<SyncRecording> = Vec::with_capacity(ids.len());
+            for id in &ids {
+                let updated_at: String = conn
+                    .query_row(
+                        "SELECT updated_at FROM recordings WHERE id = ?1",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .expect("row exists");
+                batch.push(SyncRecording {
+                    id: id.clone(),
+                    filename: format!("{}.wav", id),
+                    created_at: shared_ts.to_string(),
+                    updated_at,
+                    deleted_at: None,
+                    patient_name: None,
+                    duration_seconds: None,
+                    file_size_bytes: None,
+                    stt_provider: None,
+                    ai_provider: None,
+                    fields: HashMap::new(),
+                });
+            }
+            for id in &ids {
+                assert!(
+                    delivered.insert(id.clone()),
+                    "row {id} must not be re-delivered"
+                );
+            }
+            let (ts, last_id) = batch_cursor_boundary(&batch).expect("non-empty batch boundary");
+            cursor = Some(advance_cursor(&ts, &last_id));
+        }
+
+        assert_eq!(
+            delivered.len(),
+            205,
+            "all same-timestamp rows must eventually travel; got {}",
+            delivered.len()
+        );
     }
 
     /// Seed a recording with two populated content fields plus a metadata

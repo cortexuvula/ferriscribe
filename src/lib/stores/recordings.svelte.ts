@@ -212,7 +212,7 @@ class RecordingsStore {
         this.selectedRecording = null;
       }
       void this.refreshActiveTotal();
-      void this.refreshTrashedTotal();
+      this.refreshTrashedAfterMutation();
     } catch (err) {
       console.error('Failed to delete recording:', err);
       this.lastDeleted = null;
@@ -230,8 +230,10 @@ class RecordingsStore {
         this.list = [this.lastDeleted, ...this.list];
         this.lastDeleted = null;
       }
-      // Reload to ensure consistent ordering + server-truth.
-      await this.load();
+      // Reload BOTH lists + totals for consistent ordering + server-truth:
+      // the row just left Trash, so a loaded trash page must drop it and
+      // the badge must decrement.
+      await this.refreshAfterMutation();
     } catch (err) {
       console.error('Failed to restore recording:', err);
       throw err;
@@ -255,8 +257,9 @@ class RecordingsStore {
       this.hasMore = false;
       this.selectedRecording = null;
       this.activeTotal = 0;
-      // Everything just moved into Trash — keep its badge honest too.
-      void this.refreshTrashedTotal();
+      // Everything just moved into Trash — keep its badge AND any loaded
+      // trash page honest too.
+      this.refreshTrashedAfterMutation();
       // Capture the exact set for the batch Undo toast (D2).
       this.lastDeletedAllIds = result.ids;
       return result;
@@ -284,9 +287,9 @@ class RecordingsStore {
     try {
       const result = await restoreRecordings(ids);
       this.lastDeletedAllIds = null;
-      // Refresh the active list + authoritative count (Trash totals are
-      // refreshed by the trash store surfaces).
-      await this.load();
+      // Refresh the active list + authoritative count AND the trash
+      // list/total — the rows just left Trash.
+      await this.refreshAfterMutation();
       return result.count;
     } finally {
       this.restoring = false;
@@ -331,7 +334,10 @@ class RecordingsStore {
       const fresh = items.filter((r) => !existing.has(r.id));
       this.trashedList = [...this.trashedList, ...fresh];
       this.trashedTotal = total;
-      this.trashedHasMore = fresh.length >= PAGE_SIZE;
+      // hasMore from the RAW page, exactly like loadTrashed — not the
+      // deduped slice: a full page that re-delivers already-listed rows
+      // (offsets shifted between fetches) still means more rows exist.
+      this.trashedHasMore = items.length >= PAGE_SIZE && items.length < total;
     } catch (err) {
       console.error('Failed to load more Trash:', err);
     } finally {
@@ -356,6 +362,21 @@ class RecordingsStore {
   /// every restore/delete/sync/purge, so both are refreshed together.
   private async refreshAfterMutation(): Promise<void> {
     await Promise.all([this.load(), this.loadTrashed()]);
+  }
+
+  /// Keep the Trash view consistent after a mutation that moves rows into
+  /// it WITHOUT a full list reload (remove/removeAll patch the active list
+  /// surgically). When a trash page is in play — rows listed, or a nonzero
+  /// badge saying rows exist — reload page 1 (loadTrashed folds in the
+  /// total). Otherwise refresh the badge only, preserving the documented
+  /// boot behavior (count fetched, no page loaded; the page loads on every
+  /// Trash entry).
+  private refreshTrashedAfterMutation(): void {
+    if (this.trashedList.length > 0 || this.trashedTotal > 0) {
+      void this.loadTrashed();
+    } else {
+      void this.refreshTrashedTotal();
+    }
   }
 
   /// Restore specific trashed recordings by id (per-row Restore button).
@@ -514,6 +535,10 @@ class RecordingsStore {
     this.remoteUpdateTimer = setTimeout(() => {
       this.remoteUpdateTimer = null;
       this.load();
+      // Sync-merged tombstones/revivals move the Trash badge with the
+      // list — keep it honest on the same debounce (cheap count; the
+      // trash page itself reloads on Trash entry).
+      void this.refreshTrashedTotal();
     }, 500);
   }
 }
@@ -532,7 +557,12 @@ export function startBackgroundSync(): void {
   stopBackgroundSync();
   bgSyncTimer = setInterval(async () => {
     try {
-      await syncContentNow();
+      const summary = await syncContentNow();
+      if (!summary?.disabled) {
+        // Sync merges tombstones and revives from the partner — the Trash
+        // badge moves with them (mirrors syncNow's post-sync refresh).
+        void recordings.refreshTrashedTotal();
+      }
     } catch (err) {
       console.error('Background content sync failed:', err);
     }

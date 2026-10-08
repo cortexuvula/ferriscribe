@@ -9,7 +9,6 @@
   import { rsvp } from '../stores/rsvp.svelte';
   import type { DocKind } from '../stores/rsvp.svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { formatError } from '../types/errors';
   import { resolveIcdCodes, billingCodesLabel } from '../icd';
   import { icd9 as icd9Store } from '../stores/icd9.svelte';
   import { settings } from '../stores/settings.svelte';
@@ -24,6 +23,7 @@
   import { fetchAudioFromServer } from '../api/contentSync';
   import { toasts } from '../stores/toasts.svelte';
   import { settingsNav } from '../stores/settingsNav.svelte';
+  import { sanitizedErr } from '../utils/sanitizedErr';
 
   const { tabId }: { tabId: 'transcript' | 'soap' | 'referral' | 'letter' | 'peer_discussion' } = $props();
 
@@ -284,7 +284,7 @@
     invoke('save_recording_field', { recordingId, field, value }).catch((e) => {
       console.error('Failed to flush pending edit:', e);
       toasts.error(
-        `Save failed — pending ${config.label} edit may be lost (${formatError(e)})`,
+        `Save failed — pending ${config.label} edit may be lost (${sanitizedErr(e)})`,
       );
     });
   }
@@ -367,7 +367,10 @@
         // Persisted — drop the backend's restart-protection copy of this
         // edit. Fire-and-forget with catch: worst case it lingers and a
         // later restart re-saves the same value (idempotent upsert).
-        void invoke('clear_pending_edit', { field: editField }).catch(() => {});
+        void invoke('clear_pending_edit', {
+          recordingId: editRecordingId,
+          field: editField,
+        }).catch(() => {});
         // Scope the completion writes to the edit's context: if the user
         // switched recording/tab mid-save, the new context already reset
         // these and a stale "Saved"/error badge would mislead.
@@ -382,11 +385,11 @@
       } catch (e) {
         if (editKey === currentKey) {
           saveStatus = 'error';
-          saveError = formatError(e);
+          saveError = sanitizedErr(e);
         } else {
           // The failed edit's context is gone; surface it as a toast so
           // the (silently optimistic) edit isn't invisible data loss.
-          toasts.error(`Save failed — ${config.label} edit may be lost (${formatError(e)})`);
+          toasts.error(`Save failed — ${config.label} edit may be lost (${sanitizedErr(e)})`);
         }
       }
     }, 1000); // 1 s debounce
@@ -415,7 +418,7 @@
       }, 1500);
     } catch (e) {
       saveStatus = 'error';
-      saveError = formatError(e);
+      saveError = sanitizedErr(e);
     }
   }
 
@@ -492,7 +495,7 @@
       await exportAudio(rec.id, selected);
       toasts.success('Audio exported as WAV');
     } catch (e) {
-      toasts.error(formatError(e));
+      toasts.error(sanitizedErr(e));
     } finally {
       exportingAudio = false;
     }
@@ -512,7 +515,7 @@
       await selectRecording(rec.id);
       toasts.success('Audio fetched from server');
     } catch (e) {
-      toasts.error(formatError(e));
+      toasts.error(sanitizedErr(e));
     } finally {
       fetchingAudio = false;
     }

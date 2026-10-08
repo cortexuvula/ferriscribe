@@ -269,7 +269,10 @@ fn dedupe_exact_repeat(text: &str) -> String {
 /// line-level rule's business (three identical form rows are content) —
 /// refuse, so this stage can never override that decision. Giant inputs
 /// (a degenerate loop the salvage should have handled) are skipped for
-/// time; the edit-distance pass is quadratic.
+/// time; the edit-distance pass is quadratic. Candidate splits are pruned
+/// by word-count arithmetic + line-boundary membership BEFORE any string
+/// is built (see the candidate block below), so a near-max input pays the
+/// DP only for the handful of plausible line-end splits.
 fn collapse_word_normalized_repeat(text: &str) -> String {
     const SKIP_ABOVE_WORDS: usize = 2000;
     const MIN_WORDS: usize = 12;
@@ -307,20 +310,40 @@ fn collapse_word_normalized_repeat(text: &str) -> String {
         return text.to_string();
     }
 
-    // Candidate split points: the exact half (complete second copy), then
-    // truncated second copies, longest tail first. The tail must be at
-    // least half the head (a max_tokens cut, not a repeated opening
-    // phrase).
-    let mut candidates: Vec<usize> = Vec::new();
-    if n.is_multiple_of(2) {
-        candidates.push(n / 2);
-    }
-    let h_min = n / 2 + 1;
-    let h_max = (2 * n / 3).min(n.saturating_sub(4));
-    let mut h = h_max;
-    while h >= h_min {
-        candidates.push(h);
-        h -= 1;
+    // Candidate split points, pruned BEFORE any string work: the old scan
+    // built two O(n) joins + a full word-edit-distance DP for every h in
+    // [n/2, 2n/3] (~n/6 candidates), which is quadratic on near-max
+    // outputs. A candidate must satisfy the echo's word-count arithmetic
+    // up front — the tail has to look like a copy of the head:
+    //   - within the existing ≤5%-differing-words tolerance of the head's
+    //     length (a complete second copy, head ≈ tail), or
+    //   - at least half the head (the documented truncated-tail ≥
+    //     half-head rule for a max_tokens cut),
+    // and the split must land on a line boundary — already a hard
+    // requirement below; checking it first skips the joins+DP for every
+    // other candidate. Both filters are necessary conditions the previous
+    // code enforced (implicitly, after paying for the DP), so the verdict
+    // set is unchanged.
+    let tolerance = |tail_len: usize| (tail_len / 20).max(1);
+    let h_min = n.div_ceil(2); // tail (n-h) never longer than the head (h)
+    let h_max = (2 * n / 3).min(n.saturating_sub(4)); // tail ≥ half the head
+    let mut candidates: Vec<usize> = line_end_words
+        .iter()
+        .copied()
+        .filter(|&h| h >= h_min && h <= h_max)
+        .filter(|&h| {
+            let tail_len = n - h;
+            h <= tail_len + tolerance(tail_len) || tail_len * 2 >= h
+        })
+        .collect::<Vec<_>>();
+    // Same preference order as the previous scan: the exact half (a
+    // complete second copy) first when valid, then longest head first.
+    candidates.sort_unstable_by(|a, b| b.cmp(a));
+    if n.is_multiple_of(2)
+        && let Some(pos) = candidates.iter().position(|&h| h == n / 2)
+    {
+        let half = candidates.remove(pos);
+        candidates.insert(0, half);
     }
 
     for &h in &candidates {
@@ -595,5 +618,32 @@ mod tests {
         assert_eq!(clean_ocr_text(doc), doc);
         let doc2 = "----\nsignature line above\n----";
         assert_eq!(clean_ocr_text(doc2), doc2.trim());
+    }
+
+    /// Correctness at scale (2026-10-08 complexity review): a ~1,800-word
+    /// two-copy echo — near the SKIP_ABOVE_WORDS ceiling — must still
+    /// collapse once the second copy REWRAPS (the shape that defeats the
+    /// line-verbatim stage and lands here). The candidate pruning must
+    /// change the cost, never the verdict.
+    #[test]
+    fn collapses_large_rewrapped_two_copy_echo() {
+        // Copy 1: 180 numbered lines × 5 words = 900 words.
+        let copy1: Vec<String> = (0..180)
+            .map(|i| format!("clinical finding {i} reported today"))
+            .collect();
+        let copy1_text = copy1.join("\n");
+
+        // Copy 2: the same 900 words rewrapped at 11 words per line — a
+        // different line grid, identical word stream.
+        let words: Vec<&str> = copy1.iter().flat_map(|l| l.split_whitespace()).collect();
+        assert_eq!(words.len(), 900);
+        let copy2_lines: Vec<String> = words.chunks(11).map(|c| c.join(" ")).collect();
+        let raw = format!("{copy1_text}\n{}", copy2_lines.join("\n"));
+
+        let cleaned = clean_ocr_text(&raw);
+        assert_eq!(
+            cleaned, copy1_text,
+            "the large rewrapped echo must collapse to the first copy"
+        );
     }
 }

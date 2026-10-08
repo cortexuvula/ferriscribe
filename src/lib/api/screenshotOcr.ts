@@ -1,6 +1,6 @@
 import { invokeWithOfflineHandling } from './invokeWithOfflineHandling';
 import { toasts } from '../stores/toasts.svelte';
-import { formatError } from '../types/errors';
+import { sanitizedErr } from '../utils/sanitizedErr';
 
 /** The built-in hotkey fallback, mirroring `DEFAULT_HOTKEY` in
  *  src-tauri/src/commands/screenshot_ocr.rs. Single frontend source for the
@@ -46,9 +46,11 @@ export function toastOcrOutcome(outcome: CaptureOcrOutcome): void {
   }
 }
 
-/** Toast a capture FAILURE the one way every trigger site does. */
+/** Toast a capture FAILURE the one way every trigger site does. The raw
+ *  backend message never reaches the glass — backend errors can embed row
+ *  data, so only the sanitized form renders (see utils/sanitizedErr). */
 export function toastOcrFailure(err: unknown): void {
-  toasts.error(`Screenshot OCR failed: ${formatError(err)}`);
+  toasts.error(`Screenshot OCR failed: ${sanitizedErr(err)}`);
 }
 
 /** Run the interactive region capture → OCR → clipboard flow. */

@@ -110,10 +110,14 @@ pub fn apply_corrections(text: &str, entries: &[VocabularyEntry]) -> CorrectionR
                     category: entry.category.clone(),
                     count: count as u32,
                 });
+                // PHI: find/replace pairs are often patient names — log
+                // count + category + lengths only, mirroring the adjacent
+                // info!(total_replacements = …) summary.
                 debug!(
-                    find = %entry.find_text,
-                    replace = %entry.replacement,
+                    category = ?entry.category,
                     count,
+                    find_len = entry.find_text.len(),
+                    replacement_len = entry.replacement.len(),
                     "Applied vocabulary correction"
                 );
             }

@@ -3686,6 +3686,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "tracing",
  "uuid",
 ]
 
@@ -5649,7 +5650,7 @@ dependencies = [
 
 [[package]]
 name = "rust-medical-assistant"
-version = "0.78.3"
+version = "0.79.0"
 dependencies = [
  "async-stream",
  "async-trait",

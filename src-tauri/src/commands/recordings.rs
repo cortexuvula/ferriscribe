@@ -483,76 +483,114 @@ pub async fn import_audio_file(
     // The whole import — dir resolution (settings read), file copy or
     // in-process decode/convert, WAV parse, and at-rest encryption — is
     // blocking and can take seconds on a large file.
-    tokio::task::spawn_blocking(move || -> AppResult<String> {
-        let source = PathBuf::from(&file_path);
-        if !source.exists() {
-            return Err(AppError::Other(format!("File not found: {file_path}")));
+    tokio::task::spawn_blocking(move || import_audio_file_inner(&db, &data_dir, &file_path))
+        .await
+        .map_err(join_err)?
+}
+
+/// Best-effort cleanup of a partial import destination: the copy/convert
+/// can leave a partially written plaintext WAV before failing — no row
+/// references it and no sweep covers it (the orphan-WAV sweep only
+/// ENCRYPTS rowless files, days later). Shred it; a NotFound (nothing was
+/// ever written) is fine. Logs the failure only — never the path (PHI).
+fn shred_partial_import(dest: &std::path::Path) {
+    if let Err(e) = medical_security::file_crypto::shred_and_unlink(dest)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(error = %e, "import: cleaning up partial destination failed");
+    }
+}
+
+/// Blocking core of [`import_audio_file`], extracted so the failed-import
+/// cleanup is unit-testable without `tauri::State`.
+fn import_audio_file_inner(
+    db: &Arc<medical_db::Database>,
+    data_dir: &std::path::Path,
+    file_path: &str,
+) -> AppResult<String> {
+    let source = PathBuf::from(file_path);
+    if !source.exists() {
+        return Err(AppError::Other(format!("File not found: {file_path}")));
+    }
+
+    // Resolve recordings directory from settings (custom path or default).
+    let recordings_dir = resolve_recordings_dir(db, data_dir)?;
+
+    let original_name = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "imported".to_string());
+
+    let recording_id = Uuid::new_v4();
+    let short_id = &recording_id.to_string()[..8];
+
+    // Destination for both paths (copy or convert). On ANY error from here
+    // until the row insert commits, the partial destination is shredded —
+    // a half-written plaintext WAV is PHI on disk that nothing references.
+    let dest_path = recordings_dir.join(format!("{original_name}_{short_id}.wav"));
+    let is_wav_source = medical_audio::convert::is_wav_file(&source);
+    let copy_or_convert: AppResult<()> = if is_wav_source {
+        // Already WAV — just copy.
+        std::fs::copy(&source, &dest_path)
+            .map(|_| ())
+            .map_err(|e| AppError::audio(format!("Failed to copy file: {e}")))
+    } else {
+        // Non-WAV — convert to WAV.
+        medical_audio::convert::convert_to_wav(&source, &dest_path)
+            .map_err(|e| AppError::audio(format!("Failed to convert audio: {e}")))
+    };
+    if let Err(e) = copy_or_convert {
+        shred_partial_import(&dest_path);
+        return Err(e);
+    }
+
+    // Read duration and file size from the resulting WAV. If the just-written
+    // WAV is unreadable, that's a real signal (corrupt source, converter bug)
+    // — surface it instead of silently setting duration=None.
+    let file_size = match std::fs::metadata(&dest_path) {
+        Ok(m) => m.len(),
+        Err(e) => {
+            shred_partial_import(&dest_path);
+            return Err(AppError::audio(format!("imported WAV unreadable: {e}")));
         }
-
-        // Resolve recordings directory from settings (custom path or default).
-        let recordings_dir = resolve_recordings_dir(&db, &data_dir)?;
-
-        let original_name = source
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "imported".to_string());
-
-        let recording_id = Uuid::new_v4();
-        let short_id = &recording_id.to_string()[..8];
-
-        // Determine if we need to convert to WAV.
-        let dest_path = if medical_audio::convert::is_wav_file(&source) {
-            // Already WAV — just copy.
-            let dest_filename = format!("{original_name}_{short_id}.wav");
-            let dest = recordings_dir.join(&dest_filename);
-            std::fs::copy(&source, &dest)
-                .map_err(|e| AppError::audio(format!("Failed to copy file: {e}")))?;
-            dest
-        } else {
-            // Non-WAV — convert to WAV.
-            let dest_filename = format!("{original_name}_{short_id}.wav");
-            let dest = recordings_dir.join(&dest_filename);
-            medical_audio::convert::convert_to_wav(&source, &dest)
-                .map_err(|e| AppError::audio(format!("Failed to convert audio: {e}")))?;
-            dest
-        };
-
-        // Read duration and file size from the resulting WAV. If the just-written
-        // WAV is unreadable, that's a real signal (corrupt source, converter bug)
-        // — surface it instead of silently setting duration=None.
-        let file_size = std::fs::metadata(&dest_path)
-            .map(|m| m.len())
-            .map_err(|e| AppError::audio(format!("imported WAV unreadable: {e}")))?;
-        let duration = {
-            let reader = hound::WavReader::open(&dest_path)
-                .map_err(|e| AppError::audio(format!("imported WAV unreadable: {e}")))?;
-            let spec = reader.spec();
-            let total_samples = reader.len() as f64;
-            if spec.sample_rate > 0 && spec.channels > 0 {
-                total_samples / (spec.sample_rate as f64 * spec.channels as f64)
-            } else {
-                0.0
+    };
+    let duration = {
+        match hound::WavReader::open(&dest_path) {
+            Ok(reader) => {
+                let spec = reader.spec();
+                let total_samples = reader.len() as f64;
+                if spec.sample_rate > 0 && spec.channels > 0 {
+                    total_samples / (spec.sample_rate as f64 * spec.channels as f64)
+                } else {
+                    0.0
+                }
             }
-        };
+            Err(e) => {
+                shred_partial_import(&dest_path);
+                return Err(AppError::audio(format!("imported WAV unreadable: {e}")));
+            }
+        }
+    };
 
-        // Encrypt the imported recording at rest (same as captured recordings).
-        // The row is inserted (with `encryption_pending = 1`) BEFORE the
-        // encrypt attempt, in one transaction — mirroring stop_recording's
-        // ordering. A crash or a transient keychain/IO failure mid-encrypt
-        // then leaves a flagged plaintext WAV the boot sweep retries, instead
-        // of an invisible orphan outside the sweep's view.
-        let dest_filename = dest_path
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| format!("{original_name}_{short_id}.wav"));
+    // Encrypt the imported recording at rest (same as captured recordings).
+    // The row is inserted (with `encryption_pending = 1`) BEFORE the
+    // encrypt attempt, in one transaction — mirroring stop_recording's
+    // ordering. A crash or a transient keychain/IO failure mid-encrypt
+    // then leaves a flagged plaintext WAV the boot sweep retries, instead
+    // of an invisible orphan outside the sweep's view.
+    let dest_filename = dest_path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("{original_name}_{short_id}.wav"));
 
-        // Create the Recording entry.
-        let mut recording = Recording::new(dest_filename, dest_path);
-        recording.id = recording_id;
-        recording.duration_seconds = Some(duration);
-        recording.file_size_bytes = Some(file_size);
-        recording.status = ProcessingStatus::Pending;
+    // Create the Recording entry.
+    let mut recording = Recording::new(dest_filename, dest_path);
+    recording.id = recording_id;
+    recording.duration_seconds = Some(duration);
+    recording.file_size_bytes = Some(file_size);
+    recording.status = ProcessingStatus::Pending;
 
+    let insert_result: AppResult<()> = (|| {
         let conn = db.conn()?;
         let should_encrypt = file_size > 0;
         if should_encrypt {
@@ -579,30 +617,71 @@ pub async fn import_audio_file(
         } else {
             RecordingsRepo::insert(&conn, &recording)?;
         }
+        Ok(())
+    })();
+    if let Err(e) = insert_result {
+        // No row survived — nothing references the destination.
+        shred_partial_import(&recording.audio_path);
+        return Err(e);
+    }
 
-        if should_encrypt {
-            match medical_security::file_crypto::encrypt_file_in_place(&recording.audio_path) {
-                Ok(()) => {
-                    RecordingsRepo::set_encryption_done(&conn, &recording_id)?;
-                }
-                Err(e) => {
-                    // Leave the flag set — the boot sweep retries, matching
-                    // the capture path's failure semantics.
-                    use medical_security::file_crypto::FileCryptoError;
-                    match e {
-                        FileCryptoError::Keychain(e) => {
-                            tracing::warn!(error = %e, "import: could not encrypt (keychain unavailable); encryption_pending stays set for the boot sweep")
-                        }
-                        e => {
-                            tracing::warn!(error = %e, path = %recording.audio_path.display(), "import: could not encrypt; encryption_pending stays set for the boot sweep")
-                        }
+    if file_size > 0 {
+        match medical_security::file_crypto::encrypt_file_in_place(&recording.audio_path) {
+            Ok(()) => {
+                let conn = db.conn()?;
+                RecordingsRepo::set_encryption_done(&conn, &recording_id)?;
+            }
+            Err(e) => {
+                // Leave the flag set — the boot sweep retries, matching
+                // the capture path's failure semantics.
+                use medical_security::file_crypto::FileCryptoError;
+                match e {
+                    FileCryptoError::Keychain(e) => {
+                        tracing::warn!(error = %e, "import: could not encrypt (keychain unavailable); encryption_pending stays set for the boot sweep")
+                    }
+                    e => {
+                        // Id + error only — the import path embeds the
+                        // user's filename, which is PHI per the logging
+                        // rules (counts/lengths/ids, never paths).
+                        tracing::warn!(error = %e, recording_id = %recording_id, "import: could not encrypt; encryption_pending stays set for the boot sweep")
                     }
                 }
             }
         }
+    }
 
-        Ok(recording_id.to_string())
-    })
-    .await
-    .map_err(join_err)?
+    Ok(recording_id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed conversion must leave NO destination file: the old path
+    /// returned the error with a partial plaintext WAV stranded in the
+    /// recordings dir (no row references it; the orphan sweep would only
+    /// encrypt it days later).
+    #[test]
+    fn failed_conversion_leaves_no_destination_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Short non-WAV garbage: passes the exists() check, fails
+        // `convert_to_wav` deterministically at format probing.
+        let src = tmp.path().join("corrupt-audio.mp3");
+        std::fs::write(&src, b"definitely not audio data").expect("write corrupt source");
+
+        let db = Arc::new(medical_db::Database::open_in_memory().expect("db"));
+        let result = import_audio_file_inner(&db, tmp.path(), src.to_str().unwrap());
+        assert!(result.is_err(), "garbage non-WAV source must fail");
+
+        let recordings_dir = tmp.path().join("recordings");
+        let leftovers: Vec<_> = std::fs::read_dir(&recordings_dir)
+            .expect("recordings dir exists (resolver created it)")
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "partial destination must be shredded on a failed conversion, found {leftovers:?}"
+        );
+    }
 }

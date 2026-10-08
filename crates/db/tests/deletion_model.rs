@@ -35,10 +35,11 @@ use medical_db::recordings::RecordingsRepo;
 use medical_db::user_dictionary::UserDictionaryRepo;
 use uuid::Uuid;
 
-/// Fixed, strictly-ordered timestamps: T0 < T1 < T2.
+/// Fixed, strictly-ordered timestamps: T0 < T1 < T2 < T3.
 const T0: &str = "2026-08-10T00:00:00Z";
 const T1: &str = "2026-08-11T00:00:00Z";
 const T2: &str = "2026-08-12T00:00:00Z";
+const T3: &str = "2026-08-13T00:00:00Z";
 
 /// Insert a live, FTS-indexed recording row, returning the fixture.
 fn seed(conn: &rusqlite::Connection, filename: &str) -> Recording {
@@ -806,15 +807,79 @@ fn purged_since_filters_by_cutoff() {
     );
 }
 
+/// Composite keyset cursors (`<ts>|<id>`, 2026-10-08 review) must not leak
+/// their id suffix into the ledger comparison: `purged_since` strips it and
+/// compares against the timestamp alone, so the composite cursor shape
+/// selects exactly what the equivalent plain-timestamp cursor would —
+/// nothing at-or-before the timestamp, everything strictly newer.
+#[test]
+fn purged_since_strips_the_composite_cursor_suffix() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+
+    let a = Uuid::new_v4();
+    conn.execute(
+        "INSERT INTO purged_recordings (id, purged_at) VALUES (?1, ?2)",
+        rusqlite::params![a.to_string(), T1],
+    )
+    .expect("seed ledger");
+
+    // Cursor closed exactly at T1 (the composite shape run_sync now emits):
+    // the T1 entry itself is at the boundary — the strict `>` keeps it out,
+    // matching the plain-cursor semantics (it already rode that pull).
+    let cursor = format!("{T1}|{}", Uuid::new_v4());
+    let refs = ContentSyncRepo::purged_since(&conn, Some(&cursor)).expect("purged_since");
+    assert!(
+        refs.is_empty(),
+        "an entry AT the cursor timestamp is already delivered — the composite suffix must not change that"
+    );
+
+    // The neighbouring case that matters: an entry strictly NEWER than the
+    // cursor's timestamp must survive the suffix strip.
+    let b = Uuid::new_v4();
+    conn.execute(
+        "INSERT INTO purged_recordings (id, purged_at) VALUES (?1, ?2)",
+        rusqlite::params![b.to_string(), T2],
+    )
+    .expect("seed newer ledger entry");
+    let refs = ContentSyncRepo::purged_since(&conn, Some(&cursor)).expect("purged_since");
+    assert_eq!(
+        refs,
+        vec![PurgedRef {
+            id: b.to_string(),
+            purged_at: T2.to_string(),
+        }],
+        "entries newer than the cursor's timestamp must travel under a composite cursor"
+    );
+}
+
 #[test]
 fn apply_purged_refs_tombstones_live_copies_only() {
     let db = Database::open_in_memory().expect("db");
     let conn = db.conn().expect("conn");
 
-    // Two stale LIVE copies (this machine missed the deletion), one row the
-    // machine had already tombstoned itself, and one id it has never seen.
+    // Backdate a live row's updated_at — the fixture for a STALE copy (one
+    // unedited since before the purge). `seed` alone stamps now, which the
+    // purge-LWW rule (2026-10-08 review) correctly reads as "restored after
+    // the purge" and refuses to tombstone. The UPDATE fires the FTS update
+    // trigger with unchanged indexed values, so the index stays consistent.
+    let backdate_edit = |id: &Uuid, ts: &str| {
+        conn.execute(
+            "UPDATE recordings SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![ts, id.to_string()],
+        )
+        .expect("backdate updated_at");
+    };
+
+    // Two stale LIVE copies (this machine missed the deletion), one LIVE
+    // copy RESTORED after the purge, one row the machine had already
+    // tombstoned itself, and one id it has never seen.
     let live1 = seed(&conn, "prglive1.wav");
     let live2 = seed(&conn, "prglive2.wav");
+    backdate_edit(&live1.id, T0);
+    backdate_edit(&live2.id, T0);
+    let restored = seed(&conn, "prgrestored.wav");
+    backdate_edit(&restored.id, T3);
     let gone = seed(&conn, "prggone.wav");
     soft_delete_at(&conn, &gone.id, T1);
     let unknown = Uuid::new_v4();
@@ -828,6 +893,10 @@ fn apply_purged_refs_tombstones_live_copies_only() {
         },
         PurgedRef {
             id: live2.id.to_string(),
+            purged_at: T2.to_string(),
+        },
+        PurgedRef {
+            id: restored.id.to_string(),
             purged_at: T2.to_string(),
         },
         PurgedRef {
@@ -859,6 +928,19 @@ fn apply_purged_refs_tombstones_live_copies_only() {
     assert!(
         !fts_row_present(&conn, "prglive2"),
         "tombstoned copy must leave the FTS index"
+    );
+
+    // The restored copy stays live — a restore that happened after the
+    // server purged must not be silently reverted (nor its trash clock
+    // reset) by the purge notification.
+    assert_eq!(
+        deleted_at_raw(&conn, &restored.id),
+        None,
+        "live row newer than the purge (a restore) must stay live"
+    );
+    assert!(
+        fts_row_present(&conn, "prgrestored"),
+        "the restored copy must remain searchable"
     );
 
     // The already-tombstoned row keeps its original deleted_at (a later

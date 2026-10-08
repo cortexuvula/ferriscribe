@@ -87,10 +87,12 @@
 
       <label class="field field-full">
         <span class="field-label">Additional instructions</span>
+        <!-- maxlength mirrors the backend cap on user_instructions (50k chars). -->
         <textarea
           class="instructions"
           placeholder="e.g. Keep it brief; mention the abnormal ECG; request an urgent appointment."
           rows="3"
+          maxlength={50000}
           bind:value={letterWriter.userInstructions}
           disabled={letterWriter.generating}
         ></textarea>

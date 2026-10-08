@@ -378,3 +378,72 @@ fn set_encryption_done_on_trashed_row_does_not_corrupt_fts() {
     assert_eq!(row_count(&conn, rec.id), 0, "row must be hard-deleted");
     assert_fts_healthy(&conn);
 }
+
+// -------------------------------------------------------------------------
+// A candidate tombstoned between the sweep's listing and its per-row
+// soft_delete must be skipped, not fatal to the whole sweep.
+// -------------------------------------------------------------------------
+
+/// The mid-sweep race (2026-10-08 review): a candidate the sweep LISTED as
+/// visible can be tombstoned before the sweep's `soft_delete` reaches it
+/// (user delete, a concurrent sweep). `soft_delete` then returns NotFound —
+/// previously propagated with `?`, aborting the whole loop so every later
+/// candidate stayed untrashed until the next tick.
+///
+/// The race is driven deterministically with a trigger: tombstoning the
+/// FIRST candidate (via the sweep's own UPDATE) also tombstones the second,
+/// so the sweep's `soft_delete` for the second finds it already deleted.
+/// The listing scans the table in rowid order (the `datetime(created_at)`
+/// filter can't use an index), so seeding first/second/third in that order
+/// fixes the processing sequence.
+#[test]
+fn retention_sweep_skips_candidates_tombstoned_mid_sweep() {
+    let db = Database::open_in_memory().expect("db");
+    let conn = db.conn().expect("conn");
+
+    let first = seed_days_old(&conn, 100, "race-first.wav");
+    let second = seed_days_old(&conn, 100, "race-second.wav");
+    let third = seed_days_old(&conn, 100, "race-third.wav");
+
+    // Parameters aren't allowed in CREATE TRIGGER, so the fixture UUIDs are
+    // inlined (both are generated ids — nothing user-supplied).
+    let trigger_sql = format!(
+        "CREATE TRIGGER race_tombstone_after_first
+         AFTER UPDATE ON recordings
+         WHEN new.id = '{first}' AND new.deleted_at IS NOT NULL
+         BEGIN
+             UPDATE recordings
+                SET deleted_at = new.deleted_at, updated_at = new.updated_at
+              WHERE id = '{second}' AND deleted_at IS NULL;
+         END",
+        first = first.id,
+        second = second.id,
+    );
+    conn.execute(&trigger_sql, []).expect("create race trigger");
+
+    let trashed = RecordingsRepo::retention_soft_delete_older_than(&conn, 90, chrono::Utc::now())
+        .expect("sweep must survive the mid-sweep tombstone");
+
+    assert!(
+        trashed.contains(&first.id),
+        "the candidate that fired the race is still trashed"
+    );
+    assert!(
+        !trashed.contains(&second.id),
+        "the raced row is skipped from the report (someone else trashed it)"
+    );
+    assert!(
+        trashed.contains(&third.id),
+        "candidates after the race must still be processed — the loop must not abort"
+    );
+    // End state: all three rows are tombstoned (the trigger trashed the
+    // second on the first's UPDATE) and the index stayed consistent.
+    for id in [first.id, second.id, third.id] {
+        assert!(
+            deleted_at_raw(&conn, id).is_some(),
+            "row {id} must be trashed"
+        );
+    }
+    assert!(visible_ids(&conn).is_empty());
+    assert_fts_healthy(&conn);
+}

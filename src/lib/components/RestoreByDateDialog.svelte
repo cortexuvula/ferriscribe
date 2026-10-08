@@ -20,6 +20,11 @@
   let phase = $state<Phase>('idle');
   let previewCount = $state<number | null>(null);
   let errorMsg = $state<string | null>(null);
+  /// Monotonic request id guarding the count preview (same discipline as
+  /// the store's list/select tokens): rapid date changes race their
+  /// counts, and a slow count for date A landing after date B's would
+  /// display A's N under B's heading.
+  let previewRequestId = 0;
 
   let root: HTMLElement | undefined = $state();
   let unregister: (() => void) | null = null;
@@ -72,12 +77,16 @@
   /// execute again — never restore against the pre-failure N.
   async function refreshPreview(): Promise<void> {
     if (chosenDay === null) return;
+    const token = ++previewRequestId;
     phase = 'counting';
     previewCount = null;
     try {
-      previewCount = await recordings.countTrashedOnDate(chosenDay);
+      const count = await recordings.countTrashedOnDate(chosenDay);
+      if (token !== previewRequestId) return;
+      previewCount = count;
       phase = 'preview';
     } catch (err) {
+      if (token !== previewRequestId) return;
       console.error('Failed to count trashed recordings by date:', err);
       errorMsg = "Couldn't count recordings. Try again.";
       phase = 'idle';
@@ -86,12 +95,10 @@
 
   async function handleDateChange() {
     errorMsg = null;
-    if (chosenDay === null) {
-      phase = 'idle';
-      previewCount = null;
-      return;
-    }
-    if (futureDate) {
+    if (chosenDay === null || futureDate) {
+      // Invalidate any in-flight count: its result belongs to a date the
+      // user has already abandoned.
+      previewRequestId++;
       phase = 'idle';
       previewCount = null;
       return;

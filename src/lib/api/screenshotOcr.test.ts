@@ -87,19 +87,21 @@ describe('screenshotOcr api', () => {
     });
   });
 
-  it('toastOcrFailure error-toasts the formatted message', () => {
-    toastOcrFailure(new Error('provider offline'));
+  it('toastOcrFailure error-toasts a SANITIZED message — raw backend text never renders', () => {
+    // Backend error strings can embed row data (a filename is
+    // patient-visible surface) — only the generic string may render.
+    toastOcrFailure(new Error('failed to open Smith_John_2026-10-06.wav'));
     expect(mockToasts.error).toHaveBeenCalledWith(
-      'Screenshot OCR failed: provider offline'
+      'Screenshot OCR failed: unexpected error'
     );
   });
 
-  it('toastOcrFailure passes plain-string errors through (event payloads)', () => {
-    // The App.svelte event listener hands the emitted error string straight
-    // to the shared helper — same wording as the command path.
-    toastOcrFailure('No OCR model configured');
+  it('toastOcrFailure keeps the recording-id reference (the one PHI-safe shape)', () => {
+    // The App.svelte event listener hands emitted error strings straight to
+    // the shared helper — an id reference survives sanitization.
+    toastOcrFailure('recording 3fa85f64-5717-4562-b3fc-2c963f66afa6 not found');
     expect(mockToasts.error).toHaveBeenCalledWith(
-      'Screenshot OCR failed: No OCR model configured'
+      'Screenshot OCR failed: recording 3fa85f64-5717-4562-b3fc-2c963f66afa6'
     );
   });
 

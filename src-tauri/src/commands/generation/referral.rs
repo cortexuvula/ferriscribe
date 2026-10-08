@@ -124,11 +124,9 @@ async fn generate_referral_inner(
 
     // Freshness provenance (best-effort): effective input digest with the
     // same fold the prompt used, plus the SOAP source binding —
-    // freshness compares it against digest(recordings.soap_note).
-    let source_digest = recording
-        .soap_note
-        .as_deref()
-        .map(super::freshness::digest_str);
+    // freshness compares it against digest(recordings.soap_note); the
+    // trimming digest keeps the write side normalized like the read.
+    let source_digest = super::freshness::text_digest(recording.soap_note.as_deref());
     let input_digest = super::freshness::referral_input_digest(
         folded.as_deref(),
         recipient_type,
@@ -276,7 +274,7 @@ mod stats_tests {
         .expect("provenance row exists");
         assert_eq!(
             prov.output_digest,
-            super::super::freshness::digest_str(&text)
+            super::super::freshness::text_digest(Some(&text)).expect("non-empty output")
         );
         assert!(
             prov.source_digest.is_some(),

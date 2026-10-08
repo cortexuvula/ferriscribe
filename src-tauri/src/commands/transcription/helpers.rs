@@ -210,29 +210,6 @@ pub(super) fn filter_cross_segment_repetitions(
         .join(" ");
 }
 
-/// Open a recording WAV file and return the raw decrypted bytes.
-///
-/// Used by `export_audio` to get the full WAV (header + data) for
-/// re-encoding as standard 16-bit PCM. Handles both encrypted (FE1)
-/// and legacy plaintext files.
-///
-/// Reads the file **once** into memory, then branches on the in-memory
-/// bytes. This avoids a TOCTOU race where the background encryption
-/// task's atomic rename could land between `decrypt_file`'s read and
-/// the `NotEncrypted` fallback's second `std::fs::read`.
-pub(crate) fn open_recording_wav_raw(path: &std::path::Path) -> AppResult<Vec<u8>> {
-    use medical_security::file_crypto::{FileCryptoError, decrypt_bytes};
-
-    let bytes = std::fs::read(path).map_err(AppError::from)?;
-    match decrypt_bytes(&bytes) {
-        Ok(plaintext) => Ok(plaintext),
-        Err(FileCryptoError::NotEncrypted) => Ok(bytes), // legacy plaintext — use the bytes we already read
-        Err(e) => Err(AppError::processing(format!(
-            "Failed to decrypt recording: {e}"
-        ))),
-    }
-}
-
 /// Write an orphaned transcript (one whose DB persistence failed despite
 /// successful transcription) to an **encrypted** file inside
 /// `app_data_dir/orphaned_transcripts/`. Returns the full path so the
@@ -495,13 +472,29 @@ fn salvage_partial_wav(bytes: &[u8]) -> Option<Vec<u8>> {
     }
 
     let mut out = bytes[..start + clamped].to_vec();
-    // Rewrite the data chunk length...
-    let len_bytes = (clamped as u32).to_le_bytes();
-    out[start - 4..start].copy_from_slice(&len_bytes);
-    // ...and the RIFF size (everything after the 8-byte RIFF header).
-    let riff_size = (out.len().saturating_sub(8)) as u32;
-    out[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    patch_riff_lengths(&mut out, start, clamped)?;
     Some(out)
+}
+
+/// Rewrite a salvaged blob's data-chunk length and RIFF size fields. Both
+/// are u32 — use checked conversions: a >4 GiB salvaged extent cannot be
+/// represented, and a wrapping `as u32` would silently patch a tiny/bogus
+/// length into the header. Refuses (None) loudly — lengths only, PHI-safe.
+fn patch_riff_lengths(out: &mut [u8], start: usize, clamped: usize) -> Option<()> {
+    let (Some(data_len), Some(riff_size)) = (
+        u32::try_from(clamped).ok(),
+        u32::try_from(out.len().saturating_sub(8)).ok(),
+    ) else {
+        tracing::warn!(
+            salvaged_len = clamped,
+            total_len = out.len(),
+            "WAV salvage refused: length fields exceed the u32 RIFF limit"
+        );
+        return None;
+    };
+    out[start - 4..start].copy_from_slice(&data_len.to_le_bytes());
+    out[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    Some(())
 }
 
 /// Load a WAV file from disk and convert it into `AudioData` (f32 PCM).
@@ -860,6 +853,31 @@ mod tests {
     fn salvage_rejects_non_riff_garbage() {
         assert!(salvage_partial_wav(b"not a wav at all").is_none());
         assert!(salvage_partial_wav(&[]).is_none());
+    }
+
+    /// Regression (2026-10-08 review): the patched length fields used
+    /// wrapping `as u32` casts — a >4 GiB salvaged extent silently wrapped
+    /// to a tiny/bogus length. The patch must REFUSE (None) instead.
+    /// Pinned at the patch seam: driving `salvage_partial_wav` itself would
+    /// require actually allocating a >4 GiB buffer.
+    #[test]
+    fn salvage_patch_refuses_extent_beyond_u32_instead_of_wrapping() {
+        // Data length beyond u32::MAX (a >4 GiB data chunk) — refused,
+        // where the old `as u32` cast wrapped to 0.
+        let mut out = vec![0u8; 64];
+        assert!(patch_riff_lengths(&mut out, 44, u32::MAX as usize + 1).is_none());
+
+        // u32::MAX itself is the last representable value — accepted,
+        // and written as the full LE field.
+        let mut out = vec![0u8; 64];
+        assert!(patch_riff_lengths(&mut out, 44, u32::MAX as usize).is_some());
+        assert_eq!(&out[40..44], &u32::MAX.to_le_bytes());
+
+        // A normal extent patches both LE fields correctly.
+        let mut out = vec![0u8; 64];
+        assert!(patch_riff_lengths(&mut out, 44, 20).is_some());
+        assert_eq!(&out[40..44], &20u32.to_le_bytes(), "data chunk length");
+        assert_eq!(&out[4..8], &56u32.to_le_bytes(), "RIFF size");
     }
 
     /// Locate the start of the `data` chunk body in a RIFF blob (test aid).

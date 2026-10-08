@@ -251,11 +251,19 @@ impl SttProvider for RemoteSttProvider {
         // Resolve the server URL once for this transcription (cached 30s).
         let resolved_server = self.current_base_url().await?;
 
-        // Stage 1: resample to 16 kHz mono f32, trim silence, convert to i16 for upload.
-        let audio_16k_raw = audio_prep::to_16k_mono_f32(&audio);
-        let audio_16k = audio_prep::trim_trailing_silence(&audio_16k_raw, 0.01);
-        let samples_i16 = audio_prep::f32_to_i16(&audio_16k);
-        let wav_bytes = audio_prep::write_pcm16_wav_bytes(&samples_i16, TARGET_SAMPLE_RATE);
+        // Stage 1: resample to 16 kHz mono f32, trim silence, convert to
+        // i16, and encode the PCM WAV — on the blocking pool (these passes
+        // are O(samples) CPU and previously ran inline on the async
+        // runtime). The i16 samples come back for local diarization.
+        let (wav_bytes, samples_i16) = tokio::task::spawn_blocking(move || {
+            let audio_16k_raw = audio_prep::to_16k_mono_f32(&audio);
+            let audio_16k = audio_prep::trim_trailing_silence(&audio_16k_raw, 0.01);
+            let samples_i16 = audio_prep::f32_to_i16(&audio_16k);
+            let wav_bytes = audio_prep::write_pcm16_wav_bytes(&samples_i16, TARGET_SAMPLE_RATE);
+            (wav_bytes, samples_i16)
+        })
+        .await
+        .map_err(|e| AppError::stt_provider(format!("Audio preprocessing task panicked: {e}")))?;
 
         // Stage 2: POST to the Whisper server (cancellable via tokio::select!).
         let parsed = self

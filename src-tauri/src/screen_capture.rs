@@ -211,20 +211,32 @@ async fn capture_macos(data_dir: &Path) -> Result<Vec<u8>, RegionCaptureError> {
         .map_err(|e| RegionCaptureError::Failed(format!("prepare capture file: {e}")))?;
     file.write_all(&[]).ok();
 
-    let status = tokio::time::timeout(
-        CAPTURE_DEADLINE,
-        tokio::process::Command::new("screencapture")
-            .arg("-i")
-            .arg("-x")
-            .arg(&path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status(),
-    )
-    .await
-    .map_err(|_| RegionCaptureError::Failed("screencapture timed out".into()))?
-    .map_err(|e| RegionCaptureError::Failed(format!("run screencapture: {e}")))?;
+    // Both failure modes below return BEFORE the read+shred task further
+    // down — shred the pre-created file here too, or a hung `screencapture`
+    // (timeout) or a spawn failure strands the 0600 capture file in
+    // `capture-tmp` until the boot sweep gets it. Best-effort and
+    // NotFound-tolerant (the tool may have removed it itself).
+    let run_screencapture = tokio::process::Command::new("screencapture")
+        .arg("-i")
+        .arg("-x")
+        .arg(&path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let status = match tokio::time::timeout(CAPTURE_DEADLINE, run_screencapture).await {
+        Err(_) => {
+            shred_capture_file(&path).await;
+            return Err(RegionCaptureError::Failed("screencapture timed out".into()));
+        }
+        Ok(Err(e)) => {
+            shred_capture_file(&path).await;
+            return Err(RegionCaptureError::Failed(format!(
+                "run screencapture: {e}"
+            )));
+        }
+        Ok(Ok(status)) => status,
+    };
 
     // Read + destroy the file before OCR regardless of outcome below. Esc
     // (cancel) exits non-zero and usually leaves an empty/absent file.
@@ -253,6 +265,17 @@ async fn capture_macos(data_dir: &Path) -> Result<Vec<u8>, RegionCaptureError> {
     }
     tracing::debug!(bytes = bytes.len(), "region captured");
     Ok(bytes)
+}
+
+/// Best-effort shred of the pre-created capture file on the error paths
+/// that return before the read+shred task (timeout, spawn failure).
+/// NotFound-tolerant — the tool may have removed the file itself.
+#[cfg(target_os = "macos")]
+async fn shred_capture_file(path: &Path) {
+    let path = path.to_path_buf();
+    let _ =
+        tokio::task::spawn_blocking(move || medical_security::file_crypto::shred_and_unlink(&path))
+            .await;
 }
 
 /// The private directory macOS capture PNGs live in, created 0700.

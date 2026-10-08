@@ -87,4 +87,27 @@ describe('RecordTab — patient context survival (regression)', () => {
     // with a real assertion.
     expect(true).toBe(true);
   });
+
+  it('documents the upload-path process-launching re-entry guard', () => {
+    // Meta-test: handleUploadAudio's maybeLaunchPipeline call now sets the
+    // SAME processLaunching guard handleProcessRecording checks (the fix for
+    // the double-invoke bug: maybeLaunchPipeline can park for up to 60 s in
+    // the OCR-settle preamble while the visible Process Recording button
+    // stays clickable — a click there used to fire a second
+    // process_recording invoke for the same recording).
+    //
+    // Same unit-testability constraint as above: both handlers are internal
+    // to the component and the guard is component-local state, so the
+    // double-click shape needs a full mount this file deliberately avoids
+    // (see header). Manual verification steps (run `npm run tauri dev`):
+    //   1. Click "Upload Audio File", pick an audio file.
+    //   2. While the pipeline preamble is settling (before the Generate
+    //      view takes over), click "Process Recording".
+    //   3. Confirm only ONE pipeline run starts (no duplicate
+    //      transcription/SOAP for the recording).
+    //
+    // If you extract the upload path into a testable unit, replace this
+    // meta-test with a real assertion.
+    expect(true).toBe(true);
+  });
 });

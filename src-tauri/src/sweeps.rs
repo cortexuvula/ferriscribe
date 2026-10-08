@@ -109,7 +109,8 @@ pub fn encryption_pending_sweep(db: &Database) {
 /// the WAV the moment its samples are read — but a crash or hard-quit
 /// mid-utterance leaves one behind forever. Unlike the recordings-dir
 /// orphans (which get encrypted for possible recovery), these have no DB
-/// row, no transcript, and no recovery value, so they are deleted.
+/// row, no transcript, and no recovery value, so they are shredded and
+/// unlinked (plaintext PHI — never a plain remove_file).
 ///
 /// Age guard: files modified in the last 10 minutes are skipped — they may
 /// belong to an in-progress capture on a very fast app restart. They'll be
@@ -142,8 +143,12 @@ pub fn translation_wav_sweep(translation_dir: &Path) {
         {
             continue;
         }
-        match std::fs::remove_file(&path) {
+        // Plaintext PHI — shred before unlink (a plain remove_file leaves
+        // the audio recoverable on disk); a file raced away between the
+        // directory read and here still counts as gone.
+        match medical_security::file_crypto::shred_and_unlink(&path) {
             Ok(()) => removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => removed += 1,
             Err(e) => tracing::warn!(error = %e, "translation wav sweep: delete failed"),
         }
     }
@@ -558,6 +563,62 @@ pub fn orphaned_enc_sweep(db: &Database, recordings_dir: &Path) {
     }
 }
 
+/// Sweep: shred stale screenshot-OCR capture PNGs from the macOS private
+/// capture dir (`data_dir/capture-tmp`).
+///
+/// macOS is the one platform where captured pixels transit disk (the
+/// `screencapture` tool has no stdout mode); the capture path pre-creates
+/// the file 0600 and shreds + unlinks it before OCR, but a process crash
+/// mid-selection — or the capture-timeout error path — can strand one. The
+/// PNG is patient data: it is shredded (never a plain unlink) and deleted;
+/// there is no recovery value in keeping it.
+///
+/// Only files our own capture path names (`capture-*.png`) are touched, and
+/// only when modified more than 10 minutes ago (an in-flight selection may
+/// legitimately hold a fresh file). PHI-safe: logs carry counts only.
+pub fn capture_tmp_sweep(data_dir: &Path) {
+    let dir = data_dir.join("capture-tmp");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(d) => d,
+        Err(_) => return, // dir doesn't exist yet — nothing ever captured
+    };
+
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        let Some(name) = name else {
+            continue;
+        };
+        // Only our own capture files — never anything else in the dir.
+        if !name.starts_with("capture-") || path.extension().and_then(|e| e.to_str()) != Some("png")
+        {
+            continue;
+        }
+        // Age guard: an in-flight selection may hold a fresh file.
+        let mtime = entry.metadata().and_then(|m| m.modified()).ok();
+        if let Some(t) = mtime
+            && now.duration_since(t).unwrap_or(Duration::ZERO) < Duration::from_secs(600)
+        {
+            continue;
+        }
+        // Plaintext PHI pixels — shred, never a plain unlink. NotFound (a
+        // capture racing us) counts as gone.
+        match medical_security::file_crypto::shred_and_unlink(&path) {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => removed += 1,
+            Err(e) => tracing::warn!(error = %e, "capture tmp sweep: delete failed"),
+        }
+    }
+    if removed > 0 {
+        info!(
+            count = removed,
+            "Shredded stale screenshot-OCR capture PNGs"
+        );
+    }
+}
+
 /// Spawn the periodic sweeper: first tick 5 minutes after boot, then daily.
 /// Machines that are powered off overnight (most clinician laptops) never
 /// accumulate 24h of uptime, so sleeping a full day BEFORE the first tick
@@ -568,7 +629,14 @@ pub fn spawn_retention_sweeper(db: Arc<Database>) {
         tokio::time::sleep(Duration::from_secs(300)).await;
         loop {
             tracing::info!("running tombstone sweeper");
-            retention_sweep_tick(&db);
+            // The tick is SQLite + file shredding — blocking work. Run each
+            // tick on the blocking pool, never on the async worker.
+            let tick_db = Arc::clone(&db);
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || retention_sweep_tick(&tick_db)).await
+            {
+                tracing::warn!(error = %e, "tombstone sweeper tick task failed");
+            }
             // Daily cadence between sweeps after the boot-time first tick
             // (the 30-day window dwarfs the interval).
             tokio::time::sleep(Duration::from_secs(86400)).await;
@@ -980,6 +1048,40 @@ mod tests {
 
         // Missing directory is a no-op, not an error (nothing ever captured).
         translation_wav_sweep(&tmp.path().join("does-not-exist"));
+    }
+
+    /// Screenshot-OCR capture leftovers (macOS is the one platform where
+    /// pixels transit disk): aged `capture-*.png` files are shredded, fresh
+    /// ones (possible in-flight selection) and foreign files are kept.
+    #[test]
+    fn capture_tmp_sweep_shreds_stale_capture_pngs_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Stale capture (mtime an hour old) — crash/timeout leftover.
+        let stale = tmp.path().join("capture-tmp").join("capture-deadbeef.png");
+        std::fs::create_dir_all(stale.parent().unwrap()).expect("capture dir");
+        std::fs::write(&stale, b"\x89PNG pixels").expect("write stale capture");
+        backdate(&stale);
+        // Fresh capture — an in-flight selection may hold it.
+        let fresh = stale.parent().unwrap().join("capture-live.png");
+        std::fs::write(&fresh, b"\x89PNG in flight").expect("write fresh");
+        // Aged but NOT one of ours — never touch it.
+        let foreign = stale.parent().unwrap().join("user-screenshot.png");
+        std::fs::write(&foreign, b"\x89PNG user file").expect("write foreign");
+        backdate(&foreign);
+
+        capture_tmp_sweep(tmp.path());
+
+        assert!(!stale.exists(), "stale capture PNG must be shredded");
+        assert!(fresh.exists(), "fresh capture may be in flight — kept");
+        assert!(
+            foreign.exists(),
+            "non-capture files are never ours to delete"
+        );
+
+        // Missing directory is a no-op, not an error (macOS-only feature;
+        // other platforms never create it).
+        capture_tmp_sweep(&tmp.path().join("nowhere"));
     }
 
     /// Backdate a file's mtime by an hour so the age guards let the sweeps
