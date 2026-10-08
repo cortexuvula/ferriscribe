@@ -38,26 +38,58 @@ use medical_core::error::{AppError, AppResult};
 
 use crate::state::{self, AppState};
 
+/// Reconnect decision for the dict SSE subscriber's gate. Continue with the
+/// re-resolved target while every gate holds; exit cleanly the moment any
+/// fails — the content-sync subscriber's reconnect idiom (a captured
+/// subscribe-time connection+bearer 401-loops forever with revoked
+/// credentials after an unpair). Pure so the gate matrix is unit-testable.
+enum DictSseReconnect {
+    Continue(crate::commands::sharing::PairedConnection, String),
+    Stop,
+}
+
+fn dict_sse_reconnect_decision(
+    sync_enabled: bool,
+    paired: Option<crate::commands::sharing::PairedConnection>,
+    bearer: Option<String>,
+) -> DictSseReconnect {
+    if !sync_enabled {
+        return DictSseReconnect::Stop;
+    }
+    let Some(conn) = paired else {
+        return DictSseReconnect::Stop;
+    };
+    if conn.ports.vocab.is_none() {
+        return DictSseReconnect::Stop;
+    }
+    match bearer {
+        Some(bearer) => DictSseReconnect::Continue(conn, bearer),
+        None => DictSseReconnect::Stop,
+    }
+}
+
 /// Returns `Some((conn, bearer))` when this client should route user-dictionary
 /// operations through the office server: the `sync_user_dictionary` opt-in is
 /// on AND the client is paired with a server that exposes the vocab/dict port.
 ///
 /// Returns `None` otherwise, in which case commands fall back to the local
-/// SQLite repo.
+/// SQLite repo. Takes the DB handle directly (not `&AppState`) so the SSE
+/// subscriber task can re-resolve the target on every reconnect.
 async fn paired_dict_target(
-    state: &AppState,
+    db: &Arc<medical_db::Database>,
 ) -> Option<(crate::commands::sharing::PairedConnection, String)> {
     // Gate 1: the user must opt in to dictionary sync.
-    let config = crate::commands::settings::load_config_sync(&state.db).ok()?;
-    if !config.sync_user_dictionary {
-        return None;
-    }
+    let config = crate::commands::settings::load_config_sync(db).ok()?;
     // Gate 2: this client must be paired with a server that advertises the
     // vocab port (the dictionary API rides on the same port as the vocab API).
-    let conn = state::load_paired_connection_offload().await?;
-    conn.ports.vocab?;
-    let bearer = state::load_sharing_bearer_offload().await?;
-    Some((conn, bearer))
+    match dict_sse_reconnect_decision(
+        config.sync_user_dictionary,
+        state::load_paired_connection_offload().await,
+        state::load_sharing_bearer_offload().await,
+    ) {
+        DictSseReconnect::Continue(conn, bearer) => Some((conn, bearer)),
+        DictSseReconnect::Stop => None,
+    }
 }
 
 /// ISO 8601 UTC timestamp with millisecond precision, matching the format used
@@ -82,7 +114,7 @@ fn now_iso() -> String {
 #[tauri::command]
 #[instrument(skip(state), name = "user_dict::list")]
 pub async fn user_dict_list(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
-    if let Some((conn, bearer)) = paired_dict_target(&state).await
+    if let Some((conn, bearer)) = paired_dict_target(&state.db).await
         && let Some(remote) = crate::user_dict_remote::UserDictRemote::from(
             &conn,
             Some(bearer),
@@ -158,7 +190,7 @@ pub async fn user_dict_add(state: tauri::State<'_, AppState>, word: String) -> A
     //    `PairedConnection` is moved into the task and `UserDictRemote`
     //    borrows it from within the task's scope (it cannot borrow from this
     //    frame because `tokio::spawn` requires `'static`).
-    if let Some((conn, bearer)) = paired_dict_target(&state).await {
+    if let Some((conn, bearer)) = paired_dict_target(&state.db).await {
         let http_client = state.http_client.clone();
         let db2 = Arc::clone(&state.db);
         tokio::spawn(async move {
@@ -221,7 +253,7 @@ pub async fn user_dict_remove(state: tauri::State<'_, AppState>, word: String) -
     // 2. Best-effort background sync — push ALL entries (including tombstones)
     //    so the server records the deletion. The owned `PairedConnection` is
     //    moved into the task and `UserDictRemote` borrows it there.
-    if let Some((conn, bearer)) = paired_dict_target(&state).await {
+    if let Some((conn, bearer)) = paired_dict_target(&state.db).await {
         let http_client = state.http_client.clone();
         let db2 = Arc::clone(&state.db);
         tokio::spawn(async move {
@@ -276,7 +308,7 @@ pub async fn user_dict_remove(state: tauri::State<'_, AppState>, word: String) -
 pub async fn sync_user_dictionary_cmd(state: tauri::State<'_, AppState>) -> AppResult<Vec<String>> {
     let local_all = load_all_local(&state.db).await?;
 
-    if let Some((conn, bearer)) = paired_dict_target(&state).await
+    if let Some((conn, bearer)) = paired_dict_target(&state.db).await
         && let Some(remote) = crate::user_dict_remote::UserDictRemote::from(
             &conn,
             Some(bearer),
@@ -337,14 +369,16 @@ pub async fn subscribe_user_dictionary(
     // Gate the same way the other dict commands do: only subscribe when
     // paired + sync enabled. When not paired, also cancel any existing
     // subscriber — the user may have just unpaired, and the old task must
-    // not keep reconnecting with stale credentials.
-    let Some((conn, bearer)) = paired_dict_target(&state).await else {
+    // not keep reconnecting with stale credentials. The probe result is
+    // otherwise unused — the spawned task re-resolves the target (fresh
+    // connection + bearer) on EVERY reconnect.
+    if paired_dict_target(&state.db).await.is_none() {
         return crate::commands::swap_sse_cancel_token(
             &state.dict_sse_cancel,
             "dict_sse_cancel",
             None,
         );
-    };
+    }
 
     // Replace any previous subscriber (same discipline as the content-sync
     // and condition-chip subscribers).
@@ -356,18 +390,28 @@ pub async fn subscribe_user_dictionary(
     )?;
 
     let http_client = state.http_client.clone();
+    let db_for_task = Arc::clone(&state.db);
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(5);
         loop {
             if cancel_token.is_cancelled() {
                 break;
             }
-            // `conn` and `bearer` are owned by this task; `UserDictRemote`
+            // Re-evaluate pairing on EVERY reconnect — the content-sync
+            // subscriber's gate: pairing may have changed since the last
+            // connection (re-pair issued a new token, an unpair revoked the
+            // old one, sync was disabled). A captured subscribe-time
+            // connection+bearer 401-loops with dead credentials forever.
+            let Some((conn, bearer)) = paired_dict_target(&db_for_task).await else {
+                tracing::info!("dict SSE: pairing gate no longer holds; subscriber exiting");
+                break;
+            };
+            // `conn` and `bearer` are owned by this iteration; `UserDictRemote`
             // borrows `conn` from within the task scope (cannot borrow from the
             // calling frame because `tokio::spawn` requires `'static`).
             let remote = match crate::user_dict_remote::UserDictRemote::from(
                 &conn,
-                Some(bearer.clone()),
+                Some(bearer),
                 http_client.clone(),
             ) {
                 Some(r) => r,
@@ -450,4 +494,64 @@ async fn load_all_local_blocking(
     })
     .await
     .map_err(crate::commands::join_err)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::sharing::PairedConnection;
+
+    fn paired_fixture(vocab: Option<u16>) -> PairedConnection {
+        PairedConnection {
+            lan: Some("192.168.1.10".into()),
+            tailscale: None,
+            ports: medical_sharing::qr::PairPorts {
+                ollama: 11435,
+                whisper: 8081,
+                pairing: 11436,
+                lmstudio: None,
+                omlx: None,
+                vocab,
+            },
+            label: "office".into(),
+        }
+    }
+
+    /// The reconnect gate's decision matrix: continue only while EVERY gate
+    /// holds, stop the moment any fails — the post-unpair 401-loop guard
+    /// (mirrors the content-sync subscriber's fix).
+    #[test]
+    fn dict_sse_reconnect_decision_matrix() {
+        // All gates hold → continue with the resolved target.
+        match dict_sse_reconnect_decision(
+            true,
+            Some(paired_fixture(Some(11437))),
+            Some("bearer".into()),
+        ) {
+            DictSseReconnect::Continue(_, bearer) => assert_eq!(bearer, "bearer"),
+            DictSseReconnect::Stop => panic!("a fully-paired client must continue"),
+        }
+        // Sync disabled → stop (exits instead of looping).
+        assert!(matches!(
+            dict_sse_reconnect_decision(false, Some(paired_fixture(Some(11437))), Some("b".into())),
+            DictSseReconnect::Stop
+        ));
+        // Unpaired → stop — the case the fix exists for: the old task kept
+        // its subscribe-time bearer and 401-looped forever after an unpair.
+        assert!(matches!(
+            dict_sse_reconnect_decision(true, None, Some("stale-bearer".into())),
+            DictSseReconnect::Stop
+        ));
+        // Paired but the server predates the vocab port → stop.
+        assert!(matches!(
+            dict_sse_reconnect_decision(true, Some(paired_fixture(None)), Some("b".into())),
+            DictSseReconnect::Stop
+        ));
+        // Paired with vocab port but the keychain entry is gone (revoked) →
+        // stop rather than connecting with no credentials.
+        assert!(matches!(
+            dict_sse_reconnect_decision(true, Some(paired_fixture(Some(11437))), None),
+            DictSseReconnect::Stop
+        ));
+    }
 }

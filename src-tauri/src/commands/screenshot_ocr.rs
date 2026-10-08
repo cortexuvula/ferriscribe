@@ -32,6 +32,34 @@ pub const OCR_EVENT: &str = "screenshot-ocr";
 /// trigger while the picker is open is rejected instead of stacking overlays.
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+/// RAII twin of the `IN_FLIGHT` compare-exchange: resets the flag on EVERY
+/// exit path from `run_capture_ocr` — success, error, or panic unwind. The
+/// old manual `store(false)` after the inner call left the flag set forever
+/// if the inner future panicked, wedging the feature until app restart
+/// (same discipline as `GenerationLockGuard`).
+struct InFlightGuard;
+
+impl InFlightGuard {
+    /// Claim the single-flight slot; `None` when a capture is already
+    /// running (the caller surfaces the typed `in_progress` outcome).
+    fn acquire() -> Option<Self> {
+        if IN_FLIGHT
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            None
+        } else {
+            Some(Self)
+        }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Label of the always-on-top "recognizing text…" pill shown while the
 /// vision model runs. Frontend mounts `OcrProgressIndicator.svelte` for this
 /// hash route (see main.ts) — no invoke calls, so no capability entry.
@@ -253,19 +281,16 @@ pub async fn run_capture_ocr(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> AppResult<CaptureOcrOutcome> {
-    if IN_FLIGHT
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
+    // The guard releases the flag on drop — including a panic unwind inside
+    // the inner call, which the previous manual reset did not survive.
+    let Some(_in_flight) = InFlightGuard::acquire() else {
         tracing::debug!("screenshot OCR trigger ignored: capture already running");
         return Ok(CaptureOcrOutcome {
             status: "in_progress",
             chars: 0,
         });
-    }
-    let result = capture_ocr_inner(app, state).await;
-    IN_FLIGHT.store(false, Ordering::SeqCst);
-    result
+    };
+    capture_ocr_inner(app, state).await
 }
 
 async fn capture_ocr_inner(
@@ -522,6 +547,30 @@ mod tests {
         .unwrap();
         assert!(json.contains("\"status\":\"copied\""));
         assert!(json.contains("\"chars\":42"));
+    }
+
+    /// The single-flight guard must release the flag on drop and reject
+    /// concurrent acquires while held — a panic between the old manual
+    /// store(true) and store(false) wedged the feature until restart.
+    /// (The panic-unwind drop itself is Drop-by-construction; this is the
+    /// only test allowed to touch the static, so tests stay race-free.)
+    #[test]
+    fn in_flight_guard_releases_on_drop_and_rejects_while_held() {
+        assert!(!IN_FLIGHT.load(Ordering::SeqCst), "precondition: idle");
+        let guard = InFlightGuard::acquire().expect("first acquire succeeds");
+        assert!(
+            IN_FLIGHT.load(Ordering::SeqCst),
+            "the flag is held while the guard is alive"
+        );
+        assert!(
+            InFlightGuard::acquire().is_none(),
+            "a second acquire while in flight is rejected"
+        );
+        drop(guard);
+        assert!(
+            !IN_FLIGHT.load(Ordering::SeqCst),
+            "drop releases the flag for the next capture"
+        );
     }
 
     /// Real-sample harness: run the cleaner on a pasted raw/failed OCR

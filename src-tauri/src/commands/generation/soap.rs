@@ -216,7 +216,8 @@ async fn generate_soap_inner(
         provider.name(),
         &model_name,
         &soap_text,
-    );
+    )
+    .await;
 
     // Build the metadata PATCH (applied to the row's CURRENT metadata at
     // persist time — the snapshot may be minutes stale, and a wholesale
@@ -292,7 +293,8 @@ async fn generate_soap_inner(
         .map_err(crate::commands::join_err)??;
     }
 
-    finalize_training_generation(&state.db, capture_generation_id, recording_uuid, &soap_text);
+    finalize_training_generation(&state.db, capture_generation_id, recording_uuid, &soap_text)
+        .await;
 
     // Freshness provenance: Rust-owned effective-input digest, persisted
     // atomically with this output (inside the generation lock). Best-effort
@@ -325,9 +327,13 @@ async fn generate_soap_inner(
 /// corpus, capture step). Returns the new row's ID when capture actually
 /// inserted one — `None` otherwise (capture disabled, recording ID
 /// unparseable, DB unavailable, or insert failure). Never errors.
+///
+/// The rusqlite insert runs inside `spawn_blocking` — the invariant every
+/// other DB access in this file already follows (never block the async
+/// runtime on SQLite).
 #[allow(clippy::too_many_arguments)]
-fn capture_training_generation(
-    db: &medical_db::Database,
+async fn capture_training_generation(
+    db: &Arc<medical_db::Database>,
     recording_uuid: Option<Uuid>,
     capture_enabled: bool,
     template: Option<&str>,
@@ -342,33 +348,46 @@ fn capture_training_generation(
     if !capture_enabled {
         return None;
     }
-    let conn = match db.conn() {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!(error = %e, "training-corpus capture: could not open DB connection; continuing");
-            return None;
-        }
-    };
+    // Owned copies for the blocking worker; borrows don't cross the
+    // 'static closure boundary, so the insert is assembled INSIDE it from
+    // the moved-in owned values.
+    let db = Arc::clone(db);
+    let provider_owned = provider_name.to_string();
+    let model_owned = model_name.to_string();
+    let template_owned = template.map(str::to_string);
+    let transcript_owned = transcript.to_string();
+    let soap_owned = soap_text.to_string();
     let context_blob =
         serde_json::json!({ "context": context, "patient_context": patient_context });
     let context_json = context_blob.to_string();
-    let insert = medical_db::generations::GenerationInsert {
-        recording_id: rec_uuid,
-        output_type: "soap",
-        ai_provider: provider_name,
-        ai_model: model_name,
-        prompt_template_name: template,
-        input_transcript: transcript,
-        input_context_json: Some(context_json.as_str()),
-        draft_text: soap_text,
-    };
-    match medical_db::generations::GenerationsRepo::record_generation(&conn, insert) {
-        Ok(g) => {
+    let result = tokio::task::spawn_blocking(move || -> AppResult<_> {
+        let insert = medical_db::generations::GenerationInsert {
+            recording_id: rec_uuid,
+            output_type: "soap",
+            ai_provider: provider_owned.as_str(),
+            ai_model: model_owned.as_str(),
+            prompt_template_name: template_owned.as_deref(),
+            input_transcript: transcript_owned.as_str(),
+            input_context_json: Some(context_json.as_str()),
+            draft_text: soap_owned.as_str(),
+        };
+        let conn = db.conn()?;
+        Ok(medical_db::generations::GenerationsRepo::record_generation(
+            &conn, insert,
+        )?)
+    })
+    .await;
+    match result {
+        Ok(Ok(g)) => {
             tracing::debug!(generation_id = %g.id, "captured SOAP generation for training corpus");
             Some(g.id)
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!(error = %e, "training-corpus capture failed; continuing");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "training-corpus capture task panicked; continuing");
             None
         }
     }
@@ -379,7 +398,10 @@ fn capture_training_generation(
 /// when capture actually inserted a row above — gating on
 /// `capture_generation_id` avoids the GenerationsRepo round trip on every
 /// SOAP generation for users who haven't opted into capture. Never errors.
-fn finalize_training_generation(
+///
+/// The rusqlite update runs inside `spawn_blocking`, same as the capture
+/// step above.
+async fn finalize_training_generation(
     db: &Arc<medical_db::Database>,
     capture_generation_id: Option<Uuid>,
     recording_uuid: Option<Uuid>,
@@ -398,28 +420,35 @@ fn finalize_training_generation(
         );
         return;
     };
-    let conn = match db.conn() {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::warn!(error = %e, "training-corpus finalize: could not open DB connection; continuing");
-            return;
-        }
-    };
-    match medical_db::generations::GenerationsRepo::update_final_text(
-        &conn, rec_uuid, "soap", soap_text,
-    ) {
-        Ok(Some(g)) => {
+    let db_for_task = Arc::clone(db);
+    let db = Arc::clone(db);
+    let owned_soap = soap_text.to_string();
+    let result = tokio::task::spawn_blocking(move || -> AppResult<_> {
+        let conn = db.conn()?;
+        Ok(medical_db::generations::GenerationsRepo::update_final_text(
+            &conn,
+            rec_uuid,
+            "soap",
+            &owned_soap,
+        )?)
+    })
+    .await;
+    match result {
+        Ok(Ok(Some(g))) => {
             tracing::debug!(generation_id = %g.id, "updated final_text on generations row");
             spawn_edit_distance_task(
-                Arc::clone(db),
+                db_for_task,
                 g.id,
                 g.draft_text.clone(),
                 soap_text.to_string(),
             );
         }
-        Ok(None) => {}
-        Err(e) => {
+        Ok(Ok(None)) => {}
+        Ok(Err(e)) => {
             tracing::warn!(error = %e, "training-corpus finalize failed; continuing");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "training-corpus finalize task panicked; continuing");
         }
     }
 }
@@ -672,12 +701,12 @@ mod stats_tests {
     /// (release builds abort the whole app on panic) even if the
     /// capture-id/recording-id invariant is ever broken by a caller change.
     /// Previously this path hit `.expect(...)` — tech-debt review 2026-08-25.
-    #[test]
-    fn finalize_skips_gracefully_when_invariant_broken() {
-        let db = medical_db::Database::open_in_memory().expect("db");
+    #[tokio::test]
+    async fn finalize_skips_gracefully_when_invariant_broken() {
+        let db = Arc::new(medical_db::Database::open_in_memory().expect("db"));
         // Capture id present but recording id missing — returns after the
         // warn, without touching the DB.
-        finalize_training_generation(&Arc::new(db), Some(Uuid::new_v4()), None, "S: ok");
+        finalize_training_generation(&db, Some(Uuid::new_v4()), None, "S: ok").await;
     }
 }
 

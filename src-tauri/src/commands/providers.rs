@@ -128,10 +128,12 @@ pub async fn reinit_providers(state: tauri::State<'_, AppState>) -> AppResult<Ve
     // Load saved settings for provider config (host, port, active provider, whisper model).
     let config = crate::commands::load_app_config(&state.db, "provider").await?;
 
-    // Re-load paired endpoint so reinit also re-wires endpoints.
-    let paired = state::load_paired_connection();
+    // Re-load paired endpoint so reinit also re-wires endpoints. The
+    // pairing-file read and the keychain round trip are blocking (OS IPC) —
+    // offload them, the same as the hot async paths (state::load_*_offload).
+    let paired = state::load_paired_connection_offload().await;
     let bearer = if paired.is_some() {
-        state::load_sharing_bearer()
+        state::load_sharing_bearer_offload().await
     } else {
         None
     };

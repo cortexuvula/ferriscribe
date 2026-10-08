@@ -10,6 +10,7 @@ import type { RecordingSummary } from '../types';
 const mockListRecordings = vi.fn();
 const mockGetRecording = vi.fn();
 const mockInvoke = vi.fn();
+const mockListTrashed = vi.fn();
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
@@ -24,7 +25,7 @@ vi.mock('../api/recordings', () => ({
   restoreRecordings: vi.fn(async () => ({ count: 0, ids: [] as string[] })),
   deleteAllRecordings: vi.fn(async () => ({ count: 0, ids: [] as string[] })),
   countRecordings: vi.fn(async () => 0),
-  listTrashedRecordings: vi.fn(async () => ({ items: [], total: 0 })),
+  listTrashedRecordings: (...args: unknown[]) => mockListTrashed(...args),
   restoreAllTrashed: vi.fn(async () => ({ count: 0, ids: [] as string[] })),
   restoreRecordingsDeletedBetween: vi.fn(async () => ({ count: 0, ids: [] as string[] })),
   countRecordingsDeletedBetween: vi.fn(async () => 0),
@@ -65,6 +66,8 @@ beforeEach(() => {
   mockGetRecording.mockReset();
   mockInvoke.mockReset();
   mockInvoke.mockResolvedValue(undefined);
+  mockListTrashed.mockReset();
+  mockListTrashed.mockResolvedValue({ items: [], total: 0 });
   vi.clearAllMocks();
 });
 
@@ -163,6 +166,24 @@ describe('RecordingsStore.handleRemoteUpdate', () => {
     expect(mockListRecordings).toHaveBeenCalledTimes(1);
   });
 
+  it('refreshes the Trash badge alongside the debounced reload (sync tombstones)', async () => {
+    mockListRecordings.mockResolvedValue([]);
+    mockListTrashed.mockResolvedValue({ items: [], total: 3 });
+    const { recordings } = await freshStore();
+    await recordings.load();
+    mockListRecordings.mockClear();
+    mockListTrashed.mockClear();
+
+    recordings.handleRemoteUpdate('rec-1');
+    await vi.advanceTimersByTimeAsync(500);
+
+    // The debounced callback refreshed the trash COUNT too — a sync-pulled
+    // tombstone must move the Trash(N) badge without entering the view.
+    expect(mockListRecordings).toHaveBeenCalledTimes(1);
+    expect(mockListTrashed).toHaveBeenCalledWith(0, 0);
+    expect(recordings.trashedTotal).toBe(3);
+  });
+
   it('refetches selectedRecording when it matches the updated id', async () => {
     mockListRecordings.mockResolvedValue([]);
     mockGetRecording.mockResolvedValue({ id: 'rec-1', transcript: 'updated' });
@@ -211,5 +232,50 @@ describe('RecordingsStore.handleRemoteUpdate', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(mockGetRecording).not.toHaveBeenCalled();
+  });
+});
+
+// ── startBackgroundSync ─────────────────────────────────────────────────────
+
+describe('RecordingsStore.startBackgroundSync', () => {
+  it('refreshes the Trash badge after each background sync round', async () => {
+    mockListRecordings.mockResolvedValue([]);
+    mockListTrashed.mockResolvedValue({ items: [], total: 4 });
+    mockInvoke.mockResolvedValue({
+      pulled: 1,
+      pushed: 0,
+      merge_conflicts: 0,
+      push_conflicts: 0,
+      disabled: false,
+    });
+    const { recordings, startBackgroundSync, stopBackgroundSync } = await freshStore();
+
+    startBackgroundSync();
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    stopBackgroundSync();
+
+    expect(mockInvoke).toHaveBeenCalledWith('sync_content_now');
+    // Sync merges tombstones/revivals — the badge count ran afterwards.
+    expect(mockListTrashed).toHaveBeenCalledWith(0, 0);
+    expect(recordings.trashedTotal).toBe(4);
+  });
+
+  it('skips the Trash refresh when content sync is disabled', async () => {
+    mockListRecordings.mockResolvedValue([]);
+    mockInvoke.mockResolvedValue({
+      pulled: 0,
+      pushed: 0,
+      merge_conflicts: 0,
+      push_conflicts: 0,
+      disabled: true,
+    });
+    const { startBackgroundSync, stopBackgroundSync } = await freshStore();
+
+    startBackgroundSync();
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    stopBackgroundSync();
+
+    expect(mockInvoke).toHaveBeenCalledWith('sync_content_now');
+    expect(mockListTrashed).not.toHaveBeenCalled();
   });
 });

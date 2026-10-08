@@ -29,26 +29,59 @@ use medical_core::types::condition_chip::ConditionChip;
 
 use crate::state::{self, AppState};
 
+/// Reconnect decision for the condition-chip SSE subscriber's gate.
+/// Continue with the re-resolved target while every gate holds; exit
+/// cleanly the moment any fails — the content-sync subscriber's reconnect
+/// idiom (a captured subscribe-time connection+bearer 401-loops forever
+/// with revoked credentials after an unpair). Pure so the gate matrix is
+/// unit-testable; the twin in `user_dictionary.rs` carries the docs.
+enum ConditionSseReconnect {
+    Continue(crate::commands::sharing::PairedConnection, String),
+    Stop,
+}
+
+fn condition_sse_reconnect_decision(
+    sync_enabled: bool,
+    paired: Option<crate::commands::sharing::PairedConnection>,
+    bearer: Option<String>,
+) -> ConditionSseReconnect {
+    if !sync_enabled {
+        return ConditionSseReconnect::Stop;
+    }
+    let Some(conn) = paired else {
+        return ConditionSseReconnect::Stop;
+    };
+    if conn.ports.vocab.is_none() {
+        return ConditionSseReconnect::Stop;
+    }
+    match bearer {
+        Some(bearer) => ConditionSseReconnect::Continue(conn, bearer),
+        None => ConditionSseReconnect::Stop,
+    }
+}
+
 /// Returns `Some((conn, bearer))` when this client should route condition-chip
 /// operations through the office server: the `sync_condition_chips` opt-in is
 /// on AND the client is paired with a server that exposes the vocab/chips port.
 ///
 /// Returns `None` otherwise, in which case commands fall back to the local
-/// SQLite repo.
+/// SQLite repo. Takes the DB handle directly (not `&AppState`) so the SSE
+/// subscriber task can re-resolve the target on every reconnect.
 async fn paired_conditions_target(
-    state: &AppState,
+    db: &Arc<medical_db::Database>,
 ) -> Option<(crate::commands::sharing::PairedConnection, String)> {
     // Gate 1: the user must opt in to condition-chip sync.
-    let config = crate::commands::settings::load_config_sync(&state.db).ok()?;
-    if !config.sync_condition_chips {
-        return None;
-    }
+    let config = crate::commands::settings::load_config_sync(db).ok()?;
     // Gate 2: this client must be paired with a server that advertises the
     // vocab port (condition chips ride on the same port as the dictionary API).
-    let conn = state::load_paired_connection_offload().await?;
-    conn.ports.vocab?;
-    let bearer = state::load_sharing_bearer_offload().await?;
-    Some((conn, bearer))
+    match condition_sse_reconnect_decision(
+        config.sync_condition_chips,
+        state::load_paired_connection_offload().await,
+        state::load_sharing_bearer_offload().await,
+    ) {
+        ConditionSseReconnect::Continue(conn, bearer) => Some((conn, bearer)),
+        ConditionSseReconnect::Stop => None,
+    }
 }
 
 /// ISO 8601 UTC timestamp with millisecond precision, matching the format used
@@ -70,7 +103,7 @@ fn now_iso() -> String {
 pub async fn list_condition_chips(
     state: tauri::State<'_, AppState>,
 ) -> AppResult<Vec<ConditionChip>> {
-    if let Some((conn, bearer)) = paired_conditions_target(&state).await
+    if let Some((conn, bearer)) = paired_conditions_target(&state.db).await
         && let Some(remote) = crate::conditions_remote::ConditionsRemote::from(
             &conn,
             Some(bearer),
@@ -135,7 +168,7 @@ pub async fn add_condition_chip(
     //    `PairedConnection` is moved into the task and the `ConditionsRemote`
     //    borrows it from within the task's scope (it cannot borrow from this
     //    frame because `tokio::spawn` requires `'static`).
-    if let Some((conn, bearer)) = paired_conditions_target(&state).await {
+    if let Some((conn, bearer)) = paired_conditions_target(&state.db).await {
         let http_client = state.http_client.clone();
         let chips_to_push = local_list.clone();
         tokio::spawn(async move {
@@ -190,7 +223,7 @@ pub async fn remove_condition_chip(
     // 2. Best-effort background sync — push ALL chips (including tombstones)
     //    so the server records the deletion. The owned `PairedConnection` is
     //    moved into the task and `ConditionsRemote` borrows it there.
-    if let Some((conn, bearer)) = paired_conditions_target(&state).await {
+    if let Some((conn, bearer)) = paired_conditions_target(&state.db).await {
         let http_client = state.http_client.clone();
         let db2 = Arc::clone(&state.db);
         tokio::spawn(async move {
@@ -262,7 +295,7 @@ pub async fn sync_condition_chips_cmd(
     .await
     .map_err(crate::commands::join_err)??;
 
-    if let Some((conn, bearer)) = paired_conditions_target(&state).await
+    if let Some((conn, bearer)) = paired_conditions_target(&state.db).await
         && let Some(remote) = crate::conditions_remote::ConditionsRemote::from(
             &conn,
             Some(bearer),
@@ -320,7 +353,7 @@ pub async fn increment_condition_chip_use(
 
     // 2. Best-effort background sync push (non-blocking). The increment only
     //    touches an active chip, so pushing the active list is sufficient.
-    if let Some((conn, bearer)) = paired_conditions_target(&state).await {
+    if let Some((conn, bearer)) = paired_conditions_target(&state.db).await {
         let http_client = state.http_client.clone();
         let chips_to_push = local_list.clone();
         tokio::spawn(async move {
@@ -373,14 +406,16 @@ pub async fn subscribe_condition_chips(
     // Gate the same way the other condition commands do: only subscribe when
     // paired + sync enabled. When not paired, also cancel any existing
     // subscriber — the user may have just unpaired, and the old task must
-    // not keep reconnecting with stale credentials.
-    let Some((conn, bearer)) = paired_conditions_target(&state).await else {
+    // not keep reconnecting with stale credentials. The probe result is
+    // otherwise unused — the spawned task re-resolves the target (fresh
+    // connection + bearer) on EVERY reconnect.
+    if paired_conditions_target(&state.db).await.is_none() {
         return crate::commands::swap_sse_cancel_token(
             &state.condition_sse_cancel,
             "condition_sse_cancel",
             None,
         );
-    };
+    }
 
     // Replace any previous subscriber: the frontend subscribes on every
     // mount of ConditionChips, so without this each mount leaks an eternal
@@ -393,18 +428,30 @@ pub async fn subscribe_condition_chips(
     )?;
 
     let http_client = state.http_client.clone();
+    let db_for_task = Arc::clone(&state.db);
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(5);
         loop {
             if cancel_token.is_cancelled() {
                 break;
             }
-            // `conn` and `bearer` are owned by this task; `ConditionsRemote`
+            // Re-evaluate pairing on EVERY reconnect — the content-sync
+            // subscriber's gate: pairing may have changed since the last
+            // connection (re-pair issued a new token, an unpair revoked the
+            // old one, sync was disabled). A captured subscribe-time
+            // connection+bearer 401-loops with dead credentials forever.
+            let Some((conn, bearer)) = paired_conditions_target(&db_for_task).await else {
+                tracing::info!(
+                    "condition chip SSE: pairing gate no longer holds; subscriber exiting"
+                );
+                break;
+            };
+            // `conn` and `bearer` are owned by this iteration; `ConditionsRemote`
             // borrows `conn` from within the task scope (cannot borrow from the
             // calling frame because `tokio::spawn` requires `'static`).
             let remote = match crate::conditions_remote::ConditionsRemote::from(
                 &conn,
-                Some(bearer.clone()),
+                Some(bearer),
                 http_client.clone(),
             ) {
                 Some(r) => r,
@@ -454,4 +501,69 @@ pub async fn subscribe_condition_chips(
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::sharing::PairedConnection;
+
+    fn paired_fixture(vocab: Option<u16>) -> PairedConnection {
+        PairedConnection {
+            lan: Some("192.168.1.10".into()),
+            tailscale: None,
+            ports: medical_sharing::qr::PairPorts {
+                ollama: 11435,
+                whisper: 8081,
+                pairing: 11436,
+                lmstudio: None,
+                omlx: None,
+                vocab,
+            },
+            label: "office".into(),
+        }
+    }
+
+    /// The reconnect gate's decision matrix: continue only while EVERY gate
+    /// holds, stop the moment any fails — the post-unpair 401-loop guard
+    /// (mirrors the content-sync subscriber's fix; twin of the dict gate's
+    /// test in user_dictionary.rs).
+    #[test]
+    fn condition_sse_reconnect_decision_matrix() {
+        // All gates hold → continue with the resolved target.
+        match condition_sse_reconnect_decision(
+            true,
+            Some(paired_fixture(Some(11437))),
+            Some("bearer".into()),
+        ) {
+            ConditionSseReconnect::Continue(_, bearer) => assert_eq!(bearer, "bearer"),
+            ConditionSseReconnect::Stop => panic!("a fully-paired client must continue"),
+        }
+        // Sync disabled → stop (exits instead of looping).
+        assert!(matches!(
+            condition_sse_reconnect_decision(
+                false,
+                Some(paired_fixture(Some(11437))),
+                Some("b".into())
+            ),
+            ConditionSseReconnect::Stop
+        ));
+        // Unpaired → stop — the case the fix exists for: the old task kept
+        // its subscribe-time bearer and 401-looped forever after an unpair.
+        assert!(matches!(
+            condition_sse_reconnect_decision(true, None, Some("stale-bearer".into())),
+            ConditionSseReconnect::Stop
+        ));
+        // Paired but the server predates the vocab port → stop.
+        assert!(matches!(
+            condition_sse_reconnect_decision(true, Some(paired_fixture(None)), Some("b".into())),
+            ConditionSseReconnect::Stop
+        ));
+        // Paired with vocab port but the keychain entry is gone (revoked) →
+        // stop rather than connecting with no credentials.
+        assert!(matches!(
+            condition_sse_reconnect_decision(true, Some(paired_fixture(Some(11437))), None),
+            ConditionSseReconnect::Stop
+        ));
+    }
 }

@@ -327,8 +327,11 @@ async fn build_sharing_config(friendly_name: String) -> AppResult<SharingConfig>
     use rand::RngCore;
 
     // Reuse the SQLCipher DB key as the sharing-store key — same keychain
-    // entry, no new secret to manage.
-    let key = keychain::get_db_key()
+    // entry, no new secret to manage. The keychain read is blocking (OS
+    // IPC, possibly a permission prompt) — off the async worker.
+    let key = tokio::task::spawn_blocking(keychain::get_db_key)
+        .await
+        .map_err(|e| AppError::Other(format!("keychain read task failed: {e}")))?
         .map_err(|e| AppError::Other(format!("Keychain access denied: {e}. Sharing requires keychain access — quit and reopen FerriScribe, then approve the keychain prompt.")))?
         .ok_or_else(|| {
             AppError::Other("FerriScribe's database hasn't been initialized yet. Restart the app and try again.".into())

@@ -6,9 +6,10 @@
 //! 3. Optional pyannote speaker diarization via [`crate::diarization::SpeakerDiarizer`]
 //! 4. Merge segments with speaker labels via [`crate::merge`]
 //!
-//! Both Whisper and diarization run inside `tokio::task::spawn_blocking` to avoid
-//! blocking the async runtime. Cancellation is checked before and after each
-//! blocking stage — whisper-rs does not support mid-inference interrupt callbacks.
+//! Audio preprocessing (resample/trim), Whisper, and diarization all run
+//! inside `tokio::task::spawn_blocking` to avoid blocking the async runtime.
+//! Cancellation is checked before and after each blocking stage — whisper-rs
+//! does not support mid-inference interrupt callbacks.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -122,20 +123,24 @@ impl SttProvider for LocalSttProvider {
 
         let duration = audio.duration_seconds();
 
-        // Stage 1: Resample to 16kHz mono + trim trailing silence
-        let audio_16k_raw = audio_prep::to_16k_mono_f32(&audio);
-        let audio_16k = audio_prep::trim_trailing_silence(&audio_16k_raw, 0.01);
-
-        // Stage 2: Whisper transcription (context from the shared cache —
-        // the model load happened once, at the first call or prewarm)
+        // Stage 1+2: resample to 16 kHz mono, trim trailing silence, and run
+        // Whisper — ALL on the blocking pool (the resample/trim passes are
+        // O(samples) CPU and previously ran inline on the async runtime).
+        // One blocking task also hands the preprocessed buffer back for
+        // stage 3, eliminating the full-buffer clone the inline version
+        // needed to keep a copy for diarization.
+        // The whisper context comes from the shared cache (the model load
+        // happened once, at the first call or prewarm).
         let whisper_path = self.whisper_model_path.clone();
         let whisper_cache = Arc::clone(&self.whisper_cache);
         let language = config.language.clone();
-        let audio_for_whisper = audio_16k.clone();
 
-        let whisper_segments = tokio::task::spawn_blocking(move || {
+        let (whisper_segments, audio_16k) = tokio::task::spawn_blocking(move || {
+            let audio_16k_raw = audio_prep::to_16k_mono_f32(&audio);
+            let audio_16k = audio_prep::trim_trailing_silence(&audio_16k_raw, 0.01);
             let transcriber = WhisperTranscriber::new(whisper_path, whisper_cache);
-            transcriber.transcribe(&audio_for_whisper, language.as_deref())
+            let segments = transcriber.transcribe(&audio_16k, language.as_deref())?;
+            Ok::<_, AppError>((segments, audio_16k))
         })
         .await
         .map_err(|e| AppError::stt_provider(format!("Whisper task panicked: {e}")))??;
@@ -157,10 +162,12 @@ impl SttProvider for LocalSttProvider {
         {
             let seg_path = self.segmentation_model_path.clone();
             let emb_path = self.embedding_model_path.clone();
-            let audio_i16 = audio_prep::f32_to_i16(&audio_16k);
             let max_speakers = config.num_speakers;
 
             let (turns, failure) = match tokio::task::spawn_blocking(move || {
+                // f32→i16 conversion rides the same blocking task — it is
+                // O(samples) CPU, same class as the diarization itself.
+                let audio_i16 = audio_prep::f32_to_i16(&audio_16k);
                 let diarizer = SpeakerDiarizer::new(seg_path, emb_path);
                 diarizer.diarize(&audio_i16, 16000, max_speakers)
             })

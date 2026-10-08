@@ -18,6 +18,12 @@ use super::helpers::{
     build_completion_request, ensure_prompt_within_cap, load_config, resolve_provider,
 };
 
+/// Cap on the freeform writer's instructions — the one Letter Writer input
+/// the other caps don't already cover (`document_text` has
+/// [`MAX_DOCUMENT_CHARS`], the custom prompt has `MAX_CONTEXT_CHARS`).
+/// Same budget as every other user-supplied prompt text.
+const MAX_USER_INSTRUCTIONS_CHARS: usize = 50_000;
+
 /// Draft a letter from a source document (e.g. OCR'd text) plus optional
 /// structured fields and freeform writer's instructions.
 ///
@@ -68,6 +74,19 @@ async fn generate_letter_from_document_inner(
             "Document too large: {} chars, limit is {}",
             document_text.len(),
             MAX_DOCUMENT_CHARS
+        )));
+    }
+
+    // The freeform instructions are user prompt input too — cap them like
+    // every other user-supplied prompt text (frontend textarea carries the
+    // matching maxlength).
+    if let Some(instructions) = user_instructions.as_deref()
+        && instructions.len() > MAX_USER_INSTRUCTIONS_CHARS
+    {
+        return Err(AppError::InvalidInput(format!(
+            "Instructions too large: {} chars, limit is {}",
+            instructions.len(),
+            MAX_USER_INSTRUCTIONS_CHARS
         )));
     }
 
@@ -136,4 +155,79 @@ async fn generate_letter_from_document_inner(
     // Ephemeral: no DB write. A future letters table can be added without
     // changing this command's signature.
     Ok(letter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::generation::test_helpers::{
+        MockCompletionProvider, build_test_state_with_provider,
+    };
+    use medical_core::types::settings::AppConfig;
+
+    fn base_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.ai_provider = "ollama".to_string();
+        // Loopback → preflight probe is skipped; the mock serves completions.
+        config.ollama_host = "localhost".to_string();
+        config.ai_model = "llama3".to_string();
+        config
+    }
+
+    #[tokio::test]
+    async fn letter_writer_rejects_instructions_over_the_cap() {
+        let provider = std::sync::Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Dear patient, follow up in two weeks.",
+            64,
+        ));
+        let (state, _rid) =
+            build_test_state_with_provider(base_config(), "Patient reports back pain.", provider)
+                .await;
+
+        let result = generate_letter_from_document_inner(
+            &state,
+            "Synthetic document text.".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some("x".repeat(MAX_USER_INSTRUCTIONS_CHARS + 1)),
+        )
+        .await;
+        let err = result.expect_err("instructions over the cap must be rejected");
+        assert!(
+            matches!(err, AppError::InvalidInput(_)),
+            "expected InvalidInput, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("Instructions too large"),
+            "expected cap-style error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn letter_writer_accepts_instructions_at_the_cap() {
+        let provider = std::sync::Arc::new(MockCompletionProvider::new(
+            "ollama",
+            "Dear patient, follow up in two weeks.",
+            64,
+        ));
+        let (state, _rid) =
+            build_test_state_with_provider(base_config(), "Patient reports back pain.", provider)
+                .await;
+
+        let letter = generate_letter_from_document_inner(
+            &state,
+            "Synthetic document text.".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some("y".repeat(MAX_USER_INSTRUCTIONS_CHARS)),
+        )
+        .await
+        .expect("instructions at exactly the cap are accepted");
+        assert!(!letter.is_empty());
+    }
 }

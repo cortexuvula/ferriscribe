@@ -378,6 +378,18 @@ pub async fn translation_text_utterance(
 // Tap-to-talk capture
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Discard a throwaway utterance WAV. The captures are plaintext PHI by
+/// construction (never encrypted at rest), so they are shredded before the
+/// unlink — a plain `remove_file` leaves the audio recoverable on disk.
+/// `NotFound` is fine (nothing was captured / already cleaned).
+fn shred_utterance_wav(path: &std::path::Path) {
+    if let Err(e) = medical_security::file_crypto::shred_and_unlink(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::debug!(error = %e, "translation capture: utterance WAV shred failed");
+    }
+}
+
 /// Begin capturing an utterance from the configured input device for the
 /// given speaker. Fails if a medical recording (or another translation
 /// capture) is already in progress — audio capture is single-slot app-wide.
@@ -388,6 +400,17 @@ pub async fn translation_capture_start(
     state: tauri::State<'_, AppState>,
     speaker: Speaker,
 ) -> AppResult<()> {
+    // Exit TOCTOU guard — the same gate `start_recording` consults: once a
+    // restart or coordinated quit is committed, refuse new captures; an
+    // utterance started in the settle→exit window would be destroyed
+    // mid-capture at process exit.
+    if crate::commands::restart::exit_committed() {
+        warn!("Refusing to start translation capture: app exit is in progress");
+        return Err(AppError::audio(
+            "The app is restarting or quitting — try again in a moment".to_string(),
+        ));
+    }
+
     // Atomically claim the shared capture slot (same flag as medical
     // recordings — the two are mutually exclusive).
     {
@@ -516,7 +539,7 @@ pub async fn translation_capture_start(
         tokio::task::spawn_blocking(move || drop(handle))
             .await
             .map_err(|e| AppError::Other(format!("Stop task panicked: {e}")))?;
-        let _ = std::fs::remove_file(leftover.wav_path);
+        shred_utterance_wav(&leftover.wav_path);
         *state.recording_active.lock().await = false;
         return Err(AppError::translation(
             "No translation session is active — pick both languages first".to_string(),
@@ -627,7 +650,7 @@ pub async fn translation_capture_stop(
         tokio::task::spawn_blocking(move || drop(capture.handle))
             .await
             .map_err(|e| AppError::Other(format!("Stop task panicked: {e}")))?;
-        let _ = std::fs::remove_file(leftover_path);
+        shred_utterance_wav(&leftover_path);
         return Ok(CaptureStopResult::note(
             "That tap was too short — hold to speak and tap again to stop",
         ));
@@ -647,7 +670,7 @@ pub async fn translation_capture_stop(
         let wav_path = capture.wav_path.clone();
         let loaded = tokio::task::spawn_blocking(move || {
             let result = load_wav_to_audio_data(&wav_path);
-            let _ = std::fs::remove_file(&wav_path);
+            shred_utterance_wav(&wav_path);
             result
         })
         .await
@@ -954,10 +977,38 @@ mod tests {
     }
 
     #[test]
-    fn supported_languages_command_returns_crate_list() {
+    fn supported_languages_command_returns_the_crate_list() {
         let langs = translation_supported_languages().expect("languages");
         assert!(langs.iter().any(|l| l.code == "en"));
         assert!(langs.iter().any(|l| l.code == "zh"));
+    }
+
+    /// `translation_capture_start` must consult the exit TOCTOU gate BEFORE
+    /// claiming the shared capture slot — the same guard `start_recording`
+    /// has (audio.rs). Structural pin in the restart.rs style: the QUITTING
+    /// static is already exercised by restart.rs's own gate test, and a
+    /// second test mutating it would race that one (lib tests run in
+    /// parallel in one process).
+    #[test]
+    fn capture_start_consults_the_exit_gate_before_claiming_the_slot() {
+        let code: String = include_str!("translation.rs")
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("///") || t.starts_with("//!") || t.starts_with("//"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let gate = code
+            .find("crate::commands::restart::exit_committed()")
+            .expect("capture_start must consult the exit gate");
+        let claim = code
+            .find("state.recording_active.lock().await")
+            .expect("capture_start must claim the shared capture slot");
+        assert!(
+            gate < claim,
+            "the exit gate must run BEFORE the capture slot is claimed"
+        );
     }
 
     /// A macOS-like voice list: novelty voices sort first, then compact,

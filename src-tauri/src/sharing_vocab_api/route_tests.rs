@@ -491,6 +491,31 @@ async fn condition_chips_sync_merges_and_returns_full_list() {
     );
 }
 
+// ── Content sync pull ────────────────────────────────────────────────────────
+
+/// A purge-ledger read failure must FAIL the pull (2026-10-08 review): the
+/// client holds its pull cursor on failure and re-requests the window next
+/// cycle, while a 200 with an empty purge list would let the cursor advance
+/// past notifications that were never delivered — machines that missed a
+/// practice-wide deletion would keep serving a live copy of purged PHI
+/// forever. The ledger read is forced to fail by dropping its table.
+#[tokio::test]
+async fn content_pull_fails_when_the_purge_ledger_is_unreadable() {
+    let app = test_app().await;
+    {
+        let conn = app.db.conn().expect("conn");
+        conn.execute("DROP TABLE purged_recordings", [])
+            .expect("drop ledger table");
+    }
+
+    let (status, body) = req(&app, "GET", "/v1/content/sync?limit=10", authed(&app), None).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a purge-ledger read failure must yield an error response, not an empty purge list (body: {body})"
+    );
+}
+
 // ── Mobile API ───────────────────────────────────────────────────────────────
 
 mod mobile_api_tests {

@@ -63,7 +63,15 @@ pub(super) fn digest_str(text: &str) -> String {
 
 /// Digest of a stored text column; trimmed-empty/absent → None (a missing
 /// source contributes nothing to any input).
-fn text_digest(text: Option<&str>) -> Option<String> {
+///
+/// Trim normalization is the digest CONTRACT for every text compared
+/// against a stored column: the read side trims before hashing, so every
+/// write-side digest of text that will be read back (provenance
+/// `output_digest`, SOAP-derived `source_digest`) must go through this
+/// variant — hashing the raw text made a generated output ending in "\n"
+/// (`strip_markdown` does not trim) read `output_modified` immediately
+/// after generation.
+pub(super) fn text_digest(text: Option<&str>) -> Option<String> {
     text.map(str::trim)
         .filter(|t| !t.is_empty())
         .map(digest_str)
@@ -235,7 +243,10 @@ pub(super) fn record_provenance(
         ai_provider: provider_name.to_string(),
         ai_model: model_name.to_string(),
         input_digest,
-        output_digest: digest_str(output_text),
+        // Trimmed to mirror the read side (`text_digest`): an output whose
+        // stored column carries trailing whitespace would otherwise fail
+        // its own output binding the moment freshness reads it back.
+        output_digest: digest_str(output_text.trim()),
         source_digest,
     };
     if let Err(e) =

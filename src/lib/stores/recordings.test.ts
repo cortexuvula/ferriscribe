@@ -297,6 +297,140 @@ function makeTrashed(id: string, deletedAt = '2026-10-01T12:00:00Z') {
   };
 }
 
+describe('RecordingsStore — Trash staleness after mutations', () => {
+  beforeEach(() => {
+    mockListRecordings.mockReset();
+    mockSearchRecordings.mockReset();
+    mockCountRecordings.mockReset();
+    mockDeleteAllRecordings.mockReset();
+    mockRestoreRecordings.mockReset();
+    mockDeleteRecording.mockReset();
+    mockListTrashed.mockReset();
+    mockRestoreAllTrashed.mockReset();
+    mockRestoreBetween.mockReset();
+    mockCountBetween.mockReset();
+    mockCountRecordings.mockResolvedValue(0);
+    mockListRecordings.mockResolvedValue([]);
+    mockListTrashed.mockResolvedValue({ items: [], total: 0 });
+    vi.clearAllMocks();
+  });
+
+  it('remove() refreshes a loaded trash list — the new row appears and the total matches', async () => {
+    mockListRecordings.mockResolvedValue([makeSummary('a')]);
+    mockDeleteRecording.mockResolvedValue(undefined);
+    mockListTrashed
+      .mockResolvedValueOnce({ items: [makeTrashed('older')], total: 1 })
+      .mockResolvedValueOnce({
+        items: [makeTrashed('older'), makeTrashed('a')],
+        total: 2,
+      });
+    const { recordings } = await freshStore();
+    await recordings.load();
+    await recordings.loadTrashed();
+
+    await recordings.remove('a');
+
+    // The trash reload is fire-and-forget — wait for it to land.
+    await vi.waitFor(() => {
+      expect(recordings.trashedList.map((r) => r.id)).toEqual(['older', 'a']);
+      expect(recordings.trashedTotal).toBe(2);
+    });
+  });
+
+  it('remove() in the badge-only boot state (empty list, zero total) refreshes just the badge', async () => {
+    mockListRecordings.mockResolvedValue([makeSummary('a')]);
+    mockDeleteRecording.mockResolvedValue(undefined);
+    mockListTrashed.mockResolvedValue({ items: [], total: 1 });
+    const { recordings } = await freshStore();
+    await recordings.load();
+
+    await recordings.remove('a');
+
+    // No trash page was ever loaded — only the count runs, preserving the
+    // documented boot behavior (the page loads on Trash entry).
+    await vi.waitFor(() => expect(mockListTrashed).toHaveBeenCalledTimes(1));
+    expect(mockListTrashed).toHaveBeenCalledWith(0, 0);
+    expect(recordings.trashedList).toHaveLength(0);
+    expect(recordings.trashedTotal).toBe(1);
+  });
+
+  it('restore() refreshes BOTH lists — the row leaves the trash and the badge decrements', async () => {
+    mockListRecordings.mockResolvedValue([makeSummary('a')]);
+    mockListTrashed.mockResolvedValue({ items: [], total: 0 });
+    const { recordings } = await freshStore();
+    recordings.lastDeleted = makeSummary('a');
+    recordings.trashedList = [makeTrashed('a')];
+    recordings.trashedTotal = 1;
+
+    await recordings.restore('a');
+
+    expect(recordings.trashedList).toHaveLength(0);
+    expect(recordings.trashedTotal).toBe(0);
+    // The trash reload was a PAGE fetch, not just the (0,0) count.
+    expect(mockListTrashed).toHaveBeenCalledWith(50, 0);
+  });
+
+  it('removeAll() reloads a loaded trash list with the moved rows', async () => {
+    mockListRecordings.mockResolvedValue([makeSummary('a'), makeSummary('b')]);
+    mockDeleteAllRecordings.mockResolvedValue({ count: 2, ids: ['a', 'b'] });
+    mockListTrashed
+      .mockResolvedValueOnce({ items: [makeTrashed('x')], total: 1 })
+      .mockResolvedValueOnce({
+        items: [makeTrashed('x'), makeTrashed('a'), makeTrashed('b')],
+        total: 3,
+      });
+    const { recordings } = await freshStore();
+    await recordings.loadTrashed();
+
+    await recordings.removeAll();
+
+    await vi.waitFor(() => {
+      expect(recordings.trashedList.map((r) => r.id)).toEqual(['x', 'a', 'b']);
+      expect(recordings.trashedTotal).toBe(3);
+    });
+  });
+
+  it('undoMoveAll() refreshes the trash list + total, not just the active list', async () => {
+    mockListRecordings.mockResolvedValue([]);
+    mockCountRecordings.mockResolvedValue(0);
+    mockDeleteAllRecordings.mockResolvedValue({ count: 2, ids: ['a', 'b'] });
+    mockRestoreRecordings.mockResolvedValue({ count: 2, ids: ['a', 'b'] });
+    mockListTrashed.mockResolvedValue({ items: [], total: 0 });
+    const { recordings } = await freshStore();
+    await recordings.removeAll();
+
+    const restored = await recordings.undoMoveAll();
+
+    expect(restored).toBe(2);
+    // refreshAfterMutation ran the trash PAGE reload — the rows left Trash.
+    expect(mockListTrashed).toHaveBeenCalledWith(50, 0);
+    expect(recordings.trashedList).toHaveLength(0);
+    expect(recordings.trashedTotal).toBe(0);
+  });
+
+  it('loadMoreTrashed() keeps hasMore=true when a full page re-delivers an existing row', async () => {
+    const page1 = Array.from({ length: 50 }, (_, i) => makeTrashed(`t${i}`));
+    // Full page, but t0 is a re-delivery of a row already listed (offsets
+    // shifted between fetches) — only 49 rows are fresh.
+    const page2 = [
+      makeTrashed('t0'),
+      ...Array.from({ length: 49 }, (_, i) => makeTrashed(`u${i}`)),
+    ];
+    mockListTrashed
+      .mockResolvedValueOnce({ items: page1, total: 120 })
+      .mockResolvedValueOnce({ items: page2, total: 120 });
+    const { recordings } = await freshStore();
+
+    await recordings.loadTrashed();
+    await recordings.loadMoreTrashed();
+
+    expect(recordings.trashedList).toHaveLength(99);
+    // The RAW page was full and under the total — pagination must continue
+    // (the old fresh.length-based flag ended it early at 120 total).
+    expect(recordings.trashedHasMore).toBe(true);
+  });
+});
+
 describe('RecordingsStore — Trash state + restore paths (D4/D8)', () => {
   beforeEach(() => {
     mockListRecordings.mockReset();

@@ -91,15 +91,35 @@ pub struct FieldRevision {
 
 /// Persisted cursor state for incremental sync pulls.
 ///
-/// `cursor` is the opaque server cursor (usually an `updated_at` watermark);
-/// `last_pull` is the wall-clock time of the most recent successful pull, used
-/// for diagnostics and backoff heuristics.
+/// `cursor` is the opaque server cursor — a composite keyset watermark
+/// `<updated_at>|<last-delivered-id>` (see [`split_cursor`]; a plain
+/// timestamp without `|` is the legacy shape); `last_pull` is the wall-clock
+/// time of the most recent successful pull, used for diagnostics and backoff
+/// heuristics.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct SyncCursor {
     /// Opaque cursor marking the position in the server's update stream.
     pub cursor: Option<String>,
     /// RFC 3339 timestamp of the last successful pull.
     pub last_pull: Option<String>,
+}
+
+/// Split a content-sync cursor into its `(timestamp, id)` components.
+///
+/// The cursor format is `<rfc3339_ts>|<last-delivered-id>`, where the id is
+/// the recording that closed the last batch at that timestamp (a composite
+/// keyset cursor — a bare timestamp cannot page past rows sharing it, and
+/// bulk writers like `soft_delete_all` stamp whole batches with one shared
+/// `updated_at`). A legacy cursor without `|` parses with an empty id, which
+/// [`ContentSyncRepo::changed_since`] treats as "re-deliver everything at or
+/// after the timestamp": the LWW merges make re-delivery safe, and the
+/// alternative (strictly-greater) would permanently strand same-timestamp
+/// rows under every legacy cursor in the fleet.
+pub fn split_cursor(cursor: &str) -> (&str, &str) {
+    match cursor.split_once('|') {
+        Some((ts, id)) => (ts, id),
+        None => (cursor, ""),
+    }
 }
 
 /// Sparse field-value payload carried over the wire for one field.
@@ -484,12 +504,64 @@ impl ContentSyncRepo {
         Ok(())
     }
 
+    /// Post-pull audio-fetch skip set: recording ids whose audio the sync
+    /// loop has tried to fetch and the server answered "no audio on the
+    /// server" — mapped to the consecutive-miss count (diagnostics; the
+    /// presence of an entry is what excludes the id from selection).
+    ///
+    /// Without it, the fetch loop's `audio_path = ''` selection returns the
+    /// same oldest rows forever, so a recording whose audio never arrives
+    /// server-side head-of-line blocks every later row from ever being
+    /// attempted. The list is ordered oldest-entry-first so the command
+    /// layer can cap it by dropping the longest-tenured skips (bounded, and
+    /// a dropped id simply gets re-attempted later). Stored as a JSON array
+    /// of `[id, count]` pairs under the `audio_fetch_skips` sync-state key,
+    /// created on demand; NULL and corrupt rows read as empty (a broken skip
+    /// set must never block the fetch loop), mirroring the queue keys above.
+    pub fn get_audio_fetch_skips(conn: &Connection) -> DbResult<Vec<(String, u64)>> {
+        let value: Option<String> = match conn.query_row(
+            "SELECT value FROM sync_state WHERE key = 'audio_fetch_skips'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(DbError::from(e)),
+        };
+        let Some(json) = value else {
+            return Ok(Vec::new());
+        };
+        match serde_json::from_str(&json) {
+            Ok(skips) => Ok(skips),
+            Err(e) => {
+                // Reset rather than propagate: a corrupt skip set must never
+                // block syncing (the cost is one redundant fetch attempt).
+                tracing::warn!(error = %e, "audio fetch skip set unreadable — resetting");
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Persist the audio-fetch skip set (see [`get_audio_fetch_skips`]).
+    /// Ids and counts only — never audio or PHI.
+    pub fn set_audio_fetch_skips(conn: &Connection, skips: &[(String, u64)]) -> DbResult<()> {
+        let json = serde_json::to_string(skips)
+            .map_err(|e| DbError::Migration(format!("serialize audio fetch skips: {e}")))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('audio_fetch_skips', ?1)",
+            params![json],
+        )?;
+        Ok(())
+    }
+
     /// Delta query: return recording IDs modified since the given cursor.
     ///
-    /// `since` is an RFC 3339 `updated_at` watermark; `None` returns
-    /// everything (used for the initial pull). Results are ordered by
-    /// `updated_at` ascending and capped at `limit`. The boolean in the
-    /// returned tuple is `true` when more rows are available.
+    /// `since` is a composite keyset cursor `<updated_at>|<last-delivered-id>`
+    /// (a plain timestamp parses as the legacy shape with an empty id —
+    /// see [`split_cursor`]); `None` returns everything (used for the initial
+    /// pull). Results are ordered by `updated_at` ascending (ties broken by
+    /// `id`) and capped at `limit`. The boolean in the returned tuple is
+    /// `true` when more rows are available.
     pub fn changed_since(
         conn: &Connection,
         since: Option<&str>,
@@ -505,19 +577,35 @@ impl ContentSyncRepo {
         // the cursor passes the date). Parsed comparison matches
         // [`cmp_lww_timestamps`]; unparseable stamps compare NULL (row
         // excluded) — the same "unparseable is oldest" semantics.
+        //
+        // Keyset tiebreak: `julianday` has millisecond precision, so a bare
+        // `>` arm strands every row sharing the cursor's millisecond (bulk
+        // writers like `soft_delete_all` stamp 200+ rows with one identical
+        // `updated_at`, so a batch limit strands the overflow forever). The
+        // second arm pages within the julianday-equal bucket using the exact
+        // `(updated_at, id)` tuple the ORDER BY sorts on, so the predicate
+        // selects precisely the rows sorting AFTER the cursor position —
+        // everything before it has been delivered. A legacy cursor (empty
+        // id) re-delivers the whole bucket: idempotent merges make
+        // re-delivery safe, under-selection is not.
         let ids: Vec<String> = if let Some(since) = since {
+            let (ts, id) = split_cursor(since);
             let mut stmt = conn.prepare(
                 "SELECT id FROM recordings
                  WHERE julianday(updated_at) > julianday(?1)
-                 ORDER BY julianday(updated_at) ASC, updated_at ASC
-                 LIMIT ?2",
+                    OR (julianday(updated_at) = julianday(?1)
+                        AND (?2 = ''
+                             OR updated_at > ?1
+                             OR (updated_at = ?1 AND id > ?2)))
+                 ORDER BY julianday(updated_at) ASC, updated_at ASC, id ASC
+                 LIMIT ?3",
             )?;
-            stmt.query_map(params![since, fetch], |row| row.get::<_, String>(0))?
+            stmt.query_map(params![ts, id, fetch], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let mut stmt = conn.prepare(
                 "SELECT id FROM recordings
-                 ORDER BY julianday(updated_at) ASC, updated_at ASC
+                 ORDER BY julianday(updated_at) ASC, updated_at ASC, id ASC
                  LIMIT ?1",
             )?;
             stmt.query_map(params![fetch], |row| row.get::<_, String>(0))?
@@ -535,6 +623,14 @@ impl ContentSyncRepo {
     /// Ledger entries with `purged_at > since` (all entries when `since`
     /// is `None` — a fresh client's first pull), ordered by `purged_at`.
     ///
+    /// `since` is the client's composite keyset cursor; only its timestamp
+    /// component participates here (the ledger has no id ordering), so the
+    /// `|id` suffix is stripped via [`split_cursor`] before comparing. Without
+    /// the strip, a `purged_at` string-equal to the cursor's timestamp would
+    /// compare LESS than `ts|id` (the suffix makes the cursor longer) and the
+    /// notification would be silently dropped — the under-selection direction
+    /// this method must never take.
+    ///
     /// The comparison is a plain string `>` on `purged_at`. That is safe
     /// here even though [`cmp_lww_timestamps`] exists, because every row in
     /// `purged_recordings` is written by the purge path in `recordings.rs`
@@ -550,18 +646,20 @@ impl ContentSyncRepo {
     /// (already-tombstoned rows keep their `deleted_at`). The dangerous
     /// direction — under-selection, which would silently drop a purge
     /// notification — has no reachable cause: a `Z`-offset cursor never
-    /// reaches this comparison because `advance_cursor` normalizes every
-    /// RFC 3339-parseable timestamp to `to_rfc3339()`'s `+00:00` output,
-    /// and the only non-T-format value that survives it (space format) can
-    /// only make the cursor compare as older — which over-selects.
+    /// reaches this comparison because `advance_cursor` only ever forwards
+    /// the batch's own stored timestamp string (or a clamped `to_rfc3339()`
+    /// local-now value, `+00:00`), and the only non-T-format value that
+    /// survives it (space format) can only make the cursor compare as
+    /// older — which over-selects.
     pub fn purged_since(conn: &Connection, since: Option<&str>) -> DbResult<Vec<PurgedRef>> {
         let refs = if let Some(since) = since {
+            let (ts, _) = split_cursor(since);
             let mut stmt = conn.prepare(
                 "SELECT id, purged_at FROM purged_recordings
                  WHERE purged_at > ?1
                  ORDER BY purged_at",
             )?;
-            stmt.query_map([since], |r| {
+            stmt.query_map([ts], |r| {
                 Ok(PurgedRef {
                     id: r.get(0)?,
                     purged_at: r.get(1)?,
@@ -1144,30 +1242,47 @@ impl ContentSyncRepo {
 
     /// Apply purge notifications from a pull response: tombstone any LOCAL
     /// LIVE copy (FTS-safe) so a machine that missed the practice-wide
-    /// deletion converges. Unlike the LWW tombstone path in
-    /// [`Self::merge_incoming`], a purge notification tombstones
-    /// unconditionally — the server already hard-deleted the row, so there
-    /// is no newer-local-edit case to honour. Already-tombstoned and
-    /// unknown ids are no-ops: the former keeps its own `deleted_at` (the
-    /// local 30-day sweeper finishes it), and the latter never existed
+    /// deletion converges. A purge notification tombstones a live row only
+    /// when the row is NOT newer than the purge: a live row whose
+    /// `updated_at` beats `purged_at` is a restore that happened after the
+    /// server purged (the trash clock would also be reset by a blind
+    /// tombstone, silently reverting the user's restore) — it stays live and
+    /// continues to converge via the normal LWW paths. Already-tombstoned
+    /// and unknown ids are no-ops: the former keeps its own `deleted_at`
+    /// (the local 30-day sweeper finishes it), and the latter never existed
     /// here (the ledger also refuses any later stale re-insert).
     pub fn apply_purged_refs(conn: &Connection, purged: &[PurgedRef]) -> DbResult<()> {
         for p in purged {
-            // EXISTS always returns exactly one row; an error here is a
-            // genuine DB failure and is propagated (the caller treats the
-            // whole application as best-effort and warns).
-            let live: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM recordings WHERE id = ?1 AND deleted_at IS NULL)",
-                [&p.id],
-                |r| r.get(0),
-            )?;
-            if live {
-                Self::sync_tombstone(conn, &p.id, &p.purged_at)?;
+            // The live row's `updated_at`, if a live copy exists. EXISTS-style
+            // read: an error here is a genuine DB failure and is propagated
+            // (the caller treats the whole application as best-effort and
+            // warns, holding the sync cursor so the refs are re-delivered).
+            let local_updated: Option<String> = conn
+                .query_row(
+                    "SELECT updated_at FROM recordings
+                     WHERE id = ?1 AND deleted_at IS NULL",
+                    [&p.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(local_updated) = local_updated else {
+                continue;
+            };
+            // `cmp_lww_timestamps`, not a raw compare: the two stored
+            // timestamp formats misorder as strings. Ties tombstone —
+            // deletions win ties, matching `merge_incoming`'s LWW rule.
+            if cmp_lww_timestamps(&local_updated, &p.purged_at) == std::cmp::Ordering::Greater {
                 tracing::info!(
                     recording_id = %p.id,
-                    "sync: tombstoned local copy of purged recording"
+                    "sync: purge notification older than live row — keeping restored recording live"
                 );
+                continue;
             }
+            Self::sync_tombstone(conn, &p.id, &p.purged_at)?;
+            tracing::info!(
+                recording_id = %p.id,
+                "sync: tombstoned local copy of purged recording"
+            );
         }
         Ok(())
     }
@@ -1452,22 +1567,227 @@ mod tests {
 
         conn.execute(
             "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
+             VALUES ('old', 'old.wav', '', '2026-06-30T00:00:00Z', '2026-06-30T00:00:00Z')",
+            [],
+        )
+        .expect("insert older");
+        conn.execute(
+            "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
              VALUES ('a', 'a.wav', '', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z')",
             [],
         )
-        .expect("insert old");
+        .expect("insert at-cursor");
         conn.execute(
             "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
              VALUES ('b', 'b.wav', '', '2026-07-02T00:00:00Z', '2026-07-02T00:00:00Z')",
             [],
         )
-        .expect("insert new");
+        .expect("insert newer");
 
+        // Legacy plain-timestamp cursor (no `|id` component): the row AT the
+        // cursor timestamp is re-delivered (idempotent merges make
+        // re-delivery safe), the strictly-older row is not.
         let (ids, has_more) =
             ContentSyncRepo::changed_since(&conn, Some("2026-07-01T00:00:00Z"), 100)
                 .expect("query");
-        assert_eq!(ids, vec!["b".to_string()]);
+        assert!(
+            ids.contains(&"a".to_string()),
+            "same-timestamp row re-delivered under a legacy cursor"
+        );
+        assert!(ids.contains(&"b".to_string()), "newer row selected");
+        assert!(!ids.contains(&"old".to_string()), "older row excluded");
         assert!(!has_more);
+
+        // Composite cursor at the same position with an id that sorts past
+        // every row at that timestamp: the at-cursor row is now excluded,
+        // only the strictly-newer row travels.
+        let (ids, _) = ContentSyncRepo::changed_since(&conn, Some("2026-07-01T00:00:00Z|zzz"), 100)
+            .expect("query");
+        assert!(!ids.contains(&"a".to_string()));
+        assert_eq!(ids, vec!["b".to_string()]);
+    }
+
+    /// The core keyset pin (2026-10-08 review, fix 1): rows sharing one
+    /// EXACT `updated_at` (the `soft_delete_all` shape) page by id across
+    /// repeated batches instead of stranding the overflow past the batch
+    /// limit.
+    #[test]
+    fn changed_since_pages_same_timestamp_rows_by_id() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        let shared_ts = "2026-01-01T00:00:00+00:00";
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
+                 VALUES (?1, ?2, '', ?3, ?3)",
+                params![
+                    format!("00000000-0000-0000-0000-00000000000{i}"),
+                    format!("bulk{i}.wav"),
+                    shared_ts
+                ],
+            )
+            .expect("insert");
+        }
+
+        // First page: all five, ordered by id.
+        let (ids, has_more) =
+            ContentSyncRepo::changed_since(&conn, Some("2025-12-31T00:00:00+00:00"), 3)
+                .expect("page 1");
+        assert_eq!(ids.len(), 3);
+        assert!(has_more);
+        assert_eq!(
+            ids,
+            vec![
+                "00000000-0000-0000-0000-000000000000".to_string(),
+                "00000000-0000-0000-0000-000000000001".to_string(),
+                "00000000-0000-0000-0000-000000000002".to_string(),
+            ]
+        );
+
+        // Composite cursor resumes INSIDE the shared timestamp: only the ids
+        // after the last delivered one travel.
+        let cursor = format!("{shared_ts}|00000000-0000-0000-0000-000000000002");
+        let (ids, has_more) =
+            ContentSyncRepo::changed_since(&conn, Some(&cursor), 3).expect("page 2");
+        assert_eq!(
+            ids,
+            vec![
+                "00000000-0000-0000-0000-000000000003".to_string(),
+                "00000000-0000-0000-0000-000000000004".to_string(),
+            ],
+            "same-timestamp rows past the cursor id must still travel"
+        );
+        assert!(!has_more);
+    }
+
+    /// The tie arm must match the ORDER BY's `(updated_at, id)` tuple, not
+    /// the id alone: inside one julianday-equal (same-millisecond) bucket,
+    /// a row whose timestamp string sorts after the cursor's must be
+    /// selected even when its id sorts before the cursor id — an id-only
+    /// tiebreak would strand it forever (two writes landing in the same
+    /// millisecond with unlucky UUID ordering is exactly this shape).
+    #[test]
+    fn changed_since_tiebreak_follows_the_tuple_order_not_id_alone() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        conn.execute(
+            "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
+             VALUES ('ff000000-0000-0000-0000-000000000000', 'hi-id.wav', '',
+                     '2026-01-01T00:00:00.000100+00:00', '2026-01-01T00:00:00.000100+00:00')",
+            [],
+        )
+        .expect("insert high-id row (.000100)");
+        conn.execute(
+            "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
+             VALUES ('00000000-0000-0000-0000-0000000000ff', 'lo-id.wav', '',
+                     '2026-01-01T00:00:00.000200+00:00', '2026-01-01T00:00:00.000200+00:00')",
+            [],
+        )
+        .expect("insert low-id row (.000200, same millisecond)");
+
+        // Cursor as if the high-id row closed the previous batch.
+        let cursor = "2026-01-01T00:00:00.000100+00:00|ff000000-0000-0000-0000-000000000000";
+        let (ids, _) = ContentSyncRepo::changed_since(&conn, Some(cursor), 100).expect("query");
+        assert_eq!(
+            ids,
+            vec!["00000000-0000-0000-0000-0000000000ff".to_string()],
+            "same-ms row with a later timestamp string must travel despite its lower id"
+        );
+    }
+
+    /// Distinct timestamps still paginate through the julianday arm with the
+    /// composite cursor format in play.
+    #[test]
+    fn changed_since_composite_cursor_paginates_distinct_timestamps() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        for (id, ts) in [
+            (
+                "00000000-0000-0000-0000-0000000000aa",
+                "2026-02-01T00:00:00+00:00",
+            ),
+            (
+                "00000000-0000-0000-0000-0000000000bb",
+                "2026-02-02T00:00:00+00:00",
+            ),
+            (
+                "00000000-0000-0000-0000-0000000000cc",
+                "2026-02-03T00:00:00+00:00",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO recordings (id, filename, audio_path, created_at, updated_at)
+                 VALUES (?1, ?2, '', ?3, ?3)",
+                params![id, format!("{id}.wav"), ts],
+            )
+            .expect("insert");
+        }
+
+        let (ids, has_more) =
+            ContentSyncRepo::changed_since(&conn, Some("2026-01-31T00:00:00+00:00"), 2)
+                .expect("page 1");
+        assert_eq!(ids.len(), 2);
+        assert!(has_more);
+        assert_eq!(ids[1], "00000000-0000-0000-0000-0000000000bb");
+
+        // Cursor closed on the second row: strictly-newer timestamps ride the
+        // julianday `>` arm regardless of the id component.
+        let cursor = "2026-02-02T00:00:00+00:00|00000000-0000-0000-0000-0000000000bb";
+        let (ids, has_more) =
+            ContentSyncRepo::changed_since(&conn, Some(cursor), 2).expect("page 2");
+        assert_eq!(
+            ids,
+            vec!["00000000-0000-0000-0000-0000000000cc".to_string()]
+        );
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn audio_fetch_skips_round_trip_and_tolerate_bad_state() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+
+        // Fresh DB (no row at all) → empty.
+        assert!(
+            ContentSyncRepo::get_audio_fetch_skips(&conn)
+                .expect("get")
+                .is_empty()
+        );
+
+        // Round-trip preserves the oldest-first order the cap depends on.
+        let skips = vec![
+            ("00000000-0000-0000-0000-0000000000aa".to_string(), 1u64),
+            ("00000000-0000-0000-0000-0000000000bb".to_string(), 3u64),
+        ];
+        ContentSyncRepo::set_audio_fetch_skips(&conn, &skips).expect("set");
+        assert_eq!(
+            ContentSyncRepo::get_audio_fetch_skips(&conn).expect("get"),
+            skips
+        );
+
+        // A NULL row reads empty, not error (the queue-key precedent).
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state (key, value) VALUES ('audio_fetch_skips', NULL)",
+            [],
+        )
+        .expect("seed null");
+        assert!(
+            ContentSyncRepo::get_audio_fetch_skips(&conn)
+                .expect("null reads empty")
+                .is_empty()
+        );
+
+        // Corrupt JSON resets to empty rather than blocking the fetch loop.
+        conn.execute(
+            "UPDATE sync_state SET value = '{not json' WHERE key = 'audio_fetch_skips'",
+            [],
+        )
+        .expect("corrupt");
+        assert!(
+            ContentSyncRepo::get_audio_fetch_skips(&conn)
+                .expect("corrupt reads empty")
+                .is_empty()
+        );
     }
 
     /// Tombstone backstop (trash-restore D1): the periodic push selects by
@@ -1486,7 +1806,8 @@ mod tests {
         // next repo write can land in the SAME microsecond as the stamp the
         // test just read — the flake that took down CI's test + coverage
         // jobs on 2026-10-06. Production avoids it by advancing the cursor
-        // +1µs (`advance_cursor`); this test pins re-travel semantics
+        // to the batch boundary's composite `<ts>|<id>` position
+        // (`advance_cursor`); this test pins re-travel semantics
         // (`contains`), not cursor exactness, so a cursor sitting a full
         // second behind the stamp is deterministic while still proving the
         // tombstone/revive bumps re-travel past an advanced cursor.
@@ -1810,5 +2131,67 @@ mod sync_tombstone_tests {
             "live row keeps its FTS entry"
         );
         assert_fts_healthy(&conn);
+    }
+
+    /// Purge-notification LWW (2026-10-08 review): a live row OLDER than the
+    /// purge timestamp tombstones (this machine missed the practice-wide
+    /// deletion and converges); a live row NEWER than the purge is a restore
+    /// that happened after the server purged — it must stay live instead of
+    /// being silently re-deleted (a blind tombstone also resets the trash
+    /// clock). Unknown and already-tombstoned ids remain no-ops.
+    #[test]
+    fn apply_purged_refs_tombstones_old_live_rows_but_honours_newer_restores() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let older = seed(&conn, "purold.wav");
+        let restored = seed(&conn, "purliv.wav");
+
+        let purged = vec![
+            // Unknown id — no-op.
+            PurgedRef {
+                id: "00000000-0000-0000-0000-0000000000ee".to_string(),
+                purged_at: "2026-06-01T00:00:00Z".to_string(),
+            },
+            // Live row stamped at insert (~now) OLDER than a future purge.
+            PurgedRef {
+                id: older.id.to_string(),
+                purged_at: "2999-01-01T00:00:00Z".to_string(),
+            },
+            // Live row NEWER than a past purge — the restore race.
+            PurgedRef {
+                id: restored.id.to_string(),
+                purged_at: "2020-01-01T00:00:00Z".to_string(),
+            },
+        ];
+        ContentSyncRepo::apply_purged_refs(&conn, &purged).unwrap();
+
+        assert_eq!(
+            deleted_at_raw(&conn, &older.id.to_string()).as_deref(),
+            Some("2999-01-01T00:00:00Z"),
+            "live row older than the purge must tombstone at purged_at"
+        );
+        assert!(
+            !fts_row_present(&conn, "purold"),
+            "tombstoned purge copy must leave the FTS index"
+        );
+        assert_eq!(
+            deleted_at_raw(&conn, &restored.id.to_string()),
+            None,
+            "live row newer than the purge (a restore) must stay live"
+        );
+        assert!(
+            fts_row_present(&conn, "purliv"),
+            "the restored row must remain searchable"
+        );
+        assert_fts_healthy(&conn);
+
+        // Re-applying is idempotent: the tombstoned row keeps its own
+        // deleted_at, the restored row stays live.
+        ContentSyncRepo::apply_purged_refs(&conn, &purged).unwrap();
+        assert_eq!(
+            deleted_at_raw(&conn, &older.id.to_string()).as_deref(),
+            Some("2999-01-01T00:00:00Z")
+        );
+        assert_eq!(deleted_at_raw(&conn, &restored.id.to_string()), None);
     }
 }

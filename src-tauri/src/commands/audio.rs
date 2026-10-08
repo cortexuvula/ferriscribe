@@ -57,6 +57,14 @@ impl From<CaptureHealthSnapshot> for AudioHealthEvent {
 // 1. list_audio_devices
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Capture WAV filename for `now`: `Recording_%Y-%m-%d_%H-%M-%S_mmm`. The
+/// millisecond suffix disambiguates a stop → restart that lands within the
+/// same second — the old second-granularity name collided and the second
+/// capture's open truncated the first take's WAV.
+fn capture_wav_filename(now: chrono::DateTime<chrono::Local>) -> String {
+    now.format("Recording_%Y-%m-%d_%H-%M-%S_%3f").to_string()
+}
+
 /// List available audio input devices.
 ///
 /// Returns device metadata (name, channels, sample rate) for the audio
@@ -133,7 +141,7 @@ pub async fn start_recording(
     // Generate UUID and human-readable filename.
     let recording_id = Uuid::new_v4();
     let now = chrono::Local::now();
-    let friendly_name = now.format("Recording_%Y-%m-%d_%H-%M-%S").to_string();
+    let friendly_name = capture_wav_filename(now);
     let wav_path = recordings_dir.join(format!("{}.wav", friendly_name));
 
     // Read the configured input device and sample rate from settings.
@@ -547,22 +555,7 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stop
         let rec_id = recording_uuid;
         let db_for_enc = Arc::clone(&state.db);
         tokio::task::spawn_blocking(move || {
-            match medical_security::file_crypto::encrypt_file_in_place(&enc_path) {
-                Ok(()) => {
-                    tracing::debug!(path = %enc_path.display(), "Recording encrypted at rest (background)");
-                    if let Ok(conn) = db_for_enc.conn() {
-                        let _ = RecordingsRepo::set_encryption_done(&conn, &rec_id);
-                    }
-                }
-                Err(e) => {
-                    // Leave `encryption_pending` SET so the boot sweep
-                    // retries on next launch — matching the sweep's own
-                    // failure semantics (sweeps.rs). Clearing it here
-                    // would strand the plaintext WAV outside the sweep's
-                    // view forever after a transient keychain/IO failure.
-                    tracing::warn!(error = %e, path = %enc_path.display(), "Could not encrypt recording; keeping encryption_pending for the boot sweep to retry");
-                }
-            }
+            encrypt_stopped_recording(&db_for_enc, rec_id, &enc_path);
         });
         // NOT awaited — fire and forget.
     }
@@ -589,6 +582,43 @@ pub async fn stop_recording(state: tauri::State<'_, AppState>) -> AppResult<Stop
         stream_error: health_snap.stream_error,
         write_error: health_snap.write_error,
     })
+}
+
+/// Background at-rest encryption for a freshly stopped recording — the
+/// stop-path twin of `sweeps::encryption_pending_sweep`, including its
+/// already-encrypted guard: a file already carrying the FE1 magic is NEVER
+/// re-encrypted (encrypting ciphertext would corrupt it); the pending flag
+/// is cleared and the skip logged instead.
+fn encrypt_stopped_recording(db: &medical_db::Database, rec_id: Uuid, path: &std::path::Path) {
+    // Guard against the encrypt-landed-but-flag-still-set window (e.g. the
+    // boot sweep raced us to this file): re-encrypting ciphertext would
+    // corrupt it — clear the flag and move on, exactly like the sweep.
+    if medical_security::file_crypto::is_encrypted(path) {
+        if let Ok(conn) = db.conn() {
+            let _ = RecordingsRepo::set_encryption_done(&conn, &rec_id);
+        }
+        tracing::debug!(
+            recording_id = %rec_id,
+            "Stopped recording already encrypted at rest; cleared the pending flag"
+        );
+        return;
+    }
+    match medical_security::file_crypto::encrypt_file_in_place(path) {
+        Ok(()) => {
+            tracing::debug!(path = %path.display(), "Recording encrypted at rest (background)");
+            if let Ok(conn) = db.conn() {
+                let _ = RecordingsRepo::set_encryption_done(&conn, &rec_id);
+            }
+        }
+        Err(e) => {
+            // Leave `encryption_pending` SET so the boot sweep
+            // retries on next launch — matching the sweep's own
+            // failure semantics (sweeps.rs). Clearing it here
+            // would strand the plaintext WAV outside the sweep's
+            // view forever after a transient keychain/IO failure.
+            tracing::warn!(error = %e, path = %path.display(), "Could not encrypt recording; keeping encryption_pending for the boot sweep to retry");
+        }
+    }
 }
 
 /// The stop-time "is this recording effectively silent" verdict.
@@ -654,34 +684,40 @@ pub async fn cancel_recording(state: tauri::State<'_, AppState>) -> AppResult<()
         .await
         .map_err(|e| AppError::Other(format!("Cancel task panicked: {e}")))?;
 
-    // Set recording inactive.
-    {
-        let mut active = state.recording_active.lock().await;
-        *active = false;
-    }
+    discard_cancelled_recording(&state).await?;
 
-    // Take the current recording info and delete the WAV file.
-    let current = {
+    Ok(())
+}
+
+/// Cancel-side teardown after the capture handle is dropped: consume the
+/// `current_recording` slot BEFORE clearing `recording_active` — the same
+/// slot-before-flag discipline `stop_recording` documents. The old order
+/// (clear flag → take slot) left a window where a `start_recording` landing
+/// mid-cancel stored its fresh `CurrentRecording` into the slot and this
+/// cancel's `take()` stole it, shredding the new take's WAV out from under
+/// it. Taking the slot FIRST means a start that lands mid-teardown finds an
+/// empty slot and cleanly overwrites it after we clear the flag.
+///
+/// The discarded capture WAV is plaintext PHI by construction (at-rest
+/// encryption only happens on the stop path), so it is shredded before the
+/// unlink — a plain remove_file would leave the audio recoverable on disk.
+async fn discard_cancelled_recording(state: &AppState) -> AppResult<Option<CurrentRecording>> {
+    let taken = {
         let mut rec_lock = state
             .current_recording
             .lock()
             .map_err(|e| AppError::MutexPoisoned(format!("current_recording: {e}")))?;
         rec_lock.take()
     };
+    *state.recording_active.lock().await = false;
 
-    if let Some(current) = current
+    if let Some(current) = &taken
         && current.wav_path.exists()
+        && let Err(e) = medical_security::file_crypto::shred_and_unlink(&current.wav_path)
     {
-        // The capture WAV is plaintext PHI by construction (at-rest
-        // encryption only happens on the stop path), so shred before
-        // unlink — a plain remove_file would leave the audio recoverable
-        // on disk, the same exposure the screen-capture path shreds against.
-        if let Err(e) = medical_security::file_crypto::shred_and_unlink(&current.wav_path) {
-            tracing::debug!(error = %e, "cancel: shred/unlink of discarded capture failed");
-        }
+        tracing::debug!(error = %e, "cancel: shred/unlink of discarded capture failed");
     }
-
-    Ok(())
+    Ok(taken)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -852,28 +888,24 @@ pub async fn check_recording_audio_levels(
     Ok(levels)
 }
 
+/// Int-PCM full-scale for a WAV's `bits_per_sample`. The sibling of
+/// `transcription::helpers::compute_int_max_val`: a crafted imported WAV
+/// claiming `bits_per_sample` 0 or > 32 must be rejected with an error, not
+/// shifted — `1u64 << (bps - 1)` underflows at 0 (garbage peak/rms) and
+/// overflows the u64 shift at 65+, a debug-build panic.
+fn compute_int_max_val(bits_per_sample: u16) -> AppResult<f32> {
+    if bits_per_sample == 0 || bits_per_sample > 32 {
+        return Err(AppError::processing(format!(
+            "Corrupt WAV: bits_per_sample is {bits_per_sample} (must be 1-32)"
+        )));
+    }
+    Ok((1u64 << (bits_per_sample - 1)) as f32)
+}
+
 fn compute_audio_levels(path: &std::path::Path) -> AppResult<RecordingAudioLevels> {
     // Decrypt-then-open: handles encrypted recordings AND legacy plaintext.
     let reader = crate::commands::transcription::helpers::open_recording_wav(path)?;
     let spec = reader.spec();
-
-    // Guard against malformed WAVs where bits_per_sample is 0. Without this
-    // check, `1u64 << (spec.bits_per_sample - 1)` underflows to `1 << u32::MAX`
-    // for the int branch, which is an undefined shift and yields garbage peak
-    // and rms values. Return zeroed levels with a warning instead.
-    if spec.bits_per_sample == 0 {
-        tracing::warn!(
-            path = %path.display(),
-            sample_rate = spec.sample_rate,
-            channels = spec.channels,
-            "WAV header reports bits_per_sample=0; returning zeroed levels instead of computing bogus values"
-        );
-        return Ok(RecordingAudioLevels {
-            peak: 0.0,
-            rms: 0.0,
-            is_silent: true,
-        });
-    }
 
     let (peak, sum_sq, count) = match spec.sample_format {
         hound::SampleFormat::Float => {
@@ -893,7 +925,7 @@ fn compute_audio_levels(path: &std::path::Path) -> AppResult<RecordingAudioLevel
             (peak, sum_sq, count)
         }
         hound::SampleFormat::Int => {
-            let max_val = (1u64 << (spec.bits_per_sample - 1)) as f32;
+            let max_val = compute_int_max_val(spec.bits_per_sample)?;
             let mut peak = 0.0f32;
             let mut sum_sq = 0.0f64;
             let mut count: u64 = 0;
@@ -1148,5 +1180,164 @@ mod tests {
                 other.map(|_| "Ok")
             ),
         }
+    }
+
+    /// Same-second stop → restart used to collide on the second-granularity
+    /// WAV filename (the second capture's open truncated the first take's
+    /// file). The millisecond suffix must disambiguate any two captures
+    /// inside one wall-clock second.
+    #[test]
+    fn wav_filenames_within_the_same_second_differ() {
+        use chrono::TimeZone;
+        let base = chrono::Local
+            .with_ymd_and_hms(2026, 10, 8, 12, 0, 0)
+            .unwrap();
+        let a = capture_wav_filename(base);
+        // Same second, next millisecond — a different name.
+        let b = capture_wav_filename(base + chrono::TimeDelta::milliseconds(1));
+        assert_ne!(a, b, "captures one millisecond apart must not share a name");
+        // Same instant — stable (idempotent) naming.
+        assert_eq!(a, capture_wav_filename(base));
+        // Shape: Recording_%Y-%m-%d_%H-%M-%S_mmm (milliseconds appended).
+        assert_eq!(a, "Recording_2026-10-08_12-00-00_000");
+        assert_eq!(b, "Recording_2026-10-08_12-00-00_001");
+    }
+
+    /// Stop-path twin of the boot sweep's already-encrypted guard
+    /// (`encryption_sweep_clears_flag_when_file_already_encrypted`): a file
+    /// already carrying the FE1 magic is never re-encrypted — the flag is
+    /// cleared and the bytes are left untouched.
+    #[test]
+    fn encrypt_stopped_recording_skips_an_already_encrypted_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // FE1 magic + junk: `is_encrypted` only inspects the prefix, so no
+        // key material is needed to exercise the guard.
+        let audio_path = tmp.path().join("already-enc.wav");
+        let original = b"FE1\x00\x01\x02ciphertext-bytes".to_vec();
+        std::fs::write(&audio_path, &original).expect("write fake enc");
+
+        let db = medical_db::Database::open_in_memory().expect("db");
+        let rec_id = Uuid::new_v4();
+        {
+            let conn = db.conn().expect("conn");
+            let mut rec = Recording::new("already-enc.wav", audio_path.clone());
+            rec.id = rec_id;
+            RecordingsRepo::insert(&conn, &rec).expect("insert");
+            conn.execute(
+                "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+                [&rec_id.to_string()],
+            )
+            .expect("flag pending");
+        }
+
+        encrypt_stopped_recording(&db, rec_id, &audio_path);
+
+        assert_eq!(
+            std::fs::read(&audio_path).expect("read back"),
+            original,
+            "already-encrypted file must not be re-encrypted (ciphertext-in corrupts)"
+        );
+        let conn = db.conn().expect("conn");
+        let pending = RecordingsRepo::list_encryption_pending(&conn).expect("list pending");
+        assert!(pending.is_empty(), "flag cleared without re-encrypting");
+    }
+
+    /// The plaintext path still encrypts and clears the flag (the happy
+    /// path of the same helper, under the synthetic-key mock).
+    #[test]
+    fn encrypt_stopped_recording_encrypts_plaintext_and_clears_flag() {
+        let _mock = crate::testutil::KeychainMockGuard::fixed_db_key([0xCCu8; 32]);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let audio_path = tmp.path().join("plaintext.wav");
+        std::fs::write(&audio_path, b"RIFF fake plaintext wav bytes").expect("write wav");
+
+        let db = medical_db::Database::open_in_memory().expect("db");
+        let rec_id = Uuid::new_v4();
+        {
+            let conn = db.conn().expect("conn");
+            let mut rec = Recording::new("plaintext.wav", audio_path.clone());
+            rec.id = rec_id;
+            RecordingsRepo::insert(&conn, &rec).expect("insert");
+            conn.execute(
+                "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+                [&rec_id.to_string()],
+            )
+            .expect("flag pending");
+        }
+
+        encrypt_stopped_recording(&db, rec_id, &audio_path);
+
+        assert!(
+            medical_security::file_crypto::is_encrypted(&audio_path),
+            "plaintext stopped recording encrypted at rest"
+        );
+        let conn = db.conn().expect("conn");
+        let pending = RecordingsRepo::list_encryption_pending(&conn).expect("list pending");
+        assert!(pending.is_empty(), "flag cleared after encryption");
+    }
+
+    /// The bps bound its transcription-side sibling
+    /// (`compute_int_max_val` in transcription/helpers.rs) already has: 0
+    /// and out-of-range depths are rejected as errors, never shifted (a
+    /// crafted import claiming bps 0/33 panicked debug builds at
+    /// `1u64 << (bps - 1)`).
+    #[test]
+    fn compute_int_max_val_rejects_zero_and_out_of_range_bits() {
+        let err = compute_int_max_val(0).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("bits_per_sample"),
+            "expected helpful error mentioning bits_per_sample, got: {msg}"
+        );
+        assert!(compute_int_max_val(33).is_err(), "bps > 32 rejected");
+        // In-range depths keep their full-scale values.
+        assert_eq!(compute_int_max_val(16).unwrap(), 32768.0);
+        assert_eq!(compute_int_max_val(32).unwrap(), 2147483648.0);
+    }
+
+    /// Cancel-side teardown: the stored CurrentRecording slot is consumed,
+    /// the shared capture flag released, and the plaintext capture WAV
+    /// shredded off disk. (The flag/slot interleaving itself is not
+    /// race-testable here — this pins the teardown contract the reorder
+    /// serves.)
+    #[tokio::test]
+    async fn discard_cancelled_recording_clears_slot_flag_and_shreds_wav() {
+        use crate::commands::generation::test_helpers::MockCompletionProvider;
+        use medical_core::types::settings::AppConfig;
+
+        let provider = Arc::new(MockCompletionProvider::new("mock", "x", 1));
+        let (state, _) = crate::commands::generation::test_helpers::build_test_state_with_provider(
+            AppConfig::default(),
+            "",
+            provider,
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wav_path = tmp.path().join("discarded-take.wav");
+        std::fs::write(&wav_path, b"RIFF plaintext capture").expect("write wav");
+        *state.current_recording.lock().unwrap() = Some(CurrentRecording {
+            id: Uuid::new_v4().to_string(),
+            wav_path: wav_path.clone(),
+            started_at: Instant::now(),
+            paused_at: None,
+            accumulated_pause: std::time::Duration::ZERO,
+        });
+        *state.recording_active.lock().await = true;
+
+        let taken = discard_cancelled_recording(&state).await.expect("teardown");
+        assert!(taken.is_some(), "the stored slot was consumed");
+        assert!(
+            state.current_recording.lock().unwrap().is_none(),
+            "slot cleared"
+        );
+        assert!(
+            !*state.recording_active.lock().await,
+            "shared capture flag released"
+        );
+        assert!(
+            !wav_path.exists(),
+            "discarded capture WAV shredded + unlinked"
+        );
     }
 }

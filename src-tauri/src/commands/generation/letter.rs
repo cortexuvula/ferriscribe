@@ -155,11 +155,9 @@ async fn generate_letter_inner(
 
     // Freshness provenance (best-effort): effective input digest with the
     // same fold the prompt used, plus the SOAP source binding —
-    // freshness compares it against digest(recordings.soap_note).
-    let source_digest = recording
-        .soap_note
-        .as_deref()
-        .map(super::freshness::digest_str);
+    // freshness compares it against digest(recordings.soap_note); the
+    // trimming digest keeps the write side normalized like the read.
+    let source_digest = super::freshness::text_digest(recording.soap_note.as_deref());
     let input_digest =
         super::freshness::letter_input_digest(folded.as_deref(), letter_type, audience_id, &config);
     persist_provenance(

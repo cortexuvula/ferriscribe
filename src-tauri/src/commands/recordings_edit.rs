@@ -10,7 +10,6 @@ use std::sync::Arc;
 use medical_core::error::{AppError, AppResult};
 use medical_db::Connection;
 use medical_db::generations::GenerationsRepo;
-use medical_db::recordings::RecordingsRepo;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -150,7 +149,7 @@ pub async fn save_recording_field(
 /// Steps:
 ///  1. Validate `field` against the whitelist.
 ///  2. Parse `recording_id` as UUID.
-///  3. Load the recording, mutate the requested field, persist.
+///  3. Persist the edit column-scoped ([`persist_edited_field`]).
 ///  4. If `field == "soap_note"` and `capture_enabled`, update the
 ///     matching generations row's `final_text` and spawn the
 ///     background edit-distance task.
@@ -182,101 +181,14 @@ pub fn save_recording_field_inner(
     let id = Uuid::parse_str(recording_id)
         .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
 
-    // Load → mutate → persist.
-    let mut recording = RecordingsRepo::get_by_id(conn, &id)?;
-
-    // Empty string means "clear the field".
+    // Empty string means "clear the field" (SQL NULL); otherwise the value.
     let owned_value = if value.is_empty() {
         None
     } else {
         Some(value.to_owned())
     };
 
-    match field {
-        // TRANSCRIPT SEGMENT INVALIDATION (review contract line C,
-        // docs/reviews/transcript-render-2026-09-13, finding 2): saving an
-        // edited transcript must drop the stale `transcript_segments`
-        // metadata in the SAME transaction as the text save. Segments take
-        // precedence over text parsing in the rich view, so retaining them
-        // hid saved corrections behind the pre-edit words (a corrected dose
-        // or negation appeared to revert despite a successful save). The
-        // text (with its `[Speaker unassigned]` markers / speaker labels)
-        // becomes the single source of truth until the next
-        // retranscription re-persists fresh segments. Cleared by KEY
-        // REMOVAL, not null-write: the frontend's shape validator treats a
-        // null value the same as an absent key, but removal is the honest
-        // state — there ARE no segments for this text.
-        // DIARIZATION FOLD EVIDENCE (hard-block design, legacy folded
-        // transcripts): whether the cleared segments COULD have been folded
-        // by the old `seg.speaker.or(last_speaker)` formatter is only
-        // observable here — once the segments are removed, a folded span is
-        // indistinguishable from the speaker's own speech in stored text.
-        // Record it BEFORE the removal, in the same pass, as a closed
-        // vocabulary value (content-free by construction: no span text, no
-        // speaker labels, no counts). Three states, and unknown must stay
-        // distinguishable from "no":
-        //   "fold_possible"  — an unlabelled segment FOLLOWED a labelled one
-        //                      (the only ordering the inheritance could
-        //                      corrupt).
-        //   "none_observed"  — segments were present and parseable, and
-        //                      showed no such ordering.
-        //   key ABSENT       — segments missing/unparseable at clear time:
-        //                      UNKNOWN. Never guessed, never defaulted to
-        //                      "none_observed" (stale/pre-flag recordings
-        //                      must not silently read as clean). An existing
-        //                      historical value is likewise left untouched —
-        //                      the evidence was recorded when it existed.
-        "transcript" => {
-            recording.transcript = owned_value;
-            if let Some(obj) = recording.metadata.as_object_mut() {
-                let fold_evidence = obj
-                    .get("transcript_segments")
-                    .and_then(diarization_fold_evidence);
-                obj.remove("transcript_segments");
-                if let Some(value) = fold_evidence {
-                    obj.insert(
-                        "diarization_fold_evidence".into(),
-                        serde_json::Value::String(value.as_str().to_owned()),
-                    );
-                }
-            }
-        }
-        "soap_note" => recording.soap_note = owned_value,
-        "referral" => recording.referral = owned_value,
-        "letter" => recording.letter = owned_value,
-        "peer_discussion" => recording.peer_discussion = owned_value,
-        "chat" => recording.chat = owned_value,
-        _ => {
-            // The whitelist check above makes this branch unreachable in
-            // practice. Use an explicit Err rather than unreachable!() to
-            // satisfy conservative lint configurations.
-            return Err(AppError::Other(format!("unexpected field: {field}")));
-        }
-    }
-
-    RecordingsRepo::update(conn, &recording)?;
-
-    // Bump updated_at + field revision for content sync. The recording row's
-    // `updated_at` drives the changed-since delta query, and the per-field
-    // revision gives the merge a precise LWW timestamp for this exact field.
-    // Best-effort: a failure here must not turn a successful edit-save into
-    // an error (the user's edit is already persisted above).
-    let now = chrono::Utc::now().to_rfc3339();
-    let _ = conn.execute(
-        "UPDATE recordings SET updated_at = ?1 WHERE id = ?2",
-        rusqlite::params![now, recording.id.to_string()],
-    );
-    // Best-effort, but visible: a dropped revision stamp costs this edit
-    // its LWW sync priority with no other signal. Field name only — no PHI.
-    if let Err(e) = medical_db::ContentSyncRepo::upsert_revision(
-        conn,
-        &recording.id,
-        field,
-        &now,
-        None, // origin_device — could add machine_id later
-    ) {
-        tracing::warn!(error = %e, field, "edit saved without a field revision stamp");
-    }
+    persist_edited_field(conn, &id, field, owned_value.as_deref())?;
 
     // Training-corpus finalize hook. Only applies to soap_note (v1 captures
     // only SOAP). Best-effort — failures are logged but never returned to
@@ -302,6 +214,146 @@ pub fn save_recording_field_inner(
         }
     }
 
+    Ok(())
+}
+
+/// Column-scoped persist for the editor path — the consumer-side twin of
+/// [`RecordingsRepo::persist_producer_update`]. Writes ONLY the edited text
+/// column (NULL when the field is cleared) plus, for transcript edits, the
+/// metadata read-modify-write the transcript arm owns (segment removal +
+/// fold evidence, computed against the row's CURRENT metadata inside this
+/// transaction); bumps `updated_at` and stamps the edited field's revision
+/// in the SAME transaction. The whole-row `RecordingsRepo::update` this
+/// replaces carried a read-modify-write snapshot: a producer persist
+/// (transcription, document generation) landing between the editor's read
+/// and its write was silently reverted column-by-column.
+fn persist_edited_field(
+    conn: &Connection,
+    id: &Uuid,
+    field: &str,
+    value: Option<&str>,
+) -> AppResult<()> {
+    // Column name comes from this closed mapping, never from the caller's
+    // string (the field is whitelist-validated by the caller; this match is
+    // the injection-safe second gate).
+    let column = match field {
+        "transcript" | "soap_note" | "referral" | "letter" | "peer_discussion" | "chat" => field,
+        _ => {
+            return Err(AppError::Other(format!(
+                "field '{field}' is not editable; allowed: {EDITABLE_FIELDS:?}"
+            )));
+        }
+    };
+
+    // IMMEDIATE: the transcript arm's metadata read-modify-write must
+    // serialize against concurrent metadata writers — the same discipline
+    // `persist_producer_update` uses for its patch merge.
+    let tx = medical_db::unchecked_transaction_immediate(conn)?;
+
+    let mut sets: Vec<String> = vec![format!("{column} = ?1")];
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(value.map(str::to_string))];
+    let mut next_idx = 2usize;
+
+    if field == "transcript" {
+        // TRANSCRIPT SEGMENT INVALIDATION (review contract line C,
+        // docs/reviews/transcript-render-2026-09-13, finding 2): saving an
+        // edited transcript must drop the stale `transcript_segments`
+        // metadata in the SAME transaction as the text save. Segments take
+        // precedence over text parsing in the rich view, so retaining them
+        // hid saved corrections behind the pre-edit words (a corrected dose
+        // or negation appeared to revert despite a successful save). The
+        // text (with its `[Speaker unassigned]` markers / speaker labels)
+        // becomes the single source of truth until the next
+        // retranscription re-persists fresh segments. Cleared by KEY
+        // REMOVAL, not null-write: the frontend's shape validator treats a
+        // null value the same as an absent key, but removal is the honest
+        // state — there ARE no segments for this text.
+        //
+        // The metadata is read from the row's CURRENT value (never a stale
+        // editor snapshot) inside this IMMEDIATE transaction.
+        //
+        // DIARIZATION FOLD EVIDENCE (hard-block design, legacy folded
+        // transcripts): whether the cleared segments COULD have been folded
+        // by the old `seg.speaker.or(last_speaker)` formatter is only
+        // observable here — once the segments are removed, a folded span is
+        // indistinguishable from the speaker's own speech in stored text.
+        // Record it BEFORE the removal, in the same pass, as a closed
+        // vocabulary value (content-free by construction: no span text, no
+        // speaker labels, no counts). Three states, and unknown must stay
+        // distinguishable from "no":
+        //   "fold_possible"  — an unlabelled segment FOLLOWED a labelled one
+        //                      (the only ordering the inheritance could
+        //                      corrupt).
+        //   "none_observed"  — segments were present and parseable, and
+        //                      showed no such ordering.
+        //   key ABSENT       — segments missing/unparseable at clear time:
+        //                      UNKNOWN. Never guessed, never defaulted to
+        //                      "none_observed" (stale/pre-flag recordings
+        //                      must not silently read as clean). An existing
+        //                      historical value is likewise left untouched —
+        //                      the evidence was recorded when it existed.
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT metadata FROM recordings WHERE id = ?1 AND deleted_at IS NULL",
+                [&id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(medical_db::DbError::from)?;
+        let mut metadata: serde_json::Value = current
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        let obj = metadata.as_object_mut().expect("just made an object");
+        let fold_evidence = obj
+            .get("transcript_segments")
+            .and_then(diarization_fold_evidence);
+        obj.remove("transcript_segments");
+        if let Some(evidence) = fold_evidence {
+            obj.insert(
+                "diarization_fold_evidence".into(),
+                serde_json::Value::String(evidence.as_str().to_owned()),
+            );
+        }
+        sets.push(format!("metadata = ?{next_idx}"));
+        params.push(Box::new(metadata.to_string()));
+        next_idx += 1;
+    }
+
+    // Content change → row stamp moves (the changed-since delta query and
+    // the wire builder's max(revision, row) rider both rely on it).
+    let now = chrono::Utc::now().to_rfc3339();
+    sets.push(format!("updated_at = ?{next_idx}"));
+    params.push(Box::new(now.clone()));
+    next_idx += 1;
+
+    params.push(Box::new(id.to_string()));
+    let sql = format!(
+        "UPDATE recordings SET {} WHERE id = ?{next_idx} AND deleted_at IS NULL",
+        sets.join(", ")
+    );
+    let rows = tx
+        .execute(
+            sql.as_str(),
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+        )
+        .map_err(medical_db::DbError::from)?;
+    if rows == 0 {
+        return Err(AppError::from(medical_db::DbError::NotFound(format!(
+            "recording {id}"
+        ))));
+    }
+
+    // Per-field LWW revision for content sync, stamped in the SAME
+    // transaction as the write — a dropped stamp costs this edit its sync
+    // priority. Field name only — no PHI.
+    if let Err(e) = medical_db::ContentSyncRepo::upsert_revision(&tx, id, field, &now, None) {
+        tracing::warn!(error = %e, field, "edit saved without a field revision stamp");
+    }
+
+    tx.commit().map_err(medical_db::DbError::from)?;
     Ok(())
 }
 
@@ -817,5 +869,61 @@ mod tests {
                 "field '{field}' is in EDITABLE_FIELDS but max_chars_for_field returned the 50_000 fallback — add an explicit cap arm"
             );
         }
+    }
+
+    /// Consumer-side twin of the db crate's
+    /// `persist_producer_update_does_not_revert_concurrent_column_edits`:
+    /// the editor owns ONLY its edited column — a producer persist (e.g. a
+    /// SOAP generation completing) that lands around the editor's save must
+    /// survive it. The old whole-row `RecordingsRepo::update` carried a
+    /// read-modify-write snapshot and reverted such writes column-by-column;
+    /// the interleaving here is modeled by ordering (the scoped persist
+    /// carries no snapshot to go stale).
+    #[test]
+    fn editor_save_does_not_revert_a_concurrent_producer_write() {
+        let conn = in_memory_db();
+        let rec_id = insert_recording(&conn);
+
+        // A producer persist lands (a document generation completing).
+        RecordingsRepo::persist_producer_update(
+            &conn,
+            &rec_id,
+            &medical_db::recordings::ProducerPersist {
+                soap_note: Some("Producer-written SOAP text.".into()),
+                ..Default::default()
+            },
+        )
+        .expect("producer persist");
+
+        // …then the editor saves a transcript edit.
+        let db = std::sync::Arc::new(medical_db::Database::open_in_memory().unwrap());
+        save_recording_field_inner(
+            db,
+            &conn,
+            &rec_id.to_string(),
+            "transcript",
+            "Edited transcript wording.",
+            false,
+        )
+        .expect("editor save");
+
+        let after = RecordingsRepo::get_by_id(&conn, &rec_id).unwrap();
+        assert_eq!(
+            after.transcript.as_deref(),
+            Some("Edited transcript wording."),
+            "the edited field is saved"
+        );
+        assert_eq!(
+            after.soap_note.as_deref(),
+            Some("Producer-written SOAP text."),
+            "the concurrent producer's write must survive the editor save"
+        );
+        // The edit still stamps its own field revision (LWW priority).
+        let revisions =
+            medical_db::ContentSyncRepo::revisions_for(&conn, &rec_id).expect("revision read");
+        assert!(
+            revisions.iter().any(|r| r.field == "transcript"),
+            "editor save stamps the edited field's revision"
+        );
     }
 }

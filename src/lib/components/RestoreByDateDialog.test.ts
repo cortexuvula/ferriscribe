@@ -248,3 +248,71 @@ describe('RestoreByDateDialog — restore', () => {
     expect(mockRestoreTrashedOnDate).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('RestoreByDateDialog — stale count guard', () => {
+  it('discards a late count for a superseded date (monotonic request token)', async () => {
+    let resolveOlder: (n: number) => void = () => {};
+    mockCountTrashedOnDate
+      .mockImplementationOnce(() => new Promise((res) => { resolveOlder = res; }))
+      .mockResolvedValueOnce(2);
+    render(RestoreByDateDialog, { onClose: () => {}, onAnnounce: () => {} });
+
+    const older = new Date();
+    older.setDate(older.getDate() - 5);
+    const newer = new Date();
+    newer.setDate(newer.getDate() - 1);
+    const input = screen.getByLabelText('Deleted on') as HTMLInputElement;
+
+    await fireEvent.input(input, { target: { value: localIso(older) } });
+    await fireEvent.change(input, { target: { value: localIso(older) } });
+    expect(screen.getByText('Counting…')).toBeTruthy();
+
+    // The user picks a different day before the first count resolves.
+    await fireEvent.input(input, { target: { value: localIso(newer) } });
+    await fireEvent.change(input, { target: { value: localIso(newer) } });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Restore 2 recordings' })).toBeTruthy(),
+    );
+
+    // The abandoned date's count lands LAST — date A's N must never show
+    // under date B's heading.
+    resolveOlder(9);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.queryByText(/Restore 9/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Restore 2 recordings' })).toBeTruthy();
+  });
+
+  it('invalidates the in-flight count when the date changes to a future day', async () => {
+    let resolveCount: (n: number) => void = () => {};
+    mockCountTrashedOnDate.mockImplementationOnce(
+      () => new Promise((res) => { resolveCount = res; }),
+    );
+    render(RestoreByDateDialog, { onClose: () => {}, onAnnounce: () => {} });
+
+    const past = new Date();
+    past.setDate(past.getDate() - 1);
+    const future = new Date();
+    future.setDate(future.getDate() + 1);
+    const input = screen.getByLabelText('Deleted on') as HTMLInputElement;
+
+    await fireEvent.input(input, { target: { value: localIso(past) } });
+    await fireEvent.change(input, { target: { value: localIso(past) } });
+    expect(screen.getByText('Counting…')).toBeTruthy();
+
+    await fireEvent.input(input, { target: { value: localIso(future) } });
+    await fireEvent.change(input, { target: { value: localIso(future) } });
+    expect(screen.getByText('Choose a date that has already happened.')).toBeTruthy();
+    expect(screen.queryByText('Counting…')).toBeNull();
+
+    // The abandoned count resolves late — it must not surface a preview
+    // for a date the dialog just rejected.
+    resolveCount(7);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.queryByText(/Restore 7/)).toBeNull();
+    expect(
+      (screen.getByRole('button', { name: 'Restore' }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+});

@@ -18,16 +18,17 @@
 
   onMount(() => {
     recordings.load();
-    // Badge count only — the full trash page loads on first entry.
+    // Badge count only — the trash page loads on every Trash entry.
     void recordings.refreshTrashedTotal();
   });
 
   function switchView(next: 'active' | 'trash') {
     view = next;
-    if (next === 'trash' && recordings.trashedList.length === 0) {
-      // Fresh trash view (or emptied by a restore) — load page 1. An
-      // error state also retries here; an EMPTY result will not reload
-      // until re-entered, matching the Active view's load-once behavior.
+    if (next === 'trash') {
+      // ALWAYS reload page 1 on entry: rows move in and out of Trash from
+      // the Active view, the Undo toast, and sync, and none of those keep
+      // the cached page fresh — the old load-only-if-empty check is what
+      // let a stale list through. One bounded page fetch per entry.
       void recordings.loadTrashed();
     }
   }

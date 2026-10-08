@@ -915,6 +915,7 @@ impl AppState {
             crate::sweeps::orphaned_enc_sweep(&db, &dir);
         }
         crate::sweeps::translation_wav_sweep(&data_dir.join("translation"));
+        crate::sweeps::capture_tmp_sweep(&data_dir);
         crate::sweeps::spawn_retention_sweeper(Arc::clone(&db));
 
         let config_dir = data_dir.join("config");
@@ -992,13 +993,24 @@ impl AppState {
             let mut interval = tokio::time::interval(WHISPER_IDLE_SWEEP_INTERVAL);
             loop {
                 interval.tick().await;
-                if let Some(local) = sweeper_slot.read().await.clone()
-                    && local.evict_if_idle(WHISPER_IDLE_AFTER)
-                {
-                    tracing::info!(
-                        idle_secs = WHISPER_IDLE_AFTER.as_secs(),
-                        "Evicted idle whisper context (freed model memory)"
-                    );
+                if let Some(local) = sweeper_slot.read().await.clone() {
+                    // `evict_if_idle` takes the context cache's load mutex
+                    // and drops the (possibly gigabyte) loaded context —
+                    // blocking work that must run on the blocking pool, or
+                    // an in-flight load elsewhere would stall a Tokio
+                    // worker for the whole teardown.
+                    let evicted = tokio::task::spawn_blocking({
+                        let local = Arc::clone(&local);
+                        move || local.evict_if_idle(WHISPER_IDLE_AFTER)
+                    })
+                    .await
+                    .unwrap_or(false);
+                    if evicted {
+                        tracing::info!(
+                            idle_secs = WHISPER_IDLE_AFTER.as_secs(),
+                            "Evicted idle whisper context (freed model memory)"
+                        );
+                    }
                 }
             }
         });

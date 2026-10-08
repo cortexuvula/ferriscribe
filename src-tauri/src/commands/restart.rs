@@ -380,11 +380,28 @@ pub async fn register_pending_edit(
 }
 
 /// Clear the pending-edit registration once the frontend's save has
-/// completed (the edit is now durable in the DB).
+/// completed (the edit is now durable in the DB). Matches on BOTH the
+/// recording id and the field: a save completing for recording A must not
+/// clear a pending edit registered for recording B (the frontend passes
+/// the id it saved).
 #[tauri::command]
-pub async fn clear_pending_edit(state: State<'_, AppState>, field: String) -> AppResult<()> {
+pub async fn clear_pending_edit(
+    state: State<'_, AppState>,
+    recording_id: String,
+    field: String,
+) -> AppResult<()> {
+    clear_pending_edit_inner(&state, &recording_id, &field).await
+}
+
+/// Testable core of [`clear_pending_edit`].
+pub(crate) async fn clear_pending_edit_inner(
+    state: &AppState,
+    recording_id: &str,
+    field: &str,
+) -> AppResult<()> {
     let mut guard = state.pending_edit.lock().await;
     if let Some(edit) = guard.as_ref()
+        && edit.recording_id == recording_id
         && edit.field == field
     {
         *guard = None;
@@ -595,6 +612,61 @@ mod tests {
         assert!(
             code.contains("RESTARTING.load(Ordering::SeqCst) || QUITTING.load(Ordering::SeqCst)"),
             "exit_committed must OR the restart and quit commits"
+        );
+    }
+
+    /// Clearing a pending edit matches on BOTH the recording id and the
+    /// field — a save completing for recording A must not clear a pending
+    /// edit registered for recording B (the coordination contract with the
+    /// frontend, which passes the id it saved).
+    #[tokio::test]
+    async fn clear_pending_edit_matches_recording_id_and_field() {
+        use crate::commands::generation::test_helpers::MockCompletionProvider;
+        use medical_core::types::settings::AppConfig;
+
+        let provider = std::sync::Arc::new(MockCompletionProvider::new("mock", "x", 1));
+        let (state, _) = crate::commands::generation::test_helpers::build_test_state_with_provider(
+            AppConfig::default(),
+            "",
+            provider,
+        )
+        .await;
+
+        let seed = async |recording_id: &str, field: &str| {
+            *state.pending_edit.lock().await = Some(PendingEdit {
+                recording_id: recording_id.to_string(),
+                field: field.to_string(),
+                value: "draft".to_string(),
+            });
+        };
+
+        // Same field, DIFFERENT recording — the other recording's edit
+        // survives.
+        seed("id-b", "soap_note").await;
+        clear_pending_edit_inner(&state, "id-a", "soap_note")
+            .await
+            .expect("clear");
+        assert!(
+            state.pending_edit.lock().await.is_some(),
+            "another recording's pending edit must survive"
+        );
+
+        // Same recording, DIFFERENT field — also survives.
+        clear_pending_edit_inner(&state, "id-b", "transcript")
+            .await
+            .expect("clear");
+        assert!(
+            state.pending_edit.lock().await.is_some(),
+            "a different field's pending edit must survive"
+        );
+
+        // The exact (id, field) pair clears.
+        clear_pending_edit_inner(&state, "id-b", "soap_note")
+            .await
+            .expect("clear");
+        assert!(
+            state.pending_edit.lock().await.is_none(),
+            "the matching (recording, field) pair clears"
         );
     }
 }

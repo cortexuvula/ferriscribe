@@ -958,8 +958,17 @@ impl RecordingsRepo {
             if exempt {
                 continue;
             }
-            Self::soft_delete(conn, &id)?;
-            trashed.push(id);
+            // A candidate tombstoned between the listing above and this call
+            // (user delete, another sweep) surfaces as NotFound — skip it and
+            // keep sweeping the remaining candidates, mirroring
+            // `purge_tombstone_batch`'s skip-non-confirmed discipline. `?`
+            // here previously aborted the WHOLE sweep at the first race,
+            // leaving every later candidate untrashed until the next tick.
+            match Self::soft_delete(conn, &id) {
+                Ok(()) => trashed.push(id),
+                Err(DbError::NotFound(_)) => continue,
+                Err(e) => return Err(e),
+            }
         }
         Ok(trashed)
     }

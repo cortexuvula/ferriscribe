@@ -22,7 +22,6 @@
   import { toasts } from '../stores/toasts.svelte';
   import { playSoapCompleteChime } from '../utils/notificationSound';
   import { rsvp } from '../stores/rsvp.svelte';
-  import { formatError } from '../types/errors';
   import { buildPatientContext } from '../utils/patient_context';
   import { contextFromMetadata } from '../utils/recordingContext';
   import { generateSoap } from '../api/generation';
@@ -33,6 +32,7 @@
   import { getBackupStatus, isProtected } from '../api/backup';
   import { settingsNav } from '../stores/settingsNav.svelte';
   import { anyOverlayOpen } from '../stores/overlay';
+  import { sanitizedErr } from '../utils/sanitizedErr';
 
   type Props = {
     onopenSettings?: (target: 'models' | 'audio') => void;
@@ -459,7 +459,7 @@
         generation.finish();
         return;
       }
-      generation.setError(formatError(e) || 'Failed to regenerate SOAP note');
+      generation.setError(sanitizedErr(e) || 'Failed to regenerate SOAP note');
     } finally {
       regenerating = false;
     }
@@ -496,9 +496,16 @@
 
       // Always launch — upload doesn't respect settings.state.auto_generate_soap (live recording still does).
       pipelineRecordingId = recordingId;
-      maybeLaunchPipeline(recordingId);
+      // Same re-entry guard as handleProcessRecording: the OCR-settle
+      // preamble can park for up to 60 s while the visible Process button
+      // stays clickable — without the flag, a click there fires a second
+      // process_recording invoke for the same recording.
+      processLaunching = true;
+      void maybeLaunchPipeline(recordingId).finally(() => {
+        processLaunching = false;
+      });
     } catch (e) {
-      importError = formatError(e) || 'Import failed';
+      importError = sanitizedErr(e) || 'Import failed';
     } finally {
       importing = false;
     }
@@ -516,7 +523,7 @@
         const rec = await getRecording(rid);
         return rec?.soap_note ?? undefined;
       },
-      onError: (e) => toasts.error(`Failed to copy SOAP note: ${e}`),
+      onError: (e) => toasts.error(`Failed to copy SOAP note: ${sanitizedErr(e)}`),
     });
   }
 
@@ -532,7 +539,7 @@
       }
     } catch (e) {
       console.error('Failed to open speed reader:', e);
-      toasts.error(`Failed to open speed reader: ${e}`);
+      toasts.error(`Failed to open speed reader: ${sanitizedErr(e)}`);
     }
   }
 
