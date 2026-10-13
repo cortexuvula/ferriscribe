@@ -215,21 +215,28 @@ async fn wire_upstream_endpoints(state: &AppState) -> AppResult<()> {
 
 #[tauri::command]
 pub async fn stop_sharing(state: State<'_, AppState>) -> AppResult<()> {
+    // Clear the auto-resume marker FIRST — before the lifecycle lock and
+    // any await — so an explicit Stop wins over an unrelated startup race
+    // (e.g. user stops sharing immediately on launch, before the resume
+    // hook gets to the marker). Only this user-driven command clears the
+    // persisted server role: the quit-time callers of `stop_sharing_inner`
+    // (window close, coordinated quit) kill the whisper child but KEEP the
+    // marker, so office-server mode auto-resumes on the next launch.
+    delete_server_config();
     stop_sharing_inner(&state).await
 }
 
 /// Core stop logic, factored out so the app-close / window-close handler can
-/// call it without the Tauri command wrapper.
+/// call it without the Tauri command wrapper. Does NOT clear the persisted
+/// `sharing-server.json` auto-resume marker — that's the explicit Stop
+/// command's concern (`stop_sharing`), mirroring how `start_sharing_inner`
+/// leaves `write_server_config` to its command wrapper.
 pub async fn stop_sharing_inner(state: &AppState) -> AppResult<()> {
     // Wait out an in-flight start (see start_sharing_inner): a Stop clicked
     // during a slow start now blocks until the service registers, then
     // cleanly stops it — instead of racing to an empty slot and returning
     // Ok while the start installs a running server behind us.
     let _lifecycle = state.sharing_lifecycle.lock().await;
-    // Clear the auto-resume marker first so an explicit Stop wins over an
-    // unrelated startup race (e.g. user stops sharing immediately on launch
-    // before the resume hook fires).
-    delete_server_config();
     // Stop the sharing service, but keep its error for the return: the
     // vocab API teardown below must run regardless — early-returning on a
     // service-stop failure would leave the HTTP API (and its event
@@ -362,4 +369,91 @@ async fn build_sharing_config(friendly_name: String) -> AppResult<SharingConfig>
         whisper_internal_api_key: hex::encode(whisper_api),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{server_config_path, test_app_data_guard};
+    use super::{ServerConfig, stop_sharing_inner, write_server_config};
+    use crate::commands::generation::test_helpers::build_test_state_with_recording;
+    use medical_core::types::settings::AppConfig;
+
+    /// The 2026-10-13 field bug: the window-close handler and the
+    /// coordinated quit both ride `stop_sharing_inner` for whisper-child
+    /// hygiene, and its unconditional marker deletion wiped
+    /// `sharing-server.json` on every clean app quit — so office-server
+    /// mode never survived a restart even though boot auto-resume works
+    /// (field-verified: boots after a coordinated quit never resumed).
+    /// The quit-path stop must keep the marker byte-for-byte.
+    #[tokio::test]
+    async fn quit_path_stop_preserves_the_auto_resume_marker() {
+        let _guard = test_app_data_guard().await;
+        write_server_config(&ServerConfig {
+            version: 1,
+            friendly_name: "Clinic Server".into(),
+        })
+        .expect("write marker");
+        // Minimal state with no running sharing service: the stop takes the
+        // fast path (empty slots, providers absent) but still exercises the
+        // endpoint-restoration tail that reads config + paired state.
+        let (state, _recording_id) =
+            build_test_state_with_recording(AppConfig::default(), "transcript").await;
+        stop_sharing_inner(&state)
+            .await
+            .expect("stop with no running service succeeds");
+        let path = server_config_path().expect("marker path");
+        assert!(
+            path.exists(),
+            "quit-time stop must keep sharing-server.json so boot auto-resume fires"
+        );
+        let back: ServerConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back.version, 1);
+        assert_eq!(back.friendly_name, "Clinic Server");
+        // Cleanup via remove_file (not the helper) so this line's source
+        // doesn't add a second needle match for the source-pin test below.
+        let _ = std::fs::remove_file(server_config_path().expect("marker path"));
+    }
+
+    /// Source pin (same idiom as `restart.rs`'s exit-ordering pins, for a
+    /// wrapper decision a unit test can't reach through Tauri's `State`):
+    /// the ONLY marker deletion in this file is the explicit `stop_sharing`
+    /// command — never `stop_sharing_inner`, which the quit paths ride.
+    /// The needle is assembled at runtime so this test's own source (it
+    /// lives in the file under assertion) cannot match itself.
+    #[test]
+    fn only_the_explicit_stop_command_clears_the_marker() {
+        let code: String = include_str!("lifecycle.rs")
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("///") || t.starts_with("//!") || t.starts_with("//"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let needle = ["delete_server", "_config();"].concat();
+        assert_eq!(
+            code.matches(needle.as_str()).count(),
+            1,
+            "exactly one marker-deletion site must exist in this file"
+        );
+        let command = code
+            .split("pub async fn stop_sharing(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub async fn ").next())
+            .expect("stop_sharing command must exist");
+        assert!(
+            command.contains(needle.as_str()),
+            "the explicit Stop command must clear the auto-resume marker"
+        );
+        let inner = code
+            .split("pub async fn stop_sharing_inner(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub async fn ").next())
+            .expect("stop_sharing_inner must exist");
+        assert!(
+            !inner.contains(needle.as_str()),
+            "stop_sharing_inner is the quit-path stop — it must NOT clear the marker"
+        );
+    }
 }

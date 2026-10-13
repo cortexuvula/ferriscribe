@@ -62,7 +62,9 @@
 //!    window-close handler's spawn-and-forget shape is not acceptable
 //!    here): it kills the whisper child via `.kill().await` and can
 //!    contend with an in-flight `start_sharing_inner` on the lifecycle
-//!    lock — which is exactly why step 7's timeout exists.
+//!    lock — which is exactly why step 7's timeout exists. Keeps the
+//!    `sharing-server.json` auto-resume marker (only the explicit Stop
+//!    sharing command clears it).
 //! 6. Emit the final "exiting" log line, THEN flush the non-blocking
 //!    log buffer (dropping the `WorkerGuard` from `crate::LOG_GUARD`),
 //!    THEN re-arm the exit guard (newest atexit entry, by construction),
@@ -431,7 +433,10 @@ async fn settle_for_quit(state: &AppState) -> Result<(), QuitRefusal> {
     // Step 5 — stop office sharing, AWAITED (kills the whisper child).
     // A failure here must not block the quit: the alternative (keeping
     // the app alive on a stop failure) orphans the child on the happy
-    // path's error twin. Kind only.
+    // path's error twin. Kind only. The persisted server config
+    // (`sharing-server.json`) is deliberately NOT cleared — quit stops
+    // keep the marker so office-server mode auto-resumes on next launch;
+    // only the explicit Stop sharing command clears it.
     if let Err(e) = super::sharing::stop_sharing_inner(state).await {
         tracing::warn!(
             error_kind = e.kind_str(),
