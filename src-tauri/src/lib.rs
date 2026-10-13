@@ -301,6 +301,10 @@ pub fn run() {
             // Auto-stop sharing when the main window closes, so the
             // whisper-server child process is killed instead of becoming an
             // orphan zombie on app quit. Best-effort: failures are logged.
+            // The persisted server config (`sharing-server.json`) survives —
+            // quit stops must not clear the auto-resume marker (only the
+            // explicit Stop sharing command does), or the "this machine is
+            // the office server" setting would be lost on every app quit.
             //
             // The close is PREVENTED and re-issued after the stop finishes:
             // the spawned task races the run loop otherwise, and the window

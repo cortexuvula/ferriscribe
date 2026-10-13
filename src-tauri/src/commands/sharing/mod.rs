@@ -108,7 +108,9 @@ pub(super) fn paired_connection_path() -> AppResult<std::path::PathBuf> {
 }
 
 /// Persisted "this machine is the office server" config. Written when the
-/// user clicks Start sharing, removed when they Stop sharing. The presence
+/// user clicks Start sharing, removed when they Stop sharing — NOT when the
+/// app quits (quit-time sharing stops kill the whisper child but keep this
+/// file, so office-server mode auto-resumes on the next launch). The presence
 /// of this file at app startup is what triggers auto-resume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -124,6 +126,14 @@ fn default_server_config_version() -> u32 {
 }
 
 pub fn server_config_path() -> AppResult<std::path::PathBuf> {
+    // Test seam, same pattern as `load_paired_connection`: once any test in
+    // this binary opts in, marker writes/deletes land in the shared tempdir
+    // instead of the developer's real app-data (whose live marker may be
+    // the persisted server role of a concurrently running app instance).
+    #[cfg(test)]
+    if let Some(dir) = test_app_data_dir() {
+        return Ok(dir.join("sharing-server.json"));
+    }
     Ok(app_data_dir()?.join("sharing-server.json"))
 }
 
@@ -208,9 +218,10 @@ mod tests {
 
     #[test]
     fn write_then_delete_server_config_is_idempotent() {
-        // Writes the real config file (whatever dirs::data_dir() points at).
-        // We snapshot whatever was there first and restore it afterwards so we
-        // don't clobber a developer's actual paired install state.
+        // `server_config_path` routes through the cfg(test) app-data seam,
+        // so this writes the shared test tempdir — never the developer's
+        // real app-data. Snapshot/restore stays as belt-and-braces for a
+        // hand-run variant against a different path.
         let path = match server_config_path() {
             Ok(p) => p,
             Err(_) => return, // headless / sandboxed env without data_dir — nothing to test
