@@ -134,12 +134,15 @@ impl SttProvider for LocalSttProvider {
         let whisper_path = self.whisper_model_path.clone();
         let whisper_cache = Arc::clone(&self.whisper_cache);
         let language = config.language.clone();
+        let best_of = config.best_of;
+        let no_context = config.no_context;
 
         let (whisper_segments, audio_16k) = tokio::task::spawn_blocking(move || {
             let audio_16k_raw = audio_prep::to_16k_mono_f32(&audio);
             let audio_16k = audio_prep::trim_trailing_silence(&audio_16k_raw, 0.01);
             let transcriber = WhisperTranscriber::new(whisper_path, whisper_cache);
-            let segments = transcriber.transcribe(&audio_16k, language.as_deref())?;
+            let segments =
+                transcriber.transcribe(&audio_16k, language.as_deref(), best_of, no_context)?;
             Ok::<_, AppError>((segments, audio_16k))
         })
         .await

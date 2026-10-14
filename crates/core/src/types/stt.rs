@@ -48,6 +48,15 @@ pub struct SttConfig {
     pub smart_formatting: bool,
     /// Enable profanity filtering.
     pub profanity_filter: bool,
+    /// Local Whisper decode override: `Some(n)` with `n > 1` switches the
+    /// decoder from greedy sampling to beam search with beam size `n`.
+    /// `None` (the default) keeps the greedy decode.
+    pub best_of: Option<u32>,
+    /// Local Whisper decode override: `Some(false)` disables the default
+    /// `no_context` anti-hallucination flag, letting decoded text carry
+    /// across segments as prompt context. `None` (the default) keeps
+    /// `no_context = true`.
+    pub no_context: Option<bool>,
 }
 
 impl Default for SttConfig {
@@ -59,6 +68,8 @@ impl Default for SttConfig {
             model: None,
             smart_formatting: true,
             profanity_filter: false,
+            best_of: None,
+            no_context: None,
         }
     }
 }
@@ -174,5 +185,7 @@ mod tests {
         assert!(config.model.is_none());
         assert!(config.smart_formatting);
         assert!(!config.profanity_filter);
+        assert!(config.best_of.is_none());
+        assert!(config.no_context.is_none());
     }
 }

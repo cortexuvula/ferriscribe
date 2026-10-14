@@ -1,9 +1,11 @@
 //! Whisper transcription via whisper-rs.
 //!
-//! Wraps the whisper-rs FFI bindings to run local Whisper inference. Uses
-//! `Greedy { best_of: 1 }` sampling with anti-hallucination parameters
-//! (suppress_blank, suppress_nst, no_context) to minimize repetition loops.
-//! Must run inside `spawn_blocking` — the C++ inference is CPU/GPU-bound.
+//! Wraps the whisper-rs FFI bindings to run local Whisper inference. Decodes
+//! with `Greedy { best_of: 1 }` sampling plus anti-hallucination parameters
+//! (suppress_blank, suppress_nst, no_context) to minimize repetition loops;
+//! callers can override the sampling strategy (`best_of` > 1 → beam search)
+//! and `no_context` per call. Must run inside `spawn_blocking` — the C++
+//! inference is CPU/GPU-bound.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -139,6 +141,22 @@ impl<C> WhisperContextCache<C> {
     }
 }
 
+/// Resolve the sampling strategy for a decode attempt.
+///
+/// The default (and `Some(1)`, which is greedy's own floor) is
+/// `Greedy { best_of: 1 }`; a `best_of` override above 1 switches to
+/// `BeamSearch { beam_size: n, patience: 1.0 }` — the alternate decode shape
+/// for recordings where greedy collapsed into a repetition loop.
+fn sampling_strategy(best_of: Option<u32>) -> SamplingStrategy {
+    match best_of.filter(|n| *n > 1) {
+        Some(n) => SamplingStrategy::BeamSearch {
+            beam_size: n as i32,
+            patience: 1.0,
+        },
+        _ => SamplingStrategy::Greedy { best_of: 1 },
+    }
+}
+
 /// Production context loader: read the ggml file and build the
 /// (GPU-enabled per build features) whisper context.
 pub fn load_whisper_context(model_path: &Path) -> AppResult<Arc<WhisperContext>> {
@@ -181,11 +199,17 @@ impl WhisperTranscriber {
     ///
     /// - `audio_16k_mono` — 16 kHz mono f32 PCM samples (preprocessed by [`crate::audio_prep`])
     /// - `language` — optional 2-letter language code (e.g. `"en"`); `None` = auto-detect
+    /// - `best_of` — decode override: `Some(n)` with `n > 1` switches from greedy
+    ///   to beam search with beam size `n` (see [`sampling_strategy`])
+    /// - `no_context` — decode override: `Some(false)` disables the default
+    ///   `no_context = true` anti-hallucination flag
     #[instrument(skip(self, audio_16k_mono), fields(provider = "whisper_local"))]
     pub fn transcribe(
         &self,
         audio_16k_mono: &[f32],
         language: Option<&str>,
+        best_of: Option<u32>,
+        no_context: Option<bool>,
     ) -> AppResult<Vec<WhisperSegment>> {
         let ctx = self.cache.get(&self.model_path)?;
         let mut state = ctx
@@ -198,7 +222,9 @@ impl WhisperTranscriber {
         // single best token at each step, breaking out of loops more easily.
         // Combined with suppress_blank + no_context + trailing-silence trim,
         // this is the standard whisper.cpp anti-hallucination configuration.
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        // A `best_of` override > 1 deliberately switches to beam search — the
+        // retry's alternate decode shape for audio greedy couldn't decode.
+        let mut params = FullParams::new(sampling_strategy(best_of));
 
         let lang_code: Option<String> = language.map(|l| l.chars().take(2).collect());
         params.set_language(lang_code.as_deref());
@@ -226,14 +252,16 @@ impl WhisperTranscriber {
         // suppress_non_speech_tokens: filters out tokens like [BLANK], [NOISE],
         //   [MUSIC], etc. that trigger loop behavior.
         // no_context: prevents the model from carrying decoded text from one
-        //   segment into the next as prompt context — this stops a loop in
-        //   one segment from propagating to subsequent segments.
+        // segment into the next as prompt context — this stops a loop in
+        // one segment from propagating to subsequent segments. A `Some(false)`
+        // override turns it off (the retry's alternate decode shape);
+        // `None` keeps the anti-hallucination default.
         // max_len: caps each segment to 60 tokens (~1-2 sentences). Without
-        //   this, a single degenerate segment can grow to thousands of tokens
-        //   of repeated text.
+        // this, a single degenerate segment can grow to thousands of tokens
+        // of repeated text.
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
-        params.set_no_context(true);
+        params.set_no_context(no_context.unwrap_or(true));
         // Note: set_max_len is NOT used — it caps segment LENGTH IN CHARACTERS
         // (not tokens as the name might suggest). A value of 60 would
         // fragment every transcript into ~10-word pieces. The trailing-silence
@@ -333,6 +361,34 @@ mod tests {
 
     fn advance(now: &Arc<std::sync::Mutex<Instant>>, by: Duration) {
         *now.lock().unwrap() += by;
+    }
+
+    #[test]
+    fn none_or_one_keeps_greedy_sampling() {
+        // The default decode (None) and an explicit Some(1) — greedy's own
+        // floor — must both select the anti-hallucination greedy strategy.
+        assert!(matches!(
+            sampling_strategy(None),
+            SamplingStrategy::Greedy { best_of: 1 }
+        ));
+        assert!(matches!(
+            sampling_strategy(Some(1)),
+            SamplingStrategy::Greedy { best_of: 1 }
+        ));
+    }
+
+    #[test]
+    fn best_of_above_one_switches_to_beam_search() {
+        match sampling_strategy(Some(5)) {
+            SamplingStrategy::BeamSearch {
+                beam_size,
+                patience,
+            } => {
+                assert_eq!(beam_size, 5);
+                assert_eq!(patience, 1.0);
+            }
+            other => panic!("expected BeamSearch, got {other:?}"),
+        }
     }
 
     #[test]
