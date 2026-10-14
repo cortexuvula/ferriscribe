@@ -257,7 +257,13 @@ pub async fn transcribe_recording_inner(
     // may still skip the run when models are missing — that gap is what the
     // outcome distinction below reports on.
     let diarize_requested = config.diarize;
-    let transcript = match stt.transcribe(audio, config, token).await {
+    // Pass clones so the originals stay in scope for the beam-search retry
+    // at the empty-text guard below: re-loading the WAV would re-read and
+    // re-decrypt the audio from disk.
+    let transcript = match stt
+        .transcribe(audio.clone(), config.clone(), token.clone())
+        .await
+    {
         Ok(t) => t,
         Err(e) => {
             // Preserve EndpointOffline as-is so the frontend dialog can fire.
@@ -291,35 +297,11 @@ pub async fn transcribe_recording_inner(
 
     // Diarization outcome reporting (see `diarization_outcome` below for the
     // state definitions). A user who explicitly turned the setting on must
-    // not silently get unlabeled text when something went wrong.
-    let outcome = diarization_outcome(&transcript, diarize_requested);
-    match &outcome {
-        DiarizationOutcome::NotRequested | DiarizationOutcome::Succeeded => {}
-        DiarizationOutcome::Skipped => {
-            tracing::warn!(
-                recording_id = %recording_id,
-                "Diarization requested but skipped (models missing) — emitting diarization-warning"
-            );
-            let _ = app.emit("diarization-warning", &recording_id);
-        }
-        DiarizationOutcome::Failed(reason) => {
-            tracing::error!(
-                recording_id = %recording_id,
-                error = %reason,
-                "Diarization was requested and attempted but FAILED — emitting diarization-failed"
-            );
-            let _ = app.emit("diarization-failed", &recording_id);
-        }
-        DiarizationOutcome::SucceededNoSpeakers => {
-            // Attempted, did not fail, and every segment is unlabeled: the
-            // turns list came back empty. Log at info — this is the expected
-            // single-speaker collapse, not a failure.
-            tracing::info!(
-                recording_id = %recording_id,
-                "Diarization ran but produced no speaker turns (single-speaker collapse) — no labels"
-            );
-        }
-    }
+    // not silently get unlabeled text when something went wrong. Recomputed
+    // after a successful beam-search retry so the persisted metadata and the
+    // warnings describe the transcript that is actually saved.
+    let mut outcome = diarization_outcome(&transcript, diarize_requested);
+    emit_diarization_outcome_warnings(&app, &recording_id, &outcome);
 
     // Collapse whisper.cpp repetition loops ("okay okay okay all right all
     // right all right") before formatting. This is a decoding pathology, not
@@ -333,7 +315,7 @@ pub async fn transcribe_recording_inner(
     filter_cross_segment_repetitions(&mut transcript);
 
     // Build speaker-attributed text when diarization segments are available.
-    let display_text = format_transcript_with_speakers(&transcript);
+    let mut display_text = format_transcript_with_speakers(&transcript);
 
     // Guard: silent source + repeated-phrase output is a Whisper hallucination.
     // Rejecting here stops us from generating a bogus SOAP from nonsense like
@@ -357,17 +339,104 @@ pub async fn transcribe_recording_inner(
 
     // Guard: if transcription produced no text, mark as Failed rather than
     // silently storing an empty transcript as "Completed".
+    //
+    // WHY THE BEAM-SEARCH RETRY: whisper.cpp 1.8.3 collapses low-energy (but
+    // valid) audio into a full repetition loop; the anti-hallucination
+    // filters above then drop every segment and this guard fires even though
+    // the recording contains real speech. whisper-rs 0.16.0 is the latest
+    // release and still bundles 1.8.3, so a version bump is not available.
+    // One beam-search pass (best_of=5) with cross-segment context enabled
+    // (no_context=false) decodes such recordings correctly — retry once
+    // before failing, and mark Failed only when the retry also produces no
+    // text.
     if display_text.trim().is_empty() {
-        let err_msg = "Transcription produced no text — the recording may be silent or too short."
-            .to_string();
+        // PHI guardrail: log structural metadata only — never transcript
+        // content.
         tracing::warn!(
             provider = %transcript.provider,
             segments = transcript.segments.len(),
-            "{err_msg}"
+            text_len = transcript.text.len(),
+            "transcription retried with beam search after empty first pass"
         );
-        return Err(AppError::processing(
-            mark_recording_failed(&app, &state.db, recording, err_msg).await,
-        ));
+
+        // Checkpoint: bail before the retry STT call if cancelled.
+        if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+            let err_msg = "Transcription cancelled before STT retry".to_string();
+            tracing::info!("{err_msg}");
+            mark_recording_failed_db_only(&state.db, recording, err_msg).await;
+            let _ = app.emit("transcription-progress", "failed");
+            return Err(AppError::Cancelled);
+        }
+
+        let retry_config = SttConfig {
+            best_of: Some(5),
+            no_context: Some(false),
+            ..config.clone()
+        };
+        let mut retried = match stt
+            .transcribe(audio.clone(), retry_config, token.clone())
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                // Same error routing as the first pass: preserve
+                // EndpointOffline for the frontend dialog; everything else
+                // fails through mark_recording_failed.
+                if matches!(e, AppError::EndpointOffline { .. }) {
+                    mark_recording_failed_db_only(
+                        &state.db,
+                        recording,
+                        "Transcription failed: AI/STT endpoint offline".to_string(),
+                    )
+                    .await;
+                    return Err(e);
+                }
+                let err_msg = format!("Transcription retry failed: {e}");
+                tracing::error!(error = %e, "STT retry (beam search) failed");
+                return Err(AppError::processing(
+                    mark_recording_failed(&app, &state.db, recording, err_msg).await,
+                ));
+            }
+        };
+
+        // Identical post-processing to the first pass.
+        filter_segment_repetitions(&mut retried);
+        filter_cross_segment_repetitions(&mut retried);
+        let retried_display = format_transcript_with_speakers(&retried);
+
+        if retried_display.trim().is_empty() {
+            let err_msg =
+                "Transcription produced no text — the recording may be silent or too short."
+                    .to_string();
+            tracing::warn!(
+                provider = %retried.provider,
+                segments = retried.segments.len(),
+                "{err_msg}"
+            );
+            return Err(AppError::processing(
+                mark_recording_failed(&app, &state.db, recording, err_msg).await,
+            ));
+        }
+
+        // The retry rescued the recording — continue down the normal path
+        // with the retry's transcript, exactly as a first-pass success
+        // would.
+        tracing::info!(
+            provider = %retried.provider,
+            segments = retried.segments.len(),
+            text_len = retried.text.len(),
+            "beam-search retry produced text"
+        );
+        transcript = retried;
+        display_text = retried_display;
+        // The persisted diarization metadata must describe the transcript
+        // that is actually saved; re-report only on change so an unchanged
+        // outcome does not double-fire the frontend warnings.
+        let retry_outcome = diarization_outcome(&transcript, diarize_requested);
+        if retry_outcome != outcome {
+            emit_diarization_outcome_warnings(&app, &recording_id, &retry_outcome);
+            outcome = retry_outcome;
+        }
     }
 
     // Checkpoint: bail before vocabulary correction if cancelled mid-STT.
@@ -826,6 +895,45 @@ pub(crate) fn diarization_outcome(
         DiarizationOutcome::Succeeded
     } else {
         DiarizationOutcome::SucceededNoSpeakers
+    }
+}
+
+/// Surface diarization problems to the user: a requested-but-skipped run
+/// emits `diarization-warning`, a failed run emits `diarization-failed` (see
+/// [`diarization_outcome`] for the state definitions). Split out of the main
+/// flow so the beam-search retry can re-report when its outcome differs from
+/// the first pass's.
+fn emit_diarization_outcome_warnings(
+    app: &tauri::AppHandle,
+    recording_id: &str,
+    outcome: &DiarizationOutcome,
+) {
+    match outcome {
+        DiarizationOutcome::NotRequested | DiarizationOutcome::Succeeded => {}
+        DiarizationOutcome::Skipped => {
+            tracing::warn!(
+                recording_id = %recording_id,
+                "Diarization requested but skipped (models missing) — emitting diarization-warning"
+            );
+            let _ = app.emit("diarization-warning", recording_id);
+        }
+        DiarizationOutcome::Failed(reason) => {
+            tracing::error!(
+                recording_id = %recording_id,
+                error = %reason,
+                "Diarization was requested and attempted but FAILED — emitting diarization-failed"
+            );
+            let _ = app.emit("diarization-failed", recording_id);
+        }
+        DiarizationOutcome::SucceededNoSpeakers => {
+            // Attempted, did not fail, and every segment is unlabeled: the
+            // turns list came back empty. Log at info — this is the expected
+            // single-speaker collapse, not a failure.
+            tracing::info!(
+                recording_id = %recording_id,
+                "Diarization ran but produced no speaker turns (single-speaker collapse) — no labels"
+            );
+        }
     }
 }
 
