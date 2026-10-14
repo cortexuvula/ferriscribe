@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use medical_core::error::{AppError, AppResult};
 use medical_core::types::recording::ProcessingStatus;
-use medical_core::types::stt::SttConfig;
+use medical_core::types::stt::{AudioData, SttConfig, Transcript};
 use medical_db::recordings::RecordingsRepo;
 use medical_db::settings::SettingsRepo;
 use medical_db::vocabulary::VocabularyRepo;
@@ -337,105 +337,81 @@ pub async fn transcribe_recording_inner(
         ));
     }
 
-    // Guard: if transcription produced no text, mark as Failed rather than
-    // silently storing an empty transcript as "Completed".
-    //
-    // WHY THE BEAM-SEARCH RETRY: whisper.cpp 1.8.3 collapses low-energy (but
-    // valid) audio into a full repetition loop; the anti-hallucination
-    // filters above then drop every segment and this guard fires even though
-    // the recording contains real speech. whisper-rs 0.16.0 is the latest
-    // release and still bundles 1.8.3, so a version bump is not available.
-    // One beam-search pass (best_of=5) with cross-segment context enabled
-    // (no_context=false) decodes such recordings correctly — retry once
-    // before failing, and mark Failed only when the retry also produces no
-    // text.
-    if display_text.trim().is_empty() {
-        // PHI guardrail: log structural metadata only — never transcript
-        // content.
-        tracing::warn!(
-            provider = %transcript.provider,
-            segments = transcript.segments.len(),
-            text_len = transcript.text.len(),
-            "transcription retried with beam search after empty first pass"
-        );
-
-        // Checkpoint: bail before the retry STT call if cancelled.
-        if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+    // Guard: if transcription produced no text (after the anti-hallucination
+    // filters above), retry once with beam-search decode params before
+    // failing — see [`retry_empty_first_pass_with_beam_search`] for why.
+    // The retry decision lives in that helper (unit-testable with a fake
+    // provider); this match owns all the DB/event side-effect routing its
+    // outcomes need.
+    match retry_empty_first_pass_with_beam_search(
+        &stt,
+        &audio,
+        &config,
+        &token,
+        &transcript,
+        &display_text,
+    )
+    .await
+    {
+        Ok(BeamSearchRetryOutcome::NotNeeded) => {}
+        Ok(BeamSearchRetryOutcome::CancelledBeforeRetry) => {
             let err_msg = "Transcription cancelled before STT retry".to_string();
             tracing::info!("{err_msg}");
             mark_recording_failed_db_only(&state.db, recording, err_msg).await;
             let _ = app.emit("transcription-progress", "failed");
             return Err(AppError::Cancelled);
         }
-
-        let retry_config = SttConfig {
-            best_of: Some(5),
-            no_context: Some(false),
-            ..config.clone()
-        };
-        let mut retried = match stt
-            .transcribe(audio.clone(), retry_config, token.clone())
-            .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                // Same error routing as the first pass: preserve
-                // EndpointOffline for the frontend dialog; everything else
-                // fails through mark_recording_failed.
-                if matches!(e, AppError::EndpointOffline { .. }) {
-                    mark_recording_failed_db_only(
-                        &state.db,
-                        recording,
-                        "Transcription failed: AI/STT endpoint offline".to_string(),
-                    )
-                    .await;
-                    return Err(e);
-                }
-                let err_msg = format!("Transcription retry failed: {e}");
-                tracing::error!(error = %e, "STT retry (beam search) failed");
-                return Err(AppError::processing(
-                    mark_recording_failed(&app, &state.db, recording, err_msg).await,
-                ));
+        Ok(BeamSearchRetryOutcome::Rescued {
+            transcript: retried,
+            display_text: retried_display,
+        }) => {
+            // The retry rescued the recording — continue down the normal path
+            // with the retry's transcript, exactly as a first-pass success
+            // would.
+            tracing::info!(
+                provider = %retried.provider,
+                segments = retried.segments.len(),
+                text_len = retried.text.len(),
+                "beam-search retry produced text"
+            );
+            transcript = retried;
+            display_text = retried_display;
+            // The persisted diarization metadata must describe the transcript
+            // that is actually saved; re-report only on change so an unchanged
+            // outcome does not double-fire the frontend warnings.
+            let retry_outcome = diarization_outcome(&transcript, diarize_requested);
+            if retry_outcome != outcome {
+                emit_diarization_outcome_warnings(&app, &recording_id, &retry_outcome);
+                outcome = retry_outcome;
             }
-        };
-
-        // Identical post-processing to the first pass.
-        filter_segment_repetitions(&mut retried);
-        filter_cross_segment_repetitions(&mut retried);
-        let retried_display = format_transcript_with_speakers(&retried);
-
-        if retried_display.trim().is_empty() {
+        }
+        Ok(BeamSearchRetryOutcome::StillEmpty { provider, segments }) => {
             let err_msg =
                 "Transcription produced no text — the recording may be silent or too short."
                     .to_string();
-            tracing::warn!(
-                provider = %retried.provider,
-                segments = retried.segments.len(),
-                "{err_msg}"
-            );
+            tracing::warn!(provider = %provider, segments, "{err_msg}");
             return Err(AppError::processing(
                 mark_recording_failed(&app, &state.db, recording, err_msg).await,
             ));
         }
-
-        // The retry rescued the recording — continue down the normal path
-        // with the retry's transcript, exactly as a first-pass success
-        // would.
-        tracing::info!(
-            provider = %retried.provider,
-            segments = retried.segments.len(),
-            text_len = retried.text.len(),
-            "beam-search retry produced text"
-        );
-        transcript = retried;
-        display_text = retried_display;
-        // The persisted diarization metadata must describe the transcript
-        // that is actually saved; re-report only on change so an unchanged
-        // outcome does not double-fire the frontend warnings.
-        let retry_outcome = diarization_outcome(&transcript, diarize_requested);
-        if retry_outcome != outcome {
-            emit_diarization_outcome_warnings(&app, &recording_id, &retry_outcome);
-            outcome = retry_outcome;
+        Err(e) => {
+            // Same error routing as the first pass: preserve EndpointOffline
+            // for the frontend dialog; everything else fails through
+            // mark_recording_failed.
+            if matches!(e, AppError::EndpointOffline { .. }) {
+                mark_recording_failed_db_only(
+                    &state.db,
+                    recording,
+                    "Transcription failed: AI/STT endpoint offline".to_string(),
+                )
+                .await;
+                return Err(e);
+            }
+            let err_msg = format!("Transcription retry failed: {e}");
+            tracing::error!(error = %e, "STT retry (beam search) failed");
+            return Err(AppError::processing(
+                mark_recording_failed(&app, &state.db, recording, err_msg).await,
+            ));
         }
     }
 
@@ -732,6 +708,103 @@ pub async fn transcribe_recording_inner(
     let _ = app.emit("transcription-progress", "complete");
 
     Ok(display_text)
+}
+
+/// Outcome of [`retry_empty_first_pass_with_beam_search`].
+#[derive(Debug)]
+enum BeamSearchRetryOutcome {
+    /// The first pass produced text — nothing to retry; the caller keeps its
+    /// own transcript/display text.
+    NotNeeded,
+    /// The retry was due but the caller's cancel token had already fired —
+    /// route like the other stage-boundary checkpoints (db-only failure
+    /// mark, `failed` progress event, `AppError::Cancelled`).
+    CancelledBeforeRetry,
+    /// The retry produced text — continue down the normal path with the
+    /// retry's transcript, exactly as a first-pass success would.
+    Rescued {
+        transcript: Transcript,
+        display_text: String,
+    },
+    /// The retry also produced no text — the caller must mark the recording
+    /// Failed rather than storing an empty transcript as Completed. Carries
+    /// the retry's provider/segment count for the PHI-safe failure log.
+    StillEmpty { provider: String, segments: usize },
+}
+
+/// Guard + single beam-search retry for a first-pass transcription whose
+/// text collapsed to empty: decides whether to retry, with which decode
+/// params, and classifies the retry's result.
+///
+/// WHY THE BEAM-SEARCH RETRY: whisper.cpp 1.8.3 collapses low-energy (but
+/// valid) audio into a full repetition loop; the anti-hallucination filters
+/// in the caller then drop every segment and the empty-text guard fires
+/// even though the recording contains real speech. whisper-rs 0.16.0 is the
+/// latest release and still bundles 1.8.3, so a version bump is not
+/// available. One beam-search pass (best_of=5) with cross-segment context
+/// enabled (no_context=false) decodes such recordings correctly — retry
+/// once before failing, and report [`BeamSearchRetryOutcome::StillEmpty`]
+/// only when the retry also produces no text.
+///
+/// Extracted from `transcribe_recording_inner`'s empty-text guard (which
+/// needs a Tauri runtime and a DB) so the retry decision is unit-testable
+/// against a fake [`medical_core::traits::SttProvider`] — see
+/// [`retry_tests`]. Provider errors propagate as-is so the caller keeps its
+/// EndpointOffline routing.
+async fn retry_empty_first_pass_with_beam_search(
+    stt: &Arc<dyn medical_core::traits::SttProvider + Send + Sync>,
+    audio: &AudioData,
+    config: &SttConfig,
+    token: &CancellationToken,
+    first_pass: &Transcript,
+    first_pass_display: &str,
+) -> AppResult<BeamSearchRetryOutcome> {
+    if !first_pass_display.trim().is_empty() {
+        return Ok(BeamSearchRetryOutcome::NotNeeded);
+    }
+
+    // PHI guardrail: log structural metadata only — never transcript
+    // content.
+    tracing::warn!(
+        provider = %first_pass.provider,
+        segments = first_pass.segments.len(),
+        text_len = first_pass.text.len(),
+        "transcription retried with beam search after empty first pass"
+    );
+
+    // Checkpoint: bail before the retry STT call if cancelled. The caller's
+    // `token` is the cancel token when one was passed and a fresh (never
+    // cancelled) default otherwise, so checking it directly is equivalent
+    // to the Option-wrapped check the other checkpoints use.
+    if token.is_cancelled() {
+        return Ok(BeamSearchRetryOutcome::CancelledBeforeRetry);
+    }
+
+    let retry_config = SttConfig {
+        best_of: Some(5),
+        no_context: Some(false),
+        ..config.clone()
+    };
+    let mut retried = stt
+        .transcribe(audio.clone(), retry_config, token.clone())
+        .await?;
+
+    // Identical post-processing to the first pass.
+    filter_segment_repetitions(&mut retried);
+    filter_cross_segment_repetitions(&mut retried);
+    let retried_display = format_transcript_with_speakers(&retried);
+
+    if retried_display.trim().is_empty() {
+        Ok(BeamSearchRetryOutcome::StillEmpty {
+            provider: retried.provider,
+            segments: retried.segments.len(),
+        })
+    } else {
+        Ok(BeamSearchRetryOutcome::Rescued {
+            transcript: retried,
+            display_text: retried_display,
+        })
+    }
 }
 
 /// Format a transcript with speaker labels when diarization data is available.
@@ -1575,5 +1648,326 @@ mod preflight_tests {
             "recording must not be Processing after pre-flight failure; status = {:?}",
             loaded.status
         );
+    }
+}
+
+/// Regression tests for the beam-search retry: when the first pass
+/// collapses to empty text after the anti-hallucination filters, the
+/// transcription must retry exactly once with beam-search decode params
+/// before failing.
+///
+/// `transcribe_recording_inner` needs a Tauri runtime and a DB, so these
+/// drive the extracted retry decision with a fake provider — the real
+/// decision path, not a mock of it.
+#[cfg(test)]
+mod retry_tests {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use medical_core::error::{AppError, AppResult};
+    use medical_core::traits::SttProvider;
+    use medical_core::types::stt::{AudioData, SttConfig, Transcript, TranscriptSegment};
+    use medical_core::types::{AudioStream, TranscriptChunk};
+    use tokio_util::sync::CancellationToken;
+
+    use super::filter_cross_segment_repetitions;
+    use super::filter_segment_repetitions;
+    use super::{BeamSearchRetryOutcome, retry_empty_first_pass_with_beam_search};
+
+    // ---- fixtures ----
+
+    fn seg(text: &str, start: f64) -> TranscriptSegment {
+        TranscriptSegment {
+            text: text.into(),
+            start,
+            end: start + 2.0,
+            speaker: None,
+            confidence: None,
+        }
+    }
+
+    fn mk_transcript(segments: Vec<TranscriptSegment>) -> Transcript {
+        let text = segments
+            .iter()
+            .map(|s| s.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Transcript {
+            text,
+            segments,
+            language: None,
+            duration_seconds: None,
+            provider: "scripted-test".into(),
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    /// The field-reported failure shape: whisper.cpp 1.8.3 decodes
+    /// low-energy-but-valid audio into an endless repetition loop. The
+    /// anti-hallucination filters drop every segment, so the formatted
+    /// display text collapses to empty and the retry guard fires.
+    fn repetition_loop_transcript() -> Transcript {
+        mk_transcript((0..50).map(|i| seg("Thank you.", i as f64 * 2.0)).collect())
+    }
+
+    /// Apply the same post-processing the inner function runs before the
+    /// empty-text guard and return the display text the guard would see.
+    fn first_pass_display(transcript: &mut Transcript) -> String {
+        filter_segment_repetitions(transcript);
+        filter_cross_segment_repetitions(transcript);
+        super::format_transcript_with_speakers(transcript)
+    }
+
+    fn dummy_audio() -> AudioData {
+        AudioData {
+            samples: vec![0.01f32; 160],
+            sample_rate: 16_000,
+            channels: 1,
+        }
+    }
+
+    // ---- fake provider ----
+
+    /// Fake [`SttProvider`] scripted with one transcript per expected call.
+    /// Records the config of every `transcribe` call so the tests can pin
+    /// the retry's decode params and call count; calling past the script
+    /// panics, so an unexpected extra call fails the test loudly.
+    struct ScriptedStt {
+        calls: Mutex<Vec<SttConfig>>,
+        script: Mutex<VecDeque<Transcript>>,
+    }
+
+    impl ScriptedStt {
+        fn new(script: Vec<Transcript>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                script: Mutex::new(script.into()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+
+        /// The config of each `transcribe` call, in call order.
+        fn configs(&self) -> Vec<SttConfig> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SttProvider for ScriptedStt {
+        fn name(&self) -> &str {
+            "scripted-test"
+        }
+
+        fn supports_streaming(&self) -> bool {
+            false
+        }
+
+        fn supports_diarization(&self) -> bool {
+            false
+        }
+
+        async fn transcribe(
+            &self,
+            _audio: AudioData,
+            config: SttConfig,
+            _cancel: CancellationToken,
+        ) -> AppResult<Transcript> {
+            self.calls.lock().unwrap().push(config);
+            Ok(self
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted provider called more times than scripted"))
+        }
+
+        async fn transcribe_stream(
+            &self,
+            _stream: AudioStream,
+            _config: SttConfig,
+        ) -> AppResult<
+            Box<dyn futures_util::Stream<Item = AppResult<TranscriptChunk>> + Send + Unpin>,
+        > {
+            Err(AppError::stt_provider(
+                "streaming not supported by the test fake",
+            ))
+        }
+    }
+
+    // ---- tests ----
+
+    /// Retry contract, assertions 1-3: an empty first pass triggers exactly
+    /// one retry, the retry uses beam-search decode params, and the retry's
+    /// real content becomes the result instead of a Failed.
+    #[tokio::test]
+    async fn empty_first_pass_retries_once_with_beam_search_and_is_rescued() {
+        let real = mk_transcript(vec![
+            seg("Patient reports chest pain that started two days ago.", 0.0),
+            seg("Pain radiates to the left arm with exertion.", 4.0),
+        ]);
+        let provider = Arc::new(ScriptedStt::new(vec![real]));
+
+        // First pass: the repetition loop collapses to empty under the same
+        // filters the inner function applies before the guard.
+        let mut first_pass = repetition_loop_transcript();
+        let first_display = first_pass_display(&mut first_pass);
+        assert!(
+            first_display.trim().is_empty(),
+            "fixture premise: the repetition loop must collapse to empty"
+        );
+
+        let stt: Arc<dyn SttProvider + Send + Sync> = provider.clone();
+        let config = SttConfig {
+            language: Some("en-US".into()),
+            ..SttConfig::default()
+        };
+        let outcome = retry_empty_first_pass_with_beam_search(
+            &stt,
+            &dummy_audio(),
+            &config,
+            &CancellationToken::new(),
+            &first_pass,
+            &first_display,
+        )
+        .await;
+
+        match outcome {
+            Ok(BeamSearchRetryOutcome::Rescued {
+                transcript,
+                display_text,
+            }) => {
+                // The retry's real content is the result — not Failed. No
+                // speaker labels, so the formatter falls back to the raw
+                // joined text.
+                assert_eq!(transcript.segments.len(), 2);
+                assert_eq!(display_text, transcript.text);
+                assert_eq!(
+                    display_text,
+                    "Patient reports chest pain that started two days ago. \
+                     Pain radiates to the left arm with exertion."
+                );
+            }
+            other => panic!("expected Rescued, got {other:?}"),
+        }
+
+        // Exactly one retry call.
+        assert_eq!(provider.call_count(), 1);
+
+        // The retry used the beam-search decode params, with the rest of
+        // the caller's config carried through unchanged.
+        let configs = provider.configs();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].best_of, Some(5), "retry must use beam search");
+        assert_eq!(
+            configs[0].no_context,
+            Some(false),
+            "retry must keep cross-segment context"
+        );
+        assert_eq!(configs[0].language, Some("en-US".to_string()));
+        assert_eq!(configs[0].diarize, config.diarize);
+    }
+
+    /// Retry contract, assertion 4: when the retry ALSO produces no text,
+    /// the outcome is StillEmpty (the caller marks the recording Failed)
+    /// and there is no second retry.
+    #[tokio::test]
+    async fn empty_first_pass_with_empty_retry_reports_still_empty() {
+        let provider = Arc::new(ScriptedStt::new(vec![repetition_loop_transcript()]));
+
+        let mut first_pass = repetition_loop_transcript();
+        let first_display = first_pass_display(&mut first_pass);
+        assert!(first_display.trim().is_empty());
+
+        let stt: Arc<dyn SttProvider + Send + Sync> = provider.clone();
+        let outcome = retry_empty_first_pass_with_beam_search(
+            &stt,
+            &dummy_audio(),
+            &SttConfig::default(),
+            &CancellationToken::new(),
+            &first_pass,
+            &first_display,
+        )
+        .await;
+
+        match outcome {
+            Ok(BeamSearchRetryOutcome::StillEmpty {
+                provider: retry_provider,
+                segments,
+            }) => {
+                assert_eq!(retry_provider, "scripted-test");
+                assert_eq!(segments, 0, "the loop's segments were all dropped");
+            }
+            other => panic!("expected StillEmpty, got {other:?}"),
+        }
+        assert_eq!(provider.call_count(), 1, "exactly one retry — never a loop");
+    }
+
+    /// A non-empty first pass must NOT trigger a retry — the guard is the
+    /// empty display text, not the transcript's raw length.
+    #[tokio::test]
+    async fn nonempty_first_pass_skips_the_retry() {
+        // A scripted response exists so an unexpected retry call would fail
+        // the test loudly (via the Rescued/StillEmpty mismatch and the call
+        // count below).
+        let provider = Arc::new(ScriptedStt::new(vec![repetition_loop_transcript()]));
+
+        let mut first_pass = mk_transcript(vec![
+            seg("Normal consultation content.", 0.0),
+            seg("No repetition pathology here.", 3.0),
+        ]);
+        let first_display = first_pass_display(&mut first_pass);
+        assert!(!first_display.trim().is_empty());
+
+        let stt: Arc<dyn SttProvider + Send + Sync> = provider.clone();
+        let outcome = retry_empty_first_pass_with_beam_search(
+            &stt,
+            &dummy_audio(),
+            &SttConfig::default(),
+            &CancellationToken::new(),
+            &first_pass,
+            &first_display,
+        )
+        .await;
+
+        assert!(matches!(outcome, Ok(BeamSearchRetryOutcome::NotNeeded)));
+        assert_eq!(
+            provider.call_count(),
+            0,
+            "no retry when the first pass has text"
+        );
+    }
+
+    /// A cancelled token with an empty first pass bails BEFORE the retry
+    /// STT call — the expensive second decode must not run.
+    #[tokio::test]
+    async fn cancelled_token_with_empty_first_pass_skips_the_retry_call() {
+        let provider = Arc::new(ScriptedStt::new(vec![repetition_loop_transcript()]));
+
+        let mut first_pass = repetition_loop_transcript();
+        let first_display = first_pass_display(&mut first_pass);
+        assert!(first_display.trim().is_empty());
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let stt: Arc<dyn SttProvider + Send + Sync> = provider.clone();
+        let outcome = retry_empty_first_pass_with_beam_search(
+            &stt,
+            &dummy_audio(),
+            &SttConfig::default(),
+            &cancel,
+            &first_pass,
+            &first_display,
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            Ok(BeamSearchRetryOutcome::CancelledBeforeRetry)
+        ));
+        assert_eq!(provider.call_count(), 0, "no STT call once cancelled");
     }
 }
