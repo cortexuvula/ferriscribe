@@ -45,8 +45,13 @@ mod state;
 mod sweeps;
 mod sync_sparse_fields;
 mod templates_remote;
+// Menu-bar / system-tray recording indicator. Desktop-only (the crate
+// also has a mobile entry point). Built in the setup closure; the
+// recording-state watcher task and menu-event routing also live here.
 #[cfg(test)]
 pub(crate) mod testutil;
+#[cfg(desktop)]
+mod tray;
 mod user_dict_remote;
 mod vocab_remote;
 
@@ -353,6 +358,42 @@ pub fn run() {
                 }
             }
 
+            // Menu-bar / system-tray recording indicator. `init_tray` is
+            // best-effort — every failure inside logs and returns, so a
+            // tray problem never blocks boot. The ONE watcher task polls
+            // `recording_active` (~300 ms) instead of hooking the mutation
+            // sites, so future recording paths can't drift from the
+            // indicator. It runs even when the tray was skipped (Linux
+            // runtime library absent): `set_recording_state` no-ops
+            // without a tray handle.
+            #[cfg(desktop)]
+            {
+                crate::tray::init_tray(app.handle());
+                let app_handle = app.handle().clone();
+                let recording_active = app
+                    .state::<crate::state::AppState>()
+                    .recording_active
+                    .clone();
+                tauri::async_runtime::spawn(async move {
+                    // `None` initially, so the FIRST read always updates
+                    // the tray (idle init); after that, only real changes.
+                    let mut last: Option<bool> = None;
+                    loop {
+                        // Copy the flag out; the temporary guard drops at
+                        // this semicolon, BEFORE any tray call. The tray
+                        // setters block on the main thread, which also
+                        // takes this mutex elsewhere — updating while
+                        // still holding the guard would deadlock.
+                        let active = *recording_active.lock().await;
+                        if crate::tray::should_update(last, active) {
+                            crate::tray::set_recording_state(&app_handle, active);
+                            last = Some(active);
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    }
+                });
+            }
+
             // Note: the pdfium renderer for scanned-PDF OCR is initialized
             // lazily by the `ocr_documents` command (it downloads the library
             // into the app data dir on first use), so there's nothing to do
@@ -377,8 +418,37 @@ pub fn run() {
     builder = builder
         .menu(crate::commands::quit::build_app_menu)
         .on_menu_event(|app, event| {
-            if *event.id() == crate::commands::quit::QUIT_ITEM_ID {
-                crate::commands::quit::on_quit_requested(app);
+            // Tray menu items route through this SAME global handler (a
+            // builder-scoped `TrayIconBuilder::on_menu_event` would
+            // register a second listener and double-fire clicks).
+            match event.id().as_ref() {
+                crate::commands::quit::QUIT_ITEM_ID => {
+                    crate::commands::quit::on_quit_requested(app);
+                }
+                // Re-surface the main window (same pattern as the
+                // single-instance re-surface). A missing window is logged
+                // and ignored — a tray click must never surface an error.
+                #[cfg(desktop)]
+                crate::tray::TRAY_SHOW_ID => {
+                    use tauri::Manager;
+                    match app.get_webview_window("main") {
+                        Some(window) => {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                        None => tracing::warn!("tray show: main window not found"),
+                    }
+                }
+                // Identical to the app-menu Quit path: the coordinated
+                // quit refuses while a recording is active, settles
+                // pending work, and exits through the atexit guard —
+                // never `app.exit(0)` directly.
+                #[cfg(desktop)]
+                crate::tray::TRAY_QUIT_ID => {
+                    crate::commands::quit::on_quit_requested(app);
+                }
+                _ => {}
             }
         });
 
