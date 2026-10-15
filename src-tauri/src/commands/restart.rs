@@ -336,7 +336,16 @@ pub(crate) async fn ensure_safe_to_restart(state: &AppState) -> Result<(), AppEr
             refusal::RECORDING_ACTIVE.to_string(),
         ));
     }
-    if let Some(edit) = state.pending_edit.lock().await.take() {
+    // Bind the taken edit OUTSIDE the `if let`: a scrutinee temporary
+    // (the MutexGuard) lives to the END of the whole `if let` statement,
+    // so the put-back inside the Err arm would re-lock a mutex this
+    // task still holds — tokio's Mutex is non-reentrant and the await
+    // deadlocked forever (flush-failure refusal never fired; the quit
+    // path timed out after 8 s and exited WITHOUT the edit, and
+    // restart_app — which has no timeout — hung outright). Found by the
+    // 2026-10-14 close-while-recording regression test.
+    let pending = state.pending_edit.lock().await.take();
+    if let Some(edit) = pending {
         match flush_pending_edit(state, &edit).await {
             Ok(()) => {
                 tracing::info!(

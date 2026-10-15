@@ -31,6 +31,19 @@
 //! including the recovery/fatal dialogs (no managed `AppState`), where
 //! the handler skips the settle sequence entirely.
 //!
+//! # The window-close path
+//!
+//! Closing the main window (close button, Close Window menu item,
+//! Cmd+W) destroys the last window, which makes the runtime request
+//! exit — a close IS a quit. `lib.rs`'s CloseRequested handler
+//! therefore routes through [`on_close_requested`], which runs this
+//! same settle sequence: it REFUSES (window stays open, native dialog)
+//! over a live recording or in-flight export, flushes the pending
+//! debounced edit, stops sharing awaited, then destroys the window
+//! through the same flush → re-arm terminal ordering (2026-10-14
+//! close-while-recording fix; the old handler skipped the recording
+//! refusal and the edit flush entirely).
+//!
 //! # The settle sequence
 //!
 //! 1. `try_state::<AppState>()` — never `state()`: recovery/fatal boots
@@ -341,6 +354,93 @@ pub fn on_quit_requested(app: &tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         quit_sequence(handle).await;
     });
+}
+
+/// Coordinated window-CLOSE: the close-button / Close Window / Cmd+W
+/// path (`lib.rs`'s CloseRequested handler). Destroying the LAST window
+/// makes the runtime request exit, so a close IS a quit for
+/// data-safety purposes — this routes it through the SAME settle
+/// sequence as [`quit_sequence`] (recording refusal, export refusal,
+/// pipeline/chat cancel, pending-edit flush, awaited sharing stop)
+/// instead of the old best-effort stop-sharing-then-destroy, which
+/// skipped the recording refusal and the edit flush entirely
+/// (2026-10-14 close-while-recording fix: a mid-take close quit the
+/// app without finalizing the take).
+///
+/// Differences from quit: the terminal action destroys the WINDOW (the
+/// runtime's last-window exit then walks the atexit table through the
+/// re-armed guard), and a refusal KEEPS the window open — the take or
+/// edit keep running. The tray stays consistent on a refusal because
+/// the window was never hidden or destroyed. Idempotent against a
+/// concurrent quit/restart the same way [`on_quit_requested`] is:
+/// while any exit is committed, the close is ignored — the running
+/// sequence owns the exit. Deliberately NOT an `ExitRequested`
+/// handler: `app.exit(0)` and `app.restart()` send that same event
+/// with a code, and a blanket block there would break both.
+pub(crate) async fn on_close_requested(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    if restart::exit_committed() {
+        tracing::info!("window close while an exit is already committed — ignoring");
+        return;
+    }
+    // Flag BEFORE settling (quit step 2's TOCTOU gate, same rationale):
+    // from this instant `start_recording` refuses, so no new take can
+    // open between the settle checks and the destroy. Withdrawn below
+    // on refusal.
+    restart::mark_quitting();
+
+    // Step 1 — try_state, never state(): recovery/fatal boots manage
+    // no AppState and have nothing to settle (the main-window close
+    // handler is only registered on the full app, but the check is
+    // free and mirrors quit_sequence).
+    let refusal = match app.try_state::<AppState>() {
+        None => {
+            tracing::info!("window close with no app state (recovery/fatal boot) — closing");
+            None
+        }
+        Some(state) => {
+            match tokio::time::timeout(QUIT_SETTLE_TIMEOUT, settle_for_quit(&state)).await {
+                Ok(Ok(())) => None,
+                Ok(Err(reason)) => Some(reason),
+                Err(_) => {
+                    // Kinds/counts only (PHI); recovery mirrors quit.
+                    tracing::warn!(
+                        timeout_secs = QUIT_SETTLE_TIMEOUT.as_secs(),
+                        "window-close settle timed out — proceeding to close"
+                    );
+                    None
+                }
+            }
+        }
+    };
+
+    if let Some(reason) = refusal {
+        tracing::info!(
+            reason = ?reason,
+            "window close refused — window stays open (flag withdrawn)"
+        );
+        show_refusal_dialog(app, reason);
+        restart::clear_quitting();
+        return;
+    }
+
+    close_through_guard(window).await;
+}
+
+/// Terminal step of a successful window close: final log line, THEN
+/// log flush, THEN guard re-arm, THEN destroy — the same ordering as
+/// [`exit_through_guard`], because the runtime's last-window exit walks
+/// the same atexit table the re-armed guard must own (a boot-time-only
+/// guard loses the LIFO walk to the lazily-registered ORT/knf
+/// destructors; v0.77.12). `destroy()` (not `close()`) closes without
+/// re-firing CloseRequested, so this cannot re-enter.
+async fn close_through_guard(window: &tauri::WebviewWindow) {
+    tracing::info!(
+        exit_kind = ?restart::ExitKind::NormalQuit,
+        "FerriScribe exiting (window close)"
+    );
+    restart::flush_log_buffer();
+    restart::rearm_exit_guard();
+    let _ = window.destroy();
 }
 
 /// The full quit sequence (module docs, steps 1–7). Never blocks the
@@ -743,5 +843,130 @@ mod tests {
             "settle must be time-bounded when the sharing stop blocks"
         );
         wedger.abort();
+    }
+
+    // ── window-close path (2026-10-14 close-while-recording fix) ───────
+
+    /// Behavioral pin for the close refusal's no-lost-edit half: the
+    /// shared settle the close path runs must refuse (SaveFailed) when
+    /// the pending debounced edit cannot be flushed — on close that
+    /// refusal KEEPS the window open — AND the edit must be put back,
+    /// never carried into a dying webview. A pending edit against a
+    /// recording id with no DB row is the deterministic flush failure.
+    #[tokio::test]
+    async fn close_settle_refuses_and_keeps_pending_edit_when_flush_fails() {
+        let state = quit_test_state().await;
+        *state.pending_edit.lock().await = Some(crate::state::PendingEdit {
+            recording_id: "no-such-row".to_string(),
+            field: "soap".to_string(),
+            value: "x".to_string(),
+        });
+        assert_eq!(settle_for_quit(&state).await, Err(QuitRefusal::SaveFailed));
+        assert!(
+            state.pending_edit.lock().await.is_some(),
+            "a refused close must put the pending edit back — never lose it"
+        );
+    }
+
+    /// Structural pin on the close entry point (needs a live
+    /// WebviewWindow, so behavior is pinned by byte order on the
+    /// comment-stripped source, per the restart.rs pin style): the quit
+    /// flag is set BEFORE the settle runs (TOCTOU gate), the refusal
+    /// branch shows the dialog and withdraws the flag WITHOUT touching
+    /// the window, and the terminal destroys only after flush → re-arm.
+    #[test]
+    fn close_path_check_then_keep_ordering_is_pinned() {
+        let code: String = include_str!("quit.rs")
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("///") || t.starts_with("//!") || t.starts_with("//"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = code
+            .split("pub(crate) async fn on_close_requested(")
+            .nth(1)
+            .and_then(|rest| rest.split("async fn close_through_guard").next())
+            .expect("on_close_requested must exist");
+        // Gate before flag, flag before settle.
+        let gate = body
+            .find("restart::exit_committed()")
+            .expect("close must honor the shared exit gate");
+        let mark = body
+            .find("restart::mark_quitting();")
+            .expect("close must mark the quit flag (TOCTOU gate)");
+        let settle = body
+            .find("settle_for_quit(&state)")
+            .expect("close must run the shared settle");
+        assert!(
+            gate < mark && mark < settle,
+            "close must check the gate → mark the flag → settle, in that order"
+        );
+        // Refusal keeps the window: dialog + flag withdrawal, no destroy.
+        let refusal = body
+            .split("if let Some(reason) = refusal")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("refusal branch must exist");
+        assert!(
+            refusal.contains("show_refusal_dialog"),
+            "a refused close must surface the native dialog"
+        );
+        assert!(
+            refusal.contains("restart::clear_quitting();"),
+            "a refused close must withdraw the quit flag"
+        );
+        let destroy_pat = ["dest", "roy();"].concat();
+        assert!(
+            !refusal.contains(&destroy_pat),
+            "a refused close must NOT destroy the window"
+        );
+        // Terminal ordering: flush → re-arm → destroy.
+        let terminal = code
+            .split("async fn close_through_guard(")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("close_through_guard must exist");
+        let flush = terminal
+            .find("restart::flush_log_buffer();")
+            .expect("close terminal must flush the log buffer");
+        let rearm = terminal
+            .find("restart::rearm_exit_guard();")
+            .expect("close terminal must re-arm the exit guard");
+        let destroy = terminal
+            .find(&destroy_pat)
+            .expect("close terminal must destroy the window");
+        assert!(
+            flush < rearm && rearm < destroy,
+            "close_through_guard must flush → re-arm → destroy, in that order"
+        );
+    }
+
+    /// Cross-file wiring pin (same style as
+    /// `run_registers_the_diarization_rearm_hook`): the CloseRequested
+    /// handler in lib.rs must route through the coordinated close, and
+    /// the old best-effort inline sharing stop must be GONE from lib.rs
+    /// (the shared settle owns stopping now — the inline call is the
+    /// close-while-recording bug's shape).
+    #[test]
+    fn lib_close_handler_routes_through_coordinated_close() {
+        let lib: String = include_str!("../lib.rs")
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("///") || t.starts_with("//!") || t.starts_with("//"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            lib.contains("crate::commands::quit::on_close_requested("),
+            "the CloseRequested handler must route through the coordinated close"
+        );
+        let inline_stop = ["stop_sharing", "_inner"].concat();
+        assert!(
+            !lib.contains(&inline_stop),
+            "lib.rs must not stop sharing inline on close — the shared settle owns it"
+        );
     }
 }
