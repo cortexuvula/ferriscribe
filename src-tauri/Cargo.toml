@@ -84,7 +84,7 @@ medical-tts-providers = { path = "../crates/tts-providers", features = ["local-t
 # (libdbus-1-dev on CI/build boxes). image pinned to 0.25 to match xcap
 # 0.4's types (capture_image returns an image-0.25 RgbaImage).
 image = { version = "0.25", default-features = false, features = ["png"] }
-xcap = "=0.4.1"
+xcap = "=0.9.8"
 
 [dev-dependencies]
 tempfile = { workspace = true }
