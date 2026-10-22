@@ -418,6 +418,28 @@ pub async fn restore_all_trashed(state: tauri::State<'_, AppState>) -> AppResult
     })
 }
 
+/// Preview permanent-deletion eligibility before shortening the Trash window.
+/// The persistence boundary rechecks this count atomically when saving.
+#[tauri::command]
+pub async fn count_soft_deleted_older_than(
+    state: tauri::State<'_, AppState>,
+    days: u32,
+) -> AppResult<u32> {
+    if !medical_core::types::settings::TRASH_RETENTION_DAYS_CHOICES.contains(&days) {
+        return Err(AppError::InvalidInput(
+            "Trash window must be 7, 14, 21, or 30 days.".into(),
+        ));
+    }
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        RecordingsRepo::count_soft_deleted_older_than(&conn, days, chrono::Utc::now())
+            .map_err(AppError::from)
+    })
+    .await
+    .map_err(join_err)?
+}
+
 /// Preview count for restore-by-date (D6): how many recordings currently
 /// in Trash were moved there inside `[start_iso, end_iso)`. MUST be the
 /// count command — never derived from paginated trash pages.

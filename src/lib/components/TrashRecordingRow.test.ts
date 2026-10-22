@@ -5,8 +5,8 @@
  * Markup facts:
  *   - ONE display label: patient_name when present, else filename.
  *   - "Recorded <date/time> · <duration>" and "Moved to Trash <date/time>".
- *   - Retention line from trashRetentionLabel (days remaining / under a
- *     day / Pending permanent deletion), amber near expiry via the `now`
+ *   - Retention line from trashRetentionLabel (days until eligibility / under a
+ *     day / Pending permanent deletion), supplementary tint via the `now`
  *     test seam.
  *   - Restore is ALWAYS rendered and enabled (never hover-only) and
  *     carries data-restore-btn={id} for focus management in TrashPanel.
@@ -63,13 +63,21 @@ describe('TrashRecordingRow', () => {
     expect(screen.getByText(/Moved to Trash /)).toBeTruthy();
   });
 
+  it('uses the supplied seven-day window instead of a fixed thirty days', () => {
+    render(TrashRecordingRow, {
+      item: makeItem(), onRestore: () => {}, now: NOW, retentionDays: 7,
+    });
+    const line = screen.getByText(/5 days until eligible for permanent deletion · /);
+    expect(line.closest('.trash-row')?.classList.contains('near-expiry')).toBe(false);
+  });
+
   it('renders the days-remaining retention line', () => {
     render(TrashRecordingRow, {
       item: makeItem(),
       onRestore: () => {},
       now: NOW,
     });
-    expect(screen.getByText(/28 days remaining · Permanent deletion after /)).toBeTruthy();
+    expect(screen.getByText(/28 days until eligible for permanent deletion · /)).toBeTruthy();
   });
 
   it('shows Pending permanent deletion past the window, never a negative count', () => {
@@ -79,6 +87,18 @@ describe('TrashRecordingRow', () => {
       now: NOW,
     });
     expect(screen.getByText('Pending permanent deletion')).toBeTruthy();
+  });
+
+  it('uses readable secondary text and confines near-expiry colour to the row tint', () => {
+    const { container } = render(TrashRecordingRow, {
+      item: makeItem({ deleted_at: new Date(NOW - 29.5 * 86_400_000).toISOString() }),
+      onRestore: () => {}, now: NOW,
+    });
+    const line = screen.getByText(/Less than 1 day until eligible for permanent deletion · /);
+    expect(line.classList.contains('text-secondary')).toBe(true);
+    expect(line.classList.contains('amber')).toBe(false);
+    expect(container.querySelector('.row-meta')?.classList.contains('text-secondary')).toBe(true);
+    expect(line.closest('.trash-row')?.classList.contains('near-expiry')).toBe(true);
   });
 
   it('Restore is always visible and fires onRestore with no hover dependency', async () => {

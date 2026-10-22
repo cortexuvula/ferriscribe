@@ -29,6 +29,21 @@ describe('SettingsStore — subscribe / notify', () => {
     settings.loadError = false;
   });
 
+  it('forwards the confirmed purge count through updateField to persistence', async () => {
+    mockGetSettings.mockResolvedValue({ ...sampleConfig, trash_retention_days: 30 });
+    await settings.load();
+    await settings.updateField('trash_retention_days', 7, 3);
+    expect(mockSaveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ trash_retention_days: 7 }), 3);
+  });
+
+  it('exposes only the persisted backend trash window, not an unsaved draft', async () => {
+    mockGetSettings.mockResolvedValue({ ...sampleConfig, trash_retention_days: 7 });
+    await settings.load();
+    expect(settings.trashRetentionDays).toBe(7);
+    settings.state = { ...settings.state, trash_retention_days: 14 };
+    expect(settings.trashRetentionDays).toBe(7);
+  });
+
   it('subscribe emits current value immediately (store contract)', () => {
     const seen: AppConfig[] = [];
     const unsub = settings.subscribe((v) => seen.push(v));

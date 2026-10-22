@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { trashRetentionLabel, TRASH_RETENTION_DAYS } from './trashRetention';
+import { trashRetentionLabel } from './trashRetention';
 
 const DAY = 86_400_000;
-/// A fixed "now" so the calendar-date rendering is deterministic.
 const NOW = new Date('2026-10-06T12:00:00Z').getTime();
 
 function deletedAgo(days: number): string {
@@ -10,47 +9,51 @@ function deletedAgo(days: number): string {
 }
 
 describe('trashRetentionLabel', () => {
-  it('shows neutral days-remaining well away from expiry', () => {
-    const label = trashRetentionLabel(deletedAgo(1), NOW);
-    expect(label.text).toMatch(/^29 days remaining · Permanent deletion after /);
+  it('shows neutral eligibility text well away from expiry', () => {
+    const label = trashRetentionLabel(deletedAgo(1), 30, NOW);
+    expect(label.text).toMatch(/^29 days until eligible for permanent deletion · /);
     expect(label.nearExpiry).toBe(false);
   });
 
   it('pluralizes a single remaining day', () => {
-    const label = trashRetentionLabel(deletedAgo(29), NOW);
-    expect(label.text).toMatch(/^1 day remaining · Permanent deletion after /);
+    const label = trashRetentionLabel(deletedAgo(29), 30, NOW);
+    expect(label.text).toMatch(/^1 day until eligible for permanent deletion · /);
     expect(label.nearExpiry).toBe(true);
   });
 
-  it('shows "Less than 1 day remaining" under a day, amber', () => {
-    const label = trashRetentionLabel(new Date(NOW - 29.9 * DAY).toISOString(), NOW);
-    expect(label.text).toMatch(/^Less than 1 day remaining · Permanent deletion after /);
+  it('shows eligibility under a day with a supplementary near-expiry accent', () => {
+    const label = trashRetentionLabel(deletedAgo(29.9), 30, NOW);
+    expect(label.text).toMatch(/^Less than 1 day until eligible for permanent deletion · /);
     expect(label.nearExpiry).toBe(true);
   });
 
-  it('shows "Pending permanent deletion" past 30 days — never a negative count', () => {
-    const label = trashRetentionLabel(deletedAgo(TRASH_RETENTION_DAYS + 0.5), NOW);
+  it('shows Pending permanent deletion past the window — never a negative count', () => {
+    const label = trashRetentionLabel(deletedAgo(30.5), 30, NOW);
     expect(label.text).toBe('Pending permanent deletion');
     expect(label.nearExpiry).toBe(true);
     expect(label.text).not.toMatch(/-\d+ days/);
   });
 
-  it('switches to amber within 7 days of the purge boundary', () => {
-    // 23 days ago → exactly 7 days remaining → still neutral.
-    expect(trashRetentionLabel(deletedAgo(23), NOW).nearExpiry).toBe(false);
-    // 23.5 days ago → 6.5 days remaining → amber.
-    expect(trashRetentionLabel(deletedAgo(23.5), NOW).nearExpiry).toBe(true);
+  it('names the eligibility date, not a scheduled deletion appointment', () => {
+    const label = trashRetentionLabel(deletedAgo(1), 30, NOW);
+    const date = label.text.split('until eligible for permanent deletion · ')[1];
+    expect(date).toBe(new Date(NOW + 29 * DAY).toLocaleDateString(undefined, {
+      month: 'short', day: 'numeric', year: 'numeric',
+    }));
+    expect(date).not.toMatch(/\d{1,2}:\d{2}/);
   });
 
-  it('never promises an exact deletion time — only a calendar date', () => {
-    const label = trashRetentionLabel(deletedAgo(1), NOW);
-    const after = label.text.split('Permanent deletion after ')[1];
-    expect(after).toBeTruthy();
-    // No time-of-day component (the purge runs on a daily sweep).
-    expect(after!).not.toMatch(/\d{1,2}:\d{2}/);
+  it.each([7, 14, 21, 30])('uses the effective %i-day backend window', (days) => {
+    expect(trashRetentionLabel(deletedAgo(days - 1), days, NOW).text).toMatch(/^1 day until eligible for permanent deletion/);
+    expect(trashRetentionLabel(deletedAgo(days + 1), days, NOW).text).toBe('Pending permanent deletion');
   });
 
-  it('the window matches the backend sweeper literal', () => {
-    expect(TRASH_RETENTION_DAYS).toBe(30);
-  });
+  it.each([[7, 2], [14, 4], [21, 6], [30, 7]])(
+    'scales the %i-day window accent to less than %i days remaining', (window, threshold) => {
+      expect(trashRetentionLabel(deletedAgo(0), window, NOW).nearExpiry).toBe(false);
+      expect(trashRetentionLabel(deletedAgo(window - threshold), window, NOW).nearExpiry).toBe(false);
+      expect(trashRetentionLabel(deletedAgo(window - threshold + 0.01), window, NOW).nearExpiry).toBe(true);
+      expect(trashRetentionLabel(deletedAgo(window), window, NOW).text).toBe('Pending permanent deletion');
+    },
+  );
 });

@@ -5,8 +5,15 @@ export async function getSettings(): Promise<AppConfig> {
   return invoke('get_settings');
 }
 
-export async function saveSettings(config: AppConfig): Promise<void> {
-  return invoke('save_settings', { config });
+/** A shorter Trash window requires the caller's freshly confirmed purge count. */
+export async function saveSettings(
+  config: AppConfig,
+  confirmedTrashPurgeCount?: number,
+): Promise<void> {
+  return invoke('save_settings', {
+    config,
+    ...(confirmedTrashPurgeCount === undefined ? {} : { confirmedTrashPurgeCount }),
+  });
 }
 
 /// Mark onboarding as started. Called by the wizard the first time it saves any

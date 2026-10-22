@@ -33,6 +33,16 @@ describe('settings api', () => {
     expect(invokeMock).toHaveBeenCalledWith('save_settings', { config });
   });
 
+  it('forwards an explicit trash purge confirmation count, including zero', async () => {
+    const config = { trash_retention_days: 7 } as never;
+    for (const count of [0, 3]) {
+      await saveSettings(config, count);
+      expect(invokeMock).toHaveBeenLastCalledWith('save_settings', {
+        config, confirmedTrashPurgeCount: count,
+      });
+    }
+  });
+
   it('testLmStudioConnection passes host + port + apiKey (null when omitted)', async () => {
     await testLmStudioConnection('127.0.0.1', 1234);
     expect(invokeMock).toHaveBeenCalledWith('test_lmstudio_connection', { host: '127.0.0.1', port: 1234, apiKey: null });

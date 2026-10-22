@@ -1,8 +1,3 @@
-/// Trash retention window in days — mirrors the backend sweeper's literal
-/// (`retention_sweep_tick` purges tombstones older than 30 days). Fixed by
-/// design (no user setting); do not diverge from the sweeper.
-export const TRASH_RETENTION_DAYS = 30;
-
 const DAY_MS = 86_400_000;
 
 /// Date+time for trash rows ("Moved to Trash …", "Recorded …").
@@ -18,42 +13,42 @@ export function formatTrashDateTime(iso: string): string {
 
 export interface RetentionLabel {
   text: string;
-  /// Restrained amber treatment near the purge boundary (≤7 days, or
-  /// already past it).
+  /// Supplementary tint near eligibility, scaled to the chosen window.
   nearExpiry: boolean;
 }
 
-/// Days-remaining display for a trashed recording. Rules (brief D4):
-/// - neutral text normally, restrained amber near expiry;
-/// - "Less than 1 day remaining" under a day;
-/// - "Pending permanent deletion" once past 30 days — NEVER a negative
+/// Eligibility display for a trashed recording:
+/// - readable text with a supplementary tint near expiry;
+/// - "Less than 1 day until eligible for permanent deletion" under a day;
+/// - "Pending permanent deletion" once past the effective window — NEVER a negative
 ///   day count and never a promise of an exact deletion time (the purge
-///   runs on a daily sweep; "after <calendar date>" is the most we can
-///   honestly say).
+///   runs on a daily sweep; the date is eligibility, not an appointment).
 export function trashRetentionLabel(
   deletedAtIso: string,
+  retentionDays: number,
   now: number = Date.now(),
 ): RetentionLabel {
   const deletedAt = new Date(deletedAtIso).getTime();
-  const purgeAt = deletedAt + TRASH_RETENTION_DAYS * DAY_MS;
-  const remaining = purgeAt - now;
+  const eligibleAt = deletedAt + retentionDays * DAY_MS;
+  const remaining = eligibleAt - now;
   if (remaining <= 0) {
     return { text: 'Pending permanent deletion', nearExpiry: true };
   }
-  const purgeAfter = new Date(purgeAt).toLocaleDateString(undefined, {
+  const eligibilityDate = new Date(eligibleAt).toLocaleDateString(undefined, {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
   });
   if (remaining < DAY_MS) {
     return {
-      text: `Less than 1 day remaining · Permanent deletion after ${purgeAfter}`,
+      text: `Less than 1 day until eligible for permanent deletion · ${eligibilityDate}`,
       nearExpiry: true,
     };
   }
   const days = Math.ceil(remaining / DAY_MS);
+  const nearExpiryDays = Math.min(7, Math.ceil(retentionDays / 4));
   return {
-    text: `${days} ${days === 1 ? 'day' : 'days'} remaining · Permanent deletion after ${purgeAfter}`,
-    nearExpiry: remaining < 7 * DAY_MS,
+    text: `${days} ${days === 1 ? 'day' : 'days'} until eligible for permanent deletion · ${eligibilityDate}`,
+    nearExpiry: remaining < nearExpiryDays * DAY_MS,
   };
 }

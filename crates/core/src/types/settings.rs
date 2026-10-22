@@ -224,6 +224,46 @@ fn default_max_retry_attempts() -> u32 {
     3
 }
 
+/// The trash undo windows the UI offers, in days. This is the single allowlist:
+/// the backend save path rejects anything else and the read path maps anything
+/// else to [`default_trash_retention_days`], so the stored value, the sweeper,
+/// and the countdown label can never disagree.
+pub const TRASH_RETENTION_DAYS_CHOICES: [u32; 4] = [7, 14, 21, 30];
+
+/// The previous hardcoded trash window — also the fallback for every config
+/// that predates the setting, and the fail-closed value for an invalid one.
+fn default_trash_retention_days() -> u32 {
+    30
+}
+
+/// Resolve a possibly-untrusted trash window to one the app will act on.
+///
+/// Fail closed: an unsupported or zero value resolves to the 30-day default
+/// rather than to a shorter window. Purge is irreversible (rows, transcripts,
+/// notes and audio), so a corrupt setting must never authorise an aggressive
+/// deletion schedule.
+pub fn effective_trash_retention_days(days: u32) -> u32 {
+    if TRASH_RETENTION_DAYS_CHOICES.contains(&days) {
+        days
+    } else {
+        default_trash_retention_days()
+    }
+}
+
+/// Tolerate an explicit JSON `null` for the trash window.
+///
+/// A plain `u32` would reject `null`, and `SettingsRepo::load_config` treats any
+/// parse error as "reset the entire `AppConfig` to defaults" — one null field
+/// would silently wipe every unrelated setting. Mapping null to the default
+/// keeps a single bad field from taking the whole config with it.
+fn deserialize_trash_retention_days<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<u32>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_else(default_trash_retention_days))
+}
+
 fn default_window_width() -> u32 {
     1200
 }
@@ -555,6 +595,22 @@ pub struct AppConfig {
     /// older than this many days. `None` = keep forever (default).
     #[serde(default)]
     pub retention_days: Option<u32>,
+
+    /// Trash undo window in days — how long a recording stays in Trash before
+    /// it is permanently deleted. Counted from each recording's own
+    /// local Trash clock (`local_deleted_at`, or `deleted_at` for local/legacy
+    /// deletions), never from the moment this setting changed.
+    ///
+    /// Pre-existing configs deserialize to 30, the window that was hardcoded
+    /// before this became user-settable, so upgrades change no behaviour. Only
+    /// the values in [`TRASH_RETENTION_DAYS_CHOICES`] are honoured; anything
+    /// else falls back to 30 (see [`effective_trash_retention_days`]) — a
+    /// corrupt or unsupported window must never shorten the undo period.
+    #[serde(
+        default = "default_trash_retention_days",
+        deserialize_with = "deserialize_trash_retention_days"
+    )]
+    pub trash_retention_days: u32,
 
     // Window
     #[serde(default = "default_window_width")]
@@ -1031,5 +1087,59 @@ mod tests {
         );
         let back: AppConfig = serde_json::from_str(&out).expect("re-parse");
         assert_eq!(back.retention_days, Some(42));
+    }
+
+    #[test]
+    fn trash_retention_days_defaults_to_30_for_older_configs() {
+        // The window was hardcoded to 30 before it became settable: an upgrading
+        // config must keep exactly that behaviour, not gain a new policy.
+        let old_json = r#"{"ai_provider":"ollama","stt_mode":"local"}"#;
+        let cfg: AppConfig = serde_json::from_str(old_json).expect("parse old config");
+        assert_eq!(cfg.trash_retention_days, 30);
+        assert_eq!(AppConfig::default().trash_retention_days, 30);
+    }
+
+    #[test]
+    fn trash_retention_days_accepts_only_offered_windows() {
+        for days in TRASH_RETENTION_DAYS_CHOICES {
+            assert_eq!(effective_trash_retention_days(days), days);
+        }
+        // Fail closed: anything else — including 0, a value from a future
+        // build, or a hand-edited config — resolves to the 30-day default so a
+        // corrupt setting can never shorten the undo window.
+        for bad in [0u32, 1, 6, 8, 29, 31, 90, 365, u32::MAX] {
+            assert_eq!(
+                effective_trash_retention_days(bad),
+                30,
+                "unsupported window {bad} must resolve to the 30-day default"
+            );
+        }
+    }
+
+    #[test]
+    fn trash_retention_days_round_trips() {
+        let json = r#"{"trash_retention_days": 7}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(cfg.trash_retention_days, 7);
+
+        let out = serde_json::to_string(&cfg).expect("serialize");
+        assert!(
+            out.contains(r#""trash_retention_days":7"#),
+            "expected trash_retention_days in output, got: {out}"
+        );
+        let back: AppConfig = serde_json::from_str(&out).expect("re-parse");
+        assert_eq!(back.trash_retention_days, 7);
+    }
+
+    #[test]
+    fn trash_retention_days_null_deserializes_to_default() {
+        // A JSON null (an older writer, or a hand-edited config) must not fail
+        // the whole config parse — SettingsRepo treats any parse error as
+        // "reset every setting to defaults".
+        let json = r#"{"trash_retention_days": null, "theme":"dark"}"#;
+        let cfg: AppConfig =
+            serde_json::from_str(json).expect("a null window must not fail the whole parse");
+        assert_eq!(cfg.trash_retention_days, 30);
+        assert_eq!(cfg.theme, Theme::Dark, "unrelated settings must survive");
     }
 }

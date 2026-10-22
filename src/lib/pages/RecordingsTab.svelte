@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { recordings, selectRecording } from '../stores/recordings.svelte';
   import { pipeline } from '../stores/pipeline.svelte';
+  import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toasts.svelte';
   import SearchBar from '../components/SearchBar.svelte';
   import RecordingCard from '../components/RecordingCard.svelte';
@@ -12,6 +13,7 @@
 
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
   let showMoveAll = $state(false);
+  const retentionDays = $derived(settings.trashRetentionDays);
   /// Active | Trash view. The switch is ALWAYS rendered — an empty Active
   /// list must never hide the route to Trash recovery.
   let view = $state<'active' | 'trash'>('active');
@@ -82,9 +84,8 @@
     showMoveAll = false;
     try {
       const result = await recordings.removeAll();
-      const noun = result.count === 1 ? 'recording' : 'recordings';
       toasts.add({
-        message: `${result.count} ${noun} moved to Trash. Available to restore for 30 days.`,
+        message: `${result.count} moved to Trash. Restore them within ${retentionDays} days.`,
         type: 'success',
         autoDismiss: true,
         actionLabel: 'Undo',
@@ -192,7 +193,7 @@
 <ConfirmDialog
   open={deleteTarget !== null}
   title="Move recording to Trash?"
-  message="You can restore this recording from Trash for 30 days. After that, it and its saved audio and documents are permanently deleted."
+  message={`This recording is eligible for permanent deletion after ${retentionDays} days in Trash. You can restore it from Trash during that time. After that, cleanup permanently deletes its audio, transcript, SOAP notes and generated documents.`}
   confirmLabel="Move to Trash"
   danger={false}
   onConfirm={confirmDelete}
@@ -205,7 +206,7 @@
   <ConfirmDialog
     open={true}
     title={`Move all ${moveAllN} ${moveAllNoun} to Trash?`}
-    message="This moves all active recordings to Trash, including recordings outside the current search. Their audio, transcripts, SOAP notes, and generated documents are kept for 30 days. You can restore them from Trash during that time. After 30 days, they are permanently deleted."
+    message={`This moves all active recordings to Trash, including recordings outside the current search. Recordings are eligible for permanent deletion after ${retentionDays} days in Trash. You can restore them from Trash during that time. After that, cleanup permanently deletes their audio, transcripts, SOAP notes and generated documents.`}
     confirmLabel={`Move ${moveAllN} ${moveAllNoun} to Trash`}
     danger={false}
     onConfirm={confirmMoveAll}
@@ -292,7 +293,7 @@
     color: var(--text-muted);
   }
 
-  /* Restrained by design: Move-all-to-Trash is reversible for 30 days, so
+  /* Restrained by design: Move-all-to-Trash has a configurable recovery window, so
    * it must not carry the irreversible-danger treatment (red) the old
    * hard-delete button had. */
   .btn-move-all {

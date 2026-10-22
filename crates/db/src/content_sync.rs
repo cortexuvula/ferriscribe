@@ -1107,17 +1107,21 @@ impl ContentSyncRepo {
             .find_map(|v| v.origin_device.clone())
             .unwrap_or_else(|| "remote".to_string());
         let metadata_json = serde_json::json!({"synced_from": origin}).to_string();
+        let local_deleted_at = remote
+            .deleted_at
+            .as_deref()
+            .map(|_| chrono::Utc::now().to_rfc3339());
         conn.execute(
             "INSERT INTO recordings (
                 id, filename, transcript, soap_note, referral, letter, peer_discussion, chat,
                 patient_name, audio_path, duration_seconds, file_size_bytes,
                 stt_provider, ai_provider, tags, processing_status, created_at, metadata,
-                updated_at, deleted_at
+                updated_at, deleted_at, local_deleted_at
              ) VALUES (
                 ?1, ?2, NULL, NULL, NULL, NULL, NULL, NULL,
                 ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9, ?10, ?11, ?12,
-                ?13, ?14
+                ?13, ?14, ?15
              )",
             params![
                 remote.id,
@@ -1134,6 +1138,7 @@ impl ContentSyncRepo {
                 metadata_json,
                 remote.updated_at,
                 remote.deleted_at,
+                local_deleted_at,
             ],
         )?;
 
@@ -1210,15 +1215,17 @@ impl ContentSyncRepo {
     // -----------------------------------------------------------------
 
     /// Tombstone a live local row from a sync peer's deletion, with a
-    /// caller-supplied timestamp (the deletion's own `deleted_at`). Mirrors
+    /// separate local undo clock after the caller accepts the peer deletion.
+    /// Preserve the peer's timestamp for LWW and outgoing sync. Mirrors
     /// `RecordingsRepo::soft_delete`'s FTS discipline: UPDATE first, then
     /// remove the FTS row with the *currently indexed* column values.
     /// Missing row / already-tombstoned → clean no-op.
     pub fn sync_tombstone(conn: &Connection, id: &str, deleted_at: &str) -> DbResult<()> {
+        let local_deleted_at = chrono::Utc::now().to_rfc3339();
         let changed = conn.execute(
-            "UPDATE recordings SET deleted_at = ?1, updated_at = ?1
+            "UPDATE recordings SET deleted_at = ?1, updated_at = ?1, local_deleted_at = ?3
              WHERE id = ?2 AND deleted_at IS NULL",
-            params![deleted_at, id],
+            params![deleted_at, id, local_deleted_at],
         )?;
         // Only de-index when the UPDATE actually tombstoned the row. Unlike
         // `soft_delete` (which errors out on 0 rows and can therefore assume
@@ -1249,7 +1256,7 @@ impl ContentSyncRepo {
     /// tombstone, silently reverting the user's restore) — it stays live and
     /// continues to converge via the normal LWW paths. Already-tombstoned
     /// and unknown ids are no-ops: the former keeps its own `deleted_at`
-    /// (the local 30-day sweeper finishes it), and the latter never existed
+    /// (the local policy sweeper finishes it), and the latter never existed
     /// here (the ledger also refuses any later stale re-insert).
     pub fn apply_purged_refs(conn: &Connection, purged: &[PurgedRef]) -> DbResult<()> {
         for p in purged {
@@ -1336,7 +1343,7 @@ impl ContentSyncRepo {
             }
         }
         let changed = conn.execute(
-            "UPDATE recordings SET deleted_at = NULL, updated_at = ?1
+            "UPDATE recordings SET deleted_at = NULL, local_deleted_at = NULL, updated_at = ?1
              WHERE id = ?2 AND deleted_at IS NOT NULL",
             params![updated_at, id],
         )?;
@@ -1995,6 +2002,39 @@ mod sync_tombstone_tests {
     }
 
     #[test]
+    fn incoming_tombstone_starts_local_undo_window() {
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        for peer_time in [
+            (chrono::Utc::now() - chrono::TimeDelta::days(60)).to_rfc3339(),
+            (chrono::Utc::now() + chrono::TimeDelta::days(60)).to_rfc3339(),
+            "invalid".to_string(),
+        ] {
+            let rec = seed(&conn, "localwindow.wav");
+            let before = chrono::Utc::now();
+            ContentSyncRepo::sync_tombstone(&conn, &rec.id.to_string(), &peer_time).unwrap();
+            assert_eq!(
+                deleted_at_raw(&conn, &rec.id.to_string()).as_deref(),
+                Some(peer_time.as_str())
+            );
+            let local: String = conn
+                .query_row(
+                    "SELECT local_deleted_at FROM recordings WHERE id = ?1",
+                    [rec.id.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let stored = parse_lww_timestamp(&local).unwrap();
+            assert!(stored >= before && stored <= chrono::Utc::now());
+            assert!(
+                RecordingsRepo::list_soft_deleted_older_than(&conn, 7, chrono::Utc::now(),)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn sync_tombstone_hides_row_and_deindexes_fts() {
         let db = Database::open_in_memory().unwrap();
         let conn = db.conn().unwrap();
@@ -2163,12 +2203,22 @@ mod sync_tombstone_tests {
                 purged_at: "2020-01-01T00:00:00Z".to_string(),
             },
         ];
+        let before = chrono::Utc::now();
         ContentSyncRepo::apply_purged_refs(&conn, &purged).unwrap();
 
-        assert_eq!(
-            deleted_at_raw(&conn, &older.id.to_string()).as_deref(),
-            Some("2999-01-01T00:00:00Z"),
-            "live row older than the purge must tombstone at purged_at"
+        let local_deleted = deleted_at_raw(&conn, &older.id.to_string()).unwrap();
+        assert_eq!(local_deleted, "2999-01-01T00:00:00Z");
+        let local: String = conn
+            .query_row(
+                "SELECT local_deleted_at FROM recordings WHERE id = ?1",
+                [older.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed = parse_lww_timestamp(&local).unwrap();
+        assert!(
+            parsed >= before && parsed <= chrono::Utc::now(),
+            "accepted purge notification starts the local undo window"
         );
         assert!(
             !fts_row_present(&conn, "purold"),
@@ -2190,7 +2240,7 @@ mod sync_tombstone_tests {
         ContentSyncRepo::apply_purged_refs(&conn, &purged).unwrap();
         assert_eq!(
             deleted_at_raw(&conn, &older.id.to_string()).as_deref(),
-            Some("2999-01-01T00:00:00Z")
+            Some(local_deleted.as_str())
         );
         assert_eq!(deleted_at_raw(&conn, &restored.id.to_string()), None);
     }

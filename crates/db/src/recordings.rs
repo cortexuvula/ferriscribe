@@ -729,7 +729,7 @@ impl RecordingsRepo {
             }
         }
         let rows = tx.execute(
-            "UPDATE recordings SET deleted_at = NULL, updated_at = ?1, metadata = ?2 WHERE id = ?3 AND deleted_at IS NOT NULL",
+            "UPDATE recordings SET deleted_at = NULL, local_deleted_at = NULL, updated_at = ?1, metadata = ?2 WHERE id = ?3 AND deleted_at IS NOT NULL",
             rusqlite::params![chrono::Utc::now().to_rfc3339(), metadata_json, id.to_string()],
         )?;
         if rows == 0 {
@@ -800,7 +800,7 @@ impl RecordingsRepo {
     /// stores. Callers validate the timestamps parse; the SQL is shared so
     /// the preview count and the restore can never disagree about the
     /// candidate set's boundaries.
-    const DELETED_BETWEEN_WHERE: &'static str = "deleted_at IS NOT NULL AND datetime(deleted_at) >= datetime(?1) AND datetime(deleted_at) < datetime(?2)";
+    const DELETED_BETWEEN_WHERE: &'static str = "deleted_at IS NOT NULL AND datetime(COALESCE(local_deleted_at, deleted_at)) >= datetime(?1) AND datetime(COALESCE(local_deleted_at, deleted_at)) < datetime(?2)";
 
     /// Restore every recording moved to Trash inside the half-open
     /// `[start, end)` interval (exact local-calendar-day restore: the
@@ -876,10 +876,10 @@ impl RecordingsRepo {
             |r| r.get(0),
         )?;
         let mut stmt = conn.prepare(
-            "SELECT id, filename, patient_name, duration_seconds, created_at, deleted_at
+            "SELECT id, filename, patient_name, duration_seconds, created_at, COALESCE(local_deleted_at, deleted_at)
              FROM recordings
              WHERE deleted_at IS NOT NULL
-             ORDER BY deleted_at DESC
+             ORDER BY COALESCE(local_deleted_at, deleted_at) DESC
              LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt
@@ -989,7 +989,9 @@ impl RecordingsRepo {
         let cutoff = (now - chrono::TimeDelta::days(days as i64)).to_rfc3339();
         let mut stmt = conn.prepare(
             "SELECT id, audio_path FROM recordings
-              WHERE deleted_at IS NOT NULL AND datetime(deleted_at) < datetime(?1)",
+              WHERE deleted_at IS NOT NULL
+                AND datetime(COALESCE(local_deleted_at, deleted_at)) < datetime(?1)
+                AND (encryption_pending IS NULL OR encryption_pending = 0)",
         )?;
         let rows = stmt
             .query_map(rusqlite::params![cutoff], |row| {
@@ -1010,6 +1012,31 @@ impl RecordingsRepo {
             })
             .collect();
         Ok(rows)
+    }
+
+    /// Count soft-deleted recordings past the purge cutoff, without listing their
+    /// audio paths.
+    ///
+    /// This backs the "shortening the undo window will delete N recordings"
+    /// confirmation: it must answer the same question as
+    /// [`RecordingsRepo::list_soft_deleted_older_than`] using the same predicate
+    /// (including the mid-encryption exclusion), so the number shown to the user
+    /// is the number the next sweep will actually purge.
+    pub fn count_soft_deleted_older_than(
+        conn: &Connection,
+        days: u32,
+        now: DateTime<Utc>,
+    ) -> DbResult<u32> {
+        let cutoff = (now - chrono::TimeDelta::days(days as i64)).to_rfc3339();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM recordings
+              WHERE deleted_at IS NOT NULL
+                AND datetime(COALESCE(local_deleted_at, deleted_at)) < datetime(?1)
+                AND (encryption_pending IS NULL OR encryption_pending = 0)",
+            rusqlite::params![cutoff],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as u32)
     }
 
     /// Hard-delete soft-deleted rows by id, keeping the FTS index consistent:
@@ -1034,7 +1061,7 @@ impl RecordingsRepo {
     /// Returns [`DbError::Sqlite`] on any failure; the transaction is rolled
     /// back and no rows are removed.
     pub fn purge_soft_deleted(conn: &Connection, ids: &[Uuid]) -> DbResult<Vec<Uuid>> {
-        Self::purge_soft_deleted_impl(conn, ids, false)
+        Self::purge_soft_deleted_impl(conn, ids, false, None)
     }
 
     /// [`RecordingsRepo::purge_soft_deleted`], plus a write to the
@@ -1059,16 +1086,30 @@ impl RecordingsRepo {
     /// Returns [`DbError::Sqlite`] on any failure; the transaction is rolled
     /// back, no rows are removed, and no ledger entries are written.
     pub fn purge_soft_deleted_with_ledger(conn: &Connection, ids: &[Uuid]) -> DbResult<Vec<Uuid>> {
-        Self::purge_soft_deleted_impl(conn, ids, true)
+        Self::purge_soft_deleted_impl(conn, ids, true, None)
     }
 
-    /// Shared body of the two purge entry points. See their docs; the flag
+    /// Retention-policy purge: recheck the age and encryption guards inside
+    /// the deletion transaction, not just in the earlier candidate listing.
+    /// Explicit/manual purges keep their separate, age-independent API.
+    pub fn purge_soft_deleted_older_than_with_ledger(
+        conn: &Connection,
+        ids: &[Uuid],
+        days: u32,
+        now: DateTime<Utc>,
+    ) -> DbResult<Vec<Uuid>> {
+        let cutoff = (now - chrono::TimeDelta::days(days as i64)).to_rfc3339();
+        Self::purge_soft_deleted_impl(conn, ids, true, Some(&cutoff))
+    }
+
+    /// Shared body of the purge entry points. See their docs; the flag
     /// selects whether purged ids are also written to the
     /// `purged_recordings` ledger.
     fn purge_soft_deleted_impl(
         conn: &Connection,
         ids: &[Uuid],
         write_ledger: bool,
+        cutoff: Option<&str>,
     ) -> DbResult<Vec<Uuid>> {
         // `unchecked_transaction` because repo methods receive `&Connection`
         // (the crate's established pattern — see migrations/mod.rs). If any
@@ -1080,20 +1121,24 @@ impl RecordingsRepo {
             let id_str = id.to_string();
             // Re-index the row with its currently stored values (the exact
             // column list `restore` re-inserts / `soft_delete` deletes), but
-            // only while it is still soft-deleted. The WHERE clause doubles
-            // as the visible-row guard: for a visible id the SELECT yields
-            // no rows, so the FTS index is never touched.
+            // only while it still qualifies. Both statements use the same
+            // predicate inside this transaction: a stale listing must not touch
+            // the FTS index, delete the row, or ledger an ineligible candidate.
             tx.execute(
                 "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
                  SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
-                 FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL",
-                [&id_str],
+                 FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL
+                   AND (?2 IS NULL OR datetime(COALESCE(local_deleted_at, deleted_at)) < datetime(?2))
+                   AND (encryption_pending IS NULL OR encryption_pending = 0)",
+                rusqlite::params![id_str, cutoff],
             )?;
             // The delete trigger now finds matching indexed values, so the
             // hard DELETE de-indexes cleanly instead of corrupting FTS.
             let rows = tx.execute(
-                "DELETE FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL",
-                [&id_str],
+                "DELETE FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL
+                   AND (?2 IS NULL OR datetime(COALESCE(local_deleted_at, deleted_at)) < datetime(?2))
+                   AND (encryption_pending IS NULL OR encryption_pending = 0)",
+                rusqlite::params![id_str, cutoff],
             )?;
             if rows > 0 {
                 if write_ledger {

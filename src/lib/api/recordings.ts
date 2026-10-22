@@ -52,6 +52,11 @@ export async function countRecordings(): Promise<number> {
   return invoke('count_recordings');
 }
 
+/** Preview the same local-clock/encryption-guarded set the purge sweeper uses. */
+export async function countSoftDeletedOlderThan(days: number): Promise<number> {
+  return invoke('count_soft_deleted_older_than', { days });
+}
+
 /** One page of the Trash view plus the authoritative total. */
 export interface TrashedListResult {
   items: TrashedRecordingSummary[];

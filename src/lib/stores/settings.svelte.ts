@@ -69,6 +69,7 @@ const defaults: AppConfig = {
   sync_condition_chips: false,
   sync_content: false,
   retention_days: null,
+  trash_retention_days: 30,
   screenshot_ocr_hotkey_enabled: true,
   screenshot_ocr_hotkey: null,
 };
@@ -92,7 +93,12 @@ class SettingsStore {
    *  are derived from THIS at drain time — never from the optimistic
    *  `state` snapshot — so a rolled-back change can never be resurrected
    *  by a later queued save that captured it. */
-  private serverState: AppConfig | null = null;
+  private serverState = $state.raw<AppConfig | null>(null);
+  /** get_settings resolves invalid/missing/null windows on the backend.
+   *  Never use an optimistic draft to describe an irreversible purge policy. */
+  get trashRetentionDays(): number {
+    return this.serverState?.trash_retention_days ?? 30;
+  }
   /**
    * Svelte-store-compatible subscribers. We use an explicit Set + manual
    * notification instead of `$effect.root` so `subscribe()` is safe to call
@@ -190,6 +196,7 @@ class SettingsStore {
   async updateField<K extends keyof AppConfig>(
     key: K,
     value: AppConfig[K],
+    confirmedTrashPurgeCount?: number,
   ): Promise<void> {
     if (!this.loaded) {
       console.warn('Settings not loaded yet, refusing to save');
@@ -209,7 +216,11 @@ class SettingsStore {
       // reload above.
       const payload = { ...(this.serverState ?? this.state), [key]: value };
       try {
-        await saveSettings(payload);
+        if (key === 'trash_retention_days' && confirmedTrashPurgeCount !== undefined) {
+          await saveSettings(payload, confirmedTrashPurgeCount);
+        } else {
+          await saveSettings(payload);
+        }
         this.serverState = payload;
         this.saveError = null;
       } catch (err) {

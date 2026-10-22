@@ -2190,6 +2190,60 @@ mod tests {
     }
 
     #[test]
+    fn delayed_deletion_relay_cannot_override_newer_restore() {
+        for existing in [false, true] {
+            let relay = Database::open_in_memory().unwrap();
+            let conn = relay.conn().unwrap();
+            let id = seed_recording(&conn);
+            conn.execute(
+                "UPDATE recordings SET updated_at = '2026-01-01T00:00:00Z' WHERE id = ?1",
+                [id.to_string()],
+            )
+            .unwrap();
+            let mut deletion = build_sync_recording(&conn, &id.to_string()).unwrap();
+            deletion.deleted_at = Some("2026-01-02T00:00:00Z".into());
+            deletion.updated_at = "2026-01-02T00:00:00Z".into();
+            if !existing {
+                conn.execute("DELETE FROM recordings WHERE id = ?1", [id.to_string()])
+                    .unwrap();
+            }
+            ContentSyncRepo::merge_incoming(&conn, &[deletion.clone()]).unwrap();
+            let outgoing = build_sync_recording(&conn, &id.to_string()).unwrap();
+
+            let peer = Database::open_in_memory().unwrap();
+            let other = peer.conn().unwrap();
+            let mut restored = deletion.clone();
+            restored.deleted_at = None;
+            restored.updated_at = "2026-01-03T00:00:00Z".into();
+            ContentSyncRepo::merge_incoming(&other, &[restored.clone()]).unwrap();
+            ContentSyncRepo::merge_incoming(&other, std::slice::from_ref(&outgoing)).unwrap();
+            assert!(
+                build_sync_recording(&other, &id.to_string())
+                    .unwrap()
+                    .deleted_at
+                    .is_none(),
+                "relaying an old deletion must not undo a newer restore"
+            );
+            assert_eq!(outgoing.deleted_at, deletion.deleted_at);
+            assert_eq!(
+                medical_db::content_sync::cmp_lww_timestamps(
+                    &outgoing.updated_at,
+                    &deletion.updated_at
+                ),
+                std::cmp::Ordering::Equal
+            );
+            // The newer restore must converge back to the relay, too.
+            ContentSyncRepo::merge_incoming(&conn, &[restored]).unwrap();
+            assert!(
+                build_sync_recording(&conn, &id.to_string())
+                    .unwrap()
+                    .deleted_at
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn build_sync_recording_is_sparse_and_strips_synced_from() {
         let db = Database::open_in_memory().expect("db");
         let conn = db.conn().expect("conn");

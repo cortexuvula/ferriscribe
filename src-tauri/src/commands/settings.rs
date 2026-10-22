@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use medical_core::error::{AppError, AppResult};
-use medical_core::types::settings::AppConfig;
+use medical_core::types::settings::{AppConfig, effective_trash_retention_days};
 use medical_db::settings::SettingsRepo;
 
 use crate::state::AppState;
@@ -45,6 +45,7 @@ pub async fn get_settings(state: tauri::State<'_, AppState>) -> AppResult<AppCon
         let config_existed = SettingsRepo::exists(&conn, "app_config")?;
         let mut config = SettingsRepo::load_config(&conn)?;
         config.migrate();
+        config.trash_retention_days = effective_trash_retention_days(config.trash_retention_days);
         if !config.onboarding_completed && config_existed && !onboarding_started {
             // Pre-wizard existing install: mark onboarded, never show the wizard.
             config.onboarding_completed = true;
@@ -119,6 +120,21 @@ pub(super) fn validate_max_speakers(config: &AppConfig) -> AppResult<()> {
     Ok(())
 }
 
+/// Validate and persist the trash policy atomically with its confirmation.
+/// A stale/missing confirmation must never persist a shorter undo window,
+/// including when the number of newly eligible recordings is zero.
+fn save_config_with_trash_confirmation(
+    conn: &medical_db::Connection,
+    config: &AppConfig,
+    confirmed_trash_purge_count: Option<u32>,
+) -> AppResult<()> {
+    SettingsRepo::save_config_with_trash_confirmation(conn, config, confirmed_trash_purge_count)
+        .map_err(|err| match err {
+            medical_db::DbError::Constraint(message) => AppError::InvalidInput(message),
+            other => other.into(),
+        })
+}
+
 /// Persist updated application settings to the database.
 ///
 /// Validates that configured AI/STT hosts are local (private/LAN addresses)
@@ -133,6 +149,7 @@ pub async fn save_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     config: AppConfig,
+    confirmed_trash_purge_count: Option<u32>,
 ) -> AppResult<()> {
     validate_prompt_overrides(&config)?;
     validate_max_speakers(&config)?;
@@ -174,7 +191,7 @@ pub async fn save_settings(
             &data_dir,
         )?;
 
-        SettingsRepo::save_config(&conn, &config_to_save).map_err(AppError::from)
+        save_config_with_trash_confirmation(&conn, &config_to_save, confirmed_trash_purge_count)
     })
     .await
     .map_err(super::join_err)??;
@@ -187,6 +204,73 @@ pub async fn save_settings(
 mod tests {
     use super::*;
     use medical_core::endpoint_policy::EndpointKind;
+
+    #[test]
+    fn trash_window_save_requires_matching_confirmation_and_preserves_config_on_error() {
+        use medical_core::types::recording::Recording;
+        use medical_db::{Database, recordings::RecordingsRepo};
+        let db = Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let original = AppConfig::default();
+        SettingsRepo::save_config(&conn, &original).unwrap();
+        let rec = Recording::new("synthetic.wav", "/audio/synthetic.wav".into());
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+        conn.execute(
+            "UPDATE recordings SET deleted_at = datetime('now', '-10 days') WHERE id = ?1",
+            [rec.id.to_string()],
+        )
+        .unwrap();
+        let mut cfg = original.clone();
+        cfg.trash_retention_days = 7;
+        for confirmation in [None, Some(0), Some(2)] {
+            assert!(save_config_with_trash_confirmation(&conn, &cfg, confirmation).is_err());
+            assert_eq!(
+                SettingsRepo::load_config(&conn)
+                    .unwrap()
+                    .trash_retention_days,
+                30
+            );
+        }
+        save_config_with_trash_confirmation(&conn, &cfg, Some(1)).unwrap();
+        assert_eq!(
+            SettingsRepo::load_config(&conn)
+                .unwrap()
+                .trash_retention_days,
+            7
+        );
+        // Equal and longer windows do not require confirmation.
+        save_config_with_trash_confirmation(&conn, &cfg, None).unwrap();
+        cfg.trash_retention_days = 14;
+        save_config_with_trash_confirmation(&conn, &cfg, None).unwrap();
+        for invalid in [0, 8, 17, 31, u32::MAX] {
+            cfg.trash_retention_days = invalid;
+            let err = save_config_with_trash_confirmation(&conn, &cfg, Some(1)).unwrap_err();
+            assert!(err.to_string().contains("7, 14, 21, or 30"));
+            assert_eq!(
+                SettingsRepo::load_config(&conn)
+                    .unwrap()
+                    .trash_retention_days,
+                14
+            );
+        }
+    }
+
+    #[test]
+    fn trash_window_shortening_requires_confirmation_even_for_zero_candidates() {
+        let db = medical_db::Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        for stored in [
+            r#"{}"#,
+            r#"{"trash_retention_days":null}"#,
+            r#"{"trash_retention_days":0}"#,
+        ] {
+            SettingsRepo::set(&conn, "app_config", stored).unwrap();
+            let mut cfg = AppConfig::default();
+            cfg.trash_retention_days = 7;
+            assert!(save_config_with_trash_confirmation(&conn, &cfg, None).is_err());
+            save_config_with_trash_confirmation(&conn, &cfg, Some(0)).unwrap();
+        }
+    }
 
     fn config_with_hosts(ollama: &str, lmstudio: &str, stt: &str) -> AppConfig {
         AppConfig {

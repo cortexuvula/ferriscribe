@@ -322,7 +322,8 @@ pub struct TrashedRecordingSummary {
     pub duration_seconds: Option<f64>,
     /// When the recording was created (recorded).
     pub created_at: DateTime<Utc>,
-    /// When it was moved to Trash (the row's `deleted_at`).
+    /// When it entered Trash locally (local_deleted_at, falling back to
+    /// deleted_at for local/legacy deletions). Not the sync LWW timestamp.
     pub deleted_at: DateTime<Utc>,
 }
 

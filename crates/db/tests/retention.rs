@@ -44,6 +44,86 @@ fn visible_ids(conn: &rusqlite::Connection) -> Vec<Uuid> {
         .collect()
 }
 
+#[test]
+fn received_deletion_uses_local_clock_for_trash_display_preview_and_purge() {
+    use medical_db::content_sync::ContentSyncRepo;
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn().unwrap();
+    let rec = seed_days_old(&conn, 100, "synthetic.wav");
+    let before = chrono::Utc::now();
+    ContentSyncRepo::sync_tombstone(&conn, &rec.id.to_string(), "2000-01-01T00:00:00Z").unwrap();
+    let (items, _) = RecordingsRepo::list_trashed(&conn, 10, 0).unwrap();
+    assert!(
+        items[0].deleted_at >= before,
+        "countdown must use the local undo clock, not the peer's old LWW clock"
+    );
+    let now = chrono::Utc::now();
+    assert_eq!(
+        RecordingsRepo::count_soft_deleted_older_than(&conn, 7, now).unwrap(),
+        0
+    );
+    assert!(
+        RecordingsRepo::purge_soft_deleted_older_than_with_ledger(&conn, &[rec.id], 7, now)
+            .unwrap()
+            .is_empty()
+    );
+    let expired = now + chrono::TimeDelta::days(8);
+    assert_eq!(
+        RecordingsRepo::count_soft_deleted_older_than(&conn, 7, expired).unwrap(),
+        1
+    );
+    assert_eq!(
+        RecordingsRepo::purge_soft_deleted_older_than_with_ledger(&conn, &[rec.id], 7, expired)
+            .unwrap(),
+        vec![rec.id]
+    );
+}
+
+#[test]
+fn trash_count_listing_and_transaction_share_cutoff_and_encryption_guards() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn().unwrap();
+    let now = chrono::DateTime::parse_from_rfc3339("2026-10-22T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut ids = Vec::new();
+    for (age, pending) in [(8, false), (7, false), (6, false), (40, true)] {
+        let rec = seed_days_old(&conn, 100, "synthetic.wav");
+        let deleted = (now - chrono::TimeDelta::days(age)).to_rfc3339();
+        conn.execute(
+            "UPDATE recordings SET deleted_at = ?1, encryption_pending = ?2 WHERE id = ?3",
+            rusqlite::params![deleted, pending, rec.id.to_string()],
+        )
+        .unwrap();
+        ids.push(rec.id);
+    }
+    let listed = RecordingsRepo::list_soft_deleted_older_than(&conn, 7, now).unwrap();
+    assert_eq!(
+        listed.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![ids[0]]
+    );
+    assert_eq!(
+        RecordingsRepo::count_soft_deleted_older_than(&conn, 7, now).unwrap(),
+        1
+    );
+    assert_eq!(
+        RecordingsRepo::count_soft_deleted_older_than(&conn, 30, now).unwrap(),
+        0
+    );
+    // Feed ALL ids, not just the listing: the transaction must independently
+    // exclude boundary/fresh/encrypting rows and ledger only the eligible one.
+    assert_eq!(
+        RecordingsRepo::purge_soft_deleted_older_than_with_ledger(&conn, &ids, 7, now).unwrap(),
+        vec![ids[0]]
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM purged_recordings", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
 // -------------------------------------------------------------------------
 // Test 1: only old, visible recordings are swept.
 // -------------------------------------------------------------------------

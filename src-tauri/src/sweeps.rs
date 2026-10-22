@@ -253,13 +253,13 @@ pub fn orphaned_wav_sweep(db: &Database, recordings_dir: &Path) {
 /// (logs carry counts/ids only):
 ///
 /// 1. Tombstone purge (EVERY machine, not just the server): permanently
-///    delete recordings soft-deleted >30 days ago. PURGE-FIRST ordering:
+///    delete recordings past the configured Trash undo window. PURGE-FIRST ordering:
 ///    the ledger purge transaction runs before any artifact cleanup, and
 ///    RAG vectors + audio files are removed ONLY for ids the transaction
 ///    confirmed purged — a restore landing between the listing and the
 ///    purge leaves its row active, so the purge skips it and its artifacts
 ///    survive (pinned by `restore_between_listing_and_purge_leaves_row_active_with_audio`).
-///    Runs on clients too: standalone machines must honor the 30-day
+///    Runs on clients too: standalone machines must honor their configured
 ///    window, and the `purged_recordings` ledger keeps paired machines
 ///    safe on every side (`merge_incoming` refuses stale copies).
 /// 2. Retention sweep (per-machine): if the clinician configured a
@@ -270,46 +270,65 @@ pub fn retention_sweep_tick(db: &Database) {
         return;
     };
 
-    // Retry file removals a previous purge failed to complete (the rows are
-    // gone, so this queue is their only recovery path).
+    // Previously committed purges need no new policy authorization. Drain
+    // their safe retry queue even if reading the current settings fails.
     pending_file_removals_sweep(&conn);
 
-    // ── Phase 1: tombstone purge (every machine) ─────────────────────
-    let to_purge = match RecordingsRepo::list_soft_deleted_older_than(&conn, 30, chrono::Utc::now())
-    {
-        Ok(rows) => rows,
+    // Load the policy ONCE, before authorizing any new purge, and bail out
+    // if it cannot be read. Phase 1 permanently destroys rows,
+    // transcripts, notes and audio: a failed load must never be interpreted as
+    // "no policy" and must never fall through to a default purge.
+    let cfg = match medical_db::settings::SettingsRepo::load_config(&conn) {
+        Ok(cfg) => cfg,
         Err(e) => {
-            tracing::warn!(error = %e, "tombstone sweeper: list failed");
-            Vec::new()
+            tracing::warn!(
+                error = %e,
+                "retention sweep: failed to load settings; skipping this tick"
+            );
+            return;
         }
     };
+    // Fail closed on an unsupported window (0, 8, a value from a future build,
+    // a hand-edited config): resolve to the 30-day default rather than act on a
+    // window that could delete more than the user chose.
+    let trash_days =
+        medical_core::types::settings::effective_trash_retention_days(cfg.trash_retention_days);
+    if trash_days != cfg.trash_retention_days {
+        tracing::warn!(
+            stored = cfg.trash_retention_days,
+            effective = trash_days,
+            "trash_retention_days is not an offered window; using the default"
+        );
+    }
+
+    // ── Phase 1: tombstone purge (every machine) ─────────────────────
+    let to_purge =
+        match RecordingsRepo::list_soft_deleted_older_than(&conn, trash_days, chrono::Utc::now()) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "tombstone sweeper: list failed");
+                Vec::new()
+            }
+        };
     if !to_purge.is_empty() {
-        purge_tombstone_batch(&conn, &to_purge);
+        purge_tombstone_batch(&conn, &to_purge, trash_days);
     }
 
     // ── Phase 2: per-machine retention sweep ───────────────────────────
     // Runs on every machine — it only moves old visible recordings into
-    // the trash.
-    match medical_db::settings::SettingsRepo::load_config(&conn) {
-        Ok(cfg) => {
-            if let Some(days) = cfg.retention_days.filter(|d| *d > 0) {
-                match RecordingsRepo::retention_soft_delete_older_than(
-                    &conn,
-                    days,
-                    chrono::Utc::now(),
-                ) {
-                    Ok(trashed) if !trashed.is_empty() => {
-                        tracing::info!(
-                            count = trashed.len(),
-                            "retention sweep: moved recordings to trash"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error = %e, "retention sweep failed"),
-                }
+    // the trash. A row trashed here carries `deleted_at ≈ now`, so it cannot
+    // be picked up by the phase-1 listing that already ran this tick.
+    if let Some(days) = cfg.retention_days.filter(|d| *d > 0) {
+        match RecordingsRepo::retention_soft_delete_older_than(&conn, days, chrono::Utc::now()) {
+            Ok(trashed) if !trashed.is_empty() => {
+                tracing::info!(
+                    count = trashed.len(),
+                    "retention sweep: moved recordings to trash"
+                );
             }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "retention sweep failed"),
         }
-        Err(e) => tracing::warn!(error = %e, "retention sweep: failed to load settings"),
     }
 }
 
@@ -320,8 +339,8 @@ pub fn retention_sweep_tick(db: &Database) {
 ///
 /// The candidates come from `list_soft_deleted_older_than` moments earlier;
 /// a restore may land in that window. The purge transaction's
-/// `deleted_at IS NOT NULL` guard skips such a row (rows=0 → not
-/// confirmed), so its audio and vectors are never deleted out from under a
+/// age and encryption guards skip restored, freshly re-deleted, or encrypting
+/// rows (rows=0 → not confirmed), so audio and vectors are never deleted under a
 /// live recording. Missing audio files are tolerated. Audio removal itself
 /// shreds legacy plaintext WAVs before unlinking (encrypted artifacts get
 /// a plain unlink — they hold only ciphertext), and a non-NotFound removal
@@ -334,6 +353,7 @@ pub fn retention_sweep_tick(db: &Database) {
 fn purge_tombstone_batch(
     conn: &medical_db::Connection,
     candidates: &[(uuid::Uuid, String)],
+    trash_days: u32,
 ) -> Vec<uuid::Uuid> {
     let ids: Vec<uuid::Uuid> = candidates.iter().map(|(id, _)| *id).collect();
     // Permanently delete the rows FIRST. This must go through the repo: a
@@ -342,7 +362,12 @@ fn purge_tombstone_batch(
     // The ledger variant records each purged id in `purged_recordings`
     // inside the same transaction, so `merge_incoming` can later refuse
     // stale copies of these recordings. Id + timestamp only — no PHI.
-    let confirmed = match RecordingsRepo::purge_soft_deleted_with_ledger(conn, &ids) {
+    let confirmed = match RecordingsRepo::purge_soft_deleted_older_than_with_ledger(
+        conn,
+        &ids,
+        trash_days,
+        chrono::Utc::now(),
+    ) {
         Ok(purged) => purged,
         Err(e) => {
             tracing::warn!(error = %e, "tombstone sweeper failed");
@@ -497,13 +522,21 @@ pub fn orphaned_enc_sweep(db: &Database, recordings_dir: &Path) {
                 return;
             }
         };
+        // Read both ownership sources in one snapshot. Synced recordings can
+        // have an empty audio_path until their separate audio fetch completes.
+        // Any prepare/query/decode error makes ownership uncertain: fail closed,
+        // never fall back to a partial set (and never flatten away row errors).
         match conn
-            .prepare("SELECT audio_path FROM recordings")
+            .prepare("SELECT id, audio_path FROM recordings")
             .and_then(|mut stmt| {
                 let mut out = std::collections::HashSet::new();
-                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-                for path in rows.flatten() {
-                    if let Some(name) = std::path::Path::new(&path).file_name() {
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?;
+                for row in rows {
+                    let (id, path) = row?;
+                    out.insert(format!("{id}.enc"));
+                    if let Some(name) = path.as_deref().and_then(|p| Path::new(p).file_name()) {
                         out.insert(name.to_string_lossy().into_owned());
                     }
                 }
@@ -511,7 +544,7 @@ pub fn orphaned_enc_sweep(db: &Database, recordings_dir: &Path) {
             }) {
             Ok(set) => set,
             Err(e) => {
-                tracing::warn!(error = %e, "orphan enc sweep: audio_path query failed");
+                tracing::warn!(error = %e, "orphan enc sweep: ownership query failed; skipping sweep");
                 return;
             }
         }
@@ -848,7 +881,7 @@ mod tests {
         // …and the purge proceeds with the STALE listing.
         let confirmed = {
             let conn = db.conn().expect("conn");
-            purge_tombstone_batch(&conn, &stale_listing)
+            purge_tombstone_batch(&conn, &stale_listing, 30)
         };
 
         assert!(confirmed.is_empty(), "the restored row is not purged");
@@ -873,6 +906,73 @@ mod tests {
             ledgered, 0,
             "no ledger entry for a row that was never purged"
         );
+    }
+
+    #[test]
+    fn stale_listing_preserves_redeleted_or_encrypting_rows_and_audio() {
+        for encrypting in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let audio = tmp.path().join("synthetic.wav");
+            std::fs::write(&audio, b"FE1 synthetic ciphertext").unwrap();
+            let db = Database::open_in_memory().unwrap();
+            let conn = db.conn().unwrap();
+            let rec = seed_days_old(&conn, 100, "synthetic.wav", audio.clone());
+            seed_aged_tombstone(&conn, &rec, 40);
+            let stale = RecordingsRepo::list_soft_deleted_older_than(&conn, 30, chrono::Utc::now())
+                .unwrap();
+            assert_eq!(stale.len(), 1);
+            RecordingsRepo::restore(&conn, &rec.id).unwrap();
+            if encrypting {
+                conn.execute(
+                    "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+                    [rec.id.to_string()],
+                )
+                .unwrap();
+                seed_aged_tombstone(&conn, &rec, 40);
+            } else {
+                RecordingsRepo::soft_delete(&conn, &rec.id).unwrap();
+            }
+            assert!(purge_tombstone_batch(&conn, &stale, 30).is_empty());
+            assert!(row_exists(&conn, rec.id));
+            assert!(audio.exists());
+            let ledger: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+                    [rec.id.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(ledger, 0);
+        }
+    }
+
+    #[test]
+    fn configured_trash_windows_and_fail_closed_defaults_drive_purge() {
+        for (json, effective) in [
+            (r#"{"trash_retention_days":7}"#, 7),
+            (r#"{"trash_retention_days":14}"#, 14),
+            (r#"{"trash_retention_days":21}"#, 21),
+            (r#"{"trash_retention_days":30}"#, 30),
+            (r#"{}"#, 30),
+            (r#"{"trash_retention_days":null}"#, 30),
+            (r#"{"trash_retention_days":0}"#, 30),
+            (r#"{"trash_retention_days":8}"#, 30),
+        ] {
+            let db = Database::open_in_memory().unwrap();
+            let (expired, protected) = {
+                let conn = db.conn().unwrap();
+                SettingsRepo::set(&conn, "app_config", json).unwrap();
+                let expired = seed_days_old(&conn, 100, "expired.wav", "".into());
+                let protected = seed_days_old(&conn, 100, "protected.wav", "".into());
+                seed_aged_tombstone(&conn, &expired, effective + 1);
+                seed_aged_tombstone(&conn, &protected, effective - 1);
+                (expired, protected)
+            };
+            retention_sweep_tick(&db);
+            let conn = db.conn().unwrap();
+            assert!(!row_exists(&conn, expired.id), "expired with {json}");
+            assert!(row_exists(&conn, protected.id), "protected with {json}");
+        }
     }
 
     #[test]
@@ -1181,6 +1281,61 @@ mod tests {
                 "success and NotFound both drop their paths"
             );
         }
+    }
+
+    #[test]
+    fn orphaned_enc_sweep_fails_closed_on_id_query_failure() {
+        for broken_id in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let artifact = tmp.path().join(format!("{}.enc", Uuid::new_v4()));
+            std::fs::write(&artifact, b"FE1 synthetic").unwrap();
+            backdate(&artifact);
+            let db = Database::open_in_memory().unwrap();
+            {
+                let conn = db.conn().unwrap();
+                conn.execute_batch("ALTER TABLE recordings RENAME TO original_recordings;")
+                    .unwrap();
+                if broken_id {
+                    // Preparing succeeds, but decoding ownership fails.
+                    conn.execute_batch("CREATE TABLE recordings (id BLOB, audio_path TEXT); INSERT INTO recordings VALUES (X'ff', '');").unwrap();
+                } else {
+                    // audio_path query succeeds, preparing the id query fails.
+                    conn.execute_batch("CREATE TABLE recordings (audio_path TEXT);")
+                        .unwrap();
+                }
+            }
+            orphaned_enc_sweep(&db, tmp.path());
+            assert!(
+                artifact.exists(),
+                "uncertain ownership must never authorize unlink"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_removals_retry_even_when_policy_read_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let audio = tmp.path().join("queued.wav");
+        std::fs::write(&audio, b"FE1 synthetic").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn().unwrap();
+            ContentSyncRepo::set_pending_file_removals(
+                &conn,
+                &[audio.to_string_lossy().into_owned()],
+            )
+            .unwrap();
+            // The queue uses a separate table; only policy reads fail.
+            conn.execute_batch("DROP TABLE settings;").unwrap();
+        }
+        retention_sweep_tick(&db);
+        assert!(!audio.exists());
+        let conn = db.conn().unwrap();
+        assert!(
+            ContentSyncRepo::get_pending_file_removals(&conn)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Rowless `.enc` sync artifacts are deleted; row-backed, fresh,

@@ -11,25 +11,26 @@
     item: TrashedRecordingSummary;
     onRestore: () => void;
     restoreDisabled?: boolean;
+    retentionDays?: number;
     /// Test seam: fixed "now" (epoch ms) for the days-remaining display.
     now?: number;
   }
 
-  const { item, onRestore, restoreDisabled = false, now = Date.now() }: Props = $props();
+  const { item, onRestore, restoreDisabled = false, retentionDays = 30, now = Date.now() }: Props = $props();
 
   /// ONE label: patient name when present, else filename — never both.
   const displayName = $derived(item.patient_name ?? item.filename);
-  const retention = $derived(trashRetentionLabel(item.deleted_at, now));
+  const retention = $derived(trashRetentionLabel(item.deleted_at, retentionDays, now));
 </script>
 
 <div class="trash-row" class:near-expiry={retention.nearExpiry}>
   <div class="row-main">
     <div class="row-name truncate" title={displayName}>{displayName}</div>
-    <div class="row-meta">
+    <div class="row-meta text-secondary">
       <span>Recorded {formatTrashDateTime(item.created_at)} · {formatDuration(item.duration_seconds)}</span>
       <span>Moved to Trash {formatTrashDateTime(item.deleted_at)}</span>
     </div>
-    <div class="row-retention" class:amber={retention.nearExpiry}>{retention.text}</div>
+    <div class="row-retention text-secondary">{retention.text}</div>
   </div>
   <button
     class="btn-restore"
@@ -69,19 +70,13 @@
     flex-wrap: wrap;
     gap: 4px 12px;
     font-size: 12px;
-    color: var(--text-muted);
   }
 
   .row-retention {
     font-size: 12px;
-    color: var(--text-muted);
   }
 
-  /* Restrained amber near expiry: a tint, not a warning banner. */
-  .row-retention.amber {
-    color: var(--warning, #d97706);
-  }
-
+  /* Supplementary tint only: words retain AA contrast in both themes. */
   .trash-row.near-expiry {
     background-color: color-mix(in srgb, var(--warning, #d97706) 4%, transparent);
   }

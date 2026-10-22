@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { recordings } from '../stores/recordings.svelte';
+  import { settings } from '../stores/settings.svelte';
   import { toasts } from '../stores/toasts.svelte';
   import SearchBar from './SearchBar.svelte';
   import TrashRecordingRow from './TrashRecordingRow.svelte';
@@ -20,6 +22,14 @@
   let searchInput = $state('');
   let showRestoreAll = $state(false);
   let showRestoreByDate = $state(false);
+  const retentionDays = $derived(settings.trashRetentionDays);
+  let now = $state(Date.now());
+  // The panel is mounted only while Trash is open. One shared clock keeps
+  // every row current, and its teardown prevents timers leaking on exit.
+  onMount(() => {
+    const timer = setInterval(() => { now = Date.now(); }, 60_000);
+    return () => clearInterval(timer);
+  });
 
   /// The ONE polite live region for trash-local results (D9): per-row
   /// restore completions land here — never ALSO as a toast (no double
@@ -104,7 +114,7 @@
     Trash
   </h3>
   <p class="trash-explain">
-    Recordings stay in Trash for 30 days. After that, their audio, transcripts, SOAP notes, and generated documents are permanently deleted.
+    Recordings can be restored for {retentionDays} days in Trash. After that, cleanup permanently deletes their audio, transcripts, SOAP notes and generated documents.
   </p>
 
   <div class="trash-toolbar">
@@ -169,7 +179,7 @@
         <div class="state-icon">🗑️</div>
         <p>Trash is empty.</p>
         <p class="hint">
-          Recordings moved to Trash appear here for 30 days before permanent deletion.
+          Recordings are eligible for permanent deletion after {retentionDays} days in Trash.
         </p>
       </div>
 
@@ -183,6 +193,8 @@
       {#each filtered as item (item.id)}
         <TrashRecordingRow
           item={item}
+          {retentionDays}
+          {now}
           onRestore={() => restoreRow(item.id)}
           restoreDisabled={recordings.restoring}
         />

@@ -70,6 +70,28 @@ fn get_text_column(conn: &rusqlite::Connection, id: Uuid, column: &str) -> Optio
     .expect("query column")
 }
 
+#[test]
+fn unknown_peer_tombstone_starts_local_window() {
+    let db = Database::open_in_memory().unwrap();
+    let conn = db.conn().unwrap();
+    for age in [60, -60] {
+        let id = Uuid::new_v4();
+        let mut remote = remote_for(id, HashMap::new());
+        remote.deleted_at = Some((chrono::Utc::now() - chrono::TimeDelta::days(age)).to_rfc3339());
+        let before = chrono::Utc::now();
+        ContentSyncRepo::merge_incoming(&conn, &[remote.clone()]).unwrap();
+        assert_eq!(get_text_column(&conn, id, "deleted_at"), remote.deleted_at);
+        let stored = get_text_column(&conn, id, "local_deleted_at").unwrap();
+        let stored = chrono::DateTime::parse_from_rfc3339(&stored).unwrap();
+        assert!(stored >= before && stored <= chrono::Utc::now());
+        assert!(
+            RecordingsRepo::list_soft_deleted_older_than(&conn, 7, chrono::Utc::now())
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
 // -------------------------------------------------------------------------
 // Test 1: remote wins when its field revision is newer.
 // -------------------------------------------------------------------------

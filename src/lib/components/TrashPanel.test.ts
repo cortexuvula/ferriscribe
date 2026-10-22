@@ -4,7 +4,7 @@
  *
  * The store (../stores/recordings.svelte) is mocked with a plain object we
  * mutate per test; TrashPanel reads it directly. Facts pinned:
- *   - Persistent 30-day explanation line is always rendered.
+ *   - Persistent effective-window explanation line is always rendered.
  *   - Authoritative "N recordings in Trash" toolbar count (from
  *     trashedTotal, not the loaded page).
  *   - Four states: loading ("Loading Trash…"), error ("Couldn't load Trash.
@@ -19,7 +19,7 @@
  *     generic value for raw backend strings, the safe `recording <uuid>`
  *     reference kept when the message carries one.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import TrashPanel from './TrashPanel.svelte';
 import type { TrashedRecordingSummary } from '../types';
@@ -61,6 +61,8 @@ function makeTrashed(id: string, deletedAt = '2026-10-01T12:00:00Z'): TrashedRec
 }
 
 vi.mock('../stores/recordings.svelte', () => ({ recordings: fakeStore }));
+const fakeSettings = vi.hoisted(() => ({ trashRetentionDays: 30 }));
+vi.mock('../stores/settings.svelte', () => ({ settings: fakeSettings }));
 vi.mock('../stores/toasts.svelte', () => ({
   toasts: { add: vi.fn(), error: mockToastsError, success: vi.fn(), dismiss: vi.fn() },
 }));
@@ -68,6 +70,7 @@ vi.mock('../stores/toasts.svelte', () => ({
 beforeEach(() => {
   cleanup();
   vi.clearAllMocks();
+  fakeSettings.trashRetentionDays = 30;
   fakeStore.trashedList = [];
   fakeStore.trashedTotal = 0;
   fakeStore.trashedLoading = false;
@@ -78,11 +81,37 @@ beforeEach(() => {
 });
 
 describe('TrashPanel — states', () => {
+  afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+  it('uses the effective backend window in explanatory copy and rows', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-06T12:00:00Z'));
+    fakeSettings.trashRetentionDays = 7;
+    fakeStore.trashedTotal = 1;
+    fakeStore.trashedList = [makeTrashed('a', '2026-10-01T12:00:00Z')];
+    render(TrashPanel);
+    expect(screen.getByText(/Recordings can be restored for 7 days in Trash/)).toBeTruthy();
+    expect(screen.getByText(/2 days until eligible for permanent deletion/)).toBeTruthy();
+  });
+
+  it('refreshes the countdown while mounted and stops the clock on close', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-06T12:00:00Z'));
+    fakeStore.trashedTotal = 1;
+    fakeStore.trashedList = [makeTrashed('a', '2026-09-06T12:01:00Z')];
+    const { unmount } = render(TrashPanel);
+    expect(screen.getByText(/Less than 1 day until eligible for permanent deletion/)).toBeTruthy();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(screen.getByText('Pending permanent deletion')).toBeTruthy();
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('always shows the persistent 30-day explanation', () => {
     render(TrashPanel);
     expect(
       screen.getByText(
-        'Recordings stay in Trash for 30 days. After that, their audio, transcripts, SOAP notes, and generated documents are permanently deleted.',
+        'Recordings can be restored for 30 days in Trash. After that, cleanup permanently deletes their audio, transcripts, SOAP notes and generated documents.',
       ),
     ).toBeTruthy();
   });
@@ -113,7 +142,7 @@ describe('TrashPanel — states', () => {
     expect(screen.getByText('Trash is empty.')).toBeTruthy();
     expect(
       screen.getByText(
-        'Recordings moved to Trash appear here for 30 days before permanent deletion.',
+        'Recordings are eligible for permanent deletion after 30 days in Trash.',
       ),
     ).toBeTruthy();
   });

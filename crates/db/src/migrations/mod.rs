@@ -24,6 +24,7 @@ pub mod m017_condition_chip_use_count;
 pub mod m018_purge_ledger;
 pub mod m019_recordings_sync_cursor_index;
 pub mod m020_generation_provenance;
+pub mod m021_local_trash_clock;
 
 use rusqlite::Connection;
 
@@ -147,6 +148,11 @@ pub fn all_migrations() -> &'static [Migration] {
             version: 20,
             name: "generation_provenance",
             up: m020_generation_provenance::up,
+        },
+        Migration {
+            version: 21,
+            name: "local_trash_clock",
+            up: m021_local_trash_clock::up,
         },
     ]
 }

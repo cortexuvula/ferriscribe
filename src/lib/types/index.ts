@@ -101,7 +101,7 @@ export interface TrashedRecordingSummary {
   patient_name: string | null;
   duration_seconds: number | null;
   created_at: string;
-  /** When the recording was moved to Trash (the row's `deleted_at`). */
+  /** Local moved-to-Trash clock for countdowns; not the sync LWW timestamp. */
   deleted_at: string;
 }
 
@@ -244,6 +244,8 @@ export interface AppConfig {
    *  null). Mirrors `retention_days: Option<u32>` in
    *  crates/core/src/types/settings.rs. */
   retention_days: number | null;
+  /** Effective Trash undo window from the backend (separate from active aging). */
+  trash_retention_days: number;
   // Screenshot-region OCR (v0.75)
   /** When true, the global hotkey is registered at startup (and on settings
    *  save). Under Wayland the OS-level binding must be added to the

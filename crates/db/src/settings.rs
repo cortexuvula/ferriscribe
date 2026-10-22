@@ -3,7 +3,9 @@
 
 use rusqlite::Connection;
 
-use medical_core::types::settings::AppConfig;
+use medical_core::types::settings::{
+    AppConfig, TRASH_RETENTION_DAYS_CHOICES, effective_trash_retention_days,
+};
 
 use crate::{DbError, DbResult};
 
@@ -73,8 +75,55 @@ impl SettingsRepo {
         }
     }
 
-    /// Serialise `config` to JSON and upsert it under the key `"app_config"`.
+    /// Persist a whole config without authorizing a shorter Trash window.
+    /// Background writers with stale snapshots must pass the same policy gate
+    /// as the settings command; they cannot silently reduce the undo period.
     pub fn save_config(conn: &Connection, config: &AppConfig) -> DbResult<()> {
+        Self::save_config_with_trash_confirmation(conn, config, None)
+    }
+
+    /// Validate the policy, recheck its current purge count, and persist in one
+    /// transaction. Also works within a caller-owned transaction (template sync).
+    pub fn save_config_with_trash_confirmation(
+        conn: &Connection,
+        config: &AppConfig,
+        confirmed_trash_purge_count: Option<u32>,
+    ) -> DbResult<()> {
+        if conn.is_autocommit() {
+            let tx = crate::unchecked_transaction_immediate(conn)?;
+            Self::save_config_checked(&tx, config, confirmed_trash_purge_count)?;
+            tx.commit()?;
+            Ok(())
+        } else {
+            Self::save_config_checked(conn, config, confirmed_trash_purge_count)
+        }
+    }
+
+    fn save_config_checked(
+        conn: &Connection,
+        config: &AppConfig,
+        confirmed_trash_purge_count: Option<u32>,
+    ) -> DbResult<()> {
+        if !TRASH_RETENTION_DAYS_CHOICES.contains(&config.trash_retention_days) {
+            return Err(DbError::Constraint(
+                "trash_retention_days must be 7, 14, 21, or 30.".into(),
+            ));
+        }
+        let previous = Self::load_config(conn)?;
+        if config.trash_retention_days
+            < effective_trash_retention_days(previous.trash_retention_days)
+        {
+            let count = crate::recordings::RecordingsRepo::count_soft_deleted_older_than(
+                conn,
+                config.trash_retention_days,
+                chrono::Utc::now(),
+            )?;
+            if confirmed_trash_purge_count != Some(count) {
+                return Err(DbError::Constraint(format!(
+                    "Shortening the Trash window requires confirmation of the current purge count ({count}); refresh and confirm again."
+                )));
+            }
+        }
         let json = serde_json::to_string(config).map_err(|e| DbError::Migration(e.to_string()))?;
         Self::set(conn, "app_config", &json)
     }
@@ -145,6 +194,25 @@ mod tests {
         let default = AppConfig::default();
         assert_eq!(cfg.language, default.language);
         assert_eq!(cfg.theme, default.theme);
+    }
+
+    #[test]
+    fn interleaved_stale_whole_config_save_cannot_reduce_trash_window() {
+        let conn = migrated();
+        // A background writer reads a formerly shorter window.
+        SettingsRepo::set(&conn, "app_config", r#"{"trash_retention_days":7}"#).unwrap();
+        let mut stale = SettingsRepo::load_config(&conn).unwrap();
+        // The user subsequently increases it to 30.
+        SettingsRepo::save_config(&conn, &AppConfig::default()).unwrap();
+        stale.language = "de-DE".into();
+        let _ = SettingsRepo::save_config(&conn, &stale);
+        assert_eq!(
+            SettingsRepo::load_config(&conn)
+                .unwrap()
+                .trash_retention_days,
+            30,
+            "a stale whole-config writer must not bypass reduction confirmation"
+        );
     }
 
     #[test]

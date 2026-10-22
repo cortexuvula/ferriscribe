@@ -91,7 +91,7 @@ describe('settings navigation and composition', () => {
     expect(screen.getByLabelText('Enable Autosave')).toBeTruthy();
     expect(screen.getByLabelText('Autosave Interval (seconds)')).toBeTruthy();
     expect(screen.getByLabelText('Play a sound when a SOAP note is generated')).toBeTruthy();
-    for (const text of ['Transcription Language', 'Recording Storage Folder', 'Database Security', 'Recording Retention', 'Custom Vocabulary', 'Setup Wizard', 'Screenshot Region OCR']) expect(screen.queryByText(text)).toBeNull();
+    for (const text of ['Transcription Language', 'Recording Storage Folder', 'Database Security', 'Recording retention', 'Custom Vocabulary', 'Setup Wizard', 'Screenshot Region OCR']) expect(screen.queryByText(text)).toBeNull();
   });
 
   it('places storage, security and retention alongside backup', async () => {
@@ -99,7 +99,7 @@ describe('settings navigation and composition', () => {
     render(SettingsContent);
     expect(screen.getByText('Recording Storage Folder')).toBeTruthy();
     expect(screen.getByText('Database Security')).toBeTruthy();
-    expect(screen.getByText('Recording Retention')).toBeTruthy();
+    expect(screen.getByText('Recording retention')).toBeTruthy();
     expect(screen.getByTestId('synthetic-pane')).toBeTruthy();
   });
 
@@ -107,7 +107,7 @@ describe('settings navigation and composition', () => {
     settingsNav.state.lastSection = 'vocabulary';
     render(SettingsContent);
     for (const name of ['Manage Vocabulary', 'Manage Templates', 'Manage Dictionary']) expect(screen.getByRole('button', { name })).toBeTruthy();
-    expect(screen.queryByText('Recording Retention')).toBeNull();
+    expect(screen.queryByText('Recording retention')).toBeNull();
   });
 
   it('exposes setup, OCR, endpoint exception, training capture and legacy corpus from Advanced', async () => {

@@ -27,7 +27,7 @@ describe('toasts — pause/resume', () => {
   it('an actionable toast survives its auto-dismiss window while paused', async () => {
     render(ToastContainer);
     toasts.add({
-      message: '3 recordings moved to Trash. Available to restore for 30 days.',
+      message: '3 moved to Trash. Restore them within 30 days.',
       type: 'success',
       autoDismiss: true,
       actionLabel: 'Undo',
