@@ -37,6 +37,32 @@ use std::path::PathBuf;
 use ndarray::{Array1, ArrayViewD, IxDyn};
 use ort::session::Session;
 use ort::value::{Tensor, TensorRef};
+
+/// Process-global ONNX Runtime environment.
+///
+/// `ort` 2.0.0-rc.15 made `Session::builder` take an `&Environment`: the
+/// environment is explicitly process-global configuration (thread pools,
+/// default execution providers, telemetry), so one shared instance is the
+/// shape the crate intends rather than a per-diarizer value. Built once on
+/// first use; the failure is cached too, so a broken runtime reports the same
+/// error instead of retrying initialization on every call.
+fn ort_environment() -> AppResult<&'static ort::environment::Environment> {
+    use std::sync::OnceLock;
+
+    static ENV: OnceLock<Result<ort::environment::Environment, String>> = OnceLock::new();
+
+    match ENV.get_or_init(|| {
+        ort::init()
+            .with_name("ferriscribe")
+            .build()
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(env) => Ok(env),
+        Err(e) => Err(AppError::stt_provider(format!(
+            "Failed to initialize the ONNX Runtime environment: {e}"
+        ))),
+    }
+}
 use tracing::{debug, info};
 
 use medical_core::error::{AppError, AppResult};
@@ -327,7 +353,7 @@ impl SpeakerDiarizer {
             return Ok(Vec::new());
         }
 
-        let mut session = Session::builder()
+        let mut session = Session::builder(ort_environment()?)
             .map_err(|e| {
                 AppError::stt_provider(format!(
                     "Failed to create segmentation session builder: {e}"
@@ -502,7 +528,7 @@ impl SpeakerDiarizer {
 
     /// Stage 2: Extract speaker embedding for each speech segment using the wespeaker model.
     fn extract_embeddings(&self, segments: &[SpeechSegment]) -> AppResult<Vec<Vec<f32>>> {
-        let mut session = Session::builder()
+        let mut session = Session::builder(ort_environment()?)
             .map_err(|e| {
                 AppError::stt_provider(format!("Failed to create embedding session builder: {e}"))
             })?
