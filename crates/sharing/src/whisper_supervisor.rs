@@ -539,7 +539,10 @@ fn extract_zip(bytes: &[u8], out_dir: &Path, binary_name: &str) -> Result<()> {
         let file = zip
             .by_index(i)
             .map_err(|e| WhisperError::Manifest(e.to_string()))?;
-        let name = file.name().to_string();
+        let name = file
+            .name()
+            .map_err(|e| WhisperError::Manifest(e.to_string()))?
+            .to_string();
         if Path::new(&name).file_name().and_then(|s| s.to_str()) == Some(binary_name) {
             // The entry's declared size is untrusted zip metadata: refuse
             // oversized entries up front, then bound the actual decompressed

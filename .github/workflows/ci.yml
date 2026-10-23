@@ -217,4 +217,15 @@ jobs:
         # after the upstream fix lands.
         # TODO(review-by 2026-10-01): lopdf — drop ignore when printpdf 0.9 migration lands
         # TODO(review-by 2026-10-01): quick-xml — revisit when calamine moves past 0.31
-        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+        # - zip (RUSTSEC-2026-0367, 0368, 0369): SUID/SGID preservation,
+        #   symlink targets outside the destination, and unix permissions
+        #   applied through symlinks — ALL in the `extract*()` API. Patched
+        #   only at zip >= 9.0.0. Our OWN crates are on zip 9 and never call
+        #   extract() (they use by_index + bounded manual reads). The flagged
+        #   4.6.1 / 8.6.0 copies are pinned by tauri-plugin-updater 2.x
+        #   (extracts signature-verified release bundles), calamine 0.36
+        #   (XLSX parse-only) and docx-rs 0.4 (DOCX parse-only) — third-party
+        #   pins we cannot move to zip 9 ourselves. Revisit as those bump.
+        # TODO(review-by 2027-01-01): zip — drop ignores when tauri-plugin-updater,
+        # calamine and docx-rs move to zip 9
+        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369

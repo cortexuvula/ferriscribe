@@ -249,7 +249,10 @@ fn extract_docx_text(path: &Path) -> Result<String, OcrError> {
         let zf = archive
             .by_index(i)
             .map_err(|e| OcrError::DocxExtraction(format!("docx read: {e}")))?;
-        if zf.name() == "word/document.xml" {
+        let entry_name = zf
+            .name()
+            .map_err(|e| OcrError::DocxExtraction(format!("docx entry name: {e}")))?;
+        if entry_name == "word/document.xml" {
             use std::io::Read;
             zf.take(10 * 1024 * 1024) // 10MB cap on XML
                 .read_to_string(&mut document_xml)
