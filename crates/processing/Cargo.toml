@@ -31,7 +31,7 @@ tar = "0.4"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"
-lopdf = "0.42"
+lopdf = "0.45"
 futures-core = { workspace = true }
 
 [lints]
