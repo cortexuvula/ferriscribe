@@ -495,6 +495,8 @@ pub fn run() {
             commands::recordings::list_recordings,
             commands::recordings::get_recording,
             commands::recordings::search_recordings,
+            commands::recordings::list_recording_creation_times,
+            commands::recordings::query_recordings,
             commands::recordings::delete_recording,
             commands::recordings::restore_recording,
             commands::recordings::restore_recordings,

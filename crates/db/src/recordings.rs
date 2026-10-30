@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use medical_core::types::recording::{
     ProcessingStatus, Recording, RecordingSummary, TrashedRecordingSummary,
+    latest_tokens_per_second,
 };
 
 use crate::{DbError, DbResult};
@@ -198,6 +199,133 @@ impl RecordingsRepo {
             .collect();
 
         Ok(recordings)
+    }
+
+    /// Timestamp-only availability projection for the recordings calendar:
+    /// the `created_at` instant of EVERY active recording, one entry per
+    /// recording — duplicates retained on purpose, the browser groups them
+    /// into local-date counts.
+    ///
+    /// Deliberately narrow payload: no ids, names, filenames, paths, or any
+    /// document/metadata fields — the availability surface must not move
+    /// PHI (the frontend groups these into local dates and counts only, in
+    /// the browser's own timezone; no backend timezone dependency).
+    ///
+    /// This is an O(n) timestamp-only scan of the active rows, deliberately
+    /// not a full-row load; no covering index is added until measurement
+    /// shows one is needed.
+    ///
+    /// Both legitimate stored timestamp formats (RFC 3339 with any offset,
+    /// and legacy SQLite `datetime('now')` UTC text) are normalized through
+    /// [`crate::parse_db_timestamp`]. A corrupt timestamp PROPAGATES as an
+    /// error — never silently dropped, never manufactured into empty
+    /// availability (an empty calendar must mean "no recordings", not
+    /// "some rows were unreadable").
+    pub fn list_creation_times(conn: &Connection) -> DbResult<Vec<DateTime<Utc>>> {
+        let mut stmt =
+            conn.prepare("SELECT created_at FROM recordings WHERE deleted_at IS NULL")?;
+        let times = stmt
+            .query_map([], |row| {
+                let ts: String = row.get(0)?;
+                crate::parse_db_timestamp(0, &ts, "recordings.created_at")
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(times)
+    }
+
+    /// Composite query for the Active recordings list: optional literal-term
+    /// FTS `search`, an optional half-open `[start, end)` creation window
+    /// (`created_between` carries both bounds — both or neither, by type),
+    /// and LIMIT/OFFSET paging. Every filter is applied in SQL BEFORE the
+    /// limit, so a date holding more rows than one page (or a search whose
+    /// target sits beyond the old rank-ordered top-20) pages completely.
+    ///
+    /// Ordering is deterministic: actual-instant newest first, then id DESC
+    /// as the tie-breaker — the SAME chronological order with or without a
+    /// search term (deliberately not relevance order, so the date browser
+    /// stays coherent while filtering).
+    ///
+    /// # Timestamp normalization
+    ///
+    /// `created_at` legitimately stores two text formats (RFC 3339 with any
+    /// offset from Rust writers, legacy `YYYY-MM-DD HH:MM:SS` UTC from
+    /// SQLite defaults); raw string comparison would misclassify mixed
+    /// rows. `julianday(created_at)` normalizes every stored form — and the
+    /// caller's bounds — to a UTC instant for both the window filters and
+    /// the ORDER BY. Tradeoff: the expression bypasses the plain
+    /// `created_at` index (full scan + sort per query), accepted until
+    /// measurement says otherwise — no new index without evidence.
+    ///
+    /// # Search semantics
+    ///
+    /// `search` reuses [`crate::search::literal_phrase_match`] — the SAME
+    /// escaping as `SearchRepo::search` (hyphens/quotes literal, implicit
+    /// AND across terms). A query whose terms all strip away (e.g.
+    /// quotes-only) matches NOTHING, mirroring `SearchRepo::search`; it
+    /// never falls back to unfiltered. The caller decides whether
+    /// whitespace-only input means "no filter" and passes `None`.
+    ///
+    /// Returns summary projections only: existence flags for the five
+    /// document columns instead of their content, plus the metadata-derived
+    /// sync badge (`synced_from`) and generation speed
+    /// (`generation_stats`).
+    pub fn query(
+        conn: &Connection,
+        search: Option<&str>,
+        created_between: Option<(&str, &str)>,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<Vec<RecordingSummary>> {
+        // Column list mirrors row_to_summary's positional reads. The five
+        // document columns project as `IS NOT NULL` flags — transcript/SOAP
+        // text never leaves the DB for a list view.
+        let mut sql = String::from(
+            "SELECT id, filename, patient_name, duration_seconds, created_at, tags,
+                    processing_status, metadata,
+                    transcript IS NOT NULL, soap_note IS NOT NULL, referral IS NOT NULL,
+                    letter IS NOT NULL, peer_discussion IS NOT NULL
+             FROM recordings
+             WHERE deleted_at IS NULL",
+        );
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut next = 1usize;
+        if let Some((start, end)) = created_between {
+            sql.push_str(&format!(" AND julianday(created_at) >= julianday(?{next})"));
+            params.push(Box::new(start.to_string()));
+            next += 1;
+            sql.push_str(&format!(" AND julianday(created_at) < julianday(?{next})"));
+            params.push(Box::new(end.to_string()));
+            next += 1;
+        }
+        if let Some(query_str) = search {
+            let Some(match_str) = crate::search::literal_phrase_match(query_str) else {
+                return Ok(Vec::new());
+            };
+            sql.push_str(&format!(
+                " AND id IN (SELECT id FROM recordings_fts WHERE recordings_fts MATCH ?{next})"
+            ));
+            params.push(Box::new(match_str));
+            next += 1;
+        }
+        sql.push_str(&format!(
+            " ORDER BY julianday(created_at) DESC, id DESC LIMIT ?{next} OFFSET ?{}",
+            next + 1
+        ));
+        params.push(Box::new(limit));
+        params.push(Box::new(offset));
+
+        let mut stmt = conn.prepare(sql.as_str())?;
+        // Row-conversion failures PROPAGATE: silently dropping an
+        // unreadable row would return a short page, which the caller reads
+        // as "end of results" — pagination would stop early with no error
+        // (the caller can't distinguish a dropped row from a true end).
+        let summaries = stmt
+            .query_map(
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                Self::row_to_summary,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(summaries)
     }
 
     /// Replace all mutable fields of an existing recording.
@@ -1302,6 +1430,55 @@ impl RecordingsRepo {
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
+
+    /// Convert a [`Self::query`] projection row into a `RecordingSummary`.
+    /// Mirrors the `From<&Recording>` derivation: document columns arrive as
+    /// `IS NOT NULL` existence flags (content never leaves the DB), metadata
+    /// drives the sync badge and generation-speed fields, and JSON columns
+    /// fall back to the same safe defaults as [`Self::row_to_recording`].
+    fn row_to_summary(row: &Row) -> rusqlite::Result<RecordingSummary> {
+        let id_str: String = row.get(0)?;
+        let id = Uuid::parse_str(&id_str).map_err(|e| {
+            tracing::error!(error = %e, "corrupt recording id in DB");
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+        let filename: String = row.get(1)?;
+        let patient_name: Option<String> = row.get(2)?;
+        let duration_seconds: Option<f64> = row.get(3)?;
+        let created_at_str: String = row.get(4)?;
+        let created_at = crate::parse_db_timestamp(4, &created_at_str, "recordings.created_at")?;
+        let tags_json: Option<String> = row.get(5)?;
+        let tags: Vec<String> = tags_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let status_json: Option<String> = row.get(6)?;
+        let status: ProcessingStatus = status_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(ProcessingStatus::Pending);
+        let metadata_str: Option<String> = row.get(7)?;
+        let metadata: serde_json::Value = metadata_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        Ok(RecordingSummary {
+            id,
+            filename,
+            patient_name,
+            status,
+            duration_seconds,
+            created_at,
+            tags,
+            has_transcript: row.get(8)?,
+            has_soap_note: row.get(9)?,
+            has_referral: row.get(10)?,
+            has_letter: row.get(11)?,
+            has_peer_discussion: row.get(12)?,
+            is_remote: metadata.get("synced_from").is_some(),
+            tokens_per_second: latest_tokens_per_second(&metadata),
+        })
+    }
 
     /// Convert a SQLite row into a `Recording`.  JSON fields fall back to
     /// safe defaults on parse failure rather than propagating an error.
@@ -2525,5 +2702,408 @@ mod tests {
             "historical reason must survive too"
         );
         assert_eq!(after.metadata["generation_stats"]["note_count"], 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Timestamp-only availability projection + composite query
+    // (recording-date-calendar, batch 1)
+    // -----------------------------------------------------------------
+
+    /// A recording at a specific instant (synthetic fixture).
+    fn rec_at(rfc3339: &str) -> Recording {
+        let mut rec = new_rec();
+        rec.created_at = chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .expect("test fixture timestamp")
+            .with_timezone(&chrono::Utc);
+        rec
+    }
+
+    /// Rewrite a row's stored `created_at` to a raw string, so tests can
+    /// plant the two legitimate on-disk formats (RFC3339 with a non-UTC
+    /// offset, and SQLite's legacy `datetime('now')` UTC text) that real
+    /// databases carry.
+    fn set_raw_created_at(conn: &Connection, id: &Uuid, raw: &str) {
+        conn.execute(
+            "UPDATE recordings SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![raw, id.to_string()],
+        )
+        .expect("rewrite created_at");
+    }
+
+    #[test]
+    fn creation_times_return_active_only_with_duplicates_retained() {
+        let conn = migrated_conn();
+        let shared = "2026-10-01T09:00:00Z";
+        let a = rec_at(shared);
+        let b = rec_at(shared); // same instant — duplicates must be retained
+        let c = rec_at("2026-10-02T10:30:00Z");
+        let trashed = rec_at("2026-10-03T11:00:00Z");
+        for rec in [&a, &b, &c, &trashed] {
+            RecordingsRepo::insert(&conn, rec).unwrap();
+        }
+        RecordingsRepo::soft_delete(&conn, &trashed.id).unwrap();
+
+        let mut times = RecordingsRepo::list_creation_times(&conn).unwrap();
+        times.sort();
+        let mut expected = vec![a.created_at, b.created_at, c.created_at];
+        expected.sort();
+        assert_eq!(
+            times, expected,
+            "availability carries one instant per ACTIVE recording (duplicates kept, tombstones excluded)"
+        );
+    }
+
+    #[test]
+    fn creation_times_normalize_offset_and_legacy_formats() {
+        let conn = migrated_conn();
+        let offset_row = rec_at("2026-10-01T00:00:00Z");
+        let legacy_row = rec_at("2026-10-01T00:00:00Z");
+        RecordingsRepo::insert(&conn, &offset_row).unwrap();
+        RecordingsRepo::insert(&conn, &legacy_row).unwrap();
+        // RFC3339 with a +02:00 offset (legacy sync writer shape) and the
+        // SQLite `datetime('now')` UTC text (DEFAULT-written rows).
+        set_raw_created_at(&conn, &offset_row.id, "2026-10-01T12:00:00+02:00");
+        set_raw_created_at(&conn, &legacy_row.id, "2026-10-01 10:00:00");
+
+        let mut times = RecordingsRepo::list_creation_times(&conn).unwrap();
+        times.sort();
+        assert_eq!(
+            times,
+            vec![
+                chrono::DateTime::parse_from_rfc3339("2026-10-01T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00+02:00")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+            ],
+            "both stored formats must parse to their actual UTC instants"
+        );
+    }
+
+    #[test]
+    fn creation_times_propagate_corrupt_timestamp() {
+        let conn = migrated_conn();
+        let rec = rec_at("2026-10-01T09:00:00Z");
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+        set_raw_created_at(&conn, &rec.id, "not-a-timestamp");
+
+        let result = RecordingsRepo::list_creation_times(&conn);
+        assert!(
+            result.is_err(),
+            "a corrupt timestamp must surface as an error, never silently empty availability"
+        );
+    }
+
+    #[test]
+    fn query_date_only_beyond_fifty_rows_pages_completely() {
+        let conn = migrated_conn();
+        // 55 recordings on 2026-10-05, one second apart (distinct instants).
+        let base = chrono::DateTime::parse_from_rfc3339("2026-10-05T08:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut ids_on_day = Vec::new();
+        for i in 0..55i64 {
+            let mut rec = new_rec();
+            rec.created_at = base + chrono::TimeDelta::seconds(i);
+            ids_on_day.push(rec.id);
+            RecordingsRepo::insert(&conn, &rec).unwrap();
+        }
+        // Neighbouring days must not leak into the selected day's results.
+        for ts in ["2026-10-04T23:59:59Z", "2026-10-06T00:00:00Z"] {
+            RecordingsRepo::insert(&conn, &rec_at(ts)).unwrap();
+        }
+
+        let day = ("2026-10-05T00:00:00Z", "2026-10-06T00:00:00Z");
+        let page1 = RecordingsRepo::query(&conn, None, Some(day), 50, 0).unwrap();
+        let page2 = RecordingsRepo::query(&conn, None, Some(day), 50, 50).unwrap();
+        assert_eq!(page1.len(), 50, "first page is full");
+        assert_eq!(page2.len(), 5, "second page drains the day — no top-50 cap");
+        let got: Vec<Uuid> = page1.iter().chain(page2.iter()).map(|s| s.id).collect();
+        let mut expected = ids_on_day;
+        expected.sort();
+        let mut got_sorted = got.clone();
+        got_sorted.sort();
+        assert_eq!(got_sorted, expected, "all 55 day rows across both pages");
+
+        // Newest-first: the first row of page 1 is the latest instant.
+        let latest = base + chrono::TimeDelta::seconds(54);
+        assert_eq!(page1[0].created_at, latest, "newest first");
+    }
+
+    #[test]
+    fn query_finds_fts_hit_beyond_old_top_twenty_cap() {
+        let conn = migrated_conn();
+        // 25 search matches on successive days. The old store path called
+        // SearchRepo::search(.., 20) and then get_many — a target outside
+        // that top-20 was unreachable. The composite query intersects FTS
+        // membership with the date bounds in SQL, so the OLDEST match (Sep
+        // 1) must still be found.
+        let mut oldest = None;
+        for day in 1..=25i64 {
+            let mut rec = rec_at(&format!("2026-09-{day:02}T10:00:00Z"));
+            rec.transcript = Some("zebra marker transcript".into());
+            rec.filename = format!("visit-{day:02}.wav");
+            if day == 1 {
+                oldest = Some(rec.id);
+            }
+            RecordingsRepo::insert(&conn, &rec).unwrap();
+        }
+
+        let bounds = ("2026-09-01T00:00:00Z", "2026-09-02T00:00:00Z");
+        let results = RecordingsRepo::query(&conn, Some("zebra"), Some(bounds), 50, 0).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "the Sep-1 match is found even with 24 newer matches"
+        );
+        assert_eq!(results[0].id, oldest.expect("Sep-1 fixture"));
+    }
+
+    #[test]
+    fn query_paginated_date_and_search() {
+        let conn = migrated_conn();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-10-05T08:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for i in 0..60i64 {
+            let mut rec = new_rec();
+            rec.created_at = base + chrono::TimeDelta::seconds(i);
+            rec.transcript = Some("sharedsalt marker".into());
+            RecordingsRepo::insert(&conn, &rec).unwrap();
+        }
+        // Same day, no match — excluded by the search half.
+        let mut other = rec_at("2026-10-05T12:00:00Z");
+        other.transcript = Some("unrelated".into());
+        RecordingsRepo::insert(&conn, &other).unwrap();
+
+        let day = ("2026-10-05T00:00:00Z", "2026-10-06T00:00:00Z");
+        let page1 = RecordingsRepo::query(&conn, Some("sharedsalt"), Some(day), 50, 0).unwrap();
+        let page2 = RecordingsRepo::query(&conn, Some("sharedsalt"), Some(day), 50, 50).unwrap();
+        assert_eq!(page1.len(), 50);
+        assert_eq!(page2.len(), 10, "60 date+search hits page completely");
+        assert!(
+            !page1.iter().chain(page2.iter()).any(|s| s.id == other.id),
+            "non-matching same-day row excluded"
+        );
+    }
+
+    #[test]
+    fn query_excludes_tombstones() {
+        let conn = migrated_conn();
+        let mut a = rec_at("2026-10-05T09:00:00Z");
+        a.transcript = Some("giraffe marker".into());
+        let mut b = rec_at("2026-10-05T10:00:00Z");
+        b.transcript = Some("giraffe marker".into());
+        RecordingsRepo::insert(&conn, &a).unwrap();
+        RecordingsRepo::insert(&conn, &b).unwrap();
+        RecordingsRepo::soft_delete(&conn, &a.id).unwrap();
+
+        let day = ("2026-10-05T00:00:00Z", "2026-10-06T00:00:00Z");
+        let results = RecordingsRepo::query(&conn, Some("giraffe"), Some(day), 50, 0).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, b.id, "only the active row returns");
+    }
+
+    #[test]
+    fn query_bounds_half_open_across_mixed_stored_formats() {
+        let conn = migrated_conn();
+        // Row exactly AT the start instant, stored with a +02:00 offset.
+        let at_start = rec_at("2026-10-01T00:00:00Z");
+        // Row exactly AT the end instant, stored in legacy SQLite UTC text.
+        let at_end = rec_at("2026-10-02T00:00:00Z");
+        // Rows inside the window in both stored formats.
+        let mid_offset = rec_at("2026-10-01T12:00:00Z");
+        let mid_legacy = rec_at("2026-10-01T06:00:00Z");
+        for rec in [&at_start, &at_end, &mid_offset, &mid_legacy] {
+            RecordingsRepo::insert(&conn, rec).unwrap();
+        }
+        set_raw_created_at(&conn, &at_start.id, "2026-10-01T02:00:00+02:00");
+        set_raw_created_at(&conn, &mid_offset.id, "2026-10-01T16:00:00+02:00");
+        set_raw_created_at(&conn, &at_end.id, "2026-10-02 00:00:00");
+        set_raw_created_at(&conn, &mid_legacy.id, "2026-10-01 06:00:00");
+
+        let day = ("2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z");
+        let results = RecordingsRepo::query(&conn, None, Some(day), 50, 0).unwrap();
+        let ids: Vec<Uuid> = results.iter().map(|s| s.id).collect();
+        assert!(ids.contains(&at_start.id), "start bound is inclusive");
+        assert!(
+            !ids.contains(&at_end.id),
+            "end bound is exclusive even in legacy format"
+        );
+        assert!(
+            ids.contains(&mid_offset.id),
+            "offset-stored row classified by actual instant"
+        );
+        assert!(
+            ids.contains(&mid_legacy.id),
+            "legacy-stored row classified by actual instant"
+        );
+    }
+
+    #[test]
+    fn query_equal_timestamps_have_stable_id_tiebreak() {
+        let conn = migrated_conn();
+        let ts = "2026-10-05T09:00:00Z";
+        let first = rec_at(ts);
+        let second = rec_at(ts);
+        RecordingsRepo::insert(&conn, &first).unwrap();
+        RecordingsRepo::insert(&conn, &second).unwrap();
+        let (older_first, newer_first) = if first.id > second.id {
+            (second, first)
+        } else {
+            (first, second)
+        };
+
+        // Two identical queries agree, and pagination walks the same total
+        // order (id DESC within the equal timestamp).
+        let run1 = RecordingsRepo::query(&conn, None, None, 2, 0).unwrap();
+        let run2 = RecordingsRepo::query(&conn, None, None, 2, 0).unwrap();
+        assert_eq!(
+            run1.iter().map(|s| s.id).collect::<Vec<_>>(),
+            run2.iter().map(|s| s.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            run1[0].id, newer_first.id,
+            "greater id first at equal instants"
+        );
+        assert_eq!(run1[1].id, older_first.id);
+
+        let page_a = RecordingsRepo::query(&conn, None, None, 1, 0).unwrap();
+        let page_b = RecordingsRepo::query(&conn, None, None, 1, 1).unwrap();
+        assert_eq!(
+            page_a[0].id, newer_first.id,
+            "page 1 keeps the tie-break order"
+        );
+        assert_eq!(page_b[0].id, older_first.id, "page 2 continues it");
+    }
+
+    #[test]
+    fn query_projects_summary_flags_and_metadata_semantics() {
+        let conn = migrated_conn();
+        let mut rich = rec_at("2026-10-05T09:00:00Z");
+        rich.transcript = Some("transcript text".into());
+        rich.soap_note = Some("S: cough".into());
+        rich.tags = vec!["followup".into()];
+        rich.metadata = serde_json::json!({
+            "synced_from": "office-server",
+            "generation_stats": {
+                "soap": {
+                    "provider": "ollama",
+                    "model": "m",
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "duration_ms": 1000,
+                    "tokens_per_second": 20.0,
+                    "generated_at": "2026-10-05T09:01:00Z"
+                }
+            }
+        });
+        let plain = rec_at("2026-10-05T10:00:00Z");
+        RecordingsRepo::insert(&conn, &rich).unwrap();
+        RecordingsRepo::insert(&conn, &plain).unwrap();
+
+        let results = RecordingsRepo::query(&conn, None, None, 50, 0).unwrap();
+        let rich_summary = results.iter().find(|s| s.id == rich.id).unwrap();
+        assert!(rich_summary.has_transcript);
+        assert!(rich_summary.has_soap_note);
+        assert!(!rich_summary.has_referral);
+        assert!(!rich_summary.has_letter);
+        assert!(!rich_summary.has_peer_discussion);
+        assert!(
+            rich_summary.is_remote,
+            "sync badge from metadata.synced_from"
+        );
+        assert_eq!(
+            rich_summary.tokens_per_second,
+            Some(20.0),
+            "generation speed from metadata.generation_stats"
+        );
+        assert_eq!(rich_summary.tags, vec!["followup".to_string()]);
+
+        let plain_summary = results.iter().find(|s| s.id == plain.id).unwrap();
+        assert!(!plain_summary.has_transcript);
+        assert!(!plain_summary.is_remote);
+        assert_eq!(plain_summary.tokens_per_second, None);
+    }
+
+    #[test]
+    fn query_quotes_only_search_returns_empty_not_unfiltered() {
+        let conn = migrated_conn();
+        let rec = rec_at("2026-10-05T09:00:00Z");
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        // Mirrors SearchRepo::search: a query whose terms all strip to empty
+        // can match nothing — it must NEVER fall back to "no filter".
+        let results = RecordingsRepo::query(&conn, Some("\"\""), None, 50, 0).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn query_hyphenated_terms_stay_literal() {
+        let conn = migrated_conn();
+        let mut rec = rec_at("2026-10-05T09:00:00Z");
+        rec.filename = "Recording_2026-10-05_09-00-00.wav".into();
+        rec.transcript = Some("discussed covid-19".into());
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+
+        let by_filename = RecordingsRepo::query(
+            &conn,
+            Some("Recording_2026-10-05_09-00-00.wav"),
+            None,
+            50,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            by_filename.len(),
+            1,
+            "hyphenated filename searched literally"
+        );
+        assert_eq!(by_filename[0].id, rec.id);
+
+        let by_term = RecordingsRepo::query(&conn, Some("covid-19"), None, 50, 0).unwrap();
+        assert_eq!(
+            by_term.len(),
+            1,
+            "hyphenated clinical term searched literally"
+        );
+        assert_eq!(by_term[0].id, rec.id);
+    }
+
+    /// Batch-2 seam fix: `query` used to drop row-conversion failures via
+    /// `filter_map`, so one unreadable row silently shortened the page —
+    /// which the caller reads as "end of results" and stops paging. A
+    /// conversion failure must PROPAGATE instead (an error is retryable
+    /// and diagnosable; a silent short page is data loss in a list view).
+    #[test]
+    fn query_propagates_row_conversion_failures_instead_of_short_pages() {
+        let conn = migrated_conn();
+        let good = rec_at("2026-10-05T10:00:00Z");
+        let bad = rec_at("2026-10-05T09:00:00Z");
+        RecordingsRepo::insert(&conn, &good).unwrap();
+        RecordingsRepo::insert(&conn, &bad).unwrap();
+        // Corrupt the id on disk so row_to_summary's UUID parse fails.
+        conn.execute(
+            "UPDATE recordings SET id = 'not-a-uuid' WHERE id = ?1",
+            rusqlite::params![bad.id.to_string()],
+        )
+        .unwrap();
+
+        let result = RecordingsRepo::query(&conn, None, None, 50, 0);
+        assert!(
+            result.is_err(),
+            "a row-conversion failure must fail the query — dropping the row \
+             would fake a 1-row 'end of results' page"
+        );
+
+        // Same contract for an unparseable created_at (the other
+        // conversion that can fail inside row_to_summary).
+        let conn = migrated_conn();
+        let rec = rec_at("2026-10-05T09:00:00Z");
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+        set_raw_created_at(&conn, &rec.id, "not-a-timestamp");
+        let result = RecordingsRepo::query(&conn, None, None, 50, 0);
+        assert!(result.is_err(), "corrupt created_at must fail the query");
     }
 }

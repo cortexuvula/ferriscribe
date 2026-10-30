@@ -2,9 +2,9 @@ import { invoke } from '@tauri-apps/api/core';
 import type { SyncSummary } from '../api/contentSync';
 import type { Recording, RecordingSummary, TrashedRecordingSummary } from '../types';
 import {
-  listRecordings,
+  queryRecordings,
+  listRecordingCreationTimes,
   getRecording,
-  searchRecordings,
   deleteRecording,
   restoreRecording,
   restoreRecordings,
@@ -15,9 +15,15 @@ import {
   restoreRecordingsDeletedBetween,
   countRecordingsDeletedBetween,
   type DeleteAllResult,
+  type QueryRecordingsOptions,
 } from '../api/recordings';
 import { syncContentNow } from '../api/contentSync';
-import { latestTokensPerSecond } from '../utils/generationStats';
+import {
+  dayIntervalUtcForKey,
+  groupCreationTimesByDay,
+  fullLocalDateFromKey,
+} from '../utils/recordingDates';
+import { sanitizedErr } from '../utils/sanitizedErr';
 
 /// Page size for the Recordings list. The list loads this many at a time and
 /// appends more on "Load more". A full page means there may be more; a short
@@ -30,8 +36,26 @@ class RecordingsStore {
   loadingMore = $state<boolean>(false);
   searchQuery = $state<string>('');
   selectedRecording = $state<Recording | null>(null);
+  /// Selected local calendar day ('YYYY-MM-DD') filtering the Active list,
+  /// null = all dates. Survives every load/refresh; only an explicit
+  /// user clear/change — or an availability-proven "that day's last active
+  /// recording disappeared" — may change it (never a failed fetch).
+  selectedDate = $state<string | null>(null);
+  /// Polite static notice set when availability proved the selected day
+  /// emptied and the date filter was auto-cleared ("No active recordings
+  /// remain on <locally formatted date>. Showing all dates."). Cleared when
+  /// the user picks a date manually.
+  dateClearedNotice = $state<string | null>(null);
+  /// Sanitized first-page load error (retryable), or null. A failure is an
+  /// explicit error state — never a fake empty success, and never stale
+  /// rows from a DIFFERENT filter.
+  listError = $state<string | null>(null);
+  /// Sanitized load-more error (retryable), or null. A failed page keeps
+  /// the already-valid rows visible.
+  loadMoreError = $state<string | null>(null);
   /// True when the backend likely has more recordings beyond what's loaded.
-  /// Derived from the last fetch returning a full page. Reset by load()/search().
+  /// Derived from the last fetch returning a full RAW page (before dedup).
+  /// Reset by filter changes and first-page loads.
   hasMore = $state<boolean>(false);
   /// True while a content sync round-trip is in flight. UI uses this to show
   /// a syncing indicator and to avoid stacking concurrent syncs.
@@ -49,10 +73,41 @@ class RecordingsStore {
   /// null). Cleared at the start of each sync attempt.
   lastSyncError = $state<string | null>(null);
   /// Authoritative count of active recordings from the backend. `list` is a
-  /// paginated/search-filtered subset — dialogs that promise "all N
-  /// recordings" (Move-all-to-Trash) must use this number, never
-  /// `list.length`. Null until the first successful count.
+  /// paginated/filtered subset — dialogs that promise "all N recordings"
+  /// (Move-all-to-Trash) must use this number, never `list.length`. Null
+  /// until the first successful count.
   activeTotal = $state<number | null>(null);
+
+  // ── Availability (date-calendar data) ─────────────────────────────────
+  /// Active-recording counts per LOCAL calendar day key ('YYYY-MM-DD'),
+  /// derived from the backend's timestamp-only availability projection.
+  /// Independent of search/date filters — it always describes the whole
+  /// active DB (the calendar's populated days are global).
+  availabilityCounts = $state<Map<string, number>>(new Map());
+  availabilityLoading = $state(false);
+  /// Sanitized availability fetch error, or null. A failed fetch keeps the
+  /// previous counts visible — failure never looks like an empty calendar
+  /// and never clears the date filter.
+  availabilityError = $state<string | null>(null);
+  /// True once availability has loaded successfully at least once.
+  availabilityLoaded = $state(false);
+  /// Monotonic request id guarding availability writes (reordering guard:
+  /// a slow earlier response must never overwrite a later one).
+  availabilityRequestId = 0;
+  /// Data-generation captured by the availability request currently in
+  /// flight (null when idle) — lets a same-generation refresh reuse an
+  /// in-flight fetch instead of stacking duplicates.
+  availabilityFetchGeneration: number | null = null;
+  /// Monotonic mutation counter, bumped BEFORE every destructive mutation,
+  /// AGAIN at each mutation's COMMIT (see fenceMutationCompletion), and
+  /// whenever remote data changes (sync rounds, remote updates). A bump
+  /// fences reads issued before it — their responses land with a stale
+  /// generation and are discarded whole. The pre-mutation bump alone does
+  /// NOT fence reads issued DURING the mutation window: they snapshot
+  /// pre-commit state while holding the post-bump generation (SQLite WAL
+  /// serves concurrent readers the old snapshot), so the completion bump
+  /// closes exactly that hole.
+  dataGeneration = 0;
 
   // ── Trash state (D4/D8) ────────────────────────────────────────────────
   /// Trashed recordings, newest deletion first (paginated like `list`).
@@ -71,124 +126,252 @@ class RecordingsStore {
   /// `listRequestId`: a stale trash load must never clobber a fresh one).
   trashedRequestId = 0;
 
-  /// Fetch the authoritative active count (COUNT query — cheap). Swallows
-  /// errors: a failed count leaves the previous value in place rather than
-  /// blanking dialogs that depend on it.
+  /// Monotonic request id guarding the authoritative-count write (same
+  /// discipline as the list token): an older count landing after a newer
+  /// one must never overwrite it — activeTotal feeds the destructive
+  /// Move-all-to-Trash confirmation.
+  countRequestId = 0;
+
+  /// Fetch the authoritative active count (COUNT query — cheap). Guarded
+  /// by a request token (reordering) and the data generation (mutation
+  /// boundary, including the post-commit fence): a count issued during a
+  /// mutation window snapshots PRE-commit state and is discarded on
+  /// landing. Swallows errors: a failed count leaves the previous value
+  /// in place rather than blanking dialogs that depend on it.
   async refreshActiveTotal(): Promise<void> {
+    const token = ++this.countRequestId;
+    const generation = this.dataGeneration;
     try {
-      this.activeTotal = await countRecordings();
+      const n = await countRecordings();
+      if (token !== this.countRequestId || generation !== this.dataGeneration) {
+        return; // superseded by a newer count or a data mutation commit
+      }
+      this.activeTotal = n;
     } catch (err) {
       console.error('Failed to count recordings:', err);
     }
   }
 
-  /// Load the first page, replacing the list. Called on mount and after
-  /// mutations that change ordering (new recording, generation, etc).
+  /// The composite query options for the CURRENT {date, search} filter.
+  /// Only defined keys are set — the backend treats absent search/bounds
+  /// as "no filter" and rejects half-supplied bound pairs, so both bounds
+  /// always travel together or not at all.
+  private queryOptions(limit: number, offset: number): QueryRecordingsOptions {
+    const opts: QueryRecordingsOptions = { limit, offset };
+    const search = this.searchQuery.trim();
+    if (search !== '') opts.search = search;
+    if (this.selectedDate !== null) {
+      // Half-open [start, end) local-midnight bounds — the same semantics
+      // as the Trash restore-by-date window (localDayIntervalUtc).
+      const { startIso, endIso } = dayIntervalUtcForKey(this.selectedDate);
+      opts.startIso = startIso;
+      opts.endIso = endIso;
+    }
+    return opts;
+  }
+
+  /// Identity of the CURRENT {date, search} filter. The visible list is
+  /// tagged with the filter it was loaded under so a failed load for a NEW
+  /// filter can never leave the OLD filter's rows on screen.
+  private currentFilterKey(): string {
+    return JSON.stringify([this.selectedDate, this.searchQuery.trim()]);
+  }
+
+  /// Load the first page under the CURRENT filters, replacing the list.
+  /// Called on mount, after mutations that reorder, on filter changes,
+  /// and by every background refresh path (sync, remote updates). The
+  /// selected day and search always survive — the query is rebuilt from
+  /// them, never from a stale snapshot.
+  ///
+  /// Alongside the page, refreshes the authoritative count and the date
+  /// availability (both fire-and-forget; neither failure affects the
+  /// list outcome).
   async load(limit = PAGE_SIZE, offset = 0): Promise<void> {
-    // Keep the authoritative count fresh alongside every list refresh.
     void this.refreshActiveTotal();
-    // An active search must survive background refreshes (post-sync load(),
-    // content-changed debounces): an unfiltered page here would silently
-    // un-filter the list while the search box still shows the query.
-    if (this.searchQuery.trim() !== '') {
-      await this.search(this.searchQuery);
-      return;
+    void this.refreshAvailability();
+    if (this.currentFilterKey() !== this.listFilterKey) {
+      // Rows from a previous filter must never show under the new one —
+      // clear now so a FAILED load leaves an explicit retryable error,
+      // not stale wrong-filter rows (nor a fake empty "success").
+      this.list = [];
+      this.hasMore = false;
+      this.listFilterKey = this.currentFilterKey();
     }
     // Request token: overlapping load/search calls must not resolve out of
     // order — a stale response landing last would clobber the fresh list.
     const token = ++this.listRequestId;
+    // A new first page supersedes any in-flight load-more: its page belongs
+    // to the previous request generation, and its finally block must not
+    // touch this generation's busy flags (cleared here, skipped there).
+    this.loadingMore = false;
     this.loading = true;
+    this.listError = null;
+    this.loadMoreError = null;
     try {
-      const items = await listRecordings(limit, offset);
+      const items = await queryRecordings(this.queryOptions(limit, offset));
       if (token !== this.listRequestId) return;
       this.list = items;
+      // RAW consumed offset — deliberately independent of the deduped
+      // visible list: the backend positions pages in raw rows, and mixing
+      // the two re-delivers or strands rows when duplicates appear.
+      this.nextRawOffset = offset + items.length;
       this.hasMore = items.length >= limit;
     } catch (err) {
       console.error('Failed to load recordings:', err);
+      if (token === this.listRequestId) {
+        // Keep the same-filter rows in store state, but do NOT claim they
+        // are current: the UI intentionally hides them behind the
+        // retryable listError state until a reload succeeds. Retaining
+        // them preserves state for that recovery instead of manufacturing
+        // a fake empty success — it is not a freshness guarantee.
+        this.listError = sanitizedErr(err);
+      }
     } finally {
       if (token === this.listRequestId) this.loading = false;
     }
   }
 
-  /// Fetch the next page and append it to the list. No-op if already loading
-  /// more or if the previous fetch indicated no more results.
+  /// Fetch the next page and append it to the list. No-op while a
+  /// first-page load is in flight (paging into an unknown list), while
+  /// another load-more runs, or when the previous fetch said no more.
   async loadMore(): Promise<void> {
-    if (this.loadingMore || !this.hasMore) return;
-    this.loadingMore = true;
-    // Snapshot the request id: if a load()/search() replaces the list while
-    // this page is in flight, the stale page must NOT be appended onto the
-    // fresh results (unfiltered rows under an active query, abandoned
-    // pagination state).
+    if (this.loading || this.loadingMore || !this.hasMore) return;
+    // Snapshot both the request generation and the raw offset: if a
+    // load()/search() replaces the list while this page is in flight,
+    // the stale page must NOT be appended onto the fresh results — and
+    // an old offset must never be reused against a new filter.
     const tokenAtStart = this.listRequestId;
+    const offsetAtStart = this.nextRawOffset;
+    this.loadingMore = true;
+    this.loadMoreError = null;
     try {
-      const offset = this.list.length;
-      const items = await listRecordings(PAGE_SIZE, offset);
+      const items = await queryRecordings(this.queryOptions(PAGE_SIZE, offsetAtStart));
       if (tokenAtStart !== this.listRequestId) return;
       // Dedup by id in case a new recording landed between pages and shifted
-      // offsets — keeps the list stable without dropping anything.
+      // offsets — keeps the list stable without dropping anything. The RAW
+      // accounting (offset advance, hasMore) ignores the dedup on purpose:
+      // a full raw page that re-delivers listed rows still means more rows
+      // exist beyond it.
       const existing = new Set(this.list.map((r) => r.id));
       const fresh = items.filter((r) => !existing.has(r.id));
       this.list = [...this.list, ...fresh];
+      this.nextRawOffset = offsetAtStart + items.length;
       this.hasMore = items.length >= PAGE_SIZE;
     } catch (err) {
       console.error('Failed to load more recordings:', err);
+      // Keep the already-valid rows; the error state offers retry.
+      if (tokenAtStart === this.listRequestId) {
+        this.loadMoreError = sanitizedErr(err);
+      }
     } finally {
-      this.loadingMore = false;
+      if (tokenAtStart === this.listRequestId) this.loadingMore = false;
     }
   }
 
+  /// Set/change the Active list's date filter (strict local 'YYYY-MM-DD'
+  /// key, null = all dates) and reload the first page. The search filter
+  /// is preserved; changing either filter resets paging and invalidates
+  /// any in-flight first-page/load-more responses (they belong to the old
+  /// filter). Selecting the current date again is a no-op.
+  async setSelectedDate(key: string | null): Promise<void> {
+    if (this.selectedDate === key) return;
+    this.selectedDate = key;
+    // A manual pick supersedes any earlier auto-clear notice.
+    this.dateClearedNotice = null;
+    await this.load();
+  }
+
+  /** Dismiss the auto-clear notice (its polite announcement already fired
+   *  once on landing; the status region never repeats it). */
+  dismissDateClearedNotice(): void {
+    this.dateClearedNotice = null;
+  }
+
+  /// Set the Active list's search filter and reload the first page. The
+  /// selected date is preserved; paging resets exactly like a date change.
   async search(query: string): Promise<void> {
     this.searchQuery = query;
-    // Same request-token discipline as load(): the SearchBar debounce means
-    // overlapping queries resolve in arbitrary order — only the latest
-    // issued request may write the list.
-    const token = ++this.listRequestId;
-    this.loading = true;
+    await this.load();
+  }
+
+  /// Refresh the date availability: every active recording's creation
+  /// instant (timestamp-only payload, whole DB — independent of the
+  /// search/date filters) grouped into local-day counts.
+  ///
+  /// Guarded by BOTH a request token (reordering) and the data generation
+  /// (mutation boundary): a response landing after either moved is
+  /// discarded whole, so stale data can neither clear the selected date
+  /// nor repopulate days a mutation emptied. Coalescing reuses an
+  /// in-flight fetch ONLY while its captured generation is still the
+  /// CURRENT one — a fetch issued during a mutation window carries the
+  /// pre-commit generation, and the mutation's completion fence
+  /// (fenceMutationCompletion) bumps past it, forcing a genuine post-
+  /// commit fetch. A FAILED fetch keeps the previous counts and NEVER
+  /// touches the date filter.
+  async refreshAvailability(): Promise<void> {
+    // An in-flight fetch for the SAME data generation is still current —
+    // reuse it instead of stacking duplicates (filter refreshes fan in).
+    if (
+      this.availabilityLoading &&
+      this.availabilityFetchGeneration === this.dataGeneration
+    ) {
+      return;
+    }
+    const token = ++this.availabilityRequestId;
+    const generation = this.dataGeneration;
+    this.availabilityFetchGeneration = generation;
+    this.availabilityLoading = true;
     try {
-      if (query.trim() === '') {
-        const items = await listRecordings();
-        if (token !== this.listRequestId) return;
-        this.list = items;
-        this.hasMore = items.length >= PAGE_SIZE;
-      } else {
-        const results = await searchRecordings(query);
-        if (token !== this.listRequestId) return;
-        // Map full Recording to RecordingSummary shape
-        const summaries: RecordingSummary[] = results.map((r) => ({
-          id: r.id,
-          filename: r.filename,
-          patient_name: r.patient_name,
-          status: r.status,
-          duration_seconds: r.duration_seconds,
-          created_at: r.created_at,
-          tags: r.tags,
-          has_transcript: r.transcript !== null,
-          has_soap_note: r.soap_note !== null,
-          has_referral: r.referral !== null,
-          has_letter: r.letter !== null,
-          has_peer_discussion: r.peer_discussion !== null,
-          is_remote: r.metadata?.synced_from != null,
-          tokens_per_second: latestTokensPerSecond(r.metadata),
-        }));
-        this.list = summaries;
-        // Search has its own (smaller) limit and no pagination — treat the
-        // results as the complete set.
-        this.hasMore = false;
+      const times = await listRecordingCreationTimes();
+      if (token !== this.availabilityRequestId || generation !== this.dataGeneration) {
+        return; // superseded by a newer request or a data mutation
       }
+      const counts = groupCreationTimesByDay(times);
+      this.availabilityCounts = counts;
+      this.availabilityError = null;
+      this.availabilityLoaded = true;
+      this.maybeClearEmptiedSelectedDay(counts);
     } catch (err) {
-      console.error('Failed to search recordings:', err);
+      console.error('Failed to load recording availability:', err);
+      if (token === this.availabilityRequestId && generation === this.dataGeneration) {
+        this.availabilityError = sanitizedErr(err);
+      }
     } finally {
-      if (token === this.listRequestId) this.loading = false;
+      if (token === this.availabilityRequestId) {
+        this.availabilityLoading = false;
+        this.availabilityFetchGeneration = null;
+      }
     }
   }
 
-  /// Monotonic request id guarding list writes (see load/search).
+  /// When CURRENT (token- and generation-valid) availability proves the
+  /// selected day has no active recordings left, clear ONLY the date —
+  /// keep the search, keep the editor selection — announce politely, and
+  /// re-run the query under the widened filter. No recursion: the reload
+  /// re-refreshes availability, whose response now sees no selected date
+  /// and takes this branch zero further times.
+  private maybeClearEmptiedSelectedDay(counts: Map<string, number>): void {
+    if (this.selectedDate === null) return;
+    if (counts.has(this.selectedDate)) return;
+    const gone = this.selectedDate;
+    this.selectedDate = null;
+    this.dateClearedNotice =
+      `No active recordings remain on ${fullLocalDateFromKey(gone)}. Showing all dates.`;
+    void this.load();
+  }
+
+  /// Monotonic request id guarding list writes (see load/loadMore).
   listRequestId = 0;
   /// Monotonic request id guarding selected-recording writes: two rapid
   /// `selectRecording` calls resolve last-write-wins without it, so a slow
   /// fetch for recording A can land after the user already switched to B
   /// and clobber the view (same discipline as load/search).
   selectRequestId = 0;
+  /// RAW offset consumed by the backend so far (pages advance in raw rows,
+  /// independent of the deduped visible list — see load/loadMore).
+  nextRawOffset = 0;
+  /// The filter ({date, search}) the visible list was loaded under.
+  private listFilterKey: string | null = null;
 
   /** Fetch one recording and make it the selected one. Stale calls (a
    * newer selection superseded this one mid-flight) are discarded. */
@@ -199,19 +382,69 @@ class RecordingsStore {
     this.selectedRecording = recording;
   }
 
+  /// Invalidate every in-flight Active query. Called twice per mutation:
+  /// BEFORE the invoke (a pre-delete/pre-restore page can never land and
+  /// resurrect old list state) and AGAIN at COMMIT
+  /// (fenceMutationCompletion). Each call bumps the list token (stale
+  /// pages never land), bumps the data generation (pre-bump availability
+  /// dies), and clears the busy flags here — the stale requests' finally
+  /// blocks skip them by token, so nothing but this path may reset them
+  /// mid-flight.
+  private invalidateActiveQueries(): void {
+    this.listRequestId++;
+    this.dataGeneration++;
+    this.loading = false;
+    this.loadingMore = false;
+  }
+
+  /// COMPLETION fence (RC-1): re-invalidate AFTER a mutation's await
+  /// resolves, BEFORE surgery/post-commit refreshes. A read issued DURING
+  /// the mutation window (search debounce, Active-tab return, calendar
+  /// pick) snapshots PRE-commit state while holding the post-bump token
+  /// and the still-current generation — both pre-mutation fences pass for
+  /// it. Re-bumping at commit kills those reads, and the generation bump
+  /// breaks refreshAvailability's coalescing so the post-commit refresh
+  /// genuinely fetches current state instead of adopting the pre-commit
+  /// in-flight response. Returns true when a list query was in flight
+  /// (and got killed) — callers that patch the list surgically reload it
+  /// so the visible list converges under whatever filter is current now.
+  private fenceMutationCompletion(): boolean {
+    const killedListQuery = this.loading || this.loadingMore;
+    this.invalidateActiveQueries();
+    return killedListQuery;
+  }
+
   /** The most recently deleted summary, for undo. Cleared after restore or on next delete. */
   lastDeleted = $state<RecordingSummary | null>(null);
 
   async remove(id: string): Promise<void> {
     try {
       // Capture the item before removing so the Undo toast can restore it.
-      this.lastDeleted = this.list.find((r) => r.id === id) ?? null;
+      const visible = this.list.find((r) => r.id === id);
+      this.lastDeleted = visible ?? null;
+      this.invalidateActiveQueries();
       await deleteRecording(id);
+      // COMMIT fence (RC-1): kill any read that started during the
+      // mutation window before the surgery/refreshes below run.
+      const killedListQuery = this.fenceMutationCompletion();
       this.list = this.list.filter((r) => r.id !== id);
+      // The removed row occupied a consumed raw position — shift the next
+      // raw offset with it or the row that slides into its place is
+      // skipped by the next page (a permanently lost row).
+      if (visible) this.nextRawOffset = Math.max(0, this.nextRawOffset - 1);
       if (this.selectedRecording?.id === id) {
         this.selectedRecording = null;
       }
+      // A load that started mid-mutation was killed by the fence — the
+      // surgery above patched the OLD filter's list, so if that load was
+      // replacing the list (e.g. a filter change) reload under the
+      // CURRENT filter rather than leaving its cleared/old rows behind.
+      if (killedListQuery) void this.load();
+      // Fire-and-forget refreshes: a failed follow-up read must not turn
+      // this successful mutation into a reported failure (the errors land
+      // in their own states instead).
       void this.refreshActiveTotal();
+      void this.refreshAvailability();
       this.refreshTrashedAfterMutation();
     } catch (err) {
       console.error('Failed to delete recording:', err);
@@ -222,12 +455,15 @@ class RecordingsStore {
 
   async restore(id: string): Promise<void> {
     try {
+      this.invalidateActiveQueries();
       await restoreRecording(id);
-      // Re-insert the cached summary ONLY if it matches the id being restored.
-      // Without this guard, undoing deletion A after deletion B (which
-      // overwrote lastDeleted) would insert B's summary where A should be.
-      if (this.lastDeleted && this.lastDeleted.id === id) {
-        this.list = [this.lastDeleted, ...this.list];
+      // COMMIT fence (RC-1) — before the refreshes below.
+      this.fenceMutationCompletion();
+      // The reloaded first page (current filters) brings the restored row
+      // back when it MATCHES them. The cached undo summary is never
+      // injected into the list — a restored row outside the current
+      // date/search filters must stay out until the filters allow it.
+      if (this.lastDeleted?.id === id) {
         this.lastDeleted = null;
       }
       // Reload BOTH lists + totals for consistent ordering + server-truth:
@@ -247,19 +483,32 @@ class RecordingsStore {
   lastDeletedAllIds = $state<string[] | null>(null);
 
   /** Guard against duplicate restore submissions while one is in flight
-   *  (double-click on Undo / Restore buttons must be one operation). */
+   * (double-click on Undo / Restore buttons must be one operation). */
   restoring = $state<boolean>(false);
 
   async removeAll(): Promise<DeleteAllResult> {
     try {
+      this.invalidateActiveQueries();
       const result = await deleteAllRecordings();
+      // COMMIT fence (RC-1) — before the surgery/refreshes below. No
+      // reload-on-killed-load is needed here: the surgery's empty list IS
+      // the exact post-commit truth under every filter.
+      this.fenceMutationCompletion();
       this.list = [];
       this.hasMore = false;
+      this.nextRawOffset = 0;
+      // The empty list is accurate FOR THE CURRENT filter — tag it so a
+      // later same-filter refresh failure keeps showing this truth.
+      this.listFilterKey = this.currentFilterKey();
       this.selectedRecording = null;
       this.activeTotal = 0;
       // Everything just moved into Trash — keep its badge AND any loaded
       // trash page honest too.
       this.refreshTrashedAfterMutation();
+      // If a date filter was active, the availability refresh below proves
+      // its day emptied and clears it with the polite notice (the generic
+      // current-availability path — no special-casing here).
+      void this.refreshAvailability();
       // Capture the exact set for the batch Undo toast (D2).
       this.lastDeletedAllIds = result.ids;
       return result;
@@ -285,7 +534,10 @@ class RecordingsStore {
     }
     this.restoring = true;
     try {
+      this.invalidateActiveQueries();
       const result = await restoreRecordings(ids);
+      // COMMIT fence (RC-1) — before the refreshes below.
+      this.fenceMutationCompletion();
       this.lastDeletedAllIds = null;
       // Refresh the active list + authoritative count AND the trash
       // list/total — the rows just left Trash.
@@ -360,6 +612,8 @@ class RecordingsStore {
 
   /// Shared post-restore refresh: both Active and Trash totals move on
   /// every restore/delete/sync/purge, so both are refreshed together.
+  /// load()/loadTrashed() catch their own errors into their error states,
+  /// so this never converts a successful mutation into a rejection.
   private async refreshAfterMutation(): Promise<void> {
     await Promise.all([this.load(), this.loadTrashed()]);
   }
@@ -388,7 +642,10 @@ class RecordingsStore {
     if (this.restoring) throw new Error('A restore is already in progress');
     this.restoring = true;
     try {
+      this.invalidateActiveQueries();
       const result = await restoreRecordings(ids);
+      // COMMIT fence (RC-1) — before the refreshes below.
+      this.fenceMutationCompletion();
       await this.refreshAfterMutation();
       return result.count;
     } finally {
@@ -402,7 +659,10 @@ class RecordingsStore {
     if (this.restoring) throw new Error('A restore is already in progress');
     this.restoring = true;
     try {
+      this.invalidateActiveQueries();
       const result = await restoreAllTrashed();
+      // COMMIT fence (RC-1) — before the refreshes below.
+      this.fenceMutationCompletion();
       await this.refreshAfterMutation();
       return result.count;
     } finally {
@@ -425,12 +685,37 @@ class RecordingsStore {
     const { startIso, endIso } = localDayIntervalUtc(day);
     this.restoring = true;
     try {
+      this.invalidateActiveQueries();
       const result = await restoreRecordingsDeletedBetween(startIso, endIso);
+      // COMMIT fence (RC-1) — before the refreshes below.
+      this.fenceMutationCompletion();
       await this.refreshAfterMutation();
       return result.count;
     } finally {
       this.restoring = false;
     }
+  }
+
+  /// Hook for the Recordings tab's Active↔Trash switch (UI batch): the
+  /// user RETURNING to Active must not see a page cached from before the
+  /// restores they just did in Trash. Reloads the first page + count +
+  /// availability under the CURRENT filters (which the switch preserves);
+  /// the editor selection/draft is untouched.
+  async onActiveViewReturn(): Promise<void> {
+    await this.load();
+  }
+
+  /// A background sync round merged remote data: mark pre-merge
+  /// availability stale (generation bump) and refresh it plus the trash
+  /// badge — WITHOUT reloading the visible list. A 5-minute timer must
+  /// not yank the user's scroll position; the list picks changes up on
+  /// the next natural load()/event. (If the merged data emptied the
+  /// selected day, the availability path clears it with the notice and
+  /// reloads — that targeted reload is by design.)
+  onBackgroundSyncMerged(): void {
+    this.dataGeneration++;
+    void this.refreshTrashedTotal();
+    void this.refreshAvailability();
   }
 
   /// Sync with server (manual trigger or `content-changed` event). Sets the
@@ -455,6 +740,10 @@ class RecordingsStore {
     try {
       summary = await invoke<SyncSummary>('sync_content_now');
       if (!summary?.disabled) {
+        // The sync mutated data (merges, tombstones, revivals): an
+        // availability response issued before it completed is pre-merge
+        // and must not survive.
+        this.dataGeneration++;
         await this.load();
         // Sync merges tombstones and revives from the partner — the Trash
         // badge moves with them.
@@ -534,6 +823,9 @@ class RecordingsStore {
     if (this.remoteUpdateTimer) clearTimeout(this.remoteUpdateTimer);
     this.remoteUpdateTimer = setTimeout(() => {
       this.remoteUpdateTimer = null;
+      // The event means remote data changed: pre-event availability is
+      // stale (generation bump) and the reload refreshes it alongside.
+      this.dataGeneration++;
       this.load();
       // Sync-merged tombstones/revivals move the Trash badge with the
       // list — keep it honest on the same debounce (cheap count; the
@@ -559,9 +851,10 @@ export function startBackgroundSync(): void {
     try {
       const summary = await syncContentNow();
       if (!summary?.disabled) {
-        // Sync merges tombstones and revives from the partner — the Trash
-        // badge moves with them (mirrors syncNow's post-sync refresh).
-        void recordings.refreshTrashedTotal();
+        // Sync merges tombstones/revivals — the badge AND date
+        // availability move with them (mirrors syncNow's post-sync
+        // refresh, minus the visible-list reload).
+        recordings.onBackgroundSyncMerged();
       }
     } catch (err) {
       console.error('Background content sync failed:', err);
@@ -574,7 +867,7 @@ export function stopBackgroundSync(): void {
   if (bgSyncTimer) {
     clearInterval(bgSyncTimer);
     bgSyncTimer = null;
-    console.warn('Background content sync stopped');
+    console.warn('Background sync stopped');
   }
 }
 
@@ -594,6 +887,9 @@ export async function selectRecording(id: string): Promise<void> {
 /// since both bounds are constructed as calendar midnights, not as
 /// 24-hour offsets). The backend compares half-open:
 /// `datetime(deleted_at) >= datetime(start) AND < datetime(end)`.
+/// The date FILTER's day bounds (dayIntervalUtcForKey in
+/// utils/recordingDates.ts) carry identical semantics — pinned equivalent
+/// by test.
 export function localDayIntervalUtc(day: Date): { startIso: string; endIso: string } {
   const start = new Date(day.getFullYear(), day.getMonth(), day.getDate());
   const end = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1);

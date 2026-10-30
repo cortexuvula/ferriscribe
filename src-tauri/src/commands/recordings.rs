@@ -65,6 +65,102 @@ pub async fn search_recordings(
     .map_err(join_err)?
 }
 
+/// All active recording creation instants, one per recording (duplicates
+/// retained — the browser groups them into local-date counts).
+///
+/// The availability payload is timestamps ONLY: no ids, names, filenames,
+/// paths, transcripts, or metadata (PHI minimization — the calendar needs
+/// nothing else). Grouping into local dates happens in the browser's own
+/// timezone; the backend carries no timezone dependency. A corrupt stored
+/// timestamp surfaces as an error here rather than a silently empty
+/// calendar.
+#[tauri::command]
+pub async fn list_recording_creation_times(
+    state: tauri::State<'_, AppState>,
+) -> AppResult<Vec<chrono::DateTime<chrono::Utc>>> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        RecordingsRepo::list_creation_times(&conn).map_err(AppError::from)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+/// Limit handling for [`query_recordings`]: default 50, capped at 200 — an
+/// absurd caller request must never fetch the whole table in one page.
+fn query_limit_or_default(limit: Option<u32>) -> u32 {
+    limit.unwrap_or(50).min(200)
+}
+
+/// Normalize the optional `[start, end)` creation-window pair for
+/// [`query_recordings`]: both bounds together or neither (an incomplete
+/// pair is rejected — never an unfiltered fallback), both must parse and
+/// the window must not be reversed (reusing `validate_interval`), and the
+/// result is UTC-normalized RFC 3339 so the SQL compares like-for-like
+/// against stored timestamps of either format.
+fn query_interval_bounds(
+    start_iso: Option<&str>,
+    end_iso: Option<&str>,
+) -> AppResult<Option<(String, String)>> {
+    match (start_iso, end_iso) {
+        (None, None) => Ok(None),
+        (Some(start), Some(end)) => {
+            let (start, end) = validate_interval(start, end)?;
+            Ok(Some((start.to_rfc3339(), end.to_rfc3339())))
+        }
+        _ => Err(AppError::InvalidInput(
+            "start and end timestamps must be provided together".into(),
+        )),
+    }
+}
+
+/// Composite query for the Active recordings list (recording-date-calendar):
+/// optional literal-term FTS `search`, optional half-open
+/// `[startIso, endIso)` creation window, and paging.
+///
+/// All filters are applied in SQL before LIMIT/OFFSET, results come back in
+/// deterministic actual-instant newest-first order (id as tie-breaker), and
+/// the projection is summary flags — never transcript/SOAP documents. See
+/// `RecordingsRepo::query` for the normalization and search-escaping
+/// details. Whitespace-only `search` means "no search filter" (the caller's
+/// search box being empty must not zero out the list); a search whose terms
+/// all strip away (quotes-only) matches nothing, mirroring
+/// `search_recordings`.
+#[tauri::command]
+pub async fn query_recordings(
+    state: tauri::State<'_, AppState>,
+    search: Option<String>,
+    start_iso: Option<String>,
+    end_iso: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> AppResult<Vec<RecordingSummary>> {
+    let search = search
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let interval = query_interval_bounds(start_iso.as_deref(), end_iso.as_deref())?;
+    let limit = query_limit_or_default(limit);
+    let offset = offset.unwrap_or(0);
+
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        RecordingsRepo::query(
+            &conn,
+            search.as_deref(),
+            interval
+                .as_ref()
+                .map(|(start, end)| (start.as_str(), end.as_str())),
+            limit,
+            offset,
+        )
+        .map_err(AppError::from)
+    })
+    .await
+    .map_err(join_err)?
+}
+
 /// Move a recording to Trash (single delete).
 ///
 /// Soft-deletes: marks `deleted_at` on the row and removes it from FTS in
@@ -705,5 +801,70 @@ mod tests {
             leftovers.is_empty(),
             "partial destination must be shredded on a failed conversion, found {leftovers:?}"
         );
+    }
+
+    /// The composite query's interval bounds: both halves together or
+    /// neither, always parseable, never reversed — and normalized to UTC
+    /// so SQL compares like-for-like.
+    #[test]
+    fn query_interval_bounds_accept_valid_pairs_normalized() {
+        let bounds = query_interval_bounds(
+            Some("2026-10-01T02:00:00+02:00"),
+            Some("2026-10-02T00:00:00Z"),
+        )
+        .expect("valid pair");
+        assert_eq!(
+            bounds,
+            Some((
+                "2026-10-01T00:00:00+00:00".to_string(),
+                "2026-10-02T00:00:00+00:00".to_string(),
+            )),
+            "offsets normalize to UTC RFC3339"
+        );
+
+        assert_eq!(
+            query_interval_bounds(None, None).expect("absent pair is no filter"),
+            None
+        );
+    }
+
+    #[test]
+    fn query_interval_bounds_reject_incomplete_pairs() {
+        let err = query_interval_bounds(Some("2026-10-01T00:00:00Z"), None)
+            .expect_err("start without end must be rejected");
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+        let err = query_interval_bounds(None, Some("2026-10-02T00:00:00Z"))
+            .expect_err("end without start must be rejected");
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+    }
+
+    #[test]
+    fn query_interval_bounds_reject_malformed_and_reversed() {
+        let err = query_interval_bounds(Some("yesterday"), Some("2026-10-02T00:00:00Z"))
+            .expect_err("malformed start must be rejected");
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+
+        let err = query_interval_bounds(Some("2026-10-01T00:00:00Z"), Some("not-a-timestamp"))
+            .expect_err("malformed end must be rejected");
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+
+        let err = query_interval_bounds(Some("2026-10-02T00:00:00Z"), Some("2026-10-01T00:00:00Z"))
+            .expect_err("reversed window must be rejected");
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+
+        // Equal bounds are an empty window, not a valid one.
+        let err = query_interval_bounds(Some("2026-10-01T00:00:00Z"), Some("2026-10-01T00:00:00Z"))
+            .expect_err("zero-width window must be rejected");
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+    }
+
+    /// Limit clamping for the composite query: default 50, capped at 200 —
+    /// an absurd caller request must not fetch the whole table.
+    #[test]
+    fn query_limit_defaults_and_caps() {
+        assert_eq!(query_limit_or_default(None), 50);
+        assert_eq!(query_limit_or_default(Some(10)), 10);
+        assert_eq!(query_limit_or_default(Some(200)), 200);
+        assert_eq!(query_limit_or_default(Some(10_000)), 200);
     }
 }

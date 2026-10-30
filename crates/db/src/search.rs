@@ -14,6 +14,47 @@ use crate::{DbResult, recordings::RecordingsRepo};
 /// letter, and patient name fields.
 pub struct SearchRepo;
 
+/// Build the FTS5 MATCH string that treats every whitespace-separated term
+/// of `query` as a literal **phrase**; multiple phrases form an implicit
+/// AND, preserving multi-word semantics.
+///
+/// Shared by [`SearchRepo::search`] and the composite recordings query
+/// (`RecordingsRepo::query`) so both surfaces escape user input identically.
+///
+/// # Query escaping
+///
+/// The user's input is passed to FTS5 as **query syntax**, not a literal
+/// string — so raw input containing FTS metacharacters breaks the parse.
+/// Worst case in practice: hyphens (filenames like
+/// `Recording_2026-08-13_13-39-22.wav`, dates like `2026-08-13`, clinical
+/// terms like `covid-19`) make FTS5 treat the following token as a column
+/// filter and fail with `no such column`, which surfaced as a silent
+/// empty result set. To make input literal, each term is wrapped as an
+/// FTS5 phrase (`"term"`). FTS5 phrases cannot contain double quotes, so
+/// stray quotes are stripped.
+///
+/// Returns `None` when the query contains no usable terms (empty,
+/// whitespace-only, or quotes-only) — callers apply the "matches nothing"
+/// semantics rather than silently unfiltered results.
+pub(crate) fn literal_phrase_match(query: &str) -> Option<String> {
+    let phrases: Vec<String> = query
+        .split_whitespace()
+        .filter_map(|term| {
+            let cleaned = term.replace('"', "");
+            if cleaned.is_empty() {
+                None
+            } else {
+                Some(format!("\"{cleaned}\""))
+            }
+        })
+        .collect();
+    if phrases.is_empty() {
+        None
+    } else {
+        Some(phrases.join(" "))
+    }
+}
+
 impl SearchRepo {
     /// Search recordings using FTS5 MATCH.
     ///
@@ -22,32 +63,13 @@ impl SearchRepo {
     ///
     /// # Query escaping
     ///
-    /// The user's input is passed to FTS5 as **query syntax**, not a literal
-    /// string — so raw input containing FTS metacharacters breaks the parse.
-    /// Worst case in practice: hyphens (filenames like
-    /// `Recording_2026-08-13_13-39-22.wav`, dates like `2026-08-13`, clinical
-    /// terms like `covid-19`) make FTS5 treat the following token as a column
-    /// filter and fail with `no such column`, which surfaced as a silent
-    /// empty result set. To make input literal, each whitespace-separated term
-    /// is wrapped as an FTS5 **phrase** (`"term"`); multiple phrases form an
-    /// implicit AND, preserving multi-word semantics. FTS5 phrases cannot
-    /// contain double quotes, so stray quotes are stripped.
+    /// See [`literal_phrase_match`] — each term is wrapped as a literal FTS5
+    /// phrase so metacharacters (hyphens, quotes, colons…) never parse as
+    /// query syntax.
     pub fn search(conn: &Connection, query: &str, limit: u32) -> DbResult<Vec<Uuid>> {
-        let phrases: Vec<String> = query
-            .split_whitespace()
-            .filter_map(|term| {
-                let cleaned = term.replace('"', "");
-                if cleaned.is_empty() {
-                    None
-                } else {
-                    Some(format!("\"{cleaned}\""))
-                }
-            })
-            .collect();
-        if phrases.is_empty() {
+        let Some(fts_query) = literal_phrase_match(query) else {
             return Ok(Vec::new());
-        }
-        let fts_query = phrases.join(" ");
+        };
 
         let mut stmt = conn.prepare(
             "SELECT id FROM recordings_fts
@@ -281,5 +303,33 @@ mod tests {
 
         let results = SearchRepo::search(&conn, "(working):", 10).unwrap();
         assert_eq!(results, vec![id]);
+    }
+
+    /// The extracted literal-phrase builder (shared with the composite
+    /// recordings query): every whitespace-separated term becomes a quoted
+    /// FTS5 phrase (implicit AND), stray double quotes are stripped, and a
+    /// query with no usable terms yields `None` so callers can apply the
+    /// "matches nothing" semantics instead of silently unfiltered results.
+    #[test]
+    fn literal_phrase_match_wraps_terms_and_strips_quotes() {
+        use super::literal_phrase_match;
+
+        assert_eq!(
+            literal_phrase_match("covid-19 2026-08-13"),
+            Some("\"covid-19\" \"2026-08-13\"".to_string()),
+            "hyphens ride inside quoted phrases, never parsed as column filters"
+        );
+        assert_eq!(
+            literal_phrase_match("he said \"hello\""),
+            Some("\"he\" \"said\" \"hello\"".to_string()),
+            "stray quotes are stripped, not embedded in phrases"
+        );
+        assert_eq!(literal_phrase_match(""), None);
+        assert_eq!(literal_phrase_match("   "), None);
+        assert_eq!(
+            literal_phrase_match("\"\" \"\""),
+            None,
+            "quotes-only terms strip to nothing"
+        );
     }
 }

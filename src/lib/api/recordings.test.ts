@@ -16,6 +16,8 @@ import {
   restoreRecordingsDeletedBetween,
   countRecordingsDeletedBetween,
   importAudioFile,
+  listRecordingCreationTimes,
+  queryRecordings,
 } from './recordings';
 
 const invokeMock = vi.mocked(invoke);
@@ -109,5 +111,56 @@ describe('recordings api', () => {
   it('importAudioFile passes filePath in camelCase', async () => {
     await importAudioFile('/tmp/audio.mp3');
     expect(invokeMock).toHaveBeenCalledWith('import_audio_file', { filePath: '/tmp/audio.mp3' });
+  });
+
+  it('listRecordingCreationTimes invokes with no args and returns timestamp strings', async () => {
+    const times = ['2026-10-01T09:00:00+00:00', '2026-10-01T09:00:00+00:00'];
+    invokeMock.mockResolvedValueOnce(times);
+    await expect(listRecordingCreationTimes()).resolves.toBe(times);
+    expect(invokeMock).toHaveBeenCalledWith('list_recording_creation_times');
+  });
+
+  it('queryRecordings defaults: no filters, limit 50, offset 0, null bounds', async () => {
+    invokeMock.mockResolvedValueOnce([]);
+    await expect(queryRecordings()).resolves.toEqual([]);
+    expect(invokeMock).toHaveBeenCalledWith('query_recordings', {
+      search: null,
+      startIso: null,
+      endIso: null,
+      limit: 50,
+      offset: 0,
+    });
+  });
+
+  it('queryRecordings forwards search + date interval + explicit paging', async () => {
+    invokeMock.mockResolvedValueOnce([]);
+    await queryRecordings({
+      search: 'covid-19',
+      startIso: '2026-10-01T00:00:00Z',
+      endIso: '2026-10-02T00:00:00Z',
+      limit: 200,
+      offset: 50,
+    });
+    expect(invokeMock).toHaveBeenCalledWith('query_recordings', {
+      search: 'covid-19',
+      startIso: '2026-10-01T00:00:00Z',
+      endIso: '2026-10-02T00:00:00Z',
+      limit: 200,
+      offset: 50,
+    });
+  });
+
+  it('queryRecordings sends only one interval half when the other is omitted', async () => {
+    // The backend rejects an incomplete pair — the wrapper must not invent
+    // the missing half, so the rejection stays observable to the caller.
+    invokeMock.mockResolvedValueOnce([]);
+    await queryRecordings({ startIso: '2026-10-01T00:00:00Z' });
+    expect(invokeMock).toHaveBeenCalledWith('query_recordings', {
+      search: null,
+      startIso: '2026-10-01T00:00:00Z',
+      endIso: null,
+      limit: 50,
+      offset: 0,
+    });
   });
 });
