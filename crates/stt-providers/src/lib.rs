@@ -68,3 +68,49 @@ pub enum SttError {
 
 /// Convenience result type for [`SttError`].
 pub type SttResult<T> = Result<T, SttError>;
+
+#[cfg(all(test, target_os = "macos"))]
+mod link_regression_tests {
+    //! Regression tripwire for the v0.82.0 macOS release-link failure
+    //! (run 41077937853): whisper.cpp's ggml-metal-device.m and ORT's
+    //! CoreML objects reference `___isPlatformVersionAtLeast`, which only
+    //! the toolchain's compiler-rt archive (now wired in by this crate's
+    //! build.rs) or rustc's std shim can define. This test binary links
+    //! both native objects, so a toolchain that drops the std shim AND a
+    //! regressed build.rs fail here (or at link time) instead of only in
+    //! the release job. See crates/stt-providers/build.rs for the full
+    //! mechanism.
+
+    use std::process::Command;
+
+    #[test]
+    fn apple_availability_symbol_is_resolved_in_this_binary() {
+        let current = std::env::current_exe().expect("current exe path");
+        let output = Command::new("nm")
+            .arg(&current)
+            .output()
+            .expect("run nm (Xcode tools are a build prerequisite)");
+        assert!(
+            output.status.success(),
+            "nm failed on {}: {}",
+            current.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let syms = String::from_utf8_lossy(&output.stdout);
+        let bad: Vec<&str> = syms
+            .lines()
+            .filter(|l| l.contains("isPlatformVersionAtLeast") && l.contains(" U "))
+            .collect();
+        // An *undefined* symbol in the symbol table of an already-linked
+        // executable means the availability shim is being imported from
+        // nowhere (flat-namespace hunt at launch). Defined (T/t/W) or
+        // absent (dead-stripped, nothing referenced it) are both healthy.
+        assert!(
+            bad.is_empty(),
+            "___isPlatformVersionAtLeast is UNDEFINED in {} — the \
+             compiler-rt link fix (crates/stt-providers/build.rs) has \
+             regressed: {bad:?}",
+            current.display()
+        );
+    }
+}
