@@ -21,6 +21,8 @@ const mockListTrashed = vi.fn();
 const mockRestoreAllTrashed = vi.fn();
 const mockRestoreBetween = vi.fn();
 const mockCountBetween = vi.fn();
+const mockCountCreatedBetween = vi.fn();
+const mockDeleteCreatedBetween = vi.fn();
 vi.mock('../api/recordings', () => ({
   queryRecordings: (...args: unknown[]) => mockQueryRecordings(...args),
   listRecordingCreationTimes: (...args: unknown[]) => mockListCreationTimes(...args),
@@ -33,6 +35,8 @@ vi.mock('../api/recordings', () => ({
   restoreAllTrashed: (...args: unknown[]) => mockRestoreAllTrashed(...args),
   restoreRecordingsDeletedBetween: (...args: unknown[]) => mockRestoreBetween(...args),
   countRecordingsDeletedBetween: (...args: unknown[]) => mockCountBetween(...args),
+  countRecordingsCreatedBetween: (...args: unknown[]) => mockCountCreatedBetween(...args),
+  deleteRecordingsCreatedBetween: (...args: unknown[]) => mockDeleteCreatedBetween(...args),
   getRecording: vi.fn(),
 }));
 
@@ -100,6 +104,8 @@ function resetAllMocks() {
   mockRestoreAllTrashed.mockReset();
   mockRestoreBetween.mockReset();
   mockCountBetween.mockReset();
+  mockCountCreatedBetween.mockReset();
+  mockDeleteCreatedBetween.mockReset();
   vi.clearAllMocks();
   // Shared defaults: empty DB, everything succeeds unless a test says
   // otherwise — a mutation's fire-and-forget refreshes never explode.
@@ -107,6 +113,8 @@ function resetAllMocks() {
   mockListCreationTimes.mockResolvedValue([]);
   mockCountRecordings.mockResolvedValue(0);
   mockListTrashed.mockResolvedValue({ items: [], total: 0 });
+  mockCountCreatedBetween.mockResolvedValue(0);
+  mockDeleteCreatedBetween.mockResolvedValue({ count: 0, ids: [] });
 }
 
 describe('RecordingsStore — composite query pagination + dedup', () => {
@@ -968,6 +976,169 @@ describe('RecordingsStore — Move all to Trash (D1/D2 contract)', () => {
   });
 });
 
+describe('RecordingsStore — Move by date range to Trash (store contract)', () => {
+  beforeEach(resetAllMocks);
+
+  it('moveActiveRangeToTrash() passes the local-day-range UTC window and returns the actual result', async () => {
+    mockDeleteCreatedBetween.mockResolvedValue({ count: 2, ids: ['id-a', 'id-b'] });
+    const { recordings, localDayRangeIntervalUtc } = await freshStore();
+    const start = new Date(2026, 9, 1);
+    const end = new Date(2026, 9, 3);
+
+    const result = await recordings.moveActiveRangeToTrash(start, end);
+
+    const { startIso, endIso } = localDayRangeIntervalUtc(start, end);
+    expect(mockDeleteCreatedBetween).toHaveBeenCalledWith(startIso, endIso);
+    expect(mockDeleteCreatedBetween).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ count: 2, ids: ['id-a', 'id-b'] });
+  });
+
+  it('surgically drops ONLY the moved rows from the visible list and shifts the raw offset with them', async () => {
+    // Page of three; two moved — the survivor stays, the consumed raw
+    // positions of the moved rows are subtracted so the next page does
+    // not skip the rows that slid into their places.
+    mockQueryRecordings.mockResolvedValue([makeSummary('a'), makeSummary('b'), makeSummary('c')]);
+    mockDeleteCreatedBetween.mockResolvedValue({ count: 2, ids: ['a', 'c'] });
+    const { recordings } = await freshStore();
+    await recordings.load();
+    expect(recordings.nextRawOffset).toBe(3);
+
+    await recordings.moveActiveRangeToTrash(new Date(2026, 9, 1), new Date(2026, 9, 3));
+
+    expect(recordings.list.map((r) => r.id)).toEqual(['b']);
+    expect(recordings.nextRawOffset).toBe(1);
+  });
+
+  it('clears selectedRecording when it was moved; keeps it when it was not', async () => {
+    mockQueryRecordings.mockResolvedValue([makeSummary('a'), makeSummary('b')]);
+    mockDeleteCreatedBetween.mockResolvedValueOnce({ count: 1, ids: ['a'] });
+    const { recordings } = await freshStore();
+    await recordings.load();
+    recordings.selectedRecording = recordings.list[0] as unknown as Recording;
+    await recordings.moveActiveRangeToTrash(new Date(2026, 9, 1), new Date(2026, 9, 2));
+    expect(recordings.selectedRecording).toBeNull();
+
+    mockDeleteCreatedBetween.mockResolvedValueOnce({ count: 1, ids: ['x'] });
+    recordings.selectedRecording = recordings.list[0] as unknown as Recording;
+    await recordings.moveActiveRangeToTrash(new Date(2026, 9, 1), new Date(2026, 9, 2));
+    expect(recordings.selectedRecording?.id).toBe('b');
+  });
+
+  it('captures the EXACT moved id set for the batch Undo toast', async () => {
+    mockDeleteCreatedBetween.mockResolvedValue({ count: 2, ids: ['a', 'b'] });
+    mockRestoreRecordings.mockResolvedValue({ count: 2, ids: ['a', 'b'] });
+    const { recordings } = await freshStore();
+
+    await recordings.moveActiveRangeToTrash(new Date(2026, 9, 1), new Date(2026, 9, 3));
+
+    expect(recordings.lastDeletedAllIds).toEqual(['a', 'b']);
+    // The undo restores exactly the captured set (never "everything
+    // deleted since"), then clears the slot.
+    const restored = await recordings.undoMoveAll();
+    expect(restored).toBe(2);
+    expect(mockRestoreRecordings).toHaveBeenCalledWith(['a', 'b']);
+    expect(recordings.lastDeletedAllIds).toBeNull();
+  });
+
+  it('rejects a duplicate submission while one is in flight, and the guard clears after failure', async () => {
+    let rejectMove!: (e: Error) => void;
+    const move = new Promise<{ count: number; ids: string[] }>((_, rej) => {
+      rejectMove = rej;
+    });
+    mockDeleteCreatedBetween.mockReturnValueOnce(move);
+    const { recordings } = await freshStore();
+    const start = new Date(2026, 9, 1);
+    const end = new Date(2026, 9, 3);
+
+    const first = recordings.moveActiveRangeToTrash(start, end);
+    await expect(recordings.moveActiveRangeToTrash(start, end)).rejects.toThrow(
+      /already in progress/,
+    );
+    expect(mockDeleteCreatedBetween).toHaveBeenCalledTimes(1);
+
+    // The failure path must clear the guard (finally) — the next attempt
+    // reaches the command again.
+    rejectMove(new Error('db busy'));
+    await expect(first).rejects.toThrow('db busy');
+    mockDeleteCreatedBetween.mockResolvedValueOnce({ count: 0, ids: [] });
+    await recordings.moveActiveRangeToTrash(start, end);
+    expect(mockDeleteCreatedBetween).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed move propagates and leaves the visible list untouched', async () => {
+    mockQueryRecordings.mockResolvedValue([makeSummary('a'), makeSummary('b')]);
+    mockDeleteCreatedBetween.mockRejectedValue(new Error('db busy'));
+    const { recordings } = await freshStore();
+    await recordings.load();
+
+    await expect(
+      recordings.moveActiveRangeToTrash(new Date(2026, 9, 1), new Date(2026, 9, 3)),
+    ).rejects.toThrow('db busy');
+
+    expect(recordings.list.map((r) => r.id)).toEqual(['a', 'b']);
+  });
+
+  it('fire-and-forget refreshes ride the move: active count + availability', async () => {
+    mockDeleteCreatedBetween.mockResolvedValue({ count: 1, ids: ['a'] });
+    const { recordings } = await freshStore();
+
+    await recordings.moveActiveRangeToTrash(new Date(2026, 9, 1), new Date(2026, 9, 3));
+
+    expect(mockCountRecordings).toHaveBeenCalled();
+    expect(mockListCreationTimes).toHaveBeenCalled();
+  });
+
+  it('countActiveInRange() delegates to the dedicated count command with the same window', async () => {
+    mockCountCreatedBetween.mockResolvedValue(7);
+    const { recordings, localDayRangeIntervalUtc } = await freshStore();
+    const start = new Date(2026, 9, 1);
+    const end = new Date(2026, 9, 3);
+
+    await expect(recordings.countActiveInRange(start, end)).resolves.toBe(7);
+
+    const { startIso, endIso } = localDayRangeIntervalUtc(start, end);
+    expect(mockCountCreatedBetween).toHaveBeenCalledWith(startIso, endIso);
+  });
+});
+
+describe('localDayRangeIntervalUtc — inclusive local calendar day range', () => {
+  it('a same-day range equals the single-day window exactly', async () => {
+    const { localDayIntervalUtc, localDayRangeIntervalUtc } = await freshStore();
+    const day = new Date(2026, 9, 6);
+    expect(localDayRangeIntervalUtc(day, day)).toEqual(localDayIntervalUtc(day));
+  });
+
+  it('a multi-day range starts at the first local midnight and ends at the midnight AFTER the last day', async () => {
+    const { localDayRangeIntervalUtc } = await freshStore();
+    // Oct 1 through Oct 3 inclusive → [Oct 1 00:00, Oct 4 00:00) local.
+    const { startIso, endIso } = localDayRangeIntervalUtc(
+      new Date(2026, 9, 1),
+      new Date(2026, 9, 3),
+    );
+    const start = new Date(startIso);
+    const end = new Date(endIso);
+    expect([start.getHours(), start.getMinutes()]).toEqual([0, 0]);
+    expect([end.getHours(), end.getMinutes()]).toEqual([0, 0]);
+    expect(start.getDate()).toBe(1);
+    expect(start.getMonth()).toBe(9);
+    expect(end.getDate()).toBe(4);
+    expect(end.getMonth()).toBe(9);
+  });
+
+  it('the exclusive end bound rolls month and year boundaries (calendar, not 24h math)', async () => {
+    const { localDayRangeIntervalUtc } = await freshStore();
+    // End day Oct 31 → end bound Nov 1.
+    const oct = localDayRangeIntervalUtc(new Date(2026, 9, 30), new Date(2026, 9, 31));
+    expect(new Date(oct.endIso).getMonth()).toBe(10);
+    expect(new Date(oct.endIso).getDate()).toBe(1);
+    // End day Dec 31 → end bound Jan 1 of the NEXT year.
+    const dec = localDayRangeIntervalUtc(new Date(2026, 11, 30), new Date(2026, 11, 31));
+    expect(new Date(dec.endIso).getMonth()).toBe(0);
+    expect(new Date(dec.endIso).getDate()).toBe(1);
+    expect(new Date(dec.endIso).getFullYear()).toBe(2027);
+  });
+});
+
 function makeTrashed(id: string, deletedAt = '2026-10-01T12:00:00Z') {
   return {
     id,
@@ -1359,6 +1530,7 @@ function useScriptedWorld(seed: WorldRow[]) {
 type FenceKind =
   | 'remove'
   | 'removeAll'
+  | 'moveRange'
   | 'restore'
   | 'undoMoveAll'
   | 'restoreTrashed'
@@ -1368,6 +1540,7 @@ type FenceKind =
 const FENCE_KINDS: FenceKind[] = [
   'remove',
   'removeAll',
+  'moveRange',
   'restore',
   'undoMoveAll',
   'restoreTrashed',
@@ -1383,7 +1556,7 @@ describe('RecordingsStore — mutation completion fences (RC-1)', () => {
       it(`${kind}: a read issued DURING the mutation delivers pre-commit state that cannot survive the commit${concurrent ? ' (concurrent load)' : ' (no-concurrent-load control)'}`, async () => {
         const D = '2026-10-05'; // the moved row's day
         const E = '2026-09-01'; // two stable rows on another day
-        const isDelete = kind === 'remove' || kind === 'removeAll';
+        const isDelete = kind === 'remove' || kind === 'removeAll' || kind === 'moveRange';
         const seed: WorldRow[] = isDelete
           ? [
               { id: 'victim', day: D },
@@ -1410,6 +1583,7 @@ describe('RecordingsStore — mutation completion fences (RC-1)', () => {
         const mut = deferred<unknown>();
         if (kind === 'remove') mockDeleteRecording.mockReturnValue(mut.promise);
         else if (kind === 'removeAll') mockDeleteAllRecordings.mockReturnValue(mut.promise);
+        else if (kind === 'moveRange') mockDeleteCreatedBetween.mockReturnValue(mut.promise);
         else if (kind === 'restore') mockRestoreRecording.mockReturnValue(mut.promise);
         else if (kind === 'undoMoveAll' || kind === 'restoreTrashed')
           mockRestoreRecordings.mockReturnValue(mut.promise);
@@ -1423,6 +1597,10 @@ describe('RecordingsStore — mutation completion fences (RC-1)', () => {
               return recordings.remove('victim');
             case 'removeAll':
               return recordings.removeAll();
+            case 'moveRange':
+              // Same local day for both ends — a one-day window that
+              // contains exactly the victim.
+              return recordings.moveActiveRangeToTrash(parseLocalDateKey(D), parseLocalDateKey(D));
             case 'restore':
               return recordings.restore('victim');
             case 'undoMoveAll':
