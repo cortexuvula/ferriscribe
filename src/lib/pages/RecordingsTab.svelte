@@ -8,6 +8,7 @@
   import RecordingCard from '../components/RecordingCard.svelte';
   import RecordingDateCalendar from '../components/RecordingDateCalendar.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
+  import MoveByDateRangeDialog from '../components/MoveByDateRangeDialog.svelte';
   import RecordingViewSwitch from '../components/RecordingViewSwitch.svelte';
   import TrashPanel from '../components/TrashPanel.svelte';
   import { sanitizedErr } from '../utils/sanitizedErr';
@@ -15,6 +16,7 @@
 
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
   let showMoveAll = $state(false);
+  let showMoveByDate = $state(false);
   const retentionDays = $derived(settings.trashRetentionDays);
   /// Active | Trash view. The switch is ALWAYS rendered — an empty Active
   /// list must never hide the route to Trash recovery.
@@ -168,6 +170,41 @@
     pipeline.retry(id);
     toasts.success('Starting re-transcription…');
   }
+
+  function openMoveByDateDialog() {
+    showMoveByDate = true;
+  }
+
+  /// Move-by-date-range success: report actual vs preview (a concurrent
+  /// deletion may have shrunk the set between count and move) and offer
+  /// the exact-set batch Undo — the same toast action Move-all uses.
+  function handleMovedByDate(result: { count: number; ids: string[] }, preview: number) {
+    const noun = result.count === 1 ? 'recording' : 'recordings';
+    const missing = preview - result.count;
+    toasts.add({
+      message:
+        missing > 0
+          ? `${result.count} of ${preview} moved to Trash — ${missing} ${missing === 1 ? 'was' : 'were'} no longer available. Restore within ${retentionDays} days.`
+          : `${result.count} ${noun} moved to Trash. Restore them within ${retentionDays} days.`,
+      type: 'success',
+      autoDismiss: true,
+      actionLabel: 'Undo',
+      onAction: async () => {
+        try {
+          const restored = await recordings.undoMoveAll();
+          const restoredNoun = restored === 1 ? 'recording' : 'recordings';
+          toasts.success(`${restored} ${restoredNoun} restored to Active.`);
+        } catch (err) {
+          console.error('Failed to undo move-by-date:', err);
+          toasts.error(`Could not restore: ${sanitizedErr(err)}`);
+        }
+      },
+    });
+  }
+
+  function handleMoveByDateFailed(err: unknown) {
+    toasts.error(`Failed to move recordings to Trash: ${sanitizedErr(err)}`);
+  }
 </script>
 
 <div class="recordings-tab">
@@ -256,12 +293,20 @@
           {#if activeTotal > 0}
             <div class="list-toolbar">
               <span class="recording-count">{countLabel}</span>
-              <button
-                class="btn-move-all"
-                onclick={openMoveAllDialog}
-              >
-                Move all to Trash
-              </button>
+              <div class="toolbar-actions">
+                <button
+                  class="btn-move-all"
+                  onclick={openMoveAllDialog}
+                >
+                  Move all to Trash
+                </button>
+                <button
+                  class="btn-move-all"
+                  onclick={openMoveByDateDialog}
+                >
+                  Move by date range…
+                </button>
+              </div>
             </div>
           {/if}
 
@@ -364,6 +409,14 @@
     danger={false}
     onConfirm={confirmMoveAll}
     onCancel={() => showMoveAll = false}
+  />
+{/if}
+
+{#if showMoveByDate}
+  <MoveByDateRangeDialog
+    onClose={() => (showMoveByDate = false)}
+    onMoved={handleMovedByDate}
+    onMoveFailed={handleMoveByDateFailed}
   />
 {/if}
 
@@ -529,6 +582,12 @@
   .recording-count {
     font-size: 12px;
     color: var(--text-muted);
+  }
+
+  .toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   /* Restrained by design: Move-all-to-Trash has a configurable recovery window, so

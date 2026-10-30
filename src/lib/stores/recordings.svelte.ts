@@ -9,11 +9,13 @@ import {
   restoreRecording,
   restoreRecordings,
   deleteAllRecordings,
+  deleteRecordingsCreatedBetween,
   countRecordings,
   listTrashedRecordings,
   restoreAllTrashed,
   restoreRecordingsDeletedBetween,
   countRecordingsDeletedBetween,
+  countRecordingsCreatedBetween,
   type DeleteAllResult,
   type QueryRecordingsOptions,
 } from '../api/recordings';
@@ -677,6 +679,69 @@ class RecordingsStore {
     return countRecordingsDeletedBetween(startIso, endIso);
   }
 
+  /// Preview count of ACTIVE recordings CREATED in the local calendar day
+  /// range [startDay, endDay] (both inclusive — the dedicated count
+  /// command, never derived from the paginated/filtered Active list).
+  async countActiveInRange(startDay: Date, endDay: Date): Promise<number> {
+    const { startIso, endIso } = localDayRangeIntervalUtc(startDay, endDay);
+    return countRecordingsCreatedBetween(startIso, endIso);
+  }
+
+  /// Guard against duplicate move-to-Trash submissions while one is in
+  /// flight (a double-click is one move, not two racing transactions).
+  movingToTrash = $state<boolean>(false);
+
+  /// Move every ACTIVE recording CREATED in the local calendar day range
+  /// [startDay, endDay] (both inclusive) to Trash, regardless of the
+  /// current search/date filter. Bookkeeping mirrors removeAll: active
+  /// queries invalidated before AND fenced after the invoke, the moved
+  /// rows surgically dropped from the visible list (with the raw-offset
+  /// shift remove() uses), and the count/availability/trash badge
+  /// refreshed. The exact returned id set is captured into
+  /// `lastDeletedAllIds` so the Undo toast restores EXACTLY it via
+  /// undoMoveAll — a recording deleted AFTER the move must never be
+  /// swept into that undo. Returns the ACTUAL {count, ids}.
+  async moveActiveRangeToTrash(startDay: Date, endDay: Date): Promise<DeleteAllResult> {
+    if (this.movingToTrash) throw new Error('A move to Trash is already in progress');
+    this.movingToTrash = true;
+    try {
+      const { startIso, endIso } = localDayRangeIntervalUtc(startDay, endDay);
+      this.invalidateActiveQueries();
+      const result = await deleteRecordingsCreatedBetween(startIso, endIso);
+      // COMMIT fence (RC-1) — before the surgery/refreshes below.
+      const killedListQuery = this.fenceMutationCompletion();
+      const moved = new Set(result.ids);
+      const removedVisible = this.list.filter((r) => moved.has(r.id)).length;
+      this.list = this.list.filter((r) => !moved.has(r.id));
+      // Each removed row occupied a consumed raw position — shift the
+      // offset with them or the rows sliding into their places are skipped
+      // by the next page (the remove() discipline, plural).
+      if (removedVisible > 0) {
+        this.nextRawOffset = Math.max(0, this.nextRawOffset - removedVisible);
+      }
+      if (this.selectedRecording !== null && moved.has(this.selectedRecording.id)) {
+        this.selectedRecording = null;
+      }
+      // The patched list is accurate FOR THE CURRENT filter — tag it so a
+      // later same-filter refresh failure keeps showing this truth.
+      this.listFilterKey = this.currentFilterKey();
+      // A load that started mid-mutation was killed by the fence — the
+      // surgery above patched the OLD filter's list, so reload under the
+      // CURRENT filter rather than leaving its cleared/old rows behind.
+      if (killedListQuery) void this.load();
+      // Fire-and-forget refreshes: a failed follow-up read must not turn
+      // this successful mutation into a reported failure.
+      void this.refreshActiveTotal();
+      void this.refreshAvailability();
+      this.refreshTrashedAfterMutation();
+      // Exact-set batch Undo (same toast path as Move-all).
+      this.lastDeletedAllIds = result.ids;
+      return result;
+    } finally {
+      this.movingToTrash = false;
+    }
+  }
+
   /// Restore every recording moved to Trash on the given LOCAL calendar
   /// day (exact day, not "on or after"). Returns the ACTUAL restored
   /// count, which may differ from the preview (purge race).
@@ -893,5 +958,27 @@ export async function selectRecording(id: string): Promise<void> {
 export function localDayIntervalUtc(day: Date): { startIso: string; endIso: string } {
   const start = new Date(day.getFullYear(), day.getMonth(), day.getDate());
   const end = new Date(day.getFullYear(), day.getMonth(), day.getDate() + 1);
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
+}
+
+/// The UTC interval `[startIso, endIso)` covering the LOCAL calendar days
+/// from `startDay` through `endDay`, both INCLUSIVE — i.e.
+/// [startOfDay(startDay), startOfDay(endDay) + 1 day). Same construction
+/// discipline as `localDayIntervalUtc` (calendar midnights via
+/// `new Date(y, m, d)`, so month/year rolls and DST shifts are absorbed;
+/// the bounds are calendar midnights, never 24-hour offsets). The backend
+/// compares half-open over `created_at`: `julianday(created_at) >=
+/// julianday(start) AND < julianday(end)` — the exact clause
+/// `query_recordings` applies to its creation window.
+export function localDayRangeIntervalUtc(
+  startDay: Date,
+  endDay: Date,
+): { startIso: string; endIso: string } {
+  const start = new Date(
+    startDay.getFullYear(),
+    startDay.getMonth(),
+    startDay.getDate(),
+  );
+  const end = new Date(endDay.getFullYear(), endDay.getMonth(), endDay.getDate() + 1);
   return { startIso: start.toISOString(), endIso: end.toISOString() };
 }
