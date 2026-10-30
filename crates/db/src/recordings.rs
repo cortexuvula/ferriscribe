@@ -730,6 +730,104 @@ impl RecordingsRepo {
         Ok(trashed)
     }
 
+    /// The half-open `[start, end)` interval over `created_at` for ACTIVE
+    /// rows, shared by [`soft_delete_created_between`](Self::soft_delete_created_between)
+    /// and [`count_active_created_between`](Self::count_active_created_between).
+    /// The `julianday()` comparison is copied VERBATIM from the
+    /// `created_between` clause [`query`](Self::query) builds, so the date
+    /// browser, the preview count, and the move can never disagree about a
+    /// boundary or about the mixed-format `created_at` strings this table
+    /// stores (see `query`'s timestamp-normalization notes). Callers
+    /// validate the timestamps parse; the SQL is shared so the preview
+    /// count and the move reference the same candidate set.
+    const CREATED_ACTIVE_BETWEEN_WHERE: &'static str = "deleted_at IS NULL AND julianday(created_at) >= julianday(?1) AND julianday(created_at) < julianday(?2)";
+
+    /// Soft-delete every ACTIVE recording created inside the half-open
+    /// `[start, end)` window over `created_at` ("Move by date range to
+    /// Trash"). One transaction; per row the exact statement pair
+    /// [`soft_delete`](Self::soft_delete) uses (row UPDATE + guarded FTS
+    /// `'delete'` — see that method for why the pair must land together),
+    /// with candidate ids selected via
+    /// [`CREATED_ACTIVE_BETWEEN_WHERE`](Self::CREATED_ACTIVE_BETWEEN_WHERE)
+    /// and one shared `now` stamp (a single tombstone push batch, never
+    /// per-row clock skew). Returns the ids trashed, for the bulk
+    /// tombstone push and the exact-set batch Undo (an Undo must never
+    /// sweep in a recording deleted AFTER the move).
+    ///
+    /// Rows already in Trash are neither re-stamped nor included in the
+    /// returned set. Audio files and RAG vectors are preserved — undo owns
+    /// them until the retention purge. Content-sync cursors are
+    /// deliberately untouched: tombstones are the propagation mechanism
+    /// (the periodic push re-travels them), and resetting the pull cursor
+    /// would resurrect everything from a partner on the next pull.
+    pub fn soft_delete_created_between(
+        conn: &Connection,
+        start_iso: &str,
+        end_iso: &str,
+    ) -> DbResult<Vec<Uuid>> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let tx = conn.unchecked_transaction()?;
+        let id_strs: Vec<String> = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT id FROM recordings WHERE {}",
+                Self::CREATED_ACTIVE_BETWEEN_WHERE
+            ))?;
+            stmt.query_map(rusqlite::params![start_iso, end_iso], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut trashed = Vec::with_capacity(id_strs.len());
+        {
+            let mut update = tx.prepare(
+                "UPDATE recordings SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            )?;
+            let mut fts_delete = tx.prepare(
+                "INSERT INTO recordings_fts(recordings_fts, rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT 'delete', rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1",
+            )?;
+            for id_str in id_strs {
+                let Ok(id) = Uuid::parse_str(&id_str) else {
+                    continue;
+                };
+                let rows = update.execute(rusqlite::params![now, id_str])?;
+                if rows == 0 {
+                    // Defensive: unreachable under snapshot isolation (a
+                    // concurrent writer yields SQLITE_BUSY, not zero rows);
+                    // kept so a zero-row UPDATE can never fire the FTS
+                    // 'delete' against an already-de-indexed row.
+                    continue;
+                }
+                fts_delete.execute([&id_str])?;
+                trashed.push(id);
+            }
+        }
+        tx.commit()?;
+        Ok(trashed)
+    }
+
+    /// Count ACTIVE recordings created inside the same half-open
+    /// `[start, end)` window over `created_at` — the move-by-date-range
+    /// preview-count surface. MUST use the same WHERE clause as
+    /// [`soft_delete_created_between`](Self::soft_delete_created_between)
+    /// so the preview and the execution reference the same candidate set.
+    pub fn count_active_created_between(
+        conn: &Connection,
+        start_iso: &str,
+        end_iso: &str,
+    ) -> DbResult<u32> {
+        let n: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM recordings WHERE {}",
+                Self::CREATED_ACTIVE_BETWEEN_WHERE
+            ),
+            rusqlite::params![start_iso, end_iso],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
     /// Whether the recording's row currently has an entry in the
     /// external-content FTS index.
     ///
@@ -2343,6 +2441,168 @@ mod tests {
             )
             .unwrap()
             .is_empty()
+        );
+    }
+
+    /// Seed an ACTIVE row with an EXACT `created_at`
+    /// (move-by-date-range fixtures). Raw UPDATE on a fresh inserted row —
+    /// same statement shape as `seed_trashed_at`; the FTS update trigger
+    /// re-indexes with unchanged content columns, so the index stays
+    /// consistent.
+    fn seed_created_at(conn: &Connection, filename: &str, created_at: &str) -> Recording {
+        let mut rec = new_rec();
+        rec.filename = filename.into();
+        RecordingsRepo::insert(conn, &rec).expect("insert fixture");
+        conn.execute(
+            "UPDATE recordings SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![created_at, rec.id.to_string()],
+        )
+        .expect("seed created_at");
+        rec
+    }
+
+    /// Move-by-date-range: exactly the ACTIVE rows created inside the
+    /// half-open `[start, end)` window are tombstoned in ONE transaction,
+    /// FTS de-indexed per row, ids returned for the bulk tombstone push +
+    /// exact-set Undo. Rows outside the window, an already-trashed row
+    /// created INSIDE the window, and the content-sync cursors are all
+    /// untouched — mirroring soft_delete_all's contract, windowed.
+    #[test]
+    fn soft_delete_created_between_trashes_exactly_in_window_rows_and_deindexes_fts() {
+        use crate::content_sync::ContentSyncRepo;
+
+        let conn = migrated_conn();
+        // Window = [2026-10-01T00:00Z, 2026-10-03T00:00Z).
+        let at_start = seed_created_at(&conn, "startboundary.wav", "2026-10-01T00:00:00+00:00");
+        let mid = seed_created_at(&conn, "midwindow.wav", "2026-10-02T12:30:00+00:00");
+        let at_end = seed_created_at(&conn, "endboundary.wav", "2026-10-03T00:00:00+00:00");
+        let before = seed_created_at(&conn, "beforewindow.wav", "2026-09-30T23:59:59+00:00");
+        // Created inside the window but ALREADY in Trash — must stay out of
+        // the set and keep its original stamp.
+        let already = seed_created_at(&conn, "alreadytrashed.wav", "2026-10-01T09:00:00+00:00");
+        RecordingsRepo::soft_delete(&conn, &already.id).unwrap();
+        let pre_stamp: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM recordings WHERE id = ?1",
+                [already.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // Cursors must survive the move (tombstones are the propagation
+        // path — a reset would resurrect everything from a partner).
+        ContentSyncRepo::set_cursor(&conn, Some("2026-01-01T00:00:00Z")).unwrap();
+        ContentSyncRepo::set_push_cursor(&conn, "2026-01-02T00:00:00Z").unwrap();
+
+        let (start, end) = ("2026-10-01T00:00:00+00:00", "2026-10-03T00:00:00+00:00");
+
+        // Preview count and the move reference the same candidate set.
+        assert_eq!(
+            RecordingsRepo::count_active_created_between(&conn, start, end).unwrap(),
+            2
+        );
+
+        let trashed = RecordingsRepo::soft_delete_created_between(&conn, start, end).unwrap();
+
+        let ids: std::collections::HashSet<Uuid> = trashed.into_iter().collect();
+        assert_eq!(ids.len(), 2, "only the two in-window active rows move");
+        assert!(ids.contains(&at_start.id), "start boundary inclusive");
+        assert!(ids.contains(&mid.id));
+        assert!(
+            !ids.contains(&at_end.id),
+            "end boundary exclusive (half-open)"
+        );
+        assert!(!ids.contains(&before.id), "outside-window row untouched");
+        assert!(
+            !ids.contains(&already.id),
+            "already-trashed row not re-stamped"
+        );
+
+        // FTS de-indexed for EXACTLY the in-window rows; outsiders stay
+        // indexed; the pre-existing tombstone stays de-indexed.
+        for rec in [&at_start, &mid] {
+            assert!(
+                !RecordingsRepo::fts_row_indexed(&conn, &rec.id.to_string()).unwrap(),
+                "every moved row must be de-indexed"
+            );
+        }
+        for rec in [&at_end, &before] {
+            assert!(
+                RecordingsRepo::fts_row_indexed(&conn, &rec.id.to_string()).unwrap(),
+                "outside-window row keeps its index entry"
+            );
+        }
+        assert_eq!(fts_match_count_by_stem(&conn, "startboundary"), 0);
+        assert_eq!(fts_match_count_by_stem(&conn, "midwindow"), 0);
+        assert_eq!(fts_match_count_by_stem(&conn, "endboundary"), 1);
+        assert_eq!(fts_match_count_by_stem(&conn, "beforewindow"), 1);
+        assert_eq!(fts_match_count_by_stem(&conn, "alreadytrashed"), 0);
+
+        // The pre-existing tombstone's stamp is untouched.
+        let stamp_now: Option<String> = conn
+            .query_row(
+                "SELECT updated_at FROM recordings WHERE id = ?1",
+                [already.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamp_now, pre_stamp);
+
+        // After the move the preview count for the same window is 0.
+        assert_eq!(
+            RecordingsRepo::count_active_created_between(&conn, start, end).unwrap(),
+            0
+        );
+
+        // Round-trip: undo-style restore of a moved row works.
+        RecordingsRepo::restore(&conn, &at_start.id).unwrap();
+        assert!(RecordingsRepo::get_by_id_active(&conn, &at_start.id).is_ok());
+        assert_eq!(fts_match_count_by_stem(&conn, "startboundary"), 1);
+
+        // The sync cursors survive the whole sequence.
+        assert_eq!(
+            ContentSyncRepo::get_cursor(&conn)
+                .unwrap()
+                .cursor
+                .as_deref(),
+            Some("2026-01-01T00:00:00Z"),
+            "pull cursor survives the move"
+        );
+        let push: Option<String> = conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = 'content_sync_push_cursor'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            push.as_deref(),
+            Some("2026-01-02T00:00:00Z"),
+            "push cursor survives the move"
+        );
+    }
+
+    #[test]
+    fn soft_delete_created_between_empty_window_is_noop() {
+        let conn = migrated_conn();
+        seed_created_at(&conn, "far-away.wav", "2026-01-01T00:00:00+00:00");
+        assert!(
+            RecordingsRepo::soft_delete_created_between(
+                &conn,
+                "2026-10-01T00:00:00+00:00",
+                "2026-10-02T00:00:00+00:00"
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            RecordingsRepo::count_active_created_between(
+                &conn,
+                "2026-10-01T00:00:00+00:00",
+                "2026-10-02T00:00:00+00:00"
+            )
+            .unwrap(),
+            0
         );
     }
 

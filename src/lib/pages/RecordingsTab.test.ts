@@ -41,6 +41,7 @@ const { store, settings, toasts } = vi.hoisted(() => ({
     trashedHasMore: false, trashedError: null as string | null, restoring: false,
     restoreTrashed: vi.fn(), restoreAllFromTrash: vi.fn(),
     countTrashedOnDate: vi.fn(), restoreTrashedOnDate: vi.fn(),
+    countActiveInRange: vi.fn(), moveActiveRangeToTrash: vi.fn(),
     load: vi.fn(), loadMore: vi.fn(), search: vi.fn(), setSelectedDate: vi.fn(),
     loadTrashed: vi.fn(), onActiveViewReturn: vi.fn(), refreshAvailability: vi.fn(),
     dismissDateClearedNotice: vi.fn(),
@@ -320,5 +321,81 @@ describe('RecordingsTab — notices', () => {
     store.selectedRecording = null;
     render(RecordingsTab);
     expect(screen.queryByText('Selected recording is outside the selected date.')).toBeNull();
+  });
+});
+
+describe('RecordingsTab — Move by date range', () => {
+  function localIso(d: Date): string {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  it('renders the trigger beside Move all under activeTotal>0, hides it at 0', () => {
+    render(RecordingsTab);
+    expect(screen.getByRole('button', { name: 'Move all to Trash' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Move by date range…' })).toBeTruthy();
+    cleanup();
+
+    store.list = [];
+    store.activeTotal = 0;
+    render(RecordingsTab);
+    expect(screen.queryByRole('button', { name: 'Move by date range…' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Move all to Trash' })).toBeNull();
+  });
+
+  it('opens the date-range dialog from the toolbar trigger', async () => {
+    render(RecordingsTab);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Move by date range…' }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(screen.getByText('Move recordings by date to Trash')).toBeTruthy();
+    expect(screen.getByLabelText('Recorded from')).toBeTruthy();
+    expect(screen.getByLabelText('Recorded to')).toBeTruthy();
+  });
+
+  it('confirm wires the store move + success toast with the exact-set Undo path', async () => {
+    store.countActiveInRange.mockResolvedValueOnce(4);
+    store.moveActiveRangeToTrash.mockResolvedValueOnce({
+      count: 4,
+      ids: ['a', 'b', 'c', 'd'],
+    });
+    render(RecordingsTab);
+    await fireEvent.click(screen.getByRole('button', { name: 'Move by date range…' }));
+
+    const start = new Date();
+    start.setDate(start.getDate() - 4);
+    const end = new Date();
+    end.setDate(end.getDate() - 2);
+    const startInput = screen.getByLabelText('Recorded from') as HTMLInputElement;
+    const endInput = screen.getByLabelText('Recorded to') as HTMLInputElement;
+    await fireEvent.input(startInput, { target: { value: localIso(start) } });
+    await fireEvent.change(startInput, { target: { value: localIso(start) } });
+    await fireEvent.input(endInput, { target: { value: localIso(end) } });
+    await fireEvent.change(endInput, { target: { value: localIso(end) } });
+
+    const confirm = await screen.findByRole('button', { name: 'Move 4 recordings to Trash' });
+    await fireEvent.click(confirm);
+
+    // The store received the local-midnight window Dates.
+    expect(store.moveActiveRangeToTrash).toHaveBeenCalledWith(
+      new Date(start.getFullYear(), start.getMonth(), start.getDate()),
+      new Date(end.getFullYear(), end.getMonth(), end.getDate()),
+    );
+    await waitFor(() =>
+      expect(toasts.add).toHaveBeenCalledWith(expect.objectContaining({
+        message: '4 recordings moved to Trash. Restore them within 30 days.',
+        actionLabel: 'Undo',
+        type: 'success',
+      })),
+    );
+    // Undo rides the same batch-restore path Move-all uses.
+    store.undoMoveAll.mockResolvedValueOnce(4);
+    const toast = toasts.add.mock.calls.at(-1)?.[0] as { onAction: () => Promise<void> };
+    await toast.onAction();
+    expect(store.undoMoveAll).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(toasts.success).toHaveBeenCalledWith('4 recordings restored to Active.'),
+    );
   });
 });

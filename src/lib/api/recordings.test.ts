@@ -15,6 +15,8 @@ import {
   restoreAllTrashed,
   restoreRecordingsDeletedBetween,
   countRecordingsDeletedBetween,
+  countRecordingsCreatedBetween,
+  deleteRecordingsCreatedBetween,
   importAudioFile,
   listRecordingCreationTimes,
   queryRecordings,
@@ -105,6 +107,26 @@ describe('recordings api', () => {
     expect(invokeMock).toHaveBeenCalledWith('restore_recordings_deleted_between', {
       startIso: '2026-10-01T00:00:00Z',
       endIso: '2026-10-02T00:00:00Z',
+    });
+  });
+
+  it('count/delete by created date pass both interval bounds and return the result shape', async () => {
+    invokeMock.mockResolvedValueOnce(3);
+    await expect(
+      countRecordingsCreatedBetween('2026-10-01T00:00:00Z', '2026-10-04T00:00:00Z'),
+    ).resolves.toBe(3);
+    expect(invokeMock).toHaveBeenCalledWith('count_recordings_created_between', {
+      startIso: '2026-10-01T00:00:00Z',
+      endIso: '2026-10-04T00:00:00Z',
+    });
+
+    invokeMock.mockResolvedValueOnce({ count: 3, ids: ['a', 'b', 'c'] });
+    await expect(
+      deleteRecordingsCreatedBetween('2026-10-01T00:00:00Z', '2026-10-04T00:00:00Z'),
+    ).resolves.toEqual({ count: 3, ids: ['a', 'b', 'c'] });
+    expect(invokeMock).toHaveBeenCalledWith('delete_recordings_created_between', {
+      startIso: '2026-10-01T00:00:00Z',
+      endIso: '2026-10-04T00:00:00Z',
     });
   });
 

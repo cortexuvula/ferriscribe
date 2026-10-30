@@ -586,6 +586,72 @@ pub async fn restore_recordings_deleted_between(
     })
 }
 
+/// Preview count for move-by-recorded-date-range: how many ACTIVE
+/// recordings were created inside `[start_iso, end_iso)`. MUST be the
+/// count command — never derived from the paginated Active list, which is
+/// filtered and paged.
+#[tauri::command]
+pub async fn count_recordings_created_between(
+    state: tauri::State<'_, AppState>,
+    start_iso: String,
+    end_iso: String,
+) -> AppResult<u32> {
+    validate_interval(&start_iso, &end_iso)?;
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.conn()?;
+        RecordingsRepo::count_active_created_between(&conn, &start_iso, &end_iso)
+            .map_err(AppError::from)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+/// Move every ACTIVE recording created inside the half-open
+/// `[start_iso, end_iso)` window to Trash ("Move by date range", recorded
+/// date, both ends inclusive in the UI). Mirrors `delete_all_recordings`:
+/// one blocking hop for the soft-delete transaction plus the sync-target
+/// gates, then a fire-and-forget tombstone batch push. Returns the
+/// ACTUAL moved count and exact id set — a concurrent deletion may have
+/// shrunk the candidate set since the preview; callers report actual vs
+/// preview, and the Undo restores exactly these ids.
+#[tauri::command]
+pub async fn delete_recordings_created_between(
+    state: tauri::State<'_, AppState>,
+    start_iso: String,
+    end_iso: String,
+) -> AppResult<DeleteAllResult> {
+    validate_interval(&start_iso, &end_iso)?;
+    let db = state.db.clone();
+    let db_for_push = state.db.clone();
+    let http = state.http_client.clone();
+
+    // The soft-delete transaction and the sync-target gates (SQLite pool
+    // checkout, config load, OS keychain read) are both blocking — one
+    // blocking hop for both, mirroring `delete_all_recordings`.
+    let (ids, parts) = tokio::task::spawn_blocking(move || -> AppResult<SoftDeleteAllOutcome> {
+        let conn = db.conn()?;
+        let ids = RecordingsRepo::soft_delete_created_between(&conn, &start_iso, &end_iso)
+            .map_err(AppError::from)?;
+        let parts = crate::commands::content_sync::content_sync_target_parts(&db_for_push, http);
+        Ok((ids, parts))
+    })
+    .await
+    .map_err(join_err)??;
+
+    let count = ids.len() as u32;
+    let id_strs: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+    spawn_recordings_push(parts, state.db.clone(), id_strs.clone());
+    tracing::info!(
+        count,
+        "Move by date range to Trash: recordings moved (30-day recovery window)"
+    );
+    Ok(DeleteAllResult {
+        count,
+        ids: id_strs,
+    })
+}
+
 /// Import an audio file from the filesystem into the recordings library.
 ///
 /// Non-WAV files (MP3, FLAC, OGG, M4A, AAC) are automatically converted to

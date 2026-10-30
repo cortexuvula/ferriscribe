@@ -501,6 +501,8 @@ pub fn run() {
             commands::recordings::restore_recording,
             commands::recordings::restore_recordings,
             commands::recordings::delete_all_recordings,
+            commands::recordings::count_recordings_created_between,
+            commands::recordings::delete_recordings_created_between,
             commands::recordings::count_recordings,
             commands::recordings::list_trashed_recordings,
             commands::recordings::restore_all_trashed,

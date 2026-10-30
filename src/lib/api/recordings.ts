@@ -137,6 +137,28 @@ export async function restoreRecordingsDeletedBetween(
   return invoke('restore_recordings_deleted_between', { startIso, endIso });
 }
 
+/** Preview count for move-by-recorded-date-range: how many ACTIVE
+ *  recordings were created inside the half-open [startIso, endIso) window.
+ *  Always the dedicated count command — never derived from the paginated,
+ *  filtered Active list. */
+export async function countRecordingsCreatedBetween(
+  startIso: string,
+  endIso: string,
+): Promise<number> {
+  return invoke('count_recordings_created_between', { startIso, endIso });
+}
+
+/** Move every ACTIVE recording created inside the half-open
+ *  [startIso, endIso) window to Trash. Returns the ACTUAL moved count plus
+ *  the exact id set — the Undo toast restores exactly these ids, and a
+ *  concurrent deletion may have shrunk the set since the preview. */
+export async function deleteRecordingsCreatedBetween(
+  startIso: string,
+  endIso: string,
+): Promise<DeleteAllResult> {
+  return invoke('delete_recordings_created_between', { startIso, endIso });
+}
+
 export async function importAudioFile(filePath: string): Promise<string> {
   return invoke('import_audio_file', { filePath });
 }
