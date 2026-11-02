@@ -523,7 +523,7 @@ pub async fn count_soft_deleted_older_than(
 ) -> AppResult<u32> {
     if !medical_core::types::settings::TRASH_RETENTION_DAYS_CHOICES.contains(&days) {
         return Err(AppError::InvalidInput(
-            "Trash window must be 7, 14, 21, or 30 days.".into(),
+            "Trash window must be 2, 7, 14, 21, or 30 days.".into(),
         ));
     }
     let db = state.db.clone();

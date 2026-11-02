@@ -9,6 +9,10 @@ function deletedAgo(days: number): string {
 }
 
 describe('trashRetentionLabel', () => {
+  it('can show two days remaining for a newly trashed recording', () => {
+    expect(trashRetentionLabel(deletedAgo(0), 2, NOW).text).toMatch(/^2 days until eligible for permanent deletion/);
+  });
+
   it('shows neutral eligibility text well away from expiry', () => {
     const label = trashRetentionLabel(deletedAgo(1), 30, NOW);
     expect(label.text).toMatch(/^29 days until eligible for permanent deletion · /);
@@ -43,12 +47,12 @@ describe('trashRetentionLabel', () => {
     expect(date).not.toMatch(/\d{1,2}:\d{2}/);
   });
 
-  it.each([7, 14, 21, 30])('uses the effective %i-day backend window', (days) => {
+  it.each([2, 7, 14, 21, 30])('uses the effective %i-day backend window', (days) => {
     expect(trashRetentionLabel(deletedAgo(days - 1), days, NOW).text).toMatch(/^1 day until eligible for permanent deletion/);
     expect(trashRetentionLabel(deletedAgo(days + 1), days, NOW).text).toBe('Pending permanent deletion');
   });
 
-  it.each([[7, 2], [14, 4], [21, 6], [30, 7]])(
+  it.each([[2, 1], [7, 2], [14, 4], [21, 6], [30, 7]])(
     'scales the %i-day window accent to less than %i days remaining', (window, threshold) => {
       expect(trashRetentionLabel(deletedAgo(0), window, NOW).nearExpiry).toBe(false);
       expect(trashRetentionLabel(deletedAgo(window - threshold), window, NOW).nearExpiry).toBe(false);

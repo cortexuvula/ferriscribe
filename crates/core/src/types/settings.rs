@@ -228,7 +228,7 @@ fn default_max_retry_attempts() -> u32 {
 /// the backend save path rejects anything else and the read path maps anything
 /// else to [`default_trash_retention_days`], so the stored value, the sweeper,
 /// and the countdown label can never disagree.
-pub const TRASH_RETENTION_DAYS_CHOICES: [u32; 4] = [7, 14, 21, 30];
+pub const TRASH_RETENTION_DAYS_CHOICES: [u32; 5] = [2, 7, 14, 21, 30];
 
 /// The previous hardcoded trash window — also the fallback for every config
 /// that predates the setting, and the fail-closed value for an invalid one.
@@ -1101,6 +1101,7 @@ mod tests {
 
     #[test]
     fn trash_retention_days_accepts_only_offered_windows() {
+        assert_eq!(TRASH_RETENTION_DAYS_CHOICES.as_slice(), &[2, 7, 14, 21, 30]);
         for days in TRASH_RETENTION_DAYS_CHOICES {
             assert_eq!(effective_trash_retention_days(days), days);
         }
@@ -1114,6 +1115,15 @@ mod tests {
                 "unsupported window {bad} must resolve to the 30-day default"
             );
         }
+    }
+
+    #[test]
+    fn two_day_trash_window_round_trips_and_is_effective() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"trash_retention_days":2}"#).unwrap();
+        let back: AppConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.trash_retention_days, 2);
+        assert_eq!(effective_trash_retention_days(back.trash_retention_days), 2);
+        assert_eq!(back.retention_days, AppConfig::default().retention_days);
     }
 
     #[test]

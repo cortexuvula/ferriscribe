@@ -207,6 +207,15 @@ mod tests {
 
     #[test]
     fn trash_window_save_requires_matching_confirmation_and_preserves_config_on_error() {
+        assert_trash_window_confirmation(7);
+    }
+
+    #[test]
+    fn two_day_trash_window_save_requires_matching_confirmation() {
+        assert_trash_window_confirmation(2);
+    }
+
+    fn assert_trash_window_confirmation(days: u32) {
         use medical_core::types::recording::Recording;
         use medical_db::{Database, recordings::RecordingsRepo};
         let db = Database::open_in_memory().unwrap();
@@ -221,7 +230,7 @@ mod tests {
         )
         .unwrap();
         let mut cfg = original.clone();
-        cfg.trash_retention_days = 7;
+        cfg.trash_retention_days = days;
         for confirmation in [None, Some(0), Some(2)] {
             assert!(save_config_with_trash_confirmation(&conn, &cfg, confirmation).is_err());
             assert_eq!(
@@ -236,7 +245,7 @@ mod tests {
             SettingsRepo::load_config(&conn)
                 .unwrap()
                 .trash_retention_days,
-            7
+            days
         );
         // Equal and longer windows do not require confirmation.
         save_config_with_trash_confirmation(&conn, &cfg, None).unwrap();
@@ -245,7 +254,7 @@ mod tests {
         for invalid in [0, 8, 17, 31, u32::MAX] {
             cfg.trash_retention_days = invalid;
             let err = save_config_with_trash_confirmation(&conn, &cfg, Some(1)).unwrap_err();
-            assert!(err.to_string().contains("7, 14, 21, or 30"));
+            assert!(err.to_string().contains("2, 7, 14, 21, or 30"));
             assert_eq!(
                 SettingsRepo::load_config(&conn)
                     .unwrap()
@@ -264,11 +273,13 @@ mod tests {
             r#"{"trash_retention_days":null}"#,
             r#"{"trash_retention_days":0}"#,
         ] {
-            SettingsRepo::set(&conn, "app_config", stored).unwrap();
-            let mut cfg = AppConfig::default();
-            cfg.trash_retention_days = 7;
-            assert!(save_config_with_trash_confirmation(&conn, &cfg, None).is_err());
-            save_config_with_trash_confirmation(&conn, &cfg, Some(0)).unwrap();
+            for days in [2, 7] {
+                SettingsRepo::set(&conn, "app_config", stored).unwrap();
+                let mut cfg = AppConfig::default();
+                cfg.trash_retention_days = days;
+                assert!(save_config_with_trash_confirmation(&conn, &cfg, None).is_err());
+                save_config_with_trash_confirmation(&conn, &cfg, Some(0)).unwrap();
+            }
         }
     }
 

@@ -30,7 +30,7 @@
         if (!Number.isInteger(confirmedCount) || confirmedCount < 0) {
           throw new Error('Invalid purge preview');
         }
-        if (confirmedCount > 0 || days === 7) {
+        if (confirmedCount > 0 || days <= 7) {
           const noun = confirmedCount === 1 ? 'recording' : 'recordings';
           const impact = confirmedCount > 0
             ? `${confirmedCount} ${noun} already exceed the new limit and will be permanently deleted at the next cleanup.`
@@ -96,16 +96,17 @@
 <h4 class="preference-heading">Permanent deletion</h4>
 <div class="form-group">
   <label for="trash-retention-select" class="form-label">Permanently delete from Trash after</label>
-  <select id="trash-retention-select" aria-describedby={trashDays === 7 ? 'trash-retention-hint trash-retention-warning' : 'trash-retention-hint'} value={trashDays} onchange={handleTrashRetentionChange}>
+  <select id="trash-retention-select" aria-describedby={trashDays <= 7 ? 'trash-retention-hint trash-retention-warning' : 'trash-retention-hint'} value={trashDays} onchange={handleTrashRetentionChange}>
+    <option value={2}>2 days</option>
     <option value={7}>7 days</option>
     <option value={14}>14 days</option>
     <option value={21}>21 days</option>
     <option value={30}>30 days (default)</option>
   </select>
   <span id="trash-retention-hint" class="form-hint">When the window ends, cleanup permanently deletes the audio, transcript, SOAP notes and generated documents. They cannot be restored from Trash.</span>
-  {#if trashDays === 7}
+  {#if trashDays <= 7}
     <div id="trash-retention-warning" class="trash-warning">
-      <Callout kind="warning">Seven days is the shortest recovery window. Review Trash before saving: recordings already there may become eligible for permanent deletion.</Callout>
+      <Callout kind="warning">{trashDays === 2 ? 'Two days is the shortest recovery window.' : 'Seven days is a short recovery window.'} Review Trash before saving: recordings already there may become eligible for permanent deletion.</Callout>
     </div>
   {/if}
 </div>

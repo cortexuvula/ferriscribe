@@ -110,7 +110,7 @@ afterEach(() => {
 });
 
 describe('RecordingsTab — Trash policy copy', () => {
-  it.each([7, 14, 21, 30])('uses the %i-day window in move-all confirmation and toast', async days => {
+  it.each([2, 7, 14, 21, 30])('uses the %i-day window in move-all confirmation and toast', async days => {
     settings.trashRetentionDays = days;
     render(RecordingsTab);
     await fireEvent.click(screen.getByRole('button', { name: 'Move all to Trash' }));

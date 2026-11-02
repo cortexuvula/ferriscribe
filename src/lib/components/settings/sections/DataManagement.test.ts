@@ -170,7 +170,7 @@ describe('DataManagement — Recording Retention', () => {
     expect(select.id).toBe('trash-retention-select');
     expect(select.value).toBe('30');
     expect(select.selectedOptions[0].textContent).toBe('30 days (default)');
-    expect(Array.from(select.options, option => option.value)).toEqual(['7', '14', '21', '30']);
+    expect(Array.from(select.options, option => option.value)).toEqual(['2', '7', '14', '21', '30']);
   });
 
   it('requires confirmation naming the count before saving a shorter window', async () => {
@@ -187,6 +187,13 @@ describe('DataManagement — Recording Retention', () => {
     expect(mockUpdateField).not.toHaveBeenCalled();
     resolve(true);
     await waitFor(() => expect(mockUpdateField).toHaveBeenCalledWith('trash_retention_days', 7, 3));
+  });
+
+  it.each([2, 7, 14, 21, 30])('preserves the saved %s-day selection without saving on mount', (days) => {
+    mockSettingsState.trash_retention_days = days;
+    renderSection();
+    expect(getTrashSelect().value).toBe(String(days));
+    expect(mockUpdateField).not.toHaveBeenCalled();
   });
 
   it('cancel reverts the select without saving', async () => {
@@ -243,28 +250,60 @@ describe('DataManagement — Recording Retention', () => {
   it('describes the seven-day safeguard with the themed warning Callout', () => {
     mockSettingsState.trash_retention_days = 7;
     renderSection();
-    const warning = screen.getByText('Seven days is the shortest recovery window. Review Trash before saving: recordings already there may become eligible for permanent deletion.');
+    const warning = screen.getByText('Seven days is a short recovery window. Review Trash before saving: recordings already there may become eligible for permanent deletion.');
     expect(warning.classList.contains('warning')).toBe(true);
     const ids = getTrashSelect().getAttribute('aria-describedby')!.split(' ');
     expect(ids).toHaveLength(2);
     expect(ids.some(id => document.getElementById(id)?.contains(warning))).toBe(true);
   });
 
-  it('confirms seven days even when no recordings currently exceed the new limit', async () => {
+  it.each([2, 7])('confirms %s days even when no recordings currently exceed the new limit', async (days) => {
     mockInvoke.mockResolvedValue(0);
     vi.mocked(confirmDialog).mockImplementation(opts => confirmStore.confirm(opts));
     renderSection();
     render(ConfirmHost);
     const select = getTrashSelect();
     select.focus();
-    await fireEvent.change(select, { target: { value: '7' } });
-    const dialog = await screen.findByRole('alertdialog', { name: 'Shorten Trash retention to 7 days?' });
-    expect(dialog.textContent).toContain('No recordings currently exceed the 7-day limit.');
+    await fireEvent.change(select, { target: { value: String(days) } });
+    const dialog = await screen.findByRole('alertdialog', { name: `Shorten Trash retention to ${days} days?` });
+    expect(dialog.textContent).toContain(`No recordings currently exceed the ${days}-day limit.`);
     expect(dialog.textContent).toContain('This change affects recordings already in Trash and future recordings.');
     expect(dialog.textContent).toContain('Cleanup runs about five minutes after launch, then once daily while FerriScribe is open.');
     expect(mockUpdateField).not.toHaveBeenCalled();
-    await fireEvent.click(screen.getByRole('button', { name: 'Set 7-day window' }));
-    await waitFor(() => expect(mockUpdateField).toHaveBeenCalledWith('trash_retention_days', 7, 0));
+    await fireEvent.click(screen.getByRole('button', { name: `Set ${days}-day window` }));
+    await waitFor(() => expect(mockUpdateField).toHaveBeenCalledWith('trash_retention_days', days, 0));
+  });
+
+  it('describes the two-day shortest window accessibly without changing the saved setting', () => {
+    mockSettingsState.trash_retention_days = 2;
+    renderSection();
+    expect(getTrashSelect().value).toBe('2');
+    const warning = screen.getByText('Two days is the shortest recovery window. Review Trash before saving: recordings already there may become eligible for permanent deletion.');
+    expect(warning.classList.contains('warning')).toBe(true);
+    const ids = getTrashSelect().getAttribute('aria-describedby')!.split(' ');
+    expect(ids.some(id => document.getElementById(id)?.contains(warning))).toBe(true);
+    expect(mockUpdateField).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 3])('two-day preview count %s requires consent, cancels safely, then sends the accepted payload', async (count) => {
+    mockInvoke.mockResolvedValue(count);
+    vi.mocked(confirmDialog).mockImplementation(opts => confirmStore.confirm(opts));
+    renderSection();
+    render(ConfirmHost);
+    const select = getTrashSelect();
+    select.focus();
+    await fireEvent.change(select, { target: { value: '2' } });
+    const dialog = await screen.findByRole('alertdialog', { name: 'Shorten Trash retention to 2 days?' });
+    expect(dialog.textContent).toContain(count ? '3 recordings already exceed the new limit' : 'No recordings currently exceed the 2-day limit.');
+    expect(mockInvoke).toHaveBeenCalledWith('count_soft_deleted_older_than', { days: 2 });
+    expect(mockUpdateField).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Keep 30 days' }));
+    await waitFor(() => expect(select.value).toBe('30'));
+    expect(document.activeElement).toBe(select);
+    expect(mockUpdateField).not.toHaveBeenCalled();
+    await fireEvent.change(select, { target: { value: '2' } });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Set 2-day window' }));
+    await waitFor(() => expect(mockUpdateField).toHaveBeenCalledWith('trash_retention_days', 2, count));
   });
 
   it('keeps the select focusable through preview and confirmation, ignores duplicates, and restores focus on cancel', async () => {
@@ -296,15 +335,15 @@ describe('DataManagement — Recording Retention', () => {
     expect(screen.queryByText(/Seven days is the shortest recovery window/)).toBeNull();
   });
 
-  it('restores the select value and focus after a confirmed save fails', async () => {
+  it.each([2, 14])('restores the select value and focus after a confirmed %s-day save fails', async (days) => {
     mockUpdateField.mockRejectedValue(new Error('save failed'));
     vi.mocked(confirmDialog).mockImplementation(opts => confirmStore.confirm(opts));
     renderSection();
     render(ConfirmHost);
     const select = getTrashSelect();
     select.focus();
-    await fireEvent.change(select, { target: { value: '14' } });
-    await fireEvent.click(await screen.findByRole('button', { name: 'Set 14-day window' }));
+    await fireEvent.change(select, { target: { value: String(days) } });
+    await fireEvent.click(await screen.findByRole('button', { name: `Set ${days}-day window` }));
     await waitFor(() => expect(select.value).toBe('30'));
     expect(document.activeElement).toBe(select);
   });

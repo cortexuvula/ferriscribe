@@ -949,6 +949,7 @@ mod tests {
     #[test]
     fn configured_trash_windows_and_fail_closed_defaults_drive_purge() {
         for (json, effective) in [
+            (r#"{"trash_retention_days":2}"#, 2),
             (r#"{"trash_retention_days":7}"#, 7),
             (r#"{"trash_retention_days":14}"#, 14),
             (r#"{"trash_retention_days":21}"#, 21),

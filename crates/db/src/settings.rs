@@ -106,7 +106,7 @@ impl SettingsRepo {
     ) -> DbResult<()> {
         if !TRASH_RETENTION_DAYS_CHOICES.contains(&config.trash_retention_days) {
             return Err(DbError::Constraint(
-                "trash_retention_days must be 7, 14, 21, or 30.".into(),
+                "trash_retention_days must be 2, 7, 14, 21, or 30.".into(),
             ));
         }
         let previous = Self::load_config(conn)?;
@@ -213,6 +213,113 @@ mod tests {
             30,
             "a stale whole-config writer must not bypass reduction confirmation"
         );
+    }
+
+    #[test]
+    fn two_day_window_requires_exact_confirmation_and_blocks_stale_writers() {
+        use crate::recordings::RecordingsRepo;
+        use medical_core::types::recording::Recording;
+
+        let db = crate::Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let original = AppConfig::default();
+        SettingsRepo::save_config(&conn, &original).unwrap();
+        let mut shorter = original.clone();
+        shorter.trash_retention_days = 2;
+        assert!(SettingsRepo::save_config(&conn, &shorter).is_err());
+        // Explicit consent is required even with zero eligible rows.
+        SettingsRepo::save_config_with_trash_confirmation(&conn, &shorter, Some(0)).unwrap();
+        let stale = SettingsRepo::load_config(&conn).unwrap();
+        assert_eq!(stale.trash_retention_days, 2);
+        assert_eq!(stale.retention_days, original.retention_days);
+        SettingsRepo::save_config(&conn, &original).unwrap();
+        assert!(SettingsRepo::save_config(&conn, &stale).is_err());
+
+        let rec = Recording::new("synthetic.wav", "".into());
+        RecordingsRepo::insert(&conn, &rec).unwrap();
+        conn.execute(
+            "UPDATE recordings SET deleted_at = datetime('now', '-3 days'), local_deleted_at = datetime('now', '-3 days') WHERE id = ?1",
+            [rec.id.to_string()],
+        ).unwrap();
+        assert_eq!(
+            RecordingsRepo::count_soft_deleted_older_than(&conn, 2, chrono::Utc::now()).unwrap(),
+            1
+        );
+        for confirmation in [None, Some(0), Some(2)] {
+            let err =
+                SettingsRepo::save_config_with_trash_confirmation(&conn, &shorter, confirmation)
+                    .unwrap_err();
+            assert!(err.to_string().contains("requires confirmation"));
+            assert_eq!(
+                SettingsRepo::load_config(&conn)
+                    .unwrap()
+                    .trash_retention_days,
+                30
+            );
+        }
+        SettingsRepo::save_config_with_trash_confirmation(&conn, &shorter, Some(1)).unwrap();
+        assert_eq!(
+            SettingsRepo::load_config(&conn)
+                .unwrap()
+                .trash_retention_days,
+            2
+        );
+        // A restore between preview and save invalidates the previously exact count.
+        SettingsRepo::save_config(&conn, &original).unwrap();
+        RecordingsRepo::restore(&conn, &rec.id).unwrap();
+        assert!(
+            SettingsRepo::save_config_with_trash_confirmation(&conn, &shorter, Some(1)).is_err()
+        );
+        assert_eq!(
+            SettingsRepo::load_config(&conn)
+                .unwrap()
+                .trash_retention_days,
+            30
+        );
+        SettingsRepo::save_config_with_trash_confirmation(&conn, &shorter, Some(0)).unwrap();
+    }
+
+    #[test]
+    fn two_day_preview_uses_local_clock_and_preserves_active_restored_and_encrypting_rows() {
+        use crate::recordings::RecordingsRepo;
+        use medical_core::types::recording::Recording;
+
+        let db = crate::Database::open_in_memory().unwrap();
+        let conn = db.conn().unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-02T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        let mut ids = Vec::new();
+        // Old remote tombstones do not override a recent local Trash clock.
+        for (local, active, encrypting) in [
+            ("2026-10-30T12:00:00Z", false, false),
+            ("2026-11-01T12:00:00Z", false, false),
+            ("2026-10-31T12:00:00Z", false, false), // exact boundary stays
+            ("2026-10-30T12:00:00Z", true, false),
+            ("2026-10-30T12:00:00Z", false, true),
+        ] {
+            let rec = Recording::new("synthetic.wav", "".into());
+            RecordingsRepo::insert(&conn, &rec).unwrap();
+            if !active {
+                conn.execute(
+                    "UPDATE recordings SET deleted_at = '2026-10-01T12:00:00Z', local_deleted_at = ?1, encryption_pending = ?2 WHERE id = ?3",
+                    rusqlite::params![local, encrypting, rec.id.to_string()],
+                ).unwrap();
+            }
+            ids.push(rec.id);
+        }
+        assert_eq!(
+            RecordingsRepo::count_soft_deleted_older_than(&conn, 2, now).unwrap(),
+            1
+        );
+        let listed = RecordingsRepo::list_soft_deleted_older_than(&conn, 2, now).unwrap();
+        assert_eq!(listed.iter().map(|r| r.0).collect::<Vec<_>>(), vec![ids[0]]);
+        RecordingsRepo::restore(&conn, &ids[0]).unwrap();
+        assert_eq!(
+            RecordingsRepo::count_soft_deleted_older_than(&conn, 2, now).unwrap(),
+            0
+        );
+        assert!(RecordingsRepo::get_by_id_active(&conn, &ids[0]).is_ok());
     }
 
     #[test]
