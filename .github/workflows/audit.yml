@@ -29,4 +29,13 @@ jobs:
         with:
           tool: cargo-audit
       - name: Cargo audit
-        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+        # Ignore list + accepted-risk rationale mirror the security job in
+        # ci.yml (the canonical, fully commented copy lives there). The zip
+        # ignores cover the docx-rs-0.4.22-pinned zip 8.6.0 copy only
+        # (extract*()/extract unreachable via docx-rs; writer-only usage
+        # here) — see docs/security/RUSTSEC-2026-0429-exception.md.
+        # scripts/audit-0429-guard.mjs fail-closes the advisory-ID-wide
+        # RUSTSEC-2026-0429 ignore to exactly that residual and fails after
+        # its 2026-12-02 review date. Do not add ignores here that ci.yml
+        # does not carry.
+        run: node scripts/audit-0429-guard.mjs && cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0429

@@ -222,11 +222,24 @@ jobs:
         #   symlink targets outside the destination, and unix permissions
         #   applied through symlinks — ALL in the `extract*()` API. Patched
         #   only at zip >= 9.0.0. Our OWN crates are on zip 9 and never call
-        #   extract() (they use by_index + bounded manual reads). The flagged
-        #   4.6.1 / 8.6.0 copies are pinned by tauri-plugin-updater 2.x
-        #   (extracts signature-verified release bundles), calamine 0.36
-        #   (XLSX parse-only) and docx-rs 0.4 (DOCX parse-only) — third-party
-        #   pins we cannot move to zip 9 ourselves. Revisit as those bump.
-        # TODO(review-by 2027-01-01): zip — drop ignores when tauri-plugin-updater,
-        # calamine and docx-rs move to zip 9
-        run: cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369
+        #   extract() (they use by_index + bounded manual reads). Since
+        #   2026-11-02 tauri-plugin-updater 2.14.1 and calamine 0.38 also
+        #   ride zip 9, so the flagged copies are pinned ONLY by docx-rs
+        #   0.4.22's zip 8.6.0 (DOCX parse/write only, never extract()).
+        # TODO(review-by 2027-01-01): zip — drop ignores when docx-rs moves to zip 9
+        # - zip (RUSTSEC-2026-0429): ZipArchive::extract aborts the process
+        #   on a symlink entry with a huge declared ZIP64 size — DoS only,
+        #   no memory unsafety. TEMPORARY owner-approved exception (Andre,
+        #   2026-11-02): after updater 2.14.1 + calamine 0.38 moved to zip 9,
+        #   the ONLY pre-9 copy left is zip 8.6.0 via docx-rs 0.4.22, which
+        #   never calls extract() anywhere in its source and which this app
+        #   uses writer-only. The advisory-ID-wide ignore is CONSTRAINED by
+        #   scripts/audit-0429-guard.mjs, run before the audit below: any
+        #   other pre-9 zip version/consumer, or a past 2026-12-02, fails
+        #   this step. Removal trigger: docx-rs release with zip >=9
+        #   (upstream PR bokuweb/docx-rs#944) — the guard then exits 2 until
+        #   this ignore is dropped. Rationale:
+        #   docs/security/RUSTSEC-2026-0429-exception.md
+        # TODO(review-by 2026-12-02): RUSTSEC-2026-0429 — reauthorize or drop
+        #   (enforced by scripts/audit-0429-guard.mjs, not just this comment)
+        run: node scripts/audit-0429-guard.mjs && cargo audit --ignore RUSTSEC-2026-0187 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369 --ignore RUSTSEC-2026-0429
