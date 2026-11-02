@@ -11,7 +11,7 @@ import { assessResidual } from './audit-0429-guard.mjs';
 // Minimal cargo-metadata-shaped fixture builder. `edges` maps a package id to
 // the ids of its resolved dependencies (all targets — cargo metadata's
 // resolve graph includes platform-specific deps).
-function fixture({ zips = [], consumers = {}, edges = {} } = {}) {
+function fixture({ zips = [], edges = {} } = {}) {
   const packages = [];
   const nodes = [];
   const idOf = {};
