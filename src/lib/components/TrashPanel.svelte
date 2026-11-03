@@ -8,6 +8,7 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import RestoreByDateDialog from './RestoreByDateDialog.svelte';
   import { sanitizedErr } from '../utils/sanitizedErr';
+  import type { TrashPurgePreview } from '../api/recordings';
 
   /// Trash view panel. Search state is LOCAL and separate from the Active
   /// view's — entering Trash always starts with an empty query. The search
@@ -87,6 +88,115 @@
     }
   }
 
+  /// "Purge Now" (manual, exact-set permanent purge). The button first
+  /// fetches the BACKEND preview — the authoritative all-DB candidate set,
+  /// never the loaded page, the search filter, or the badge count — then
+  /// shows a dangerous confirmation over the FROZEN preview. Records that
+  /// land in Trash while the dialog is open are NOT in the reviewed set
+  /// and require a new click; the backend re-verifies every tombstone
+  /// identity inside the deletion transaction regardless.
+  let showPurge = $state(false);
+  let purgePreview = $state<TrashPurgePreview | null>(null);
+  /// Destructive-phase busy flag (set only AFTER consent); the preview
+  /// phase uses `previewing` so the label never implies deletion started.
+  let purgeBusy = $state(false);
+  /// True while the NON-destructive preview fetch is in flight.
+  let previewing = $state(false);
+
+  const purgeDisabled = $derived(
+    recordings.trashedTotal === 0 ||
+      recordings.trashedLoading ||
+      recordings.trashedError !== null ||
+      recordings.restoring ||
+      recordings.purging ||
+      purgeBusy ||
+      previewing,
+  );
+
+  async function startPurge() {
+    if (purgeDisabled) return;
+    previewing = true;
+    try {
+      const preview = await recordings.previewTrashPurge();
+      if (preview.candidates.length === 0) {
+        // Nothing eligible — never open a destructive dialog, never claim
+        // an empty Trash while protected rows remain.
+        announce(
+          preview.protectedCount > 0
+            ? 'Nothing in Trash can be purged right now. Recordings still encrypting were kept.'
+            : 'Trash is already empty.',
+        );
+        return;
+      }
+      purgePreview = preview; // FROZEN — the dialog confirms exactly this set
+      showPurge = true;
+    } catch (err) {
+      console.error('Failed to preview Trash purge:', err);
+      toasts.error(`Couldn't load the purge preview: ${sanitizedErr(err)}`);
+    } finally {
+      previewing = false;
+    }
+  }
+
+  async function confirmPurge() {
+    const candidates = purgePreview?.candidates;
+    // Close the dialog BEFORE the await: a double-click hits nothing, and
+    // the store's in-flight guard rejects any racing second call.
+    showPurge = false;
+    if (!candidates || candidates.length === 0) {
+      purgePreview = null;
+      return;
+    }
+    purgeBusy = true;
+    let succeeded = false;
+    try {
+      const result = await recordings.purgeTrashNow(candidates);
+      succeeded = true;
+      const noun = (n: number) => (n === 1 ? 'recording' : 'recordings');
+      const parts = [`${result.purged} ${noun(result.purged)} permanently deleted.`];
+      if (result.protected > 0) {
+        parts.push(
+          `${result.protected} ${noun(result.protected)} still encrypting ${result.protected === 1 ? 'was' : 'were'} kept — try again later.`,
+        );
+      }
+      if (result.changed > 0) {
+        parts.push(
+          `${result.changed} ${noun(result.changed)} changed in Trash ${result.changed === 1 ? 'was' : 'were'} left alone.`,
+        );
+      }
+      if (result.cleanupPending) {
+        // Durable committed intent — the background drain WILL finish
+        // these (unlink failures, ack failures, crashes all recover).
+        parts.push('Some audio cleanup continues in the background.');
+      }
+      // Remaining-count (Codie S1): only from the store's POST-purge
+      // refresh, and only when that refresh succeeded — a failed reload
+      // must not invent a count (trashedError is set in that case).
+      if (recordings.trashedError === null && recordings.trashedTotal > 0) {
+        parts.push(
+          `${recordings.trashedTotal} ${noun(recordings.trashedTotal)} remain in Trash.`,
+        );
+      }
+      // ONE polite announcement (D9) — never also a toast.
+      announce(parts.join(' '));
+    } catch (err) {
+      console.error('Failed to purge Trash:', err);
+      toasts.error(`Couldn't purge Trash: ${sanitizedErr(err)}`);
+    } finally {
+      purgePreview = null;
+      purgeBusy = false;
+      if (succeeded) {
+        // The purge button may now be disabled (Trash emptied) — focus()
+        // on a disabled button is a no-op, so move focus to the heading.
+        requestAnimationFrame(() => {
+          (
+            document.querySelector('[data-trash-heading]') as HTMLElement | null
+          )?.focus();
+        });
+      }
+    }
+  }
+
   /// "Restore all" — operates on EVERY trashed recording (the dialog says
   /// so), not the loaded page or the active search filter. Duplicate
   /// submissions are one restore: the dialog closes before the await and
@@ -136,6 +246,13 @@
         disabled={recordings.trashedTotal === 0}
       >
         Restore all…
+      </button>
+      <button
+        class="btn-purge-now"
+        onclick={startPurge}
+        disabled={purgeDisabled}
+      >
+        {previewing ? 'Checking…' : purgeBusy || recordings.purging ? 'Purging…' : 'Purge Now'}
       </button>
     </div>
   </div>
@@ -235,6 +352,24 @@
   />
 {/if}
 
+{#if showPurge && purgePreview && purgePreview.candidates.length > 0}
+  {@const purgeN = purgePreview.candidates.length}
+  {@const purgeNoun = purgeN === 1 ? 'recording' : 'recordings'}
+  {@const protectedN = purgePreview.protectedCount}
+  <ConfirmDialog
+    open={true}
+    title={`Permanently delete all ${purgeN} ${purgeNoun} in Trash?`}
+    message={`This permanently deletes every recording in Trash — including any outside your current search and loaded pages — erasing their audio, transcripts, SOAP notes and generated documents forever. There is no undo.${protectedN > 0 ? ` ${protectedN} ${protectedN === 1 ? 'recording' : 'recordings'} still encrypting will be kept.` : ''}`}
+    confirmLabel={`Purge ${purgeN} ${purgeNoun} now`}
+    danger={true}
+    onConfirm={confirmPurge}
+    onCancel={() => {
+      showPurge = false;
+      purgePreview = null;
+    }}
+  />
+{/if}
+
 <style>
   .trash-panel {
     flex: 1;
@@ -287,6 +422,17 @@
     cursor: pointer;
   }
 
+  .btn-purge-now {
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--danger, #ef4444);
+    background-color: transparent;
+    border: 1px solid var(--danger, #ef4444);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+
   .trash-actions {
     display: flex;
     gap: 6px;
@@ -298,8 +444,21 @@
     color: var(--text-primary);
   }
 
+  .btn-purge-now:hover:not(:disabled) {
+    /* Contrast-preserving hover (N2): NO background tint — the tinted bg
+       dropped the 12px/600 label to 3.88:1 on the light theme (below the
+       4.5:1 AA bar for non-large text). Underline alone signals the hover
+       without changing text/background colors. */
+    text-decoration: underline;
+  }
+
   .btn-restore-all:disabled,
   .btn-restore-date:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .btn-purge-now:disabled {
     opacity: 0.6;
     cursor: not-allowed;
   }

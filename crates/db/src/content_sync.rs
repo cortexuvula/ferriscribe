@@ -31,6 +31,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DbError, DbResult};
 
+/// RAII rollback guard for
+/// [`ContentSyncRepo::update_pending_file_removals`]: unless defused by a
+/// successful COMMIT, it issues a best-effort ROLLBACK on scope exit —
+/// covering closure errors, COMMIT failures, AND panics — so a pooled
+/// connection is never handed back inside an open transaction (Codie R-B).
+/// A rollback failure can only be logged (Drop has no return path) and
+/// never masks the original error.
+struct QueueRmwRollbackGuard<'a> {
+    conn: &'a Connection,
+    defused: bool,
+}
+
+impl Drop for QueueRmwRollbackGuard<'_> {
+    fn drop(&mut self) {
+        if !self.defused
+            && !self.conn.is_autocommit()
+            && let Err(e) = self.conn.execute_batch("ROLLBACK")
+        {
+            tracing::warn!(
+                error = %e,
+                "queue RMW rollback failed — connection transaction state needs recovery"
+            );
+        }
+    }
+}
+
 /// Parse a stored timestamp for LWW decisions. Accepts both legitimate
 /// stored formats: RFC 3339 (with any offset) and SQLite's space-separated
 /// `datetime('now')` format. Returns `None` for anything else.
@@ -483,12 +509,20 @@ impl ContentSyncRepo {
         };
         match serde_json::from_str(&json) {
             Ok(paths) => Ok(paths),
-            Err(e) => {
-                // Reset rather than propagate, mirroring the audio queue: a
-                // corrupt queue must never block the retention sweep.
-                tracing::warn!(error = %e, "pending file removal queue unreadable — resetting");
-                Ok(Vec::new())
-            }
+            // FAIL CLOSED (durable-cleanup contract): a corrupt queue may
+            // hold unfulfilled deletion intent for already-purged rows.
+            // Resetting it would silently orphan those files forever; the
+            // error propagates so callers abort (manual purge rolls back)
+            // or skip their tick without touching the stored value.
+            // PHI: only the parser POSITION travels — never the stored
+            // value or serde's Display (a root wrong-type JSON string
+            // would otherwise echo the data through "invalid type:
+            // string \"…\"" — probe-proven in the closing test).
+            Err(e) => Err(DbError::Migration(format!(
+                "pending file removal queue unreadable at line {} column {}",
+                e.line(),
+                e.column()
+            ))),
         }
     }
 
@@ -502,6 +536,52 @@ impl ContentSyncRepo {
             params![json],
         )?;
         Ok(())
+    }
+
+    /// Serialize a pending-file-removal-queue read-modify-write. `BEGIN
+    /// IMMEDIATE` takes SQLite's single write lock BEFORE the read, so no
+    /// concurrent writer can interleave an enqueue between our read and
+    /// our write — a lost update would silently drop unfulfilled deletion
+    /// intent. Callers that are ALREADY inside a transaction must not use
+    /// this (SQLite cannot nest); they read/set on their own transaction
+    /// handle instead (the manual purge's outbox write does exactly that).
+    ///
+    /// # Errors
+    ///
+    /// Propagates queue read/parse/write failures (the stored queue is
+    /// left untouched — rolled back); a busy lock surfaces as an error the
+    /// caller may treat as best-effort (the intent stays queued).
+    pub fn update_pending_file_removals<F>(conn: &Connection, mutate: F) -> DbResult<()>
+    where
+        F: FnOnce(&mut Vec<String>) -> DbResult<()>,
+    {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        // RAII (Codie R-B): whatever happens between BEGIN and COMMIT —
+        // closure Err, commit failure, or a panic — the guard issues a
+        // best-effort ROLLBACK on scope exit so the (pooled) connection
+        // is never returned inside an open transaction. The guard cannot
+        // mask the original error: Drop only logs its own failure.
+        let mut guard = QueueRmwRollbackGuard {
+            conn,
+            defused: false,
+        };
+        let result = (|| -> DbResult<()> {
+            let mut queue = Self::get_pending_file_removals(conn)?;
+            mutate(&mut queue)?;
+            Self::set_pending_file_removals(conn, &queue)
+        })();
+        match result {
+            Ok(()) => match conn.execute_batch("COMMIT") {
+                Ok(()) => {
+                    guard.defused = true;
+                    Ok(())
+                }
+                // COMMIT failed (e.g. BUSY): propagate the commit error;
+                // the guard rolls the transaction back on drop.
+                Err(commit_err) => Err(DbError::from(commit_err)),
+            },
+            Err(e) => Err(e),
+        }
     }
 
     /// Post-pull audio-fetch skip set: recording ids whose audio the sync
@@ -1490,17 +1570,25 @@ mod tests {
                 .is_empty()
         );
 
-        // Corrupt JSON resets to empty rather than blocking the sweep.
+        // Corrupt JSON FAILS CLOSED (durable-cleanup contract): the queue
+        // may hold unfulfilled deletion intent, so it must never be reset.
         conn.execute(
             "UPDATE sync_state SET value = '{not json' WHERE key = 'pending_file_removals'",
             [],
         )
         .expect("corrupt");
         assert!(
-            ContentSyncRepo::get_pending_file_removals(&conn)
-                .expect("corrupt reads empty")
-                .is_empty()
+            ContentSyncRepo::get_pending_file_removals(&conn).is_err(),
+            "corrupt queue must error, never silently reset"
         );
+        let raw: String = conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = 'pending_file_removals'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("stored value untouched");
+        assert_eq!(raw, "{not json", "corrupt value preserved byte-for-byte");
     }
 
     // Regression (2026-09-02 bug review): a legacy space-format
@@ -2243,5 +2331,141 @@ mod sync_tombstone_tests {
             Some(local_deleted.as_str())
         );
         assert_eq!(deleted_at_raw(&conn, &restored.id.to_string()), None);
+    }
+
+    // ── Recovery closeout (Codie round-3): R-B commit-failure rollback ──
+
+    /// R-B: a COMMIT failure (here: a reader holding SHARED on a DELETE-
+    /// journal file DB with a tiny busy timeout — the deterministic
+    /// reproducer from the review probe) must return Err AND leave the
+    /// connection OUT of any transaction (autocommit restored, no ghost
+    /// mutation visible), so a later exclusive RMW on the same pooled
+    /// connection succeeds. Diagnostic only — does not change app journal
+    /// settings.
+    #[test]
+    fn update_pending_file_removals_commit_failure_rolls_back_connection() {
+        use rusqlite::Connection;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("r-b.db");
+        {
+            let db = Database::open(&path, None).expect("migrated file db");
+            let conn = db.conn().expect("conn");
+            ContentSyncRepo::set_pending_file_removals(&conn, &["/seed/entry.enc".to_string()])
+                .expect("seed queue");
+        }
+        let a = Connection::open(&path).expect("conn a");
+        let b = Connection::open(&path).expect("conn b");
+        a.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA busy_timeout=30;")
+            .expect("diagnostic pragmas");
+        // Reader holds SHARED in an explicit read transaction.
+        b.execute_batch("BEGIN;").expect("reader begin");
+        let _ = b.query_row("SELECT COUNT(*) FROM sync_state", [], |r| {
+            r.get::<_, i64>(0)
+        });
+
+        let result = ContentSyncRepo::update_pending_file_removals(&a, |q| {
+            q.push("/innocuous/probe.enc".to_string());
+            Ok(())
+        });
+        assert!(
+            result.is_err(),
+            "COMMIT must fail while the reader holds the lock"
+        );
+        assert!(
+            a.is_autocommit(),
+            "the connection must be OUT of the transaction after the error (no poisoning)"
+        );
+        // No ghost mutation visible on the same connection.
+        let queue_now = ContentSyncRepo::get_pending_file_removals(&a).expect("read back");
+        assert_eq!(
+            queue_now,
+            vec!["/seed/entry.enc".to_string()],
+            "uncommitted queue write must not be visible or durable"
+        );
+        // Release the reader: a second exclusive RMW on the SAME
+        // connection must now succeed (pool not poisoned).
+        b.execute_batch("ROLLBACK;").expect("release reader");
+        ContentSyncRepo::update_pending_file_removals(&a, |q| {
+            q.push("/after/recovery.enc".to_string());
+            Ok(())
+        })
+        .expect("second RMW succeeds after rollback-on-commit-failure");
+        let final_queue = ContentSyncRepo::get_pending_file_removals(&a).expect("final read");
+        assert!(final_queue.contains(&"/after/recovery.enc".to_string()));
+        assert!(final_queue.contains(&"/seed/entry.enc".to_string()));
+    }
+
+    /// R-B (panic leg): a PANICKING closure between BEGIN and COMMIT is
+    /// covered by the RAII guard — the connection is returned to autocommit
+    /// with the stored queue untouched.
+    #[test]
+    fn update_pending_file_removals_closure_panic_rolls_back_connection() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        ContentSyncRepo::set_pending_file_removals(&conn, &["/seed/entry.enc".to_string()])
+            .expect("seed queue");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ContentSyncRepo::update_pending_file_removals(&conn, |_q| {
+                panic!("synthetic closure panic");
+            })
+        }))
+        .is_err();
+        assert!(panicked, "fixture: the closure panicked");
+
+        assert!(
+            conn.is_autocommit(),
+            "RAII guard must roll the transaction back on panic"
+        );
+        let queue = ContentSyncRepo::get_pending_file_removals(&conn).expect("queue");
+        assert_eq!(
+            queue,
+            vec!["/seed/entry.enc".to_string()],
+            "stored queue unchanged by the panicked RMW"
+        );
+        // The connection is fully usable afterwards.
+        ContentSyncRepo::update_pending_file_removals(&conn, |q| {
+            q.push("/after/panic.enc".to_string());
+            Ok(())
+        })
+        .expect("connection usable after panic rollback");
+    }
+
+    /// Recovery closeout PHI probe: a root wrong-type JSON STRING where a
+    /// sequence is expected. If serde's Display echoes the string token
+    /// (e.g. `invalid type: string "PRIVATE_QUEUE_MARKER"`), the error
+    /// carries data-derived text; the strict parse must then be PHI-free.
+    /// Refute-or-fix: if the real output does not echo, this test PINS
+    /// that fact.
+    #[test]
+    fn strict_queue_error_does_not_echo_root_string_value() {
+        let db = Database::open_in_memory().expect("db");
+        let conn = db.conn().expect("conn");
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state (key, value)
+             VALUES ('pending_file_removals', ?1)",
+            [serde_json::to_string("PRIVATE_QUEUE_MARKER").expect("json string")],
+        )
+        .expect("seed root-type-string value");
+
+        let err = ContentSyncRepo::get_pending_file_removals(&conn)
+            .expect_err("root string is not a sequence");
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains("PRIVATE_QUEUE_MARKER"),
+            "strict parse error must not echo the stored value: {msg}"
+        );
+        // Fail-closed + byte-preserved remain.
+        let raw: String = conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = 'pending_file_removals'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("stored value present");
+        assert_eq!(
+            raw, "\"PRIVATE_QUEUE_MARKER\"",
+            "stored bytes preserved exactly"
+        );
     }
 }

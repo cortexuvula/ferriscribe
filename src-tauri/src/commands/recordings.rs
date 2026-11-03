@@ -369,6 +369,132 @@ pub struct DeleteAllResult {
     pub ids: Vec<String>,
 }
 
+/// One "Purge Now" candidate on the wire: the recording id plus the RAW
+/// stored deletion timestamp from the preview. camelCase on the wire to
+/// match the frontend `TrashPurgeCandidate`. The identity travels
+/// byte-for-byte — the backend purge re-verifies it inside the deletion
+/// transaction with raw-string equality.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashPurgeCandidateDto {
+    pub id: String,
+    pub deleted_at: String,
+}
+
+/// Backend preview for the "Purge Now" confirmation: the authoritative,
+/// all-DB candidate set (any age, independent of pages/search filters)
+/// plus the count of trashed rows still mid-encryption (never purged —
+/// the dialog says they will be kept). Ids and timestamps only, no PHI.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashPurgePreview {
+    pub candidates: Vec<TrashPurgeCandidateDto>,
+    pub protected_count: u32,
+}
+
+/// Result of the destructive "Purge Now" purge: ACTUAL counts, never
+/// fabricated — `purged` rows are gone, `protected` were kept
+/// (mid-encryption; retry later), `changed` left the reviewed set (a new
+/// preview + confirmation is needed), `cleanup_pending` means some audio
+/// removals did not complete in this call but have DURABLE COMMITTED
+/// cleanup intent — the boot/tick drain will finish them (crash, unlink
+/// failure, or ack-write failure all recover).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashPurgeResult {
+    pub purged: u32,
+    pub protected: u32,
+    pub changed: u32,
+    pub cleanup_pending: bool,
+}
+
+/// Validate + convert the wire candidates for [`purge_trash_now`]: a
+/// malformed id or a blank tombstone identity is rejected BEFORE any DB
+/// work — never silently dropped (the purge would under-deliver against
+/// its confirmation) and never defaulted (a fabricated identity could
+/// purge an unreviewed deletion).
+fn parse_trash_purge_candidates(
+    dtos: Vec<TrashPurgeCandidateDto>,
+) -> AppResult<Vec<medical_db::recordings::TrashPurgeSnapshotCandidate>> {
+    dtos.into_iter()
+        .map(|dto| {
+            let id = Uuid::parse_str(&dto.id)
+                .map_err(|e| AppError::Other(format!("invalid recording id: {e}")))?;
+            if dto.deleted_at.trim().is_empty() {
+                return Err(AppError::InvalidInput(
+                    "purge candidate is missing its deletion timestamp".into(),
+                ));
+            }
+            Ok(medical_db::recordings::TrashPurgeSnapshotCandidate {
+                id,
+                deleted_at: dto.deleted_at,
+            })
+        })
+        .collect()
+}
+
+/// Preview the exact-set "Purge Now" candidates: every trashed recording
+/// regardless of age (fresh and future-dated tombstones included),
+/// excluding rows still mid-encryption. The confirmation dialog must show
+/// `candidates.len()` — never the paginated list length or the badge.
+#[tauri::command]
+pub async fn preview_trash_purge(
+    state: tauri::State<'_, AppState>,
+) -> AppResult<TrashPurgePreview> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || -> AppResult<TrashPurgePreview> {
+        let conn = db.conn()?;
+        let (candidates, protected_count) =
+            RecordingsRepo::list_soft_deleted_snapshot(&conn).map_err(AppError::from)?;
+        Ok(TrashPurgePreview {
+            candidates: candidates
+                .into_iter()
+                .map(|c| TrashPurgeCandidateDto {
+                    id: c.id.to_string(),
+                    deleted_at: c.deleted_at,
+                })
+                .collect(),
+            protected_count,
+        })
+    })
+    .await
+    .map_err(join_err)?
+}
+
+/// Permanently purge EXACTLY the reviewed candidates ("Purge Now"). The
+/// frozen preview set travels verbatim; the backend re-verifies each
+/// tombstone identity plus the mid-encryption guard inside ONE deletion
+/// transaction (purge-first artifact cleanup follows only for confirmed
+/// ids — see `sweeps::purge_trash_snapshot`). No paired-server push: the
+/// tombstones already travelled at soft-delete time, and the
+/// `purged_recordings` ledger written in the same transaction blocks
+/// stale peer copies from resurrecting the rows.
+#[tauri::command]
+pub async fn purge_trash_now(
+    state: tauri::State<'_, AppState>,
+    candidates: Vec<TrashPurgeCandidateDto>,
+) -> AppResult<TrashPurgeResult> {
+    let snapshot = parse_trash_purge_candidates(candidates)?;
+    let db = state.db.clone();
+    let outcome =
+        tokio::task::spawn_blocking(move || crate::sweeps::purge_trash_snapshot(&db, &snapshot))
+            .await
+            .map_err(join_err)??;
+    tracing::info!(
+        purged = outcome.purged.len(),
+        protected = outcome.protected.len(),
+        changed = outcome.changed.len(),
+        cleanup_pending = outcome.cleanup_pending,
+        "Purge Now: manual Trash purge completed"
+    );
+    Ok(TrashPurgeResult {
+        purged: outcome.purged.len() as u32,
+        protected: outcome.protected.len() as u32,
+        changed: outcome.changed.len() as u32,
+        cleanup_pending: outcome.cleanup_pending,
+    })
+}
+
 /// The paired-server push target once resolved (owned connection + bearer
 /// + HTTP client), as produced by `content_sync_target_parts`.
 pub(crate) type SyncPushParts = Option<(
@@ -932,5 +1058,50 @@ mod tests {
         assert_eq!(query_limit_or_default(Some(10)), 10);
         assert_eq!(query_limit_or_default(Some(200)), 200);
         assert_eq!(query_limit_or_default(Some(10_000)), 200);
+    }
+
+    /// Purge-Now candidate parsing: a malformed id or an identity-less
+    /// candidate must be rejected BEFORE any DB work — never silently
+    /// dropped (the purge would then under-deliver vs its confirmation)
+    /// and never defaulted (a fabricated identity could purge an
+    /// unreviewed deletion).
+    #[test]
+    fn parse_trash_purge_candidates_round_trips_valid_set() {
+        let dtos = vec![
+            TrashPurgeCandidateDto {
+                id: "3fa85f64-5717-4562-b3fc-2c963f66afa6".into(),
+                deleted_at: "2026-11-01T00:00:00+00:00".into(),
+            },
+            TrashPurgeCandidateDto {
+                id: "0c0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b".into(),
+                deleted_at: "2026-11-02T12:34:56.789+02:00".into(),
+            },
+        ];
+        let parsed = parse_trash_purge_candidates(dtos).expect("valid set parses");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed[0].id.to_string(),
+            "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        );
+        // Identity travels byte-for-byte — any normalization would break
+        // the backend's raw-string recheck.
+        assert_eq!(parsed[1].deleted_at, "2026-11-02T12:34:56.789+02:00");
+    }
+
+    #[test]
+    fn parse_trash_purge_candidates_rejects_bad_ids_and_empty_identity() {
+        let err = parse_trash_purge_candidates(vec![TrashPurgeCandidateDto {
+            id: "not-a-uuid".into(),
+            deleted_at: "2026-11-01T00:00:00+00:00".into(),
+        }])
+        .expect_err("malformed id must be rejected");
+        assert!(matches!(err, AppError::Other(_)), "{err}");
+
+        let err = parse_trash_purge_candidates(vec![TrashPurgeCandidateDto {
+            id: "3fa85f64-5717-4562-b3fc-2c963f66afa6".into(),
+            deleted_at: "   ".into(),
+        }])
+        .expect_err("blank identity must be rejected");
+        assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
     }
 }

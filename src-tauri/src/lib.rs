@@ -509,6 +509,8 @@ pub fn run() {
             commands::recordings::count_recordings_deleted_between,
             commands::recordings::count_soft_deleted_older_than,
             commands::recordings::restore_recordings_deleted_between,
+            commands::recordings::preview_trash_purge,
+            commands::recordings::purge_trash_now,
             commands::recordings::import_audio_file,
             commands::recordings_edit::save_recording_field,
             commands::settings::get_settings,

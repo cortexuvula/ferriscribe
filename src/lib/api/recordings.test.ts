@@ -20,6 +20,8 @@ import {
   importAudioFile,
   listRecordingCreationTimes,
   queryRecordings,
+  previewTrashPurge,
+  purgeTrashNow,
 } from './recordings';
 
 const invokeMock = vi.mocked(invoke);
@@ -184,5 +186,25 @@ describe('recordings api', () => {
       limit: 50,
       offset: 0,
     });
+  });
+});
+
+describe('recordings api — Purge Now', () => {
+  it('previewTrashPurge rides the dedicated preview command with no args', async () => {
+    invokeMock.mockResolvedValueOnce({ candidates: [], protectedCount: 0 });
+    await previewTrashPurge();
+    expect(invokeMock).toHaveBeenCalledWith('preview_trash_purge');
+  });
+
+  it('purgeTrashNow forwards the EXACT reviewed candidate set', async () => {
+    invokeMock.mockResolvedValueOnce({ purged: 2, protected: 0, changed: 0, cleanupPending: false });
+    const candidates = [
+      { id: '3fa85f64-5717-4562-b3fc-2c963f66afa6', deletedAt: '2026-11-01T00:00:00+00:00' },
+      { id: '0c0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b', deletedAt: '2026-11-02T00:00:00+00:00' },
+    ];
+    await purgeTrashNow(candidates);
+    // The frozen preview travels verbatim — the backend re-verifies each
+    // tombstone identity inside the purge transaction.
+    expect(invokeMock).toHaveBeenCalledWith('purge_trash_now', { candidates });
   });
 });

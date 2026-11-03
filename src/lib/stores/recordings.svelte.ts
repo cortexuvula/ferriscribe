@@ -9,15 +9,20 @@ import {
   restoreRecording,
   restoreRecordings,
   deleteAllRecordings,
-  deleteRecordingsCreatedBetween,
   countRecordings,
   listTrashedRecordings,
   restoreAllTrashed,
   restoreRecordingsDeletedBetween,
   countRecordingsDeletedBetween,
   countRecordingsCreatedBetween,
+  deleteRecordingsCreatedBetween,
+  previewTrashPurge,
+  purgeTrashNow as purgeTrashNowApi,
   type DeleteAllResult,
   type QueryRecordingsOptions,
+  type TrashPurgeCandidate,
+  type TrashPurgePreview,
+  type TrashPurgeResult,
 } from '../api/recordings';
 import { syncContentNow } from '../api/contentSync';
 import {
@@ -601,11 +606,22 @@ class RecordingsStore {
 
   /// Refresh ONLY the authoritative trash total (badge updates after
   /// mutations/sync/purge) without disturbing the loaded page.
+  ///
+  /// Fenced like every other trash read (Codie W2): the request token and
+  /// data generation are captured BEFORE the await, and a response whose
+  /// token or generation was superseded (a purge's invalidate → fence →
+  /// `loadTrashed` bumps both) is discarded whole — a stale badge can
+  /// never resurrect the pre-purge count.
   async refreshTrashedTotal(): Promise<void> {
+    const token = this.trashedRequestId;
+    const generation = this.dataGeneration;
     try {
       // limit=0: no rows, just the COUNT — the total is folded into
       // list_trashed_recordings by design (fewer commands).
       const { total } = await listTrashedRecordings(0, 0);
+      if (token !== this.trashedRequestId || generation !== this.dataGeneration) {
+        return; // superseded by a newer trash read or a data mutation
+      }
       this.trashedTotal = total;
     } catch (err) {
       console.error('Failed to refresh Trash total:', err);
@@ -758,6 +774,40 @@ class RecordingsStore {
       return result.count;
     } finally {
       this.restoring = false;
+    }
+  }
+
+  /// True while a manual Trash purge is in flight (double-submit guard:
+  /// a double-click is one purge, not two racing destructive calls).
+  purging = $state<boolean>(false);
+
+  /// Backend preview for "Purge Now": the authoritative all-DB candidate
+  /// set plus the protected (mid-encryption) count. Never derived from
+  /// the loaded trash page or the badge.
+  async previewTrashPurge(): Promise<TrashPurgePreview> {
+    return previewTrashPurge();
+  }
+
+  /// Manual "Purge Now": permanently delete EXACTLY the reviewed
+  /// candidates — the frozen preview travels verbatim; the backend
+  /// re-verifies each tombstone identity inside the deletion
+  /// transaction, so records trashed while the dialog was open never
+  /// silently join. Refreshes the trash list + badge afterwards (the
+  /// reload's token bump also kills any in-flight stale trash read).
+  /// The active list, editor selection, and unsaved drafts are
+  /// untouched — purge only removes rows that were already in Trash.
+  async purgeTrashNow(candidates: TrashPurgeCandidate[]): Promise<TrashPurgeResult> {
+    if (this.purging) throw new Error('A Trash purge is already in progress');
+    this.purging = true;
+    try {
+      this.invalidateActiveQueries();
+      const result = await purgeTrashNowApi(candidates);
+      // COMMIT fence (RC-1) — before the refreshes below.
+      this.fenceMutationCompletion();
+      await this.loadTrashed();
+      return result;
+    } finally {
+      this.purging = false;
     }
   }
 

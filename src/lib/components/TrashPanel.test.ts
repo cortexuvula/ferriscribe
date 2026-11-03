@@ -27,7 +27,7 @@ import type { TrashedRecordingSummary } from '../types';
 // ── Store + toasts mocks ───────────────────────────────────────────────────
 // vi.mock factories are hoisted above every const, so the store object is
 // created inside vi.hoisted and shared through the mocks holder.
-const { fakeStore, mockRestoreTrashed, mockLoadTrashed, mockToastsError } = vi.hoisted(() => {
+const { fakeStore, mockRestoreTrashed, mockLoadTrashed, mockToastsError, mockPreviewTrashPurge, mockPurgeTrashNow } = vi.hoisted(() => {
   const fakeStore = {
     trashedList: [] as import('../types').TrashedRecordingSummary[],
     trashedTotal: 0,
@@ -36,18 +36,32 @@ const { fakeStore, mockRestoreTrashed, mockLoadTrashed, mockToastsError } = vi.h
     trashedHasMore: false,
     trashedError: null as string | null,
     restoring: false,
+    purging: false,
     loadTrashed: vi.fn(),
     loadMoreTrashed: vi.fn(),
     restoreTrashed: vi.fn(),
     restoreAllFromTrash: vi.fn(),
+    previewTrashPurge: vi.fn(),
+    purgeTrashNow: vi.fn(),
   };
   return {
     fakeStore,
     mockRestoreTrashed: fakeStore.restoreTrashed,
     mockLoadTrashed: fakeStore.loadTrashed,
     mockToastsError: vi.fn(),
+    mockPreviewTrashPurge: fakeStore.previewTrashPurge,
+    mockPurgeTrashNow: fakeStore.purgeTrashNow,
   };
 });
+
+/// Deferred-promise helper for busy-state phase tests.
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 function makeTrashed(id: string, deletedAt = '2026-10-01T12:00:00Z'): TrashedRecordingSummary {
   return {
@@ -78,6 +92,7 @@ beforeEach(() => {
   fakeStore.trashedHasMore = false;
   fakeStore.trashedError = null;
   fakeStore.restoring = false;
+  fakeStore.purging = false;
 });
 
 describe('TrashPanel — states', () => {
@@ -336,3 +351,278 @@ describe('TrashPanel — restore-failure toasts are sanitized (PHI)', () => {
     );
   });
 });
+
+// ── Purge Now (manual, exact-set permanent purge) ─────────────────────────
+const purgeCandidates = [
+  { id: '3fa85f64-5717-4562-b3fc-2c963f66afa6', deletedAt: '2026-11-01T00:00:00+00:00' },
+  { id: '0c0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b', deletedAt: '2026-11-02T00:00:00+00:00' },
+];
+
+describe('TrashPanel — Purge Now', () => {
+  afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+  it('renders a Purge Now button, disabled when Trash is empty', () => {
+    render(TrashPanel);
+    const btn = screen.getByRole('button', { name: 'Purge Now' }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('is enabled with recordings in Trash, disabled while loading, on load error, and while busy', () => {
+    // The store mock is a plain object (not $state), so each disabled
+    // variant needs its own render — a rerender cannot recompute the
+    // derived disabled expression against mutated plain props.
+    fakeStore.trashedTotal = 2;
+    render(TrashPanel);
+    expect((screen.getByRole('button', { name: 'Purge Now' }) as HTMLButtonElement).disabled)
+      .toBe(false);
+    cleanup();
+
+    fakeStore.trashedLoading = true;
+    render(TrashPanel);
+    expect((screen.getByRole('button', { name: 'Purge Now' }) as HTMLButtonElement).disabled)
+      .toBe(true);
+    cleanup();
+    fakeStore.trashedLoading = false;
+
+    fakeStore.trashedError = 'db locked';
+    render(TrashPanel);
+    expect((screen.getByRole('button', { name: 'Purge Now' }) as HTMLButtonElement).disabled)
+      .toBe(true);
+    cleanup();
+    fakeStore.trashedError = null;
+
+    fakeStore.purging = true;
+    render(TrashPanel);
+    expect((screen.getByRole('button', { name: 'Purging…' }) as HTMLButtonElement).disabled)
+      .toBe(true);
+  });
+
+  it('click fetches the backend preview; the dialog count comes from the PREVIEW, not trashedTotal', async () => {
+    fakeStore.trashedTotal = 41; // badge says 41…
+    mockPreviewTrashPurge.mockResolvedValueOnce({
+      candidates: purgeCandidates, // …but only 2 are eligible
+      protectedCount: 1,
+    });
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+
+    expect(mockPreviewTrashPurge).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Permanently delete all 2 recordings in Trash?')).toBeTruthy();
+    // All-scope + irreversibility + content warnings.
+    expect(screen.getByText(/including any outside your current search and loaded pages/)).toBeTruthy();
+    expect(screen.getByText(/erasing their audio, transcripts, SOAP notes and generated documents forever/)).toBeTruthy();
+    expect(screen.getByText(/There is no undo/)).toBeTruthy();
+    expect(screen.getByText(/1 recording still encrypting will be kept/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Purge 2 recordings now' })).toBeTruthy();
+    expect(mockPurgeTrashNow).not.toHaveBeenCalled();
+  });
+
+  it('preview failure shows a sanitized toast and NO dialog — no destructive call', async () => {
+    fakeStore.trashedTotal = 3;
+    mockPreviewTrashPurge.mockRejectedValueOnce(
+      new Error('failed to open Smith_John_visit.wav'),
+    );
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+
+    await waitFor(() =>
+      expect(mockToastsError).toHaveBeenCalledWith(
+        "Couldn't load the purge preview: unexpected error",
+      ),
+    );
+    expect(mockToastsError.mock.calls.flat().join(' ')).not.toContain('Smith');
+    expect(screen.queryByText(/Permanently delete all/)).toBeNull();
+    expect(mockPurgeTrashNow).not.toHaveBeenCalled();
+  });
+
+  it('zero eligible candidates: announces, opens NO dialog, never purges', async () => {
+    fakeStore.trashedTotal = 2; // both rows mid-encryption
+    mockPreviewTrashPurge.mockResolvedValueOnce({ candidates: [], protectedCount: 2 });
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toMatch(
+        /Nothing in Trash can be purged right now/,
+      ),
+    );
+    expect(screen.queryByText(/Permanently delete all/)).toBeNull();
+    expect(mockPurgeTrashNow).not.toHaveBeenCalled();
+  });
+
+  it('Cancel closes the dialog with NO purge', async () => {
+    fakeStore.trashedTotal = 2;
+    mockPreviewTrashPurge.mockResolvedValueOnce({ candidates: purgeCandidates, protectedCount: 0 });
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByText(/Permanently delete all/)).toBeNull();
+    expect(mockPurgeTrashNow).not.toHaveBeenCalled();
+  });
+
+  it('confirm purges the FROZEN preview verbatim, closes the dialog first, and announces once', async () => {
+    fakeStore.trashedTotal = 2;
+    mockPreviewTrashPurge.mockResolvedValueOnce({ candidates: purgeCandidates, protectedCount: 0 });
+    mockPurgeTrashNow.mockImplementationOnce(async () => {
+      // The refresh empties the view, like the real store does.
+      fakeStore.trashedList = [];
+      fakeStore.trashedTotal = 0;
+      return { purged: 2, protected: 0, changed: 0, cleanupPending: false };
+    });
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge 2 recordings now' }));
+
+    // Dialog closes before the await — a double-click hits nothing.
+    expect(screen.queryByText(/Permanently delete all/)).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(
+        '2 recordings permanently deleted.',
+      ),
+    );
+    expect(mockPurgeTrashNow).toHaveBeenCalledWith(purgeCandidates);
+    expect(mockPurgeTrashNow).toHaveBeenCalledTimes(1);
+    // ONE polite status region (D9) — no double announce, no toast.
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(mockToastsError).not.toHaveBeenCalled();
+  });
+
+  it('protected rows are reported KEPT — never announced as fully purged', async () => {
+    fakeStore.trashedTotal = 2;
+    mockPreviewTrashPurge.mockResolvedValueOnce({ candidates: purgeCandidates, protectedCount: 0 });
+    mockPurgeTrashNow.mockResolvedValueOnce({ purged: 1, protected: 1, changed: 0, cleanupPending: false });
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge 2 recordings now' }));
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toContain('1 recording still encrypting was kept'),
+    );
+  });
+
+  it('purge failure shows a sanitized toast and stays retryable', async () => {
+    fakeStore.trashedTotal = 2;
+    mockPreviewTrashPurge.mockResolvedValueOnce({ candidates: purgeCandidates, protectedCount: 0 });
+    mockPurgeTrashNow.mockRejectedValueOnce(new Error('failed to unlink Smith_John_visit.wav.enc'));
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge 2 recordings now' }));
+    await waitFor(() =>
+      expect(mockToastsError).toHaveBeenCalledWith("Couldn't purge Trash: unexpected error"),
+    );
+    expect(mockToastsError.mock.calls.flat().join(' ')).not.toContain('Smith');
+    // Button is back and enabled — retry is possible.
+    expect((screen.getByRole('button', { name: 'Purge Now' }) as HTMLButtonElement).disabled)
+      .toBe(false);
+  });
+
+  it('focus moves to the Trash heading after a purge empties the view', async () => {
+    fakeStore.trashedTotal = 2;
+    mockPreviewTrashPurge.mockResolvedValueOnce({ candidates: purgeCandidates, protectedCount: 0 });
+    mockPurgeTrashNow.mockImplementationOnce(async () => {
+      fakeStore.trashedList = [];
+      fakeStore.trashedTotal = 0;
+      return { purged: 2, protected: 0, changed: 0, cleanupPending: false };
+    });
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge 2 recordings now' }));
+    await waitFor(() => {
+      expect((document.activeElement as HTMLElement)?.getAttribute('data-trash-heading')).toBe('');
+    });
+    expect(document.activeElement).not.toBe(document.body);
+  });
+});
+
+  it('cleanupPending (durably queued) is announced honestly — never claimed fully removed', async () => {
+    fakeStore.trashedTotal = 2;
+    mockPreviewTrashPurge.mockResolvedValueOnce({ candidates: purgeCandidates, protectedCount: 0 });
+    mockPurgeTrashNow.mockImplementationOnce(async () => {
+      // The store's post-purge refresh empties the view (queued audio
+      // cleanup does not keep rows in Trash).
+      fakeStore.trashedList = [];
+      fakeStore.trashedTotal = 0;
+      return { purged: 2, protected: 0, changed: 0, cleanupPending: true };
+    });
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge 2 recordings now' }));
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(
+        '2 recordings permanently deleted. Some audio cleanup continues in the background.',
+      ),
+    );
+  });
+
+  it('completion states the refreshed remaining Trash count; nothing invented when the refresh failed (S1)', async () => {
+    // Preview saw 1 protected; 1 more flipped mid-window; after the purge
+    // refresh, 2 remain in Trash.
+    fakeStore.trashedTotal = 3;
+    mockPreviewTrashPurge.mockResolvedValueOnce({
+      candidates: [purgeCandidates[0]],
+      protectedCount: 1,
+    });
+    mockPurgeTrashNow.mockImplementationOnce(async () => {
+      fakeStore.trashedList = [];
+      fakeStore.trashedTotal = 2;
+      return { purged: 1, protected: 1, changed: 0, cleanupPending: false };
+    });
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge 1 recording now' }));
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe(
+        '1 recording permanently deleted. 1 recording still encrypting was kept — try again later. 2 recordings remain in Trash.',
+      ),
+    );
+
+    // Refresh failure: no count is invented.
+    cleanup();
+    fakeStore.trashedTotal = 1;
+    mockPreviewTrashPurge.mockResolvedValueOnce({
+      candidates: [purgeCandidates[0]],
+      protectedCount: 0,
+    });
+    mockPurgeTrashNow.mockImplementationOnce(async () => {
+      fakeStore.trashedList = [];
+      fakeStore.trashedError = 'db locked'; // the post-purge reload failed
+      return { purged: 1, protected: 0, changed: 0, cleanupPending: false };
+    });
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge 1 recording now' }));
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent).toBe('1 recording permanently deleted.'),
+    );
+    expect(screen.getByRole('status').textContent).not.toContain('remain in Trash');
+  });
+
+  it('busy label distinguishes checking the preview from purging (S3)', async () => {
+    fakeStore.trashedTotal = 2;
+    const previewGate = deferred<{ candidates: typeof purgeCandidates; protectedCount: number }>();
+    mockPreviewTrashPurge.mockReturnValueOnce(previewGate.promise);
+    render(TrashPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+
+    // Non-destructive phase: neutral "Checking…", button disabled.
+    const checking = screen.getByRole('button', { name: 'Checking…' }) as HTMLButtonElement;
+    expect(checking.disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Purging…' })).toBeNull();
+
+    previewGate.resolve({ candidates: purgeCandidates, protectedCount: 0 });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Purge Now' })).toBeTruthy(),
+    );
+
+    // Destructive phase (after consent): "Purging…".
+    const purgeGate = deferred<{ purged: number; protected: number; changed: number; cleanupPending: boolean }>();
+    mockPurgeTrashNow.mockReturnValueOnce(purgeGate.promise);
+    fakeStore.trashedTotal = 2;
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge Now' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Purge 2 recordings now' }));
+    expect((screen.getByRole('button', { name: 'Purging…' }) as HTMLButtonElement).disabled)
+      .toBe(true);
+    purgeGate.resolve({ purged: 2, protected: 0, changed: 0, cleanupPending: false });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Purge Now' })).toBeTruthy(),
+    );
+  });

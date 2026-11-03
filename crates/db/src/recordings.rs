@@ -13,6 +13,41 @@ use medical_core::types::recording::{
 
 use crate::{DbError, DbResult};
 
+/// Tombstone identity for the manual "Purge Now" flow: the recording id
+/// plus the RAW stored `deleted_at` string. Byte-equality on the stored
+/// string is the recheck contract: it is exact and format-agnostic, and
+/// a restore or a fresh delete always writes a NEW value — so only the
+/// exact deletion the user reviewed can match.
+#[derive(Debug, Clone)]
+pub struct TrashPurgeSnapshotCandidate {
+    pub id: Uuid,
+    pub deleted_at: String,
+}
+
+/// Outcome of the exact-set snapshot purge
+/// ([`RecordingsRepo::purge_soft_deleted_snapshot_with_ledger`]).
+#[derive(Debug, Default)]
+pub struct SnapshotPurgeOutcome {
+    /// Actually purged ids, each with the `audio_path` read from the live
+    /// row INSIDE the deletion transaction (never a stale preview path).
+    /// Empty string when the row carried no path.
+    pub purged: Vec<(Uuid, String)>,
+    /// Still trashed under the reviewed identity, but mid-encryption —
+    /// never purged, never ledgered; callers must say they were KEPT.
+    pub protected: Vec<Uuid>,
+    /// No longer trashed under the reviewed identity (restored, re-trashed
+    /// with a NEW deletion, or already gone). A purge of these requires a
+    /// new preview + confirmation.
+    pub changed: Vec<Uuid>,
+    /// Audio paths durably enqueued for cleanup in the SAME transaction as
+    /// the purge (transactional outbox). Every path here has committed
+    /// deletion intent in `pending_file_removals` — the caller may attempt
+    /// an immediate unlink, and if anything (crash, unlink failure, ack
+    /// failure) intervenes, the boot/tick drain finishes the job. Paths
+    /// still referenced by a surviving row are NOT enqueued (live owner).
+    pub cleanup_enqueued: Vec<String>,
+}
+
 /// Repository for the `recordings` table -- the central entity of the app.
 ///
 /// All methods are associated functions that take a `&Connection`. The table
@@ -1326,6 +1361,180 @@ impl RecordingsRepo {
     ) -> DbResult<Vec<Uuid>> {
         let cutoff = (now - chrono::TimeDelta::days(days as i64)).to_rfc3339();
         Self::purge_soft_deleted_impl(conn, ids, true, Some(&cutoff))
+    }
+
+    /// Snapshot of EVERY purge-eligible tombstone in the database for the
+    /// manual "Purge Now" confirmation — all ages (including fresh and
+    /// future-dated tombstones; the age-based retention windows do not
+    /// apply), excluding rows still mid-encryption. Returns the candidates
+    /// plus the count of protected (encryption-pending trashed) rows so the
+    /// caller can report them honestly.
+    pub fn list_soft_deleted_snapshot(
+        conn: &Connection,
+    ) -> DbResult<(Vec<TrashPurgeSnapshotCandidate>, u32)> {
+        let mut stmt = conn.prepare(
+            "SELECT id, deleted_at FROM recordings
+              WHERE deleted_at IS NOT NULL
+                AND (encryption_pending IS NULL OR encryption_pending = 0)",
+        )?;
+        let candidates = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| {
+                r.map_err(
+                    |e| tracing::warn!(error = %e, "dropping unreadable row in trash snapshot"),
+                )
+                .ok()
+            })
+            .filter_map(|(id_str, deleted_at)| match Uuid::parse_str(&id_str) {
+                Ok(id) => Some(TrashPurgeSnapshotCandidate { id, deleted_at }),
+                Err(e) => {
+                    tracing::warn!(error = %e, "unparseable recording id in trash snapshot");
+                    None
+                }
+            })
+            .collect();
+        let protected: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM recordings
+              WHERE deleted_at IS NOT NULL AND encryption_pending = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((candidates, protected.max(0) as u32))
+    }
+
+    /// Manual, age-independent, EXACT-SET purge for the "Purge Now" flow.
+    ///
+    /// The snapshot comes from [`RecordingsRepo::list_soft_deleted_snapshot`]
+    /// at preview time; every candidate is re-verified inside ONE deletion
+    /// transaction against the reviewed tombstone identity
+    /// (`id` + raw stored `deleted_at`) plus the `deleted_at IS NOT NULL`
+    /// and mid-encryption guards. A row that stopped matching (restored,
+    /// re-trashed with a new deletion, purged elsewhere) is reported as
+    /// `changed`, never deleted, never ledgered — a same-count set swap or a
+    /// record trashed while the dialog was open cannot silently join the
+    /// destructive operation. FTS consistency and the
+    /// `purged_recordings`-ledger discipline are identical to
+    /// [`RecordingsRepo::purge_soft_deleted_with_ledger`]: the guarded
+    /// re-index runs immediately before the DELETE, and only ids whose rows
+    /// were actually deleted are ledgered.
+    pub fn purge_soft_deleted_snapshot_with_ledger(
+        conn: &Connection,
+        snapshot: &[TrashPurgeSnapshotCandidate],
+    ) -> DbResult<SnapshotPurgeOutcome> {
+        use rusqlite::OptionalExtension;
+
+        let tx = conn.unchecked_transaction()?;
+        let purged_at = Utc::now().to_rfc3339();
+        let mut outcome = SnapshotPurgeOutcome::default();
+        for cand in snapshot {
+            let id_str = cand.id.to_string();
+            // Classify under the reviewed identity, inside the transaction.
+            // `deleted_at = ?2` string-compares the raw stored values, so
+            // only the exact reviewed deletion matches.
+            let classified: Option<(Option<String>, i64)> = tx
+                .query_row(
+                    "SELECT audio_path, COALESCE(encryption_pending, 0) FROM recordings
+                      WHERE id = ?1 AND deleted_at IS NOT NULL AND deleted_at = ?2",
+                    rusqlite::params![id_str, cand.deleted_at],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((audio_path, encryption_pending)) = classified else {
+                outcome.changed.push(cand.id);
+                continue;
+            };
+            if encryption_pending != 0 {
+                outcome.protected.push(cand.id);
+                continue;
+            }
+            // Same guarded re-index → DELETE → ledger sequence as the
+            // retention purge, with the identity predicate added: a row
+            // that stopped matching mid-batch is neither de-indexed,
+            // deleted, nor ledgered.
+            tx.execute(
+                "INSERT INTO recordings_fts(rowid, id, filename, transcript, soap_note, referral, letter, patient_name)
+                 SELECT rowid, id, filename, transcript, soap_note, referral, letter, patient_name
+                 FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL AND deleted_at = ?2
+                   AND (encryption_pending IS NULL OR encryption_pending = 0)",
+                rusqlite::params![id_str, cand.deleted_at],
+            )?;
+            let rows = tx.execute(
+                "DELETE FROM recordings WHERE id = ?1 AND deleted_at IS NOT NULL AND deleted_at = ?2
+                   AND (encryption_pending IS NULL OR encryption_pending = 0)",
+                rusqlite::params![id_str, cand.deleted_at],
+            )?;
+            if rows > 0 {
+                // RAG chunks for the purged document go in the SAME
+                // transaction (Codie C1): orphaned document_chunks are
+                // queryable by the vector store with no recordings join,
+                // so a silent vector failure would leave consented PHI
+                // searchable. A failure here aborts the whole transaction —
+                // row, chunks, and ledger all roll back together and the
+                // error propagates before ANY artifact cleanup runs.
+                crate::vectors::VectorsRepo::delete_by_document(&tx, &id_str)?;
+                tx.execute(
+                    "INSERT INTO purged_recordings (id, purged_at) VALUES (?1, ?2)
+                     ON CONFLICT(id) DO UPDATE SET purged_at = excluded.purged_at",
+                    rusqlite::params![id_str, purged_at],
+                )?;
+                outcome
+                    .purged
+                    .push((cand.id, audio_path.unwrap_or_default()));
+            } else {
+                // Unreachable given the classification above ran in this
+                // same transaction — defensive: never claim a purge on a
+                // miss (the caller would delete artifacts for a live row).
+                outcome.changed.push(cand.id);
+            }
+        }
+        // ── Transactional outbox (durable recovery, owner round 3) ──────
+        // Record cleanup intent for every purged row's audio path IN THIS
+        // TRANSACTION, BEFORE the commit: once the commit lands, every
+        // needed unlink has durable intent even if the process dies before
+        // cleanup, the unlink fails, or the later ack write fails. A
+        // queue read/parse/write failure aborts the WHOLE purge (rows,
+        // chunks, FTS, ledger, and the queue itself roll back together)
+        // and NO artifact is touched. A corrupt queue is never reset.
+        let candidate_paths: Vec<String> = outcome
+            .purged
+            .iter()
+            .map(|(_, path)| path.clone())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if !candidate_paths.is_empty() {
+            let mut queue = crate::content_sync::ContentSyncRepo::get_pending_file_removals(&tx)?;
+            for path in candidate_paths {
+                // Ownership guard (post-delete, in-transaction): if any
+                // SURVIVING row still references this path — a shared-path
+                // collision or a synced copy — the file belongs to that
+                // live owner. Skip the intent; never unlink a live owner.
+                let owners: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM recordings WHERE audio_path = ?1",
+                    rusqlite::params![path],
+                    |r| r.get(0),
+                )?;
+                if owners > 0 {
+                    continue;
+                }
+                // Dedup the QUEUE (one durable entry per path), but report
+                // EVERY eligible intended path in the outcome — including
+                // paths already queued by a prior purge's crash window —
+                // so the immediate cleanup attempts them and the result
+                // can never claim completion for an unfulfilled intent
+                // (Codie R-A).
+                if !queue.contains(&path) {
+                    queue.push(path.clone());
+                }
+                if !outcome.cleanup_enqueued.contains(&path) {
+                    outcome.cleanup_enqueued.push(path);
+                }
+            }
+            crate::content_sync::ContentSyncRepo::set_pending_file_removals(&tx, &queue)?;
+        }
+        tx.commit()?;
+        Ok(outcome)
     }
 
     /// Shared body of the purge entry points. See their docs; the flag
@@ -3365,5 +3574,278 @@ mod tests {
         set_raw_created_at(&conn, &rec.id, "not-a-timestamp");
         let result = RecordingsRepo::query(&conn, None, None, 50, 0);
         assert!(result.is_err(), "corrupt created_at must fail the query");
+    }
+
+    // ── Manual "Purge Now": snapshot preview + exact-set purge ───────────
+    //
+    // Fixtures: seed a trashed row with a single raw UPDATE (the statement
+    // shape `soft_delete` uses — re-updating after soft_delete would fire
+    // the FTS trigger against a de-indexed row). `days` may be negative to
+    // plant a FUTURE tombstone (clock skew / migrated data).
+
+    fn deleted_at_is_null(conn: &Connection, id: Uuid) -> bool {
+        conn.query_row(
+            "SELECT deleted_at IS NULL FROM recordings WHERE id = ?1",
+            rusqlite::params![id.to_string()],
+            |r| r.get(0),
+        )
+        .expect("query deleted_at nullity")
+    }
+
+    fn seed_snapshot_row(
+        conn: &Connection,
+        filename: &str,
+        audio_path: &str,
+        deleted_days_ago: i64,
+    ) -> (Recording, String) {
+        let rec = Recording::new(filename, PathBuf::from(audio_path));
+        RecordingsRepo::insert(conn, &rec).unwrap();
+        let stamp = (Utc::now() - chrono::TimeDelta::days(deleted_days_ago)).to_rfc3339();
+        conn.execute(
+            "UPDATE recordings SET deleted_at = ?1, updated_at = ?1
+              WHERE id = ?2 AND deleted_at IS NULL",
+            rusqlite::params![stamp, rec.id.to_string()],
+        )
+        .expect("seed tombstone");
+        (rec, stamp)
+    }
+
+    #[test]
+    fn snapshot_lists_all_trashed_ages_and_excludes_active_and_encrypting() {
+        let conn = migrated_conn();
+        let (fresh, fresh_stamp) = seed_snapshot_row(&conn, "fresh.wav", "/a/fresh.wav", 0);
+        let (aged, aged_stamp) = seed_snapshot_row(&conn, "aged.wav", "/a/aged.wav", 40);
+        let (future, future_stamp) = seed_snapshot_row(&conn, "future.wav", "/a/future.wav", -5);
+        let (pending, _) = seed_snapshot_row(&conn, "pending.wav", "/a/pending.wav", 3);
+        conn.execute(
+            "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+            rusqlite::params![pending.id.to_string()],
+        )
+        .unwrap();
+        // A never-trashed active row.
+        let active = new_rec();
+        RecordingsRepo::insert(&conn, &active).unwrap();
+
+        let (candidates, protected_count) =
+            RecordingsRepo::list_soft_deleted_snapshot(&conn).unwrap();
+
+        let by_id: std::collections::HashMap<Uuid, String> = candidates
+            .iter()
+            .map(|c| (c.id, c.deleted_at.clone()))
+            .collect();
+        assert_eq!(by_id.len(), 3, "fresh + aged + future tombstones only");
+        // Tombstone identity is the EXACT raw stored string (byte equality
+        // is the recheck contract), for every age — including future.
+        assert_eq!(by_id[&fresh.id], fresh_stamp);
+        assert_eq!(by_id[&aged.id], aged_stamp);
+        assert_eq!(by_id[&future.id], future_stamp);
+        assert!(!by_id.contains_key(&pending.id), "encrypting rows excluded");
+        assert!(!by_id.contains_key(&active.id), "active rows excluded");
+        assert_eq!(protected_count, 1, "encrypting trashed row is protected");
+    }
+
+    #[test]
+    fn snapshot_purge_deletes_exact_candidates_with_ledger_and_consistent_fts() {
+        let conn = migrated_conn();
+        let (purged, _) = seed_snapshot_row(&conn, "gone.wav", "/a/gone.wav", 3);
+        let (kept, _) = seed_snapshot_row(&conn, "kept.wav", "/a/kept.wav", 40);
+
+        let (candidates, _) = RecordingsRepo::list_soft_deleted_snapshot(&conn).unwrap();
+        // Purge ONLY the first candidate — an exact subset, not "all trash".
+        let subset: Vec<_> = candidates.iter().take(1).cloned().collect();
+        let outcome =
+            RecordingsRepo::purge_soft_deleted_snapshot_with_ledger(&conn, &subset).unwrap();
+
+        assert_eq!(outcome.purged.len(), 1);
+        assert_eq!(outcome.purged[0].0, purged.id);
+        assert_eq!(
+            outcome.purged[0].1, "/a/gone.wav",
+            "audio path is read from the live row inside the transaction"
+        );
+        assert!(outcome.protected.is_empty());
+        assert!(outcome.changed.is_empty());
+
+        // Row gone + ledgered; the untargeted trashed row survives unledgered.
+        let gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recordings WHERE id = ?1",
+                rusqlite::params![purged.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(gone, 0, "targeted row hard-deleted");
+        let ledgered: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+                rusqlite::params![purged.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ledgered, 1, "purged id is ledgered");
+        let kept_ledgered: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+                rusqlite::params![kept.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept_ledgered, 0, "unpurged row never ledgered");
+
+        // FTS consistency: the surviving tombstone can still be restored
+        // (SQLITE_CORRUPT here would mean a broken index), and the purged
+        // row leaves no searchable residue.
+        RecordingsRepo::restore(&conn, &kept.id).unwrap();
+        assert_eq!(fts_match_count_by_stem(&conn, "gone"), 0);
+        assert_eq!(fts_match_count_by_stem(&conn, "kept"), 1);
+    }
+
+    #[test]
+    fn snapshot_purge_skips_candidate_restored_after_preview() {
+        let conn = migrated_conn();
+        let (rec, _) = seed_snapshot_row(&conn, "raced.wav", "/a/raced.wav", 3);
+        let (candidates, _) = RecordingsRepo::list_soft_deleted_snapshot(&conn).unwrap();
+        RecordingsRepo::restore(&conn, &rec.id).unwrap();
+
+        let outcome =
+            RecordingsRepo::purge_soft_deleted_snapshot_with_ledger(&conn, &candidates).unwrap();
+
+        assert!(outcome.purged.is_empty(), "restored row must not be purged");
+        assert!(outcome.protected.is_empty());
+        assert_eq!(
+            outcome.changed,
+            vec![rec.id],
+            "reported as changed, not purged"
+        );
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recordings WHERE id = ?1",
+                rusqlite::params![rec.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "restored row survives the stale purge");
+        let still_active = deleted_at_is_null(&conn, rec.id);
+        assert!(still_active, "row is ACTIVE, not trashed");
+    }
+
+    #[test]
+    fn snapshot_purge_retrash_after_preview_requires_new_consent() {
+        let conn = migrated_conn();
+        let (rec, _) = seed_snapshot_row(&conn, "retrashed.wav", "/a/retrashed.wav", 3);
+        let (candidates, _) = RecordingsRepo::list_soft_deleted_snapshot(&conn).unwrap();
+        // Restore, then the user trashes it AGAIN — same id, NEW tombstone.
+        RecordingsRepo::restore(&conn, &rec.id).unwrap();
+        RecordingsRepo::soft_delete(&conn, &rec.id).unwrap();
+
+        let outcome =
+            RecordingsRepo::purge_soft_deleted_snapshot_with_ledger(&conn, &candidates).unwrap();
+
+        assert!(
+            outcome.purged.is_empty(),
+            "new deletion is not the reviewed one"
+        );
+        assert_eq!(outcome.changed, vec![rec.id]);
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recordings WHERE id = ?1",
+                rusqlite::params![rec.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "re-trashed row survives the stale purge");
+        let ledgered: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+                rusqlite::params![rec.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ledgered, 0, "never ledgered — it was never purged");
+    }
+
+    #[test]
+    fn snapshot_purge_protects_encryption_pending_raced_after_preview() {
+        let conn = migrated_conn();
+        let (rec, _) = seed_snapshot_row(&conn, "encrypting.wav", "/a/encrypting.wav", 3);
+        let (candidates, _) = RecordingsRepo::list_soft_deleted_snapshot(&conn).unwrap();
+        // Encryption flips on AFTER the preview (a raced capture/import).
+        conn.execute(
+            "UPDATE recordings SET encryption_pending = 1 WHERE id = ?1",
+            rusqlite::params![rec.id.to_string()],
+        )
+        .unwrap();
+
+        let outcome =
+            RecordingsRepo::purge_soft_deleted_snapshot_with_ledger(&conn, &candidates).unwrap();
+
+        assert!(outcome.purged.is_empty());
+        assert_eq!(
+            outcome.protected,
+            vec![rec.id],
+            "mid-encryption row is protected"
+        );
+        assert!(outcome.changed.is_empty());
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM recordings WHERE id = ?1",
+                rusqlite::params![rec.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "protected row survives");
+    }
+
+    #[test]
+    fn snapshot_purge_ignores_active_id_passed_by_mistake() {
+        let conn = migrated_conn();
+        let active = new_rec();
+        RecordingsRepo::insert(&conn, &active).unwrap();
+        let snapshot = vec![TrashPurgeSnapshotCandidate {
+            id: active.id,
+            deleted_at: "2026-01-01T00:00:00+00:00".to_string(),
+        }];
+
+        let outcome =
+            RecordingsRepo::purge_soft_deleted_snapshot_with_ledger(&conn, &snapshot).unwrap();
+
+        assert!(outcome.purged.is_empty(), "an active row is never purged");
+        assert_eq!(outcome.changed, vec![active.id]);
+        let ledgered: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+                rusqlite::params![active.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ledgered, 0, "no spurious ledger entry");
+    }
+
+    #[test]
+    fn snapshot_purge_is_idempotent_on_replay() {
+        let conn = migrated_conn();
+        let (rec, _) = seed_snapshot_row(&conn, "once.wav", "/a/once.wav", 3);
+        let (candidates, _) = RecordingsRepo::list_soft_deleted_snapshot(&conn).unwrap();
+
+        let first =
+            RecordingsRepo::purge_soft_deleted_snapshot_with_ledger(&conn, &candidates).unwrap();
+        assert_eq!(first.purged.len(), 1);
+
+        // Double invocation (double-click / retry of the same payload).
+        let second =
+            RecordingsRepo::purge_soft_deleted_snapshot_with_ledger(&conn, &candidates).unwrap();
+        assert!(second.purged.is_empty(), "no fabricated counts on replay");
+        assert_eq!(second.changed, vec![rec.id]);
+    }
+
+    #[test]
+    fn snapshot_purge_empty_trash_is_noop() {
+        let conn = migrated_conn();
+        let (candidates, protected) = RecordingsRepo::list_soft_deleted_snapshot(&conn).unwrap();
+        assert!(candidates.is_empty());
+        assert_eq!(protected, 0);
+        let outcome = RecordingsRepo::purge_soft_deleted_snapshot_with_ledger(&conn, &[]).unwrap();
+        assert!(outcome.purged.is_empty());
+        assert!(outcome.protected.is_empty());
+        assert!(outcome.changed.is_empty());
     }
 }

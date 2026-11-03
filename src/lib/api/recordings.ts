@@ -162,3 +162,53 @@ export async function deleteRecordingsCreatedBetween(
 export async function importAudioFile(filePath: string): Promise<string> {
   return invoke('import_audio_file', { filePath });
 }
+
+/** One purge-eligible tombstone in the "Purge Now" preview: the recording
+ *  id plus the RAW tombstone identity (stored deletion timestamp). The
+ *  backend re-verifies BOTH inside the purge transaction, so only the
+ *  exact deletion the user reviewed can be purged. */
+export interface TrashPurgeCandidate {
+  id: string;
+  deletedAt: string;
+}
+
+/** Backend "Purge Now" preview: the authoritative, all-DB candidate set —
+ *  every trashed recording regardless of deletion/creation age (fresh and
+ *  future-dated tombstones included), independent of any page or search
+ *  filter — plus the count of trashed rows still mid-encryption (they are
+ *  never purged; reported honestly so the dialog can say they'll be
+ *  kept). */
+export interface TrashPurgePreview {
+  candidates: TrashPurgeCandidate[];
+  protectedCount: number;
+}
+
+/** Result of the destructive "Purge Now" purge: ACTUAL counts, never
+ *  fabricated. `purged` rows are permanently gone; `protected` were kept
+ *  (mid-encryption — retry later); `changed` left the reviewed set
+ *  (restored / re-trashed anew / gone) and need a new confirmation;
+ *  `cleanupPending` means some audio removals did not complete in this
+ *  call but have DURABLE COMMITTED cleanup intent — the background drain
+ *  will finish them (crash, unlink failure, and ack failure all
+ *  recover). */
+export interface TrashPurgeResult {
+  purged: number;
+  protected: number;
+  changed: number;
+  cleanupPending: boolean;
+}
+
+/** Preview the exact-set "Purge Now" candidate set from the backend. MUST
+ *  be this dedicated command — never derived from the paginated trash
+ *  list, the local search filter, or `trashedTotal`. */
+export async function previewTrashPurge(): Promise<TrashPurgePreview> {
+  return invoke('preview_trash_purge');
+}
+
+/** Permanently purge EXACTLY the reviewed candidates (frozen preview — the
+ *  backend re-verifies each tombstone identity inside the transaction). */
+export async function purgeTrashNow(
+  candidates: TrashPurgeCandidate[],
+): Promise<TrashPurgeResult> {
+  return invoke('purge_trash_now', { candidates });
+}

@@ -23,6 +23,8 @@ const mockRestoreBetween = vi.fn();
 const mockCountBetween = vi.fn();
 const mockCountCreatedBetween = vi.fn();
 const mockDeleteCreatedBetween = vi.fn();
+const mockPreviewTrashPurge = vi.fn();
+const mockPurgeTrashNow = vi.fn();
 vi.mock('../api/recordings', () => ({
   queryRecordings: (...args: unknown[]) => mockQueryRecordings(...args),
   listRecordingCreationTimes: (...args: unknown[]) => mockListCreationTimes(...args),
@@ -37,6 +39,8 @@ vi.mock('../api/recordings', () => ({
   countRecordingsDeletedBetween: (...args: unknown[]) => mockCountBetween(...args),
   countRecordingsCreatedBetween: (...args: unknown[]) => mockCountCreatedBetween(...args),
   deleteRecordingsCreatedBetween: (...args: unknown[]) => mockDeleteCreatedBetween(...args),
+  previewTrashPurge: (...args: unknown[]) => mockPreviewTrashPurge(...args),
+  purgeTrashNow: (...args: unknown[]) => mockPurgeTrashNow(...args),
   getRecording: vi.fn(),
 }));
 
@@ -106,6 +110,8 @@ function resetAllMocks() {
   mockCountBetween.mockReset();
   mockCountCreatedBetween.mockReset();
   mockDeleteCreatedBetween.mockReset();
+  mockPreviewTrashPurge.mockReset();
+  mockPurgeTrashNow.mockReset();
   vi.clearAllMocks();
   // Shared defaults: empty DB, everything succeeds unless a test says
   // otherwise — a mutation's fire-and-forget refreshes never explode.
@@ -1756,6 +1762,121 @@ describe('RecordingsStore — refreshActiveTotal fencing (S-2)', () => {
     slow.resolve(3); // the older request lands LAST
     await pSlow;
     expect(recordings.activeTotal).toBe(7);
+  });
+});
+
+// ── Purge Now (manual, exact-set Trash purge) ─────────────────────────────
+const purgePreview = {
+  candidates: [
+    { id: '3fa85f64-5717-4562-b3fc-2c963f66afa6', deletedAt: '2026-11-01T00:00:00+00:00' },
+    { id: '0c0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b', deletedAt: '2026-11-02T00:00:00+00:00' },
+  ],
+  protectedCount: 0,
+};
+
+describe('RecordingsStore — Purge Now (manual trash purge)', () => {
+  beforeEach(resetAllMocks);
+
+  it('previewTrashPurge() rides the dedicated command untouched', async () => {
+    mockPreviewTrashPurge.mockResolvedValueOnce(purgePreview);
+    const { recordings } = await freshStore();
+    await expect(recordings.previewTrashPurge()).resolves.toEqual(purgePreview);
+    expect(mockPreviewTrashPurge).toHaveBeenCalledTimes(1);
+  });
+
+  it('purgeTrashNow() sends the FROZEN candidates verbatim, refreshes Trash, guards double-submit, keeps the editor', async () => {
+    mockPurgeTrashNow.mockResolvedValueOnce({ purged: 2, protected: 0, changed: 0, cleanupPending: false });
+    mockListTrashed.mockResolvedValueOnce({ items: [], total: 0 });
+    const { recordings } = await freshStore();
+    recordings.selectedRecording = { id: 'unrelated' } as unknown as Recording;
+
+    const first = recordings.purgeTrashNow(purgePreview.candidates);
+    await expect(recordings.purgeTrashNow(purgePreview.candidates)).rejects.toThrow(
+      /already in progress/,
+    );
+    const result = await first;
+
+    expect(result.purged).toBe(2);
+    expect(mockPurgeTrashNow).toHaveBeenCalledTimes(1);
+    expect(mockPurgeTrashNow).toHaveBeenCalledWith(purgePreview.candidates);
+    expect(mockListTrashed).toHaveBeenCalledTimes(1);
+    expect(recordings.trashedList).toEqual([]);
+    expect(recordings.trashedTotal).toBe(0);
+    expect(recordings.purging).toBe(false);
+    expect(recordings.selectedRecording?.id).toBe('unrelated');
+  });
+
+  it('purge failure propagates, clears purging, and does not fake a refresh', async () => {
+    mockPurgeTrashNow.mockRejectedValueOnce(new Error('db locked'));
+    const { recordings } = await freshStore();
+    await expect(recordings.purgeTrashNow(purgePreview.candidates)).rejects.toThrow('db locked');
+    expect(recordings.purging).toBe(false);
+    expect(mockListTrashed).not.toHaveBeenCalled();
+  });
+
+  it('a stale BADGE refresh during the purge can never resurrect the count (W2)', async () => {
+    const { recordings } = await freshStore();
+
+    // A badge-only refresh (background sync / remote-update debounce) is
+    // in flight when the purge starts, holding the PRE-purge count.
+    const staleBadge = deferred<{ items: unknown[]; total: number }>();
+    mockListTrashed.mockImplementationOnce(() => staleBadge.promise);
+    void recordings.refreshTrashedTotal();
+
+    const mut = deferred<unknown>();
+    mockPurgeTrashNow.mockReturnValue(mut.promise);
+    const purging = recordings.purgeTrashNow(purgePreview.candidates);
+    await Promise.resolve();
+
+    // COMMIT: purge resolves; the post-purge reload reports an empty Trash.
+    mockListTrashed.mockResolvedValueOnce({ items: [], total: 0 });
+    mut.resolve({ purged: 2, protected: 0, changed: 0, cleanupPending: false });
+    await purging;
+    expect(recordings.trashedTotal).toBe(0);
+
+    // The stale badge lands LAST with the pre-purge count — it must be
+    // discarded (its request generation/token predates the purge's reload).
+    staleBadge.resolve({ items: [], total: 2 });
+    await new Promise((r) => setTimeout(r, 0));
+    // The badge must not resurrect purged rows.
+    expect(recordings.trashedTotal).toBe(0);
+  });
+
+  it('a stale trash page in flight during the purge can never resurrect purged rows or the count', async () => {
+    const { recordings } = await freshStore();
+    const trashedRow = (id: string) =>
+      ({
+        id,
+        filename: `${id}.wav`,
+        patient_name: null,
+        duration_seconds: 60,
+        created_at: '2026-11-01T00:00:00Z',
+        deleted_at: '2026-11-02T00:00:00Z',
+      }) as import('../types').TrashedRecordingSummary;
+
+    // A pre-purge trash load is still in flight when the purge starts.
+    const stale = deferred<{ items: unknown[]; total: number }>();
+    mockListTrashed.mockImplementationOnce(() => stale.promise);
+    void recordings.loadTrashed();
+
+    const mut = deferred<unknown>();
+    mockPurgeTrashNow.mockReturnValue(mut.promise);
+    const purging = recordings.purgeTrashNow(purgePreview.candidates);
+    await Promise.resolve();
+
+    // COMMIT: purge resolves; the post-purge reload sees the emptied Trash.
+    mockListTrashed.mockResolvedValueOnce({ items: [], total: 0 });
+    mut.resolve({ purged: 2, protected: 0, changed: 0, cleanupPending: false });
+    await purging;
+    expect(recordings.trashedList).toEqual([]);
+    expect(recordings.trashedTotal).toBe(0);
+
+    // The STALE pre-purge page lands LAST with the purged rows still in
+    // it — it must be discarded whole (token superseded by the reload).
+    stale.resolve({ items: [trashedRow(purgePreview.candidates[0].id)], total: 1 });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(recordings.trashedList).toEqual([]);
+    expect(recordings.trashedTotal).toBe(0);
   });
 });
 
