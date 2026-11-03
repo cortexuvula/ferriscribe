@@ -84,7 +84,7 @@ regex = "1"
 hound = "3.5"
 libc = "0.2"
 urlencoding = "2"
-dirs = "6"
+dirs = "7"
 tempfile = "3"
 wiremock = "0.6"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
