@@ -1124,3 +1124,87 @@ fn dict_merge_applies_remote_tombstone() {
         "tie on updated_at must not resurrect the tombstoned word"
     );
 }
+
+// -------------------------------------------------------------------------
+// Drift regression (installed v0.85.0 "Couldn't purge Trash: unexpected
+// error"): the exact-set purge must survive a document_chunks row whose
+// chunks_fts entry is MISSING — the residue of any historical
+// de-index-without-row-delete. The external-content FTS5 delete trigger
+// alone rejects such a DELETE with SQLITE_CORRUPT ("database disk image is
+// malformed"), which aborts the WHOLE purge transaction (row, chunks,
+// ledger, outbox all roll back) and surfaces as the generic sanitized
+// toast. chunks_fts is DERIVED from the authoritative document_chunks rows:
+// the purge rebuilds the missing entry from the authoritative row inside
+// the same transaction. Synthetic non-PHI fixtures only.
+// -------------------------------------------------------------------------
+
+#[test]
+fn purge_snapshot_survives_missing_chunks_fts_entry() {
+    use medical_db::vectors::VectorsRepo;
+
+    let db = Database::open_in_memory().expect("db");
+    let rec = {
+        let conn = db.conn().expect("conn");
+        let rec = seed(&conn, "drift-purge.wav");
+        RecordingsRepo::soft_delete(&conn, &rec.id).expect("trash");
+        // RAG chunks for the trashed document.
+        for i in 0..2 {
+            VectorsRepo::insert_chunk(
+                &conn,
+                &format!("{}-c{i}", rec.id),
+                &rec.id.to_string(),
+                "synthetic chunk",
+                None,
+                i,
+                "{}",
+            )
+            .expect("seed chunk");
+        }
+        // Drift injection: de-index ONE chunk via the legitimate FTS
+        // 'delete' command — the exact state a historical de-index leaves
+        // (row survives, index entry gone).
+        conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts, rowid, content)
+             SELECT 'delete', rowid, content FROM document_chunks WHERE id = ?1",
+            rusqlite::params![format!("{}-c0", rec.id)],
+        )
+        .expect("de-index chunk");
+        rec
+    };
+
+    let conn = db.conn().expect("conn");
+    let (snapshot, protected) = RecordingsRepo::list_soft_deleted_snapshot(&conn).expect("preview");
+    assert_eq!(snapshot.len(), 1, "fixture: one trashed candidate");
+    assert_eq!(protected, 0);
+
+    // Pre-fix this failed with SQLITE_CORRUPT "database disk image is
+    // malformed" inside the deletion transaction.
+    let outcome = RecordingsRepo::purge_soft_deleted_snapshot_with_ledger(&conn, &snapshot)
+        .expect("purge must survive derived-index drift");
+
+    assert_eq!(outcome.purged.len(), 1, "the drifted row still purges");
+    let chunks_left: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM document_chunks WHERE document_id = ?1",
+            [rec.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(chunks_left, 0, "all chunks deleted with the row");
+    let rows_left: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM recordings WHERE id = ?1",
+            [rec.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows_left, 0, "row hard-deleted");
+    let ledgered: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+            [rec.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ledgered, 1, "purge ledgered (resurrection fence intact)");
+}

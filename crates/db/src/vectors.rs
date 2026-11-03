@@ -316,7 +316,33 @@ impl VectorsRepo {
     /// Delete all chunks belonging to a document.
     ///
     /// Returns the number of rows removed (0 if the document had no chunks).
+    ///
+    /// FTS drift repair: `chunks_fts` is an EXTERNAL-CONTENT index derived
+    /// from the authoritative `document_chunks` rows. A chunk row whose
+    /// index entry has gone missing (historical drift — e.g. a past
+    /// de-index-without-row-delete) makes the `chunks_fts_delete` trigger's
+    /// 'delete' command run against absent index state, which FTS5 rejects
+    /// with SQLITE_CORRUPT ("database disk image is malformed"). That error
+    /// aborts the CALLER's whole transaction — for the manual "Purge Now"
+    /// purge this was the deterministic "Couldn't purge Trash: unexpected
+    /// error" failure. Before deleting, rebuild ONLY the missing entries
+    /// from the authoritative rows (same guarded re-index discipline the
+    /// recordings side uses — see `RecordingsRepo::purge_soft_deleted_impl`
+    /// and `restore_row_within_tx`'s membership probe; the `_docsize` shadow
+    /// table is the membership oracle). Any error still propagates: this
+    /// repair rebuilds a derived index, it never weakens failure semantics,
+    /// and it never touches surviving rows of other documents.
     pub fn delete_by_document(conn: &Connection, document_id: &str) -> DbResult<u32> {
+        conn.execute(
+            "INSERT INTO chunks_fts(rowid, content)
+             SELECT c.rowid, c.content
+               FROM document_chunks c
+              WHERE c.document_id = ?1
+                AND NOT EXISTS (
+                    SELECT 1 FROM chunks_fts_docsize d WHERE d.rowid = c.rowid
+                )",
+            [document_id],
+        )?;
         let deleted = conn.execute(
             "DELETE FROM document_chunks WHERE document_id = ?1",
             [document_id],
@@ -437,6 +463,64 @@ mod tests {
         let conn = migrated_conn();
         let deleted = VectorsRepo::delete_by_document(&conn, "nope").unwrap();
         assert_eq!(deleted, 0);
+    }
+
+    /// Drift regression: a `document_chunks` row whose `chunks_fts` entry is
+    /// missing (the residue of any historical de-index-without-row-delete).
+    /// The external-content delete trigger alone would reject the DELETE with
+    /// SQLITE_CORRUPT "database disk image is malformed"; the delete must
+    /// rebuild the missing entry from the authoritative row first and still
+    /// succeed — while other documents' chunks and index entries stay
+    /// untouched, and BM25 search over them keeps working.
+    #[test]
+    fn delete_by_document_survives_missing_fts_entry() {
+        let conn = migrated_conn();
+
+        VectorsRepo::insert_chunk(&conn, "d1c0", "doc1", "knee pain assessment", None, 0, "{}")
+            .unwrap();
+        VectorsRepo::insert_chunk(&conn, "d1c1", "doc1", "followup plan", None, 1, "{}").unwrap();
+        VectorsRepo::insert_chunk(&conn, "d2c0", "doc2", "unrelated visit", None, 0, "{}").unwrap();
+
+        // Inject the drift with the LEGITIMATE FTS 'delete' command (the
+        // exact state a historical de-index leaves): row survives, entry gone.
+        conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts, rowid, content)
+             SELECT 'delete', rowid, content FROM document_chunks WHERE id = 'd1c0'",
+            [],
+        )
+        .expect("de-index d1c0");
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts_docsize d
+                  JOIN document_chunks c ON c.rowid = d.rowid
+                  WHERE c.id = 'd1c0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 0, "fixture: d1c0 row present but unindexed");
+
+        // Pre-fix: SQLITE_CORRUPT. Post-fix: clean delete of the whole doc.
+        let deleted = VectorsRepo::delete_by_document(&conn, "doc1").unwrap();
+        assert_eq!(deleted, 2, "both doc1 chunks deleted");
+
+        // The other document is untouched and still searchable.
+        assert_eq!(VectorsRepo::count(&conn).unwrap(), 1);
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'unrelated'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "doc2 still indexed and searchable");
+
+        // And the index is internally consistent afterwards.
+        conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')",
+            [],
+        )
+        .expect("chunks_fts integrity-check after drift repair");
     }
 
     #[test]

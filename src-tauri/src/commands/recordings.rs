@@ -461,6 +461,35 @@ pub async fn preview_trash_purge(
     .map_err(join_err)?
 }
 
+/// PHI-safe failure diagnostic for the manual "Purge Now" command: static
+/// operation name, the stable `AppError` kind discriminant, and the numeric
+/// SQLite extended code when the source chain carries one. NEVER the raw
+/// Display/Debug/`message`/`source`/serialized `AppError` — `Database`'s
+/// message is the `DbError` Display, which can echo SQL and row data (PHI),
+/// and the wrapped `rusqlite` error message can echo engine strings with
+/// bound values.
+fn log_purge_failure_diagnostic(err: &AppError) {
+    tracing::warn!(
+        operation = "purge_trash_now",
+        error_kind = err.kind_str(),
+        sqlite_extended_code = sqlite_extended_code(err).unwrap_or(0),
+        "Purge Now failed"
+    );
+}
+
+/// Numeric SQLite extended result code buried in `err`'s source chain, if
+/// any (e.g. 267 = SQLITE_CORRUPT_VTAB). Pure number — no engine text.
+fn sqlite_extended_code(err: &AppError) -> Option<i32> {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = current {
+        if let Some(rusqlite::Error::SqliteFailure(ffi, _)) = e.downcast_ref::<rusqlite::Error>() {
+            return Some(ffi.extended_code);
+        }
+        current = e.source();
+    }
+    None
+}
+
 /// Permanently purge EXACTLY the reviewed candidates ("Purge Now"). The
 /// frozen preview set travels verbatim; the backend re-verifies each
 /// tombstone identity plus the mid-encryption guard inside ONE deletion
@@ -479,7 +508,12 @@ pub async fn purge_trash_now(
     let outcome =
         tokio::task::spawn_blocking(move || crate::sweeps::purge_trash_snapshot(&db, &snapshot))
             .await
-            .map_err(join_err)??;
+            .map_err(join_err)?
+            // Scoped PHI-safe diagnostic (v0.85.0 field report: purge failures
+            // left NO log line — only the success path logged). Structured
+            // statics only — see `log_purge_failure_diagnostic`; the frontend
+            // toast stays sanitized (sanitizedErr).
+            .inspect_err(log_purge_failure_diagnostic)?;
     tracing::info!(
         purged = outcome.purged.len(),
         protected = outcome.protected.len(),
@@ -1103,5 +1137,131 @@ mod tests {
         }])
         .expect_err("blank identity must be rejected");
         assert!(matches!(err, AppError::InvalidInput(_)), "{err}");
+    }
+    /// PHI-shaped markers for the diagnostic leak tests below. Synthetic — no
+    /// real patient data, but exactly the class of content that can ride inside
+    /// an `AppError::Database` message (the `DbError` Display) or the wrapped
+    /// rusqlite engine string.
+    const PHI_MARKER_MESSAGE: &str = "PHI-MARKER-doe-jane-205-pandosy";
+    const PHI_MARKER_SQLITE: &str = "PHI-MARKER-near-visit-notes.wav";
+
+    /// Capture the tracing output of one `log_purge_failure_diagnostic` call
+    /// into a string, with a scoped subscriber (no global default touched, so
+    /// this is safe to run alongside the rest of the suite).
+    fn capture_purge_diagnostic(err: &AppError) -> String {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for CaptureWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct CaptureMaker(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureMaker {
+            type Writer = CaptureWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                CaptureWriter(self.0.clone())
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(CaptureMaker(buf.clone()))
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        tracing::dispatcher::with_default(&dispatch, || log_purge_failure_diagnostic(err));
+        let bytes = buf.lock().unwrap().clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Privacy regression (Frikkie pre-review correction): the Purge Now
+    /// failure diagnostic must NEVER emit the raw error — a Database error
+    /// whose message and rusqlite engine string both carry PHI-shaped markers
+    /// must log only the static operation, the stable kind discriminant, and
+    /// the numeric SQLite extended code. Pre-fix this failed: the raw
+    /// `error = %e` Display carried both markers into the log line.
+    #[test]
+    fn purge_failure_diagnostic_emits_no_raw_database_error_content() {
+        let sqlite_err = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseCorrupt,
+                extended_code: 267, // SQLITE_CORRUPT_VTAB — the field-report class
+            },
+            Some(PHI_MARKER_SQLITE.to_string()),
+        );
+        // Exactly how the purge path wraps DB failures (crates/db lib.rs
+        // `From<DbError> for AppError`): message = DbError Display, source =
+        // the typed DbError with the rusqlite error beneath it.
+        let db_err = medical_db::DbError::Sqlite(sqlite_err);
+        let err = AppError::database_with_source(db_err.to_string(), db_err);
+
+        let captured = capture_purge_diagnostic(&err);
+
+        assert!(
+            !captured.contains(PHI_MARKER_MESSAGE),
+            "raw DbError message must not reach the log, got: {captured}"
+        );
+        assert!(
+            !captured.contains(PHI_MARKER_SQLITE),
+            "raw rusqlite engine string must not reach the log, got: {captured}"
+        );
+        assert!(
+            !captured.contains("SQLite error"),
+            "DbError Display prefix carries content risk, got: {captured}"
+        );
+        // The safe class MUST be present: static operation, kind, numeric code.
+        assert!(
+            captured.contains("purge_trash_now"),
+            "operation: {captured}"
+        );
+        assert!(
+            captured.contains("Database"),
+            "kind discriminant: {captured}"
+        );
+        assert!(captured.contains("267"), "numeric sqlite code: {captured}");
+    }
+
+    /// The fallback for UNCLASSIFIED errors (no sqlite code in the chain) is
+    /// the static operation + kind only — never a raw Display of the error.
+    #[test]
+    fn purge_failure_diagnostic_fallback_is_static_not_raw() {
+        let err = AppError::Other(format!("unclassified failure {PHI_MARKER_MESSAGE}"));
+        let captured = capture_purge_diagnostic(&err);
+
+        assert!(
+            !captured.contains(PHI_MARKER_MESSAGE),
+            "unclassified fallback must not emit raw Display, got: {captured}"
+        );
+        assert!(
+            captured.contains("purge_trash_now"),
+            "operation: {captured}"
+        );
+        assert!(captured.contains("Other"), "kind discriminant: {captured}");
+    }
+
+    /// The numeric-code extractor must find the code through the real wrap
+    /// chain (AppError → DbError → rusqlite::Error::SqliteFailure) and return
+    /// None for chains without one.
+    #[test]
+    fn sqlite_extended_code_walks_the_real_wrap_chain() {
+        let db_err = medical_db::DbError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseCorrupt,
+                extended_code: 267,
+            },
+            None,
+        ));
+        let err = AppError::database_with_source(db_err.to_string(), db_err);
+        assert_eq!(sqlite_extended_code(&err), Some(267));
+
+        let plain = AppError::Other("no chain".into());
+        assert_eq!(sqlite_extended_code(&plain), None);
     }
 }

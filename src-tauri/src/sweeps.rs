@@ -1876,6 +1876,80 @@ mod tests {
         );
     }
 
+    /// Drift regression (installed v0.85.0 "Couldn't purge Trash: unexpected
+    /// error"): a `document_chunks` row whose `chunks_fts` entry is MISSING —
+    /// the residue any historical chunk de-index-without-row-delete leaves.
+    /// The external-content FTS5 delete trigger then aborts with
+    /// SQLITE_CORRUPT ("database disk image is malformed"), rolling back the
+    /// WHOLE purge transaction and surfacing as the generic sanitized toast.
+    /// `chunks_fts` is a DERIVED index over the authoritative
+    /// `document_chunks` rows: the purge must rebuild the missing entry from
+    /// the authoritative row (same guarded re-index discipline the
+    /// recordings side already uses) and still succeed.
+    #[test]
+    fn manual_purge_survives_missing_chunks_fts_entry() {
+        let db = Database::open_in_memory().expect("db");
+        let rec = {
+            let conn = db.conn().expect("conn");
+            set_retention_days(&conn, None);
+            let rec = seed_purge_now_row(&conn, "drift.wav", "/never/drift.wav".into(), 0);
+            seed_chunks(&conn, &rec.id.to_string(), 2);
+            // Inject the drift with the LEGITIMATE FTS 'delete' command (the
+            // exact state a historical de-index leaves): the chunk row
+            // survives, its index entry is gone.
+            conn.execute(
+                "INSERT INTO chunks_fts(chunks_fts, rowid, content)
+                 SELECT 'delete', rowid, content FROM document_chunks
+                  WHERE id = ?1",
+                [format!("{}-c0", rec.id)],
+            )
+            .expect("de-index one chunk");
+            rec
+        };
+        {
+            // Fixture proof: the chunk row exists but has NO index entry.
+            let conn = db.conn().expect("conn");
+            let indexed: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM chunks_fts_docsize d
+                      JOIN document_chunks c ON c.rowid = d.rowid
+                      WHERE c.id = ?1",
+                    [format!("{}-c0", rec.id)],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(indexed, 0, "fixture: chunk row present but unindexed");
+            assert_eq!(
+                chunk_count(&conn, &rec.id.to_string()),
+                2,
+                "fixture: both chunk rows present"
+            );
+        }
+        let (snapshot, _) = {
+            let conn = db.conn().expect("conn");
+            RecordingsRepo::list_soft_deleted_snapshot(&conn).expect("preview")
+        };
+
+        let outcome =
+            purge_trash_snapshot(&db, &snapshot).expect("purge must survive derived-index drift");
+
+        assert_eq!(outcome.purged.len(), 1, "the drifted row still purges");
+        let conn = db.conn().expect("conn");
+        assert_eq!(
+            chunk_count(&conn, &rec.id.to_string()),
+            0,
+            "all chunks deleted with the row"
+        );
+        let ledgered: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM purged_recordings WHERE id = ?1",
+                [rec.id.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ledgered, 1, "purge ledgered");
+    }
+
     /// C1: skipped candidates (restored / encryption-flipped after the
     /// preview) keep both their rows and their chunks.
     #[test]
